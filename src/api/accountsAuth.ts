@@ -572,20 +572,30 @@ export function registerAccountRoutes(
    *  ordinary-user business, and the list is a map of the household. */
   app.get('/v1/local-accounts', async (req, reply) => {
     if (!manager(req)) return reply.code(403).send({ error: 'Only the host owner manages accounts.' });
-    return store.listLocalAccounts().map((a) => ({
-      id: a.id,
-      username: a.username,
-      displayName: a.displayName,
-      hostOwner: a.hostOwner,
-      disabled: a.disabled,
-      createdAt: a.createdAt,
-      pending: !!a.claimCode,
-      // A pending invitation's code is a way into that account: at the public
-      // address it is shown once, to whoever makes it (a step-up route), not
-      // listed for any session to read.
-      claimPath: a.claimCode && !isPublic(req) ? `/?claim=${a.claimCode}` : undefined,
-      agents: store.listAgents(a.id).filter((x) => x.state !== 'DELETED').length,
-    }));
+    const now = new Date().toISOString();
+    return store.listLocalAccounts().map((a) => {
+      // A code outlives its expiry on the row, and a reset puts one on someone
+      // with a password: only no password yet and a live code is an invitation
+      // still open (HB-0422). The same test as localAccountByClaim.
+      const noPassword = a.pwHash === '';
+      const pending = noPassword && !!a.claimCode && !!a.claimExpires && a.claimExpires > now;
+      return {
+        id: a.id,
+        username: a.username,
+        displayName: a.displayName,
+        hostOwner: a.hostOwner,
+        disabled: a.disabled,
+        createdAt: a.createdAt,
+        pending,
+        invitationExpired: noPassword && !pending,
+        // A pending invitation's code is a way into that account: at the public
+        // address it is shown once, to whoever makes it (a step-up route), not
+        // listed for any session to read. A reset's code is never listed.
+        claimPath: pending && !isPublic(req) ? `/?claim=${a.claimCode}` : undefined,
+        claimExpires: pending ? a.claimExpires : undefined,
+        agents: store.listAgents(a.id).filter((x) => x.state !== 'DELETED').length,
+      };
+    });
   });
 
   app.post<{ Body: { username?: string; password?: string; displayName?: string } }>(

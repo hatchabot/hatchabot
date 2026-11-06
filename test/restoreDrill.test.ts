@@ -7,13 +7,18 @@
  * It checks the drill's record, and that each restore is isolated: no
  * network, limits, nothing of the set mounted but that one archive.
  */
-import { afterAll, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { listDrills } from '../src/orchestrator/drills.js';
+
+// These run the restore drill on real sets: 1-2 s alone, past vitest's 5 s
+// when the self-hosted runner shares the machine (PR #76, 2026-11-05).
+vi.setConfig({ testTimeout: 30_000 });
 
 const dirs: string[] = [];
 afterAll(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -104,6 +109,16 @@ exit 0
 const LAYOUT = ['.openclaw/agents/main/agent/auth-profiles.json', '.openclaw/openclaw.json'];
 
 describe('the drill writes a record of every run', () => {
+  it('it says whose it is, by the mark a backup set carries, so an uninstall can tell it from another install\'s (HB-0440)', () => {
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    expect(w.run({ HATCHABOT_SECRET_KEY: 'not-a-real-key-for-tests' }).status).toBe(0);
+    expect(w.lastRecord().owner).toBe(createHash('sha256').update('hatchabot-backup-owner\0not-a-real-key-for-tests').digest('hex').slice(0, 16));
+    const none = drillWorld();
+    none.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    expect(none.run({}).status).toBe(0);
+    expect(none.lastRecord().owner).toBe('');
+  });
   it('a passing set: each archive read, its layout found, restored in isolation; the record says so', () => {
     const w = drillWorld();
     const d = w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT, 'hatchabot-notes-2-vol': [...LAYOUT, '.openclaw/workspace/notes.md'] }, { state: 'complete' });

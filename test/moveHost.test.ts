@@ -5,11 +5,12 @@
  * one where the dangerous steps live: copying state across daemons and
  * retiring the source runtime afterwards.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
+import { operationRefusal } from '../src/orchestrator/operations.js';
 import { TransferError } from '../src/orchestrator/transfer.js';
-import { makeWorld, seedRunningAgent, type World } from './support/world.js';
+import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 const channelStub = { kind: 'telegram', pool: { availableCount: () => 0, owns: () => false } } as any;
 
@@ -97,6 +98,27 @@ describe('moveAgentToHost — across two daemons', () => {
     expect(w.store.dataSourceRemovals(id).map((r) => r.id)).toEqual(['gone']);
   });
 
+  it('a change owed to its next start: the new container has it, and an undone move still owes it (HB-0411)', async () => {
+    const { w, deps } = await crossDaemonWorld();
+    const id = await seedRunningAgent(w);
+    await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+    w.store.setAgentState(id, 'STOPPED');
+    w.store.setRebuildOnStart(id, '2026-11-05T00:00:00.000Z');
+    const moved = await moveAgentToHost(deps, id, 'h2');
+    expect(moved.rebuildOnStart).toBeUndefined();
+
+    const back = await crossDaemonWorld();
+    const id2 = await seedRunningAgent(back.w);
+    await back.w.provider.stop(back.w.store.getAgent(id2)!.runtimeRef!);
+    back.w.store.setAgentState(id2, 'STOPPED');
+    back.w.store.setRebuildOnStart(id2, '2026-11-05T00:00:00.000Z');
+    // It fails after the new container was recorded, so only an undo can bring the mark back.
+    back.w.store.setRebuildHookDue = () => { throw new Error('the last step failed'); };
+    await expect(moveAgentToHost(back.deps, id2, 'h2')).rejects.toThrow(/rolled back/);
+    expect(back.w.store.getAgent(id2)!.hostId).toBe('h1');
+    expect(back.w.store.getAgent(id2)!.rebuildOnStart).toBe('2026-11-05T00:00:00.000Z');
+  });
+
   it('rolls back onto the source host when the target provision fails', async () => {
     const w = await makeWorld();
     w.store.insertHost({
@@ -116,6 +138,105 @@ describe('moveAgentToHost — across two daemons', () => {
     // The quiesced source was restarted — the move must not strand it stopped.
     expect(agent.state).toBe('RUNNING');
     expect((await w.provider.status(agent.runtimeRef!)).phase).toBe('running');
+  });
+
+  it('a source that did not come back after a failed move: failed, said so, and Start is open (HB-0416)', async () => {
+    const w = await makeWorld();
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock', name: 'Runner', settings: {}, createdAt: 'now' });
+    const target = new MockProvider({ failOn: 'provision' });
+    const deps = { store: w.store, secrets: w.secrets, channel: channelStub, source: w.provider, target, sleep: async () => {} };
+    const id = await seedRunningAgent(w);
+    const start = w.provider.start.bind(w.provider);
+    w.provider.start = async () => { throw new Error('the port is taken'); };
+    const err = await moveAgentToHost(deps, id, 'h2').catch((e: Error) => e);
+    expect(String(err)).toMatch(/failed.*did not start again on .*stopped there.*Start.*Rebuild/);
+    expect(String(err)).not.toMatch(/stays on|rolled back|Try again/);
+    const op = w.store.listOperations([id], 1)[0]!;
+    expect(op).toMatchObject({ kind: 'move-host', status: 'failed', outcome: expect.stringMatching(/did not start again/) });
+    expect(op.recovery).toBeFalsy();
+    expect(w.store.getAgent(id)).toMatchObject({ state: 'STOPPED', hostId: 'h1' });
+    expect(w.store.activeOperationFor(id)).toBeUndefined();
+    // It says why, on its card and in Alerts, not just in a toast.
+    expect(w.store.getAgent(id)!.stateReason).toMatch(/move to Runner failed.*did not start again on .*press Start, or Rebuild/);
+    const seen = await w.f.inject({ method: 'GET', url: `/v1/agents/${id}`, headers: as() });
+    expect(seen.json().stateReason).toMatch(/did not start again/);
+    // Nothing is held: the machine answers again, and Start starts it.
+    w.provider.start = start;
+    const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/start`, headers: as(), payload: {} });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING');
+    expect(w.store.getAgent(id)!.stateReason).toBeUndefined();
+  });
+
+  it('a move that failed on an agent left stopped says nothing: nobody expected it to run', async () => {
+    const w = await makeWorld();
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock', name: 'Runner', settings: {}, createdAt: 'now' });
+    const target = new MockProvider({ failOn: 'provision' });
+    const deps = { store: w.store, secrets: w.secrets, channel: channelStub, source: w.provider, target, sleep: async () => {} };
+    const id = await seedRunningAgent(w);
+    w.store.setAgentState(id, 'STOPPED');
+    await moveAgentToHost(deps, id, 'h2').catch(() => {});
+    expect(w.store.getAgent(id)).toMatchObject({ state: 'STOPPED', hostId: 'h1' });
+    expect(w.store.getAgent(id)!.stateReason).toBeUndefined();
+  });
+
+  it('what a failed move said goes with a later move that works, and a Clear from Alerts does not hide the next one (HB-0416)', async () => {
+    const w = await makeWorld();
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock', name: 'Runner', settings: {}, createdAt: 'now' });
+    const bad = new MockProvider({ failOn: 'provision' });
+    bad.daemonId = async () => 'daemon-target';
+    w.provider.daemonId = async () => 'daemon-source';
+    const id = await seedRunningAgent(w);
+    const start = w.provider.start.bind(w.provider);
+    w.provider.start = async () => { throw new Error('the port is taken'); };
+    const deps = { store: w.store, secrets: w.secrets, channel: channelStub, source: w.provider, target: bad, sleep: async () => {} };
+    await moveAgentToHost(deps, id, 'h2').catch(() => {});
+    expect(w.store.getAgent(id)!.stateReason).toMatch(/did not start again/);
+    w.provider.start = start;
+    // Cleared, then it happens again from RUNNING: the Clear does not cover the new one.
+    w.store.setAgentAttentionAck(id, 'not-started');
+    w.store.markNotStarted(id, 'made up: again');
+    expect(w.store.getAgent(id)!.attentionAck ?? '').not.toContain('not-started');
+    const good = new MockProvider();
+    good.daemonId = async () => 'daemon-target';
+    const moved = await moveAgentToHost({ ...deps, target: good }, id, 'h2');
+    expect(moved).toMatchObject({ state: 'STOPPED', hostId: 'h2' });
+    expect(moved.stateReason).toBeUndefined();
+  });
+
+  it('a state read that failed, and a source that did not come back: not "nothing was changed", and Rebuild is open (HB-0416)', async () => {
+    const { w, deps } = await crossDaemonWorld();
+    const id = await seedRunningAgent(w);
+    const read = w.provider.exportStateToFile.bind(w.provider);
+    w.provider.exportStateToFile = async () => { throw new Error('read failed'); };
+    const start = w.provider.start.bind(w.provider);
+    w.provider.start = async () => { throw new Error('the port is taken'); };
+    const err = await moveAgentToHost(deps, id, 'h2').catch((e: Error) => e);
+    expect(String(err)).toMatch(/did not start again on .*stopped there/);
+    expect(String(err)).not.toMatch(/nothing was changed|Try again/);
+    const op = w.store.listOperations([id], 1)[0]!;
+    expect(op).toMatchObject({ kind: 'move-host', status: 'failed' });
+    expect(op.recovery).toBeFalsy();
+    expect(w.store.getAgent(id)).toMatchObject({ state: 'STOPPED', hostId: 'h1' });
+    expect(w.store.getAgent(id)!.stateReason).toMatch(/did not start again on /);
+    // The old container is the fault (a pruned image, a taken port): Start still
+    // fails, and Rebuild, the cure, is not refused.
+    w.provider.exportStateToFile = read;
+    w.provider.start = start;
+    const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/rebuild`, headers: as(), payload: {} });
+    expect(r.statusCode, r.body).toBe(202);
+    await vi.waitFor(() => expect(w.store.getAgent(id)!.state).toBe('RUNNING'), { timeout: 4000, interval: 20 });
+  });
+
+  it('a failed move leaves no operation that refuses Move or Delete either (HB-0416)', async () => {
+    const { w, deps } = await crossDaemonWorld();
+    const id = await seedRunningAgent(w);
+    w.provider.exportStateToFile = async () => { throw new Error('read failed'); };
+    w.provider.start = async () => { throw new Error('the runner is gone'); };
+    await moveAgentToHost(deps, id, 'h2').catch(() => {});
+    expect(operationRefusal(w.store, id)).toBeUndefined();
+    const del = await w.f.inject({ method: 'DELETE', url: `/v1/agents/${id}`, headers: as() });
+    expect(del.statusCode, del.body).not.toBe(409);
   });
 
   it('refuses two host rows that are the SAME daemon (aliased endpoints), volume untouched', async () => {

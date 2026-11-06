@@ -391,6 +391,150 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
     expect(existsSync(join(backups, 'other-machine', 'db.sqlite'))).toBe(true);
   });
 
+  describe('restore drills, and what counts as a set (HB-0440)', () => {
+    const mark = (key: string) => createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16);
+    const MINE = mark('x'), THEIRS = 'feedfacefeedface', REC = '2026-10-02T03-00-00Z.json';
+    /** A record as restore-drill.sh writes it: one line, its set, and (from v2.173.0) who ran it. */
+    const record = (fields: { set?: string; owner?: string }) => `${JSON.stringify({ version: 1, set: fields.set ?? '2026-10-01', setState: 'complete', startedAt: '2026-10-02T03:00:00Z', finishedAt: '2026-10-02T03:10:00Z', durationSec: 600, trigger: 'scheduled', result: 'passed', reason: '', database: 'ok', key: 'ok', ...(fields.owner ? { owner: fields.owner } : {}), volumes: [{ volume: 'hatchabot-recipe-box', readable: true, layout: true, restored: true, note: '', result: 'passed' }], isolation: { network: 'none', memory: '1g', cpus: '1' } })}\n`;
+    const backupsWith = (w: ReturnType<typeof purgeWorld>, marks: string[], rec: string | null = record({ owner: MINE }), key = 'HATCHABOT_SECRET_KEY=x\n') => {
+      const backups = join(dirname(w.repo), 'nas');
+      marks.forEach((m, i) => {
+        const d = join(backups, `2026-10-0${i + 1}`); mkdirSync(d, { recursive: true });
+        writeFileSync(join(d, 'backup-status.json'), '{}');
+        if (m) writeFileSync(join(d, '.backup-owner'), `${m}\n`);
+      });
+      mkdirSync(join(backups, 'drills', '.lock'), { recursive: true });
+      if (rec) writeFileSync(join(backups, 'drills', REC), rec);
+      writeFileSync(join(w.repo, '.env'), `${key}HATCHABOT_BACKUP_DIR=${backups}\n`);
+      return backups;
+    };
+    const purge = (w: ReturnType<typeof purgeWorld>) => run(w, ['--purge', '--backups', '--yes']);
+    it('--backups takes this install\'s drill records, and the folder goes with them', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, ['']);
+      const r = purge(w);
+      expect(r.stdout, r.stderr).toContain('removed 1 backup sets');
+      expect(r.stdout).toContain(`removed the restore drill records in ${backups}`);
+      expect(r.stdout).toContain(`removed ${backups} (empty now)`);
+      expect(r.stdout).not.toContain('holds more than');
+      expect(existsSync(backups)).toBe(false);
+    });
+    it('a record from before the mark is this install\'s when the set it names says so, by its mark or its key', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, [MINE], record({}));
+      const r = purge(w);
+      expect(r.stdout, r.stderr).toContain(`removed the restore drill records in ${backups}`);
+      expect(existsSync(backups)).toBe(false);
+      const w2 = purgeWorld();
+      dockerShim(w2, VOLS);
+      const b2 = backupsWith(w2, [''], record({}));
+      writeFileSync(join(b2, '2026-10-01', 'secret-key.env'), 'HATCHABOT_SECRET_KEY=x\n');
+      expect(purge(w2).status).toBe(0);
+      expect(existsSync(b2)).toBe(false);
+    });
+    it('in a folder another install also uses, its record stays and this one\'s goes', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, ['', THEIRS], record({ owner: THEIRS, set: '2026-10-02' }));
+      writeFileSync(join(backups, 'drills', '2026-10-03T03-00-00Z.json'), record({ owner: MINE }));
+      const r = purge(w);
+      expect(r.stdout, r.stderr).toContain('kept 1 sets another Hatchabot install made there');
+      expect(existsSync(join(backups, 'drills', REC))).toBe(true);
+      expect(existsSync(join(backups, 'drills', '2026-10-03T03-00-00Z.json'))).toBe(false);
+      expect(r.stdout).toContain(`kept what is left in ${backups}/drills`);
+      expect(r.stdout).toContain(`kept ${backups} itself: it still holds 2026-10-02 drills`);
+    });
+    it('a record that names another install\'s set, or a set that is gone, cannot be told: it stays, and that is said', () => {
+      for (const [rec, marks] of [[record({ set: '2026-10-01' }), [THEIRS]], [record({ set: '2026-09-01' }), ['']], [record({ set: '../../x' }), ['']], [record({ set: '2026-10-01' }), ['']]] as const) {
+        const w = purgeWorld();
+        dockerShim(w, VOLS);
+        const backups = backupsWith(w, [...marks], rec);
+        const r = purge(w);
+        expect(r.status, r.stderr).toBe(0);
+        expect(readFileSync(join(backups, 'drills', REC), 'utf8')).toBe(rec);
+        expect(r.stdout).toContain(`kept what is left in ${backups}/drills: this install cannot tell it is its own`);
+        expect(r.stdout).not.toContain('removed the restore drill records');
+      }
+    });
+    it('a drills folder that is not this script\'s to judge stays whole, whatever is in it', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, [''], null);
+      writeFileSync(join(backups, 'drills', 'fire-drill-2026.pdf'), 'someone else\'s');
+      writeFileSync(join(backups, 'drills', 'notes.json'), record({ owner: MINE })); // not a record's name
+      writeFileSync(join(backups, 'drills', '2026-10-05T03-00-00Z.json'), `{"owner":"${MINE}"}\n`); // a record's name, not one
+      mkdirSync(join(backups, 'drills', 'photos'));
+      const r = purge(w);
+      expect(r.stdout, r.stderr).toContain(`kept what is left in ${backups}/drills`);
+      for (const f of ['fire-drill-2026.pdf', 'notes.json', '2026-10-05T03-00-00Z.json', 'photos']) expect(existsSync(join(backups, 'drills', f)), f).toBe(true);
+    });
+    it('with no key to tell by, nothing there is taken for this install\'s', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, [''], record({ owner: MINE }), '');
+      const r = purge(w);
+      expect(r.stdout + r.stderr).toContain(`kept what is left in ${backups}/drills`);
+      expect(existsSync(join(backups, 'drills', REC))).toBe(true);
+    });
+    it('a folder that is a link to somewhere else is not followed', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, ['']);
+      const elsewhere = join(dirname(w.repo), 'elsewhere');
+      renameSync(join(backups, 'drills'), elsewhere);
+      symlinkSync(elsewhere, join(backups, 'drills'));
+      const r = purge(w);
+      expect(r.stdout, r.stderr).toContain(`kept ${backups}/drills: it is a link`);
+      expect(existsSync(join(elsewhere, REC))).toBe(true);
+    });
+    it('the lock of a drill that is still running stays; a dead one goes with the records', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, ['']);
+      writeFileSync(join(backups, 'drills', '.lock', 'pid'), String(process.pid));
+      const r = purge(w);
+      expect(r.stdout, r.stderr).toContain(`kept what is left in ${backups}/drills`);
+      expect(existsSync(join(backups, 'drills', '.lock', 'pid'))).toBe(true);
+      expect(existsSync(join(backups, 'drills', REC))).toBe(false);
+      const w2 = purgeWorld();
+      dockerShim(w2, VOLS);
+      const b2 = backupsWith(w2, ['']);
+      writeFileSync(join(b2, 'drills', '.lock', 'pid'), '4194999');
+      expect(purge(w2).status).toBe(0);
+      expect(existsSync(b2)).toBe(false);
+    });
+    it('what else is left in the folder is named, not blamed on Hatchabot\'s sets', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, ['']);
+      mkdirSync(join(backups, 'other-machine'));
+      const r = run(w, ['--purge', '--backups', '--yes']);
+      expect(r.stdout, r.stderr).toContain(`kept ${backups} itself: it still holds other-machine`);
+      expect(existsSync(join(backups, 'drills'))).toBe(false);
+    });
+    it('the plan and the note on what is kept count dated sets only', () => {
+      for (const args of [['--purge', '--backups', '--yes'], ['--yes']]) {
+        const w = purgeWorld();
+        dockerShim(w, VOLS);
+        const backups = backupsWith(w, ['', '']);
+        mkdirSync(join(backups, 'restore-safety-feedface'));
+        mkdirSync(join(backups, '2026-10-05')); writeFileSync(join(backups, '2026-10-05', 'photo.jpg'), 'not ours'); // dated, but not a set
+        const r = run(w, args);
+        expect(r.stdout, r.stderr).toContain(`backups:   ${backups} (2 sets)`);
+        if (args.length === 1) expect(r.stdout).toContain(`2 backup sets in ${backups}`);
+      }
+    });
+    it('without --backups a purge leaves the drill records with the sets', () => {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = backupsWith(w, ['']);
+      expect(run(w, ['--purge', '--yes']).status).toBe(0);
+      expect(existsSync(join(backups, 'drills', '2026-10-02T03-00-00Z.json'))).toBe(true);
+    });
+  });
+
   it('--backups leaves the sets another install made in a shared folder (HB-0280)', () => {
     const w = purgeWorld();
     dockerShim(w, VOLS);

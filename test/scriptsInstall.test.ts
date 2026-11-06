@@ -172,6 +172,76 @@ describe('install.sh re-run after a first setup that stopped part-way finishes t
   });
 });
 
+describe('install.sh, with a bundle upgrade cut off in the swap (HB-0430)', () => {
+  const cutOff = (w: ReturnType<typeof world>) => {
+    mkdirSync(join(w.dir, '.prev-release'), { recursive: true });
+    writeFileSync(join(w.dir, '.prev-release', 'BUNDLE.json'), '{"tag":"v2.0.0","platform":"linux-x64"}\n');
+    writeFileSync(join(w.dir, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    writeFileSync(join(w.dir, '.swapping'), 'from v2.0.0\nto v2.1.0\nin scripts\n');
+    mkdirSync(join(w.dir, 'data')); writeFileSync(join(w.dir, 'data', 'hatchabot.sqlite'), 'made up');
+  };
+  it('it goes to upgrade.sh for the repair, and never calls the folder foreign', () => {
+    const w = world(CHANNELS);
+    mkdirSync(join(w.dir, 'scripts'), { recursive: true });
+    shim(join(w.dir, 'scripts'), 'with-docker.sh', `echo "with-docker $*" >> ${JSON.stringify(w.log)}`);
+    cutOff(w);
+    serviceUnit(w.home, w.dir);
+    const r = w.run(['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stderr).not.toContain('not a Hatchabot install');
+    expect(readFileSync(w.log, 'utf8')).toBe('with-docker ./scripts/upgrade.sh stable\n');
+    expect(readFileSync(join(w.dir, 'data', 'hatchabot.sqlite'), 'utf8')).toBe('made up');
+  });
+  it('so does one whose service unit is not there to read', () => {
+    const w = world(CHANNELS);
+    mkdirSync(join(w.dir, 'scripts'), { recursive: true });
+    shim(join(w.dir, 'scripts'), 'with-docker.sh', `echo "with-docker $*" >> ${JSON.stringify(w.log)}`);
+    cutOff(w);
+    expect(w.run(['stable']).status).toBe(0);
+    expect(readFileSync(w.log, 'utf8')).toBe('with-docker ./scripts/upgrade.sh stable\n');
+  });
+  it('cut with scripts/ itself aside, the old one comes back first, its line struck', () => {
+    const w = world(CHANNELS);
+    mkdirSync(w.dir, { recursive: true });
+    cutOff(w);
+    mkdirSync(join(w.dir, '.prev-release', 'scripts'));
+    shim(join(w.dir, '.prev-release', 'scripts'), 'with-docker.sh', `echo "old with-docker $*" >> ${JSON.stringify(w.log)}`);
+    serviceUnit(w.home, w.dir);
+    const r = w.run(['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(w.log, 'utf8')).toBe('old with-docker ./scripts/upgrade.sh stable\n');
+    expect(readFileSync(join(w.dir, '.swapping'), 'utf8')).toBe('from v2.0.0\nto v2.1.0\n');
+  });
+  it('a dry run says so', () => {
+    const w = world(CHANNELS);
+    mkdirSync(w.dir, { recursive: true });
+    writeFileSync(join(w.dir, '.swapping'), 'from v2.0.0\n');
+    expect(w.run(['stable'], { HATCHABOT_DRY_RUN: '1' }).stdout).toContain('bundle-existing');
+  });
+  it('with .git beside it, it is a clone, as upgrade.sh reads it', () => {
+    const w = world(CHANNELS);
+    mkdirSync(join(w.dir, '.git'), { recursive: true });
+    writeFileSync(join(w.dir, '.swapping'), 'from v2.0.0\n');
+    expect(w.run(['stable'], { HATCHABOT_DRY_RUN: '1' }).stdout).toContain('native-existing');
+  });
+});
+
+describe('install.sh leaves a pin to upgrade.sh (HB-0428)', () => {
+  it('a mistyped version on a set-up install is not written before upgrade.sh has looked', () => {
+    const w = world(CHANNELS);
+    mkdirSync(join(w.dir, 'scripts'), { recursive: true });
+    writeFileSync(join(w.dir, 'BUNDLE.json'), '{"tag":"v2.0.0","platform":"linux-x64"}\n');
+    writeFileSync(join(w.dir, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    mkdirSync(join(w.dir, 'data')); writeFileSync(join(w.dir, 'data', 'channel'), 'stable\n');
+    serviceUnit(w.home, w.dir);
+    shim(join(w.dir, 'scripts'), 'with-docker.sh', `echo "with-docker $*" >> ${JSON.stringify(w.log)}`);
+    const r = w.run(['v9.9.9']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(w.log, 'utf8')).toBe('with-docker ./scripts/upgrade.sh v9.9.9\n');
+    expect(readFileSync(join(w.dir, 'data', 'channel'), 'utf8')).toBe('stable\n');
+  });
+});
+
 describe('the units\' PATH holds a folder with a space in its name (audit #044)', () => {
   const ANALYZE = '/usr/bin/systemd-analyze';
   /** systemd's own reading of a generated unit, offline: only the unit's folder searched, no generators, nothing started. */

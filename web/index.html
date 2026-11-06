@@ -1761,6 +1761,7 @@
       <div class="actions" id="embedActions" style="justify-content:flex-start;margin-top:6px"></div>
       <div id="embedFleetRow" hidden style="margin-top:8px"><div id="embedFleetBody" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"></div></div>
     </div>
+    <div id="addRunnerBlock">
     <h4 style="margin:16px 0 4px">Add a runner</h4>
     <div class="sub" style="margin-bottom:6px">
       <b>1.</b> On the runner: install <b>Docker</b> and enable <b>SSH</b>
@@ -1782,6 +1783,7 @@
     <div class="err" id="hostErr"></div>
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="hostAddBtn" onclick="addHost()">Add runner</button>
+    </div>
     </div>
   </section>
 
@@ -1981,6 +1983,7 @@
         </div>
         <div class="sub" style="margin-top:6px">They pick their own password through a one-time link that expires in 48 hours — you never have to invent one or send it over another app.</div>
         <div id="acctInviteOut" class="invite-link" style="display:none;margin-top:8px"></div>
+        <div id="acctInviteNote" class="sub" style="margin-top:6px"></div>
       </details>
     </div>
     <div id="acctSelf" hidden>
@@ -2119,7 +2122,7 @@
       <h4 style="margin:22px 0 4px">Derived images</h4>
       <div class="sub">The base image plus extra system packages, for an agent that needs them.
         Ask the management agent for one — it writes the Dockerfile lines, you press <b>Confirm</b>.
-        Pin an agent to a finished image in its <b>Definition</b> tab.</div>
+        Pin an agent to a finished image in its <b>Advanced</b> tab, under Runtime.</div>
       <div class="actions" style="justify-content:flex-start;margin:8px 0 0">
         <button class="primary" onclick="askMgmtForImage()">💬 Ask for an image…</button>
       </div>
@@ -2140,6 +2143,7 @@
       <button class="primary" onclick="newCliToken()">New token</button>
       <button onclick="newCliToken('rehost')" title="For another Hatchabot server: it can move agents here, and nothing else">Token for moving agents here</button>
     </div>
+    <div class="err" id="cliTokenErr"></div>
     <div id="cliTokenList" class="sub" style="margin-top:8px">Loading…</div>
 
 
@@ -2525,13 +2529,13 @@
     <span><b>Recover context after the switch</b>
       <div class="sub" style="margin-top:2px">Once each agent is back up on the NEW source, it re-reads the conversation it was
       having before the switch and saves the important parts to memory — so nothing is lost even when the old source
-      can't answer any more. It confirms in its chat when done.</div></span>
+      can't answer any more. It confirms in its chat when done. A stopped or sleeping agent is not recovered: once it is up, press <b>Recover context</b> on its Personality tab.</div></span>
   </label>
-  <div class="sub" id="moveSourceErr" style="color:var(--bad);margin-top:8px"></div>
+  <div class="sub" id="moveSourceErr" style="color:var(--bad);margin-top:8px;white-space:pre-line"></div>
   <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap">
     <button onclick="moveSourceDlg.close()">Cancel</button>
     <button onclick="moveAgentsApply(false)" title="Ticked agents switch on their next rebuild. No rebuild now.">Switch, rebuild later</button>
-    <button class="primary" id="moveSourceBtn" onclick="moveAgentsApply(true)">Switch &amp; rebuild</button>
+    <button class="primary" id="moveSourceBtn" onclick="moveAgentsApply(true)" title="Running agents rebuild now. Stopped and sleeping ones are not started: they take the new source when they next start.">Switch &amp; rebuild</button>
   </div>
 </dialog>
 
@@ -2586,7 +2590,7 @@
       <span>Save each conversation to memory first <span class="sub">— needs the OLD source to still answer; skip this if it's out of tokens</span></span></label>
     <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
       <input type="checkbox" id="faSourceRecover" checked style="width:auto;margin-top:3px;flex:none">
-      <span><b>Recover context after the switch</b> <span class="sub">— once each agent is back on the NEW source it re-reads its pre-switch conversation and saves it to memory. Works even when the old source is dead.</span></span></label>
+      <span><b>Recover context after the switch</b> <span class="sub">— once each agent is back on the NEW source it re-reads its pre-switch conversation and saves it to memory. Works even when the old source is dead. A stopped or sleeping agent is not recovered: once it is up, press <b>Recover context</b> on its Personality tab.</span></span></label>
   </div>
   <div style="display:none">
   </div>
@@ -2626,7 +2630,7 @@
 
 <dialog id="migrateDlg" style="width:min(560px,96vw)">
   <h3 style="margin:0 0 4px">Migrate all agents off <span id="migrateFrom"></span></h3>
-  <div class="sub" style="margin-bottom:10px">Host-owner action. Every agent on this source — <b>including other accounts'</b> — moves to the shared source you pick and rebuilds (as many at once as Rebuild-at-once allows). Then the old source can be deleted.</div>
+  <div class="sub" style="margin-bottom:10px">Host-owner action. Every agent on this source — <b>including other accounts'</b> — moves to the shared source you pick. Running ones rebuild (as many at once as Rebuild-at-once allows); stopped and sleeping ones are not started, and take it when they next start. Then the old source can be deleted.</div>
   <div id="migrateAgents" class="sub" style="margin:0 0 10px;max-height:160px;overflow:auto"></div>
   <label>Move them to <span class="sub">(only shared sources can take other accounts' agents)</span></label>
   <select id="migrateTo"></select>
@@ -2635,7 +2639,7 @@
     <span>Save each conversation to memory first <span class="sub">— needs the OLD source to still answer</span></span></label>
   <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
     <input type="checkbox" id="migrateRecover" style="width:auto;margin-top:3px;flex:none">
-    <span>Recover context after the switch <span class="sub">— re-read the pre-switch chat on the NEW source; use instead of the box above when the old source is dead</span></span></label>
+    <span>Recover context after the switch <span class="sub">— re-read the pre-switch chat on the NEW source; use instead of the box above when the old source is dead. A stopped or sleeping agent is not recovered: once it is up, its owner can press <b>Recover context</b> on its Personality tab (nobody else can, you included).</span></span></label>
   <div class="sub" id="migrateErr" style="color:var(--bad);margin-top:8px"></div>
   <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px">
     <button onclick="migrateDlg.close()">Cancel</button>
@@ -2646,9 +2650,7 @@
 <dialog id="archiveDlg" style="width:min(520px,96vw)">
   <h3 style="margin:0 0 4px">Archive <span id="archiveName"></span>?</h3>
   <div class="sub" style="margin-bottom:10px">
-    It keeps what it has learned, plus its settings and members, and stops. Its Telegram bot goes back in
-    the pool for another agent to use, and members are told in the chat. When you restore it, it gets a
-    DIFFERENT bot with a new link to send to members; the current link stops working.
+    It keeps what it has learned, plus its settings and members, and stops. <span id="archiveBotNote"></span>
   </div>
   <label id="archiveCheckpointRow" style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:0">
     <input type="checkbox" id="archiveCheckpoint" checked style="width:auto;margin-top:3px;flex:none">
@@ -2879,7 +2881,8 @@ const api = async (path, opts = {}) => {
   // the sign-in screen then hid the message behind "auth required".
   if (res.status === 401 && path !== '/v1/login' && (!data.error || data.error === 'auth required')) {
     showLogin();
-    throw new Error('auth required');
+    // The status: the server turned it away, so whatever it carried did not arrive (the web chat reads it, HB-0446).
+    throw Object.assign(new Error('auth required'), { status: 401 });
   }
   if (!res.ok) {
     // App errors send {error: "friendly text"}; framework errors send a
@@ -2985,7 +2988,7 @@ function sfOpen(ev, el, probe) {
 async function sfCancel() {
   const kind = sfPending?.kind;
   if (sfDlg.open) sfDlg.close();
-  sfPending?.reject(new Error('The second factor was not given.'));
+  sfPending?.reject(Object.assign(new Error('The second factor was not given.'), { status: 401 })); // refused, as a 401 is: the request never went on
   // At sign-in there is nothing to use without it: back to the sign-in screen, signed out.
   if (kind === 'required') {
     try { await fetch('/v1/logout', { method: 'POST' }); } catch { /* the screen is shown either way */ }
@@ -3168,7 +3171,9 @@ async function loadReach(preflight) {
   reachRender(r);
 }
 function reachRender(r) {
-  $('reachErr').textContent = '';
+  // A leftover Funnel entry found on looking, and not removable from here: with the command (HB-0449).
+  const left = r.recovered?.funnelError;
+  $('reachErr').textContent = left ? `Tailscale's Funnel entry could not be removed (${left}). Hatchabot is not serving it.${r.recovered.command ? ` Run: ${r.recovered.command}` : ''}` : '';
   $('reachStatus').innerHTML = r.on
     ? (r.serving ? `<b>On.</b> This Hatchabot's sign-in page is reachable from the internet.`
         : `<b style="color:var(--bad)">On, but refused.</b> A safeguard below is off, so the public address answers nothing until it is fixed.`)
@@ -3218,6 +3223,8 @@ async function reachTurnOn(btn) {
       // Say exactly what is missing, with Tailscale's own link when it gave one.
       const parts = [data.error || 'Could not turn it on.'];
       for (const m of data.missing || []) parts.push(`${m.what} ${m.fix}`);
+      // It took itself back, but Tailscale kept its entry: with the command to remove it (HB-0449).
+      if (data.warning) parts.push(data.warning);
       $('reachErr').innerHTML = parts.map(esc).join('<br>') + (/^https:\/\//.test(data.link || '') ? `<br><a href="${esc(data.link)}" target="_blank" rel="noopener">Open Tailscale to allow Funnel</a>` : '');
       // Check again (something may have changed), and keep the reason on screen: the re-render clears it.
       const why = $('reachErr').innerHTML;
@@ -3404,7 +3411,7 @@ async function startSession(idToken) {
   if (out.email) { try { localStorage.setItem('hatchabot_email', out.email); } catch {} }
   loginDlg.close();
   $('loginIdPw').value = '';
-  await refresh(true);
+  await pageSignedIn();
 }
 
 async function signOut() {
@@ -3506,6 +3513,7 @@ function plainHttpFromAfar(loc = location) {
   return loc.protocol === 'http:' && !/^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i.test(loc.hostname);
 }
 function showLogin() {
+  pageSessionEnded();
   if ($('sfBlock')) $('sfBlock').hidden = true; // the next sign-in is judged afresh
   if (!loginDlg.open) {
     $('loginErr').textContent = '';
@@ -3573,7 +3581,7 @@ async function acctClaim() {
     await rememberPassword(r.username, $('claimPw').value);
     history.replaceState(null, '', location.pathname);   // the code is spent
     loginDlg.close(); $('claimPw').value = '';
-    await loadConfig(); await refresh(true);
+    await loadConfig(); await pageSignedIn();
     if (r.recoveryCode) showRecoveryCode(r.recoveryCode); // the owner, arriving from a command-line setup
   } catch (e) { $('loginErr').textContent = e.message; }
   finally { $('claimBtn').disabled = false; }
@@ -3596,7 +3604,7 @@ async function acctSignIn() {
     await api('/v1/login', { method: 'POST', body: { username: $('loginUser').value.trim(), password: $('loginAcctPw').value } });
     await rememberPassword($('loginUser').value.trim(), $('loginAcctPw').value);
     loginDlg.close(); $('loginAcctPw').value = '';
-    await loadConfig(); await refresh(true);
+    await loadConfig(); await pageSignedIn();
   } catch (e) { $('loginErr').textContent = e.message === 'auth required' ? 'Wrong username or password' : e.message; }
   finally { $('acctLoginBtn').disabled = false; }
 }
@@ -3610,7 +3618,7 @@ async function acctBootstrap() {
     await rememberPassword($('setupUser').value.trim(), $('setupPw').value);
     loginDlg.close(); $('setupPw').value = '';
     if (r.adopted) toast(`Account created — it adopted ${r.adopted} existing record${r.adopted === 1 ? '' : 's'}.`);
-    await loadConfig(); await refresh(true);
+    await loadConfig(); await pageSignedIn();
     if (r.recoveryCode) showRecoveryCode(r.recoveryCode);
   } catch (e) { $('loginErr').textContent = e.message; }
   finally { $('setupBtn').disabled = false; }
@@ -3637,10 +3645,11 @@ async function loadAccounts() {
     $('acctAdmin').hidden = false;
     $('acctList').innerHTML = rows.map(a => `<div class="pair" style="gap:8px;align-items:center">
       <b>${esc(a.username)}</b>${a.hostOwner ? ' <span class="chip">host owner</span>' : ''}
-      ${a.pending ? '<span class="chip">invitation not accepted yet</span>' : `<span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>`}
+      ${a.pending ? '<span class="chip">invitation not accepted yet</span>' : a.invitationExpired ? '<span class="chip">invitation expired</span>' : `<span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>`}
       <span style="margin-left:auto;display:flex;gap:6px">
         ${a.pending && !a.claimPath ? `<span class="sub" title="An invitation link is a way into that account, so it is not listed at the public address">invitation link: at the private address</span>`
-          : a.pending ? `<button onclick="copyAccountInvite('${jsq(a.claimPath ?? '')}')">Copy invitation</button>`
+          : a.pending ? `<button onclick="copyAccountInvite('${jsq(a.claimPath ?? '')}','${jsq(a.claimExpires ?? '')}')">Copy invitation</button>`
+          : a.invitationExpired ? `<button onclick="sendResetLink('${jsq(a.id)}','${jsq(a.username)}',true)" title="The old link no longer works; this makes a new one">Send a new invitation</button>`
           : a.hostOwner ? '' : `<button onclick="sendResetLink('${jsq(a.id)}','${jsq(a.username)}')" title="They choose a new password themselves; you never see it">Send a reset link</button>`}
         ${a.hostOwner ? '' : `<button class="danger" onclick="removeAccount('${jsq(a.id)}','${jsq(a.username)}')">Remove</button>`}
       </span></div>`).join('');
@@ -3684,41 +3693,65 @@ async function addAccount(btn) {
   try {
     const r = await api('/v1/local-accounts', { method: 'POST', body: { username: $('acctNewUser').value.trim() } });
     // The step everyone forgets: an account with no source can't do anything.
-    if ($('acctShareSource').checked) {
-      const mine = (profiles || []).filter(p => p.mine !== false && !p.shared);
-      const shareable = mine.filter(p => p.credential !== 'machine-login');
-      for (const p of shareable.slice(0, 1)) { try { await api(`/v1/ai-profiles/${p.id}`, { method: 'PATCH', body: { shared: true } }); } catch {} }
-    }
+    const sourceNote = $('acctShareSource').checked ? await shareSourceForInvite() : '';
     $('acctNewUser').value = '';
     const url = (appConfig?.linkUrl || appConfig?.appUrl || location.origin).replace(/\/$/, '') + r.claimPath;
     $('acctInviteOut').style.display = '';
     $('acctInviteOut').textContent = url;
-    try { await navigator.clipboard.writeText(url); toast('Invitation copied — send it to them. It expires in 48 hours.', 7000); }
-    catch { toast('Invitation ready — copy the link below.', 7000); }
+    $('acctInviteNote').textContent = sourceNote; // stays: the toast is gone in seconds
+    let said;
+    try { await navigator.clipboard.writeText(url); said = 'Invitation copied — send it to them. It expires in 48 hours.'; }
+    catch { said = 'Invitation ready — copy the link below.'; }
+    toast(sourceNote ? `${said} ${sourceNote}` : said, sourceNote ? 12000 : 7000);
     await loadAccounts();
   } catch (e) { toast(e.message); }
   finally { btn.disabled = false; }
 }
 
-async function copyAccountInvite(path) {
+/**
+ * "Share my AI source with them": what it is for is that the new account has a
+ * source. One already shared does that, so no second private source is opened
+ * up (HB-0408). Says, in words, what was done or why nothing was.
+ */
+async function shareSourceForInvite() {
+  try { profiles = await api('/v1/ai-profiles'); } catch { /* the list we have */ }
+  // Not a machine login shared before the server began refusing that: it never runs another account's agent.
+  const shared = (profiles || []).find(p => p.shared && p.credential !== 'machine-login');
+  if (shared) return `They can use ${shared.name}, which is already shared; nothing more was shared.`;
+  const p = (profiles || []).find(x => x.mine !== false && x.credential !== 'machine-login');
+  if (!p) return 'No AI source was shared: you have none that can be (a machine login is never shared this way), so they will need their own.';
+  try {
+    await api(`/v1/ai-profiles/${p.id}`, { method: 'PATCH', body: { shared: true } });
+  } catch (e) { return `${p.name} could not be shared (${e.message}), so they have no AI source yet.`; }
+  try { profiles = await api('/v1/ai-profiles'); } catch { p.shared = true; }
+  if ($('aiList')?.childElementCount) renderAiList();
+  return `${p.name} is now shared with everyone on this server, and they spend on it.`;
+}
+
+async function copyAccountInvite(path, expires) {
   const url = (appConfig?.linkUrl || appConfig?.appUrl || location.origin).replace(/\/$/, '') + path;
-  try { await navigator.clipboard.writeText(url); toast('Invitation copied — it expires 48 hours after it was made.', 7000); }
+  // Its real end: a one-time sign-in link replaces the 48-hour code with one good 15 minutes.
+  try { await navigator.clipboard.writeText(url); toast(`Invitation copied${expires ? ` — it expires ${new Date(expires).toLocaleString()}` : ''}.`, 7000); }
   catch { toast(url, 12000); }
 }
 
 /**
  * A reset link, the same kind as an invitation: they choose their own new
  * password and you never learn it. Their old one keeps working until they use
- * the link, so sending one never locks anybody out.
+ * the link, so sending one never locks anybody out. `invitation`: the same
+ * link renews an invitation that expired, for someone with no password yet.
  */
-async function sendResetLink(id, username) {
+async function sendResetLink(id, username, invitation = false) {
+  const what = invitation ? 'New invitation' : 'Reset link';
   try {
     const r = await api(`/v1/local-accounts/${id}/reset-link`, { method: 'POST', body: {} });
     const url = (appConfig?.linkUrl || appConfig?.appUrl || location.origin).replace(/\/$/, '') + r.claimPath;
     $('acctInviteOut').style.display = '';
     $('acctInviteOut').textContent = url;
+    $('acctInviteNote').textContent = '';
     const copied = await copyText(url);
-    toast(`${copied ? 'Reset link copied' : 'Reset link ready below'} — send it to ${username}. It works once and expires in 48 hours.`, 9000);
+    toast(`${what} ${copied ? 'copied' : 'ready below'} — send it to ${username}. It works once and expires in 48 hours.`, 9000);
+    if (invitation) await loadAccounts();
   } catch (e) { toast(e.message); }
 }
 
@@ -3792,7 +3825,7 @@ async function acctRecover() {
     const r = await api('/v1/local-accounts/recover-with-code', { method: 'POST', body: { username: $('recUser').value.trim(), code: $('recCode').value, password: $('recPw').value } });
     await rememberPassword(r.username, $('recPw').value);
     loginDlg.close(); $('recPw').value = ''; $('recCode').value = ''; hideRecoverForm();
-    await loadConfig(); await refresh(true);
+    await loadConfig(); await pageSignedIn();
     showRecoveryCode(r.recoveryCode, '<b>You are back in.</b> Your old code is used up — this is your new one. Save it somewhere safe, away from this computer.');
   } catch (e) { $('loginErr').textContent = e.message; }
   finally { $('recBtn').disabled = false; }
@@ -3813,7 +3846,7 @@ async function doLogin() {
   try {
     await api('/v1/login', { method: 'POST', body: { password: $('loginPw').value } });
     loginDlg.close(); $('loginPw').value = '';
-    await refresh(true);
+    await pageSignedIn();
   } catch (e) { $('loginErr').textContent = e.message === 'auth required' ? 'Wrong password' : e.message; }
   finally { $('loginBtn').disabled = false; }
 }
@@ -4448,6 +4481,7 @@ async function loadPosture() {
 }
 
 async function loadMediaKey() {
+  if (myAccount.hostOwner === false) return; // hidden from them: paintMachineOwnerOnly
   try {
     const r = await api('/v1/media-key');
     const el = $('mediaKeyStatus');
@@ -4496,6 +4530,7 @@ async function removeMediaKey() {
 }
 
 async function loadSearchKey() {
+  if (myAccount.hostOwner === false) return; // hidden from them: paintMachineOwnerOnly
   try {
     const r = await api('/v1/search-key');
     const el = $('searchKeyStatus');
@@ -5022,7 +5057,7 @@ async function addHost() {
     $('hostName').value = ''; $('hostEndpoint').value = '';
     await loadHosts();
     toast(h.reachable
-      ? `Runner "${name}" added — Docker ${h.serverVersion} reachable${h.hasImage === false ? '. The runtime image is missing — use Install image on its row.' : '.'}`
+      ? `Runner "${name}" added — Docker ${h.serverVersion} reachable${h.hasImage === false ? '. The runtime image is missing — use Install image on its row.' : '.'}${h.warning ? ` ${h.warning}` : ''}`
       : `Runner "${name}" added, but it didn't answer yet (${h.pingError || 'unreachable'}) — check step 2, then Check its row.`, 20000);
     if (h.reachable) pingHost(h.id);
   } catch (e) { $('hostErr').textContent = e.message; }
@@ -5566,6 +5601,7 @@ async function pollDerivedBuild(name) {
 // predates heartbeats and hasn't been restarted yet.
 async function openAiDlg(tab) {
   $('aiErr').textContent = '';
+  if (!aiDlg.open) aiRowsDrawn = {}; // closing without Save drops an edit, as it always has
   // Deep-link the tab so "add a server first" can land you where the work is,
   // rather than on a page you then have to hunt through.
   showTab(tab || 'ai');
@@ -5782,7 +5818,9 @@ async function assignClass() {
 let sourceUsageData = null; // { sampledAt, sources: [...] } from /v1/ai-profiles/usage
 async function loadSourceUsage() {
   try { sourceUsageData = await api('/v1/ai-profiles/usage'); } catch { return; }
-  if ($('aiList')?.childElementCount) renderAiList();
+  // Each row's usage line only: this runs off the poll, and redrawing the rows
+  // threw away a model being chosen, an open drawer and a revealed credential (HB-0410).
+  for (const p of profiles) { const el = $(`aiUsage-${p.id}`); if (el) el.innerHTML = sourceUsagePanel(p); }
 }
 function sourceUsageOf(id) { return sourceUsageData?.sources?.find(x => x.id === id); }
 const fmtN = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
@@ -5795,14 +5833,41 @@ function sourceUsagePanel(p) {
   return `<div class="su"><div class="su-status limited">⛔ Rate-limited since ${esc(clock(u.limitedSince))} — calls through this source are being refused</div></div>`;
 }
 
+/**
+ * What each row's model controls showed when drawn: the server's values. What differs
+ * now is the person's unsaved edit, and a redraw (another row's Save, a model list
+ * arriving) keeps only that. The rest follows the server, as ⟳ Sync, the auto-clean or
+ * another device leave it, so Save cannot write an old value back (HB-0410). For the
+ * list the edit is what was added and what was removed, put on the server's list as it
+ * is then: kept whole, it undid what Sync had just added. The list is compared without
+ * the default in force: picking a default takes it off the list on the page, which is
+ * not a change to the list.
+ */
+let aiRowsDrawn = {};
+const aiExtrasOf = (csv, dflt) => csv.split(',').map(s => s.trim()).filter(m => m && m !== dflt);
+function aiRowEdits() {
+  const edits = {};
+  for (const [id, drawn] of Object.entries(aiRowsDrawn)) {
+    const model = $(`aiModel-${id}`)?.value, models = $(`aiModels-${id}`)?.value;
+    if (model === undefined || models === undefined) continue;
+    const edit = {};
+    if (model !== drawn.model) edit.model = model;
+    const was = aiExtrasOf(drawn.models, model), now = aiExtrasOf(models, model);
+    const add = now.filter(m => !was.includes(m)), remove = was.filter(m => !now.includes(m));
+    if (add.length || remove.length) edit.models = { add, remove };
+    if (Object.keys(edit).length) edits[id] = edit;
+  }
+  return edits;
+}
 function renderAiList() {
+  const edits = aiRowEdits();
   // The intro to the request counts went with them (2026-10-07).
   $('aiList').innerHTML = profiles.map((p, i) => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${p.defaultSource ? '⭐ ' : ''}${esc(p.name)}</b>
       <span class="chip">${vendorChip(p)}</span>
       <span class="sub">shared by the server owner — usable for your agents, managed by them${p.defaultSource ? '; the default for new agents' : ''}</span>
-      ${sourceUsagePanel(p)}${sourceSpendBox(p)}
+      <div id="aiUsage-${p.id}" style="display:contents">${sourceUsagePanel(p)}</div>${sourceSpendBox(p)}
     </div>` : `
     <div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;width:100%">
@@ -5818,13 +5883,13 @@ function renderAiList() {
                title="Let every account on this server use this source for their agents — they spend on it, and their agents hold the key">
           <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked, ${p.kind === 'subscription' && p.credential === 'machine-login'})"> Shared
         </label>
-        <label class="sub" style="display:flex;align-items:center;gap:4px"
+        ${myAccount.hostOwner === false ? '' : `<label class="sub" style="display:flex;align-items:center;gap:4px"
                title="Preselect this source whenever anyone on this server creates or imports an agent (one source can hold this). Other accounts only see it if it's also Shared.">
           <input type="checkbox" ${p.defaultSource ? 'checked' : ''} onchange="setDefaultSource('${p.id}', this.checked, ${p.shared ? 'true' : 'false'})"> ⭐ Default
-        </label>
+        </label>`}
       </div>
       ${sourceUsage(p)}
-      ${sourceUsagePanel(p)}${sourceSpendBox(p)}
+      <div id="aiUsage-${p.id}" style="display:contents">${sourceUsagePanel(p)}</div>${sourceSpendBox(p)}
       ${p.credential === 'machine-login' || p.vendor === 'local' ? '' : `
       <details class="su" style="width:100%">
         <summary><b>🔑 Credential</b> <span class="sub">— reveal only to copy this source to another Hatchabot machine</span></summary>
@@ -5861,7 +5926,19 @@ function renderAiList() {
       <div class="sub" id="aiRowErr-${p.id}" style="width:100%;color:var(--bad);text-align:right"></div>
     </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
   // Populate the switchable-model bubbles for each owned profile.
-  profiles.filter(p => p.mine !== false).forEach(p => renderExtras(p.id));
+  aiRowsDrawn = {};
+  profiles.filter(p => p.mine !== false).forEach(p => {
+    renderExtras(p.id);
+    const model = $(`aiModel-${p.id}`), models = $(`aiModels-${p.id}`), edit = edits[p.id];
+    aiRowsDrawn[p.id] = { model: model.value, models: models.value };
+    if (!edit) return;
+    if (edit.model !== undefined) {
+      if (model.tagName === 'SELECT' && ![...model.options].some(o => o.value === edit.model)) model.add(new Option(edit.model, edit.model));
+      model.value = edit.model;
+    }
+    if (edit.models !== undefined) models.value = [...new Set([...aiExtrasOf(models.value).filter(m => !edit.models.remove.includes(m)), ...edit.models.add])].join(',');
+    renderExtras(p.id);
+  });
   void loadSpendCharts($('aiList'));
 }
 /**
@@ -5945,6 +6022,16 @@ function chosenNow(id) {
   return $(`aiModels-${id}`).value.split(',').map(s => s.trim()).filter(Boolean);
 }
 
+/**
+ * An error from a source's own controls, on its own row (with reading time in a
+ * toast: the row can be tall). #aiErr is the Add-a-source drawer's, and a closed
+ * drawer shows nothing (HB-0442).
+ */
+function aiRowSay(id, msg) {
+  const el = $(`aiRowErr-${id}`);
+  if (el) el.textContent = msg;
+  toast(msg, 12000);
+}
 async function setMgmtLlmSource(id, on) {
   try {
     await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { mgmtLlm: on } });
@@ -6034,7 +6121,7 @@ async function shareAiProfile(id, shared, isMachineLogin) {
     await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { shared } });
     toast(shared ? 'Shared with everyone on this server' : 'No longer shared — existing agents keep it until switched');
     await refresh(true); renderAiList();
-  } catch (e) { $('aiErr').textContent = e.message; renderAiList(); }
+  } catch (e) { renderAiList(); aiRowSay(id, e.message); }
 }
 
 /** ⟳ Sync models: reconcile this source's switchable list with what its
@@ -6077,7 +6164,8 @@ async function syncModels(id, name) {
 
 async function saveAiProfile(id) {
   const model = $(`aiModel-${id}`).value.trim();
-  if (!model) { $('aiErr').textContent = 'Default model is required.'; return; }
+  if (!model) { aiRowSay(id, 'Default model is required.'); return; }
+  $(`aiRowErr-${id}`).textContent = '';
   const extra = $(`aiModels-${id}`).value.split(',').map(s => s.trim()).filter(Boolean);
   const p = (profiles ?? []).find(x => x.id === id);
   // A default-model change on a cloud source that has agents → let the owner
@@ -6091,8 +6179,9 @@ async function saveAiProfile(id) {
   try {
     await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { model, models: [model, ...extra] } });
     toast(p?.vendor === 'local' && onProfile.length ? 'Saved — Rebuild agents to apply' : 'Saved');
+    delete aiRowsDrawn[id]; // saved: no longer an edit, so the redraw shows what the server holds
     await refresh(true); renderAiList();
-  } catch (e) { $('aiErr').textContent = e.message; }
+  } catch (e) { aiRowSay(id, e.message); }
 }
 
 let applyModelState = null;
@@ -6158,6 +6247,7 @@ async function applyModelToSelected() {
       ? `Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`
       : `Default is now ${model} for new agents. Existing agents keep their models.`) + others, others ? 12000 : 7000);
     applyModelDlg.close();
+    delete aiRowsDrawn[profileId]; // saved: no longer an edit
     await refresh(true); renderAiList();
   } catch (e) { $('applyModelErr').textContent = e.message; }
   finally { $('applyModelBtn').disabled = false; }
@@ -6168,13 +6258,26 @@ let moveSourceState = null;
  * Switch a batch of agents onto one AI source — checkbox list, no typing.
  * Mirrors the apply-model dialog. Only offers agents not already on the source.
  */
-function moveAgentsToSource(profileId, profileName) {
-  if ($('moveSourceRecover')) $('moveSourceRecover').checked = true;
+/** Words for the agents a recovery asked for did not reach: not rebuilt now (down, archived, its rebuild refused), and their next start is a plain rebuild (HB-0411). */
+const notRecoveredNote = (n) => `${n} not recovered: once ${n === 1 ? 'it is' : 'they are'} up on this source, press Recover context on ${n === 1 ? 'its' : 'their'} Personality tab`;
+/** The same for Migrate all: the button is the agent's owner's alone, so another account's agents are theirs to press it on. */
+const notRecoveredOthersNote = (n) => `${n === 1 ? '1 on another account' : `${n} on other accounts`} not recovered: only ${n === 1 ? 'its owner' : 'each one\'s owner'} can press Recover context, once it is up, so let them know`;
+function moveAgentsToSource(profileId, profileName, keepChoices = false) {
+  // Defaults for the person's own open; the reopen after a skip keeps what they chose.
+  if (!keepChoices) {
+    $('moveSourceRecover').checked = true;
+    $('moveSourceCheckpoint').checked = false; // off by default: a checkpoint needs the OLD source to answer, which is exactly what's often dead when you're moving
+  }
   const candidates = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId !== profileId);
-  if (!candidates.length) { toast('Every one of your agents already uses this source.'); return; }
-  moveSourceState = { profileId };
+  if (!candidates.length) {
+    toast('Every one of your agents already uses this source.');
+    if (keepChoices && moveSourceDlg.open) moveSourceDlg.close(); // drawn again with nobody left: nothing to show
+    return;
+  }
+  // Drawn again, it is the same open: a move running from it still answers to it.
+  if (!keepChoices || moveSourceState?.profileId !== profileId) moveSourceState = { profileId };
   $('moveSourceName').textContent = profileName;
-  $('moveSourceErr').textContent = '';
+  if (!keepChoices) $('moveSourceErr').textContent = ''; // drawn again behind a move: what this open said still stands
   $('moveSourceList').innerHTML = candidates.map(a => {
     const src = profiles.find(p => p.id === a.aiProfileId);
     // Archived agents stay selectable — you must be able to move them off a
@@ -6196,9 +6299,8 @@ function moveAgentsToSource(profileId, profileName) {
       const n = candidates.filter(a => a.aiProfileId === id).length;
       return `<option value="${esc(id)}">${esc(p ? p.name : 'another source')} (${n})</option>`;
     }).join('');
-  $('moveSourceCheckpoint').checked = false; // off by default: a checkpoint needs the OLD source to answer, which is exactly what's often dead when you're moving
   refreshMoveCount();
-  moveSourceDlg.showModal();
+  if (!moveSourceDlg.open) moveSourceDlg.showModal();
 }
 function toggleMoveAll(on) {
   document.querySelectorAll('.moveSourceCb').forEach(cb => { cb.checked = on; });
@@ -6598,7 +6700,7 @@ function faRenderAction() {
     $('faSource').innerHTML = profiles.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
     keep($('faSource'), prevSrc);
     $('faApplyBtn').disabled = !sel.length;
-    $('faActionNote').textContent = 'Moves the selected agents onto the chosen source and rebuilds each (memory kept, brief downtime). Agents already on it are skipped. A class that pins a different source is detached.';
+    $('faActionNote').textContent = 'Moves the selected agents onto the chosen source and rebuilds the running ones (memory kept, brief downtime). Stopped and sleeping agents stay as they are, and take the new source when they next start. Agents already on it are skipped. A class that pins a different source is detached.';
     return;
   }
   if (action === 'class') {
@@ -6661,12 +6763,14 @@ async function faApply() {
     const profileId = $('faSource').value;
     if (!profileId) return;
     const p = profiles.find(x => x.id === profileId);
-    if (!confirm(`Move ${ids.length} agent${ids.length > 1 ? 's' : ''} to "${p ? p.name : 'that source'}" and rebuild each?`)) return;
+    if (!confirm(`Move ${ids.length} agent${ids.length > 1 ? 's' : ''} to "${p ? p.name : 'that source'}" and rebuild the running ones?\n\nStopped and sleeping agents are not started: they take the new source when they next start.`)) return;
     $('faApplyBtn').disabled = true; $('faResults').innerHTML = 'Switching…';
     try {
       const r = await api(`/v1/ai-profiles/${profileId}/adopt-agents`, { method: 'POST', body: {
         apply: ids, rebuild: true, checkpoint: $('faSourceCheckpoint').checked, recoverAfter: $('faSourceRecover').checked } });
       const bits = [`${r.switched} switched`, `rebuilding ${r.rebuilding}`];
+      if (r.atNextStart) bits.push(`${r.atNextStart} not running, so ${r.atNextStart === 1 ? 'it takes' : 'they take'} it at the next start`);
+      if (r.notRecovered) bits.push(notRecoveredNote(r.notRecovered));
       if (r.classDetached) bits.push(`${r.classDetached} detached from a class`);
       if ((r.skipped || []).length) bits.push(`${r.skipped.length} skipped`);
       $('faResults').innerHTML = `✓ ${esc(bits.join(' · '))}.`;
@@ -6690,7 +6794,7 @@ async function faApply() {
       const todo = (r.needRebuild || []).filter(a => a.state === 'RUNNING');
       if ($('faPeersRebuild').checked) {
         for (const a of todo) {
-          try { await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: {} }); rebuilt++; }
+          try { const r2 = await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } }); if (!r2?.atNextStart) rebuilt++; }
           catch (e) { $('faErr').textContent = `${a.name}: ${e.message}`; }
         }
         if (rebuilt) bits.push(`rebuilding ${rebuilt} (a few at a time)`);
@@ -6725,12 +6829,13 @@ async function faApply() {
       } else if (action === 'rebuild') {
         // Running ones only, as the note says: a rebuild ends RUNNING, so a
         // stopped or sleeping agent would be started behind its owner's back.
+        // By the last poll here, and by the server's own state with stoppedWaits.
         if (a?.state !== 'RUNNING') { skipped++; continue; }
-        await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
+        await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
       } else if (action === 'image') {
         if ((a?.image ?? null) === image) { skipped++; continue; } // already there
         const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image } });
-        if (!r.sameImage && a?.state === 'RUNNING' && a.runtimeRef) await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
+        if (!r.sameImage && a?.state === 'RUNNING' && a.runtimeRef) await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
       } else if (action === 'stop') {
         if (a?.state !== 'RUNNING') { skipped++; continue; }
         await api(`/v1/agents/${id}/stop`, { method: 'POST', body: {} });
@@ -6755,24 +6860,48 @@ async function faApply() {
   await refresh(false);
   if ($('classList').childElementCount) renderClassList(); // Settings may still be open: keep its counts honest
 }
+/** A move behind a dialog reopened meanwhile has changed who can move: its list follows, and what is ticked stays ticked. */
+function moveSourceRedraw() {
+  if (!moveSourceDlg.open || !moveSourceState) return;
+  const ticked = [...document.querySelectorAll('.moveSourceCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
+  moveAgentsToSource(moveSourceState.profileId, $('moveSourceName').textContent, true);
+  document.querySelectorAll('.moveSourceCb').forEach(cb => { cb.checked = ticked.includes(cb.dataset.id); });
+  refreshMoveCount();
+}
 async function moveAgentsApply(rebuild) {
-  if (!moveSourceState) { toast('Reopen this dialog and try again.'); return; }
+  const state = moveSourceState;
+  if (!state) { toast('Reopen this dialog and try again.'); return; }
   const apply = [...document.querySelectorAll('.moveSourceCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
   if (!apply.length) { toast('Tick at least one agent to move.'); return; }
   $('moveSourceBtn').disabled = true;
   try {
-    const r = await api(`/v1/ai-profiles/${moveSourceState.profileId}/adopt-agents`, {
+    const r = await api(`/v1/ai-profiles/${state.profileId}/adopt-agents`, {
       method: 'POST', body: { apply, rebuild, checkpoint: rebuild && $('moveSourceCheckpoint').checked, recoverAfter: rebuild && $('moveSourceRecover').checked },
     });
     const bits = [`${r.switched} switched`];
     if (r.rebuilding) bits.push(`rebuilding ${r.rebuilding} now`);
-    else if (r.switched) bits.push('rebuild to apply');
-    toast(bits.join(' — '));
-    for (const sk of r.skipped ?? []) toast(`skipped ${sk.name}: ${sk.reason}`);
-    moveSourceDlg.close();
+    if (r.atNextStart) bits.push(`${r.atNextStart} not running, so ${r.atNextStart === 1 ? 'it takes' : 'they take'} it at the next start`);
+    if (r.notRecovered) bits.push(notRecoveredNote(r.notRecovered));
+    if (!r.rebuilding && !r.atNextStart && r.switched) bits.push('rebuild to apply');
+    const skipped = r.skipped ?? [];
+    if (!skipped.length) {
+      toast(bits.join(' — '));
+      if (moveSourceState === state) moveSourceDlg.close();
+      await refresh(true); renderAiList();
+      moveSourceRedraw();
+      return;
+    }
+    // Stays open, listing what is left, with every skip and its reason: toasts
+    // overwrite each other, so only the last skip could ever be read (HB-0445).
+    const said = `${bits.join(' — ')}. Skipped ${skipped.length}:\n${skipped.map(sk => `${sk.name}: ${sk.reason}`).join('\n')}`;
     await refresh(true); renderAiList();
-  } catch (e) { $('moveSourceErr').textContent = e.message; }
-  finally { $('moveSourceBtn').disabled = false; }
+    // Cancel pressed meanwhile stands (or it is open for another source now): told, not reopened.
+    if (!moveSourceDlg.open || moveSourceState !== state) { toast(said); moveSourceRedraw(); return; }
+    moveAgentsToSource(state.profileId, $('moveSourceName').textContent, true);
+    $('moveSourceErr').textContent = said;
+  } catch (e) {
+    if (moveSourceDlg.open && moveSourceState === state) $('moveSourceErr').textContent = e.message; else toast(e.message); // open for another source now: not that one's error
+  } finally { refreshMoveCount(); } // as the ticks say: none left after a reopen means off
 }
 
 async function delAiProfile(id, name) {
@@ -6825,16 +6954,16 @@ function openMigrate(id, name) {
 }
 async function runMigrate() {
   const to = $('migrateTo').value;
-  if (!to) { toast('Pick the machine to move it to.'); return; }
+  if (!to) { toast('Pick the AI source to move them to.'); return; }
   if (!migrateState) { toast('Reopen this dialog and try again.'); return; }
   const toName = (profiles.find(p => p.id === to) || {}).name || 'that source';
-  if (!confirm(`Move EVERY agent on "${migrateState.name}" to "${toName}" and rebuild them?\n\nThis includes other accounts' agents; their chats restart on the new source (memory kept).`)) return;
+  if (!confirm(`Move EVERY agent on "${migrateState.name}" to "${toName}" and rebuild the running ones?\n\nThis includes other accounts' agents; their chats restart on the new source (memory kept). Stopped and sleeping agents are not started: they take the new source when they next start.`)) return;
   $('migrateBtn').disabled = true;
   try {
     const r = await api(`/v1/ai-profiles/${migrateState.id}/migrate-agents`, { method: 'POST', body: {
       toProfileId: to, rebuild: true, checkpoint: $('migrateCheckpoint').checked, recoverAfter: $('migrateRecover').checked } });
     migrateDlg.close();
-    toast(`Moved ${r.switched} of ${r.agents} agent${r.agents === 1 ? '' : 's'} (${r.otherAccounts} other account${r.otherAccounts === 1 ? '' : 's'}) — rebuilding ${r.rebuilding}. Delete "${migrateState.name}" once they're done.${(r.skipped || []).length ? ' Skipped: ' + r.skipped.map(s => s.name).join(', ') : ''}`, 12000);
+    toast(`Moved ${r.switched} of ${r.agents} agent${r.agents === 1 ? '' : 's'} (${r.otherAccounts} other account${r.otherAccounts === 1 ? '' : 's'}) — rebuilding ${r.rebuilding}${r.atNextStart ? `; ${r.atNextStart} not running take it at their next start` : ''}${r.notRecovered > (r.notRecoveredOthers || 0) ? `; ${notRecoveredNote(r.notRecovered - (r.notRecoveredOthers || 0))}` : ''}${r.notRecoveredOthers ? `; ${notRecoveredOthersNote(r.notRecoveredOthers)}` : ''}. Delete "${migrateState.name}" once they're done.${(r.skipped || []).length ? ' Skipped: ' + r.skipped.map(s => s.name).join(', ') : ''}`, 12000);
     await refresh(true); renderAiList();
   } catch (e) { $('migrateErr').textContent = e.message; }
   finally { $('migrateBtn').disabled = false; }
@@ -7017,6 +7146,7 @@ function aiModelSelectChanged() {
 }
 
 async function newCliToken(scope) {
+  $('cliTokenErr').textContent = '';
   try {
     // scope 'rehost': for another server that will move agents here — that,
     // and nothing else. The old advice pasted a full token there.
@@ -7027,7 +7157,7 @@ async function newCliToken(scope) {
     toast('Copy it now — it is not shown again', 20000);
     if (await copyText(t.token)) toast(scope ? 'Token copied — paste it on the other server, under Settings → Advanced → Other Hatchabot servers' : 'Token copied — run: hatchabot login', 20000);
     void loadCliTokens();
-  } catch (e) { $('aiErr').textContent = e.message; }
+  } catch (e) { $('cliTokenErr').textContent = e.message; } // its own line: #aiErr is in another tab (HB-0442)
 }
 
 /** The tokens this account has minted, so one can be taken back — a retired
@@ -7474,8 +7604,9 @@ async function offerFolders(items) {
       toRebuild.add(f.agentId);
     } catch (e) { toast(`Couldn't share ${f.path}: ${e.message}`, 12000); }
   }
-  for (const id of toRebuild) { try { await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} }); } catch { /* surfaced on card */ } }
-  toast(`Shared ${finds.length} folder(s); rebuilding ${toRebuild.size} agent(s) to mount them.`, 15000);
+  // stoppedWaits: one that is not running stays so, and mounts them when it next starts.
+  for (const id of toRebuild) { try { await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } }); } catch { /* surfaced on card */ } }
+  toast(`Shared ${finds.length} folder(s); ${toRebuild.size} agent(s) mount them on a rebuild, now if running, otherwise when next started.`, 15000);
   await refresh(true);
 }
 
@@ -7585,12 +7716,13 @@ function agentNotices(a, opts = {}) {
         <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
       ${a.pendingModel && a.pendingModel !== a.model && !isRechecking(a) ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
         <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
-      ${a.state === 'FAILED' && a.stateReason && !opts.skipFailure ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
+      ${a.rebuildOnStart && a.state === 'STOPPED' ? `<div class="pair" id="rebuildOnStartNote-${esc(a.id)}">🕓 <span class="grow">A change is waiting: it comes up with it the next time it ${a.hibernatedAt ? 'wakes' : 'is started'} (a rebuild, memory kept).</span></div>` : ''}
+      ${(a.state === 'FAILED' || a.state === 'STOPPED') && a.stateReason && !opts.skipFailure ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
       ${botNameNote(a)}
       ${attentionFingerprint(a) && v2Mine(a) ? (attentionCleared(a)
         ? `<div class="pair sub">🔕 <span class="grow">Cleared from Alerts — it comes back if something new happens.</span><button onclick="clearAttention('${a.id}', false)">Show again</button></div>`
         : `<div class="pair sub"><span class="grow"></span><button onclick="clearAttention('${a.id}')" title="Take it out of Alerts until something new happens">🔕 Clear from Alerts</button></div>`) : ''}
-      ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
+      ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept.${a.webOnly ? '' : ` ${a.exportedAt ? '' : 'Its Telegram bot went back in the pool for another agent. '}Restore gives it a <b>new</b> bot; members will need the new link.`}</span></div>` : ''}
       ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
         <div class="pair">
           <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
@@ -7719,8 +7851,8 @@ async function savePeers() {
     if (ids.length) {
       const name = agents.find(x => x.id === forId)?.name || 'this agent';
       if (confirm(`Saved. Rebuild "${name}" now so it can consult ${ids.length} peer${ids.length > 1 ? 's' : ''}?\n\nThe call-agent tool is installed on rebuild (memory kept, briefly offline). Without a rebuild the grant is saved but the agent can't call them yet.`)) {
-        await api(`/v1/agents/${forId}/rebuild`, { method: 'POST', body: {} });
-        toast('Rebuilding so it can consult its peers…');
+        const r = await api(`/v1/agents/${forId}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+        toast(r?.atNextStart ? 'Saved. It is not running, so it stays that way: it can consult them from its next start.' : 'Rebuilding so it can consult its peers…');
         if (editAgentId === forId) editDlg.close();
       } else {
         toast('Saved — Rebuild this agent before it can consult them.', 8000);
@@ -7870,12 +8002,14 @@ async function loadConnections() {
     $('connVault').innerHTML = connections.length ? connections.map(c => {
       const agents = c.attachedTo ?? [];
       const rows = agents.length ? agents.map(a => {
-        const badge = a.stale ? '⚠' : (a.materializedAt ? '✓' : '·');
+        const old = !c.needsReconnect && a.secretPending;
+        const badge = a.stale || old ? '⚠' : (a.materializedAt ? '✓' : '·');
         const when = a.attachedAt ? `attached ${esc(a.attachedAt.slice(0, 10))}` : 'attached before this was tracked';
         const pull = a.materializedAt ? `, token pulled ${ago(a.materializedAt)}` : ', token pull not tracked yet';
-        const warn = a.stale ? ' · <b>stale — reconnect this account, then re-attach this agent to pull the new token</b>' : '';
+        const warn = a.stale ? ' · <b>stale — reconnect this account, then re-attach this agent to pull the new token</b>'
+          : old ? ' · <b>still has the old client secret — it gets the new one at its next start or rebuild; keep the old secret at Google until then</b>' : '';
         return `
-        <div class="sub" style="display:flex;gap:6px;align-items:baseline${a.stale ? ';color:var(--warn)' : ''}">
+        <div class="sub" style="display:flex;gap:6px;align-items:baseline${a.stale || old ? ';color:var(--warn)' : ''}">
           <span>${badge}</span>
           <span class="grow"><b style="font-weight:600">${esc(a.name)}</b> — ${when}${pull}${warn}</span>
         </div>`;
@@ -7883,7 +8017,7 @@ async function loadConnections() {
         : '<div class="sub">not attached to any agent yet</div>';
       return `
       <div class="pair" style="flex-wrap:wrap;gap:6px;align-items:flex-start">
-        <span class="grow"><b class="pii">${esc(c.email)}</b>${c.staleCount ? ` <span style="color:var(--warn);font-size:12px">· ${c.staleCount} stale</span>` : ''}${c.needsReconnect ? ` <span class="conn-reconnect" style="color:var(--warn);font-size:12px">· ⚠ made with an earlier OAuth client — press Connect and pick this account again</span>` : ''}
+        <span class="grow"><b class="pii">${esc(c.email)}</b>${c.staleCount ? ` <span style="color:var(--warn);font-size:12px">· ${c.staleCount} stale</span>` : ''}${c.secretPendingCount ? ` <span style="color:var(--warn);font-size:12px">· ${c.secretPendingCount} waiting for the new secret</span>` : ''}${c.needsReconnect ? ` <span class="conn-reconnect" style="color:var(--warn);font-size:12px">· ⚠ made with an earlier OAuth client — press Connect and pick this account again</span>` : ''}
           <span class="sub">${esc((c.services ?? []).join(', ') || 'default services')} · last consent ${esc((c.createdAt || '').slice(0, 10))}${c.createdAt ? ` (${ago(c.createdAt)})` : ''}</span>
           <div style="margin-top:4px;display:flex;flex-direction:column;gap:2px">${rows}</div></span>
         <button class="danger" onclick="removeConnection('${jsq(c.id)}','${jsq(c.email)}')">Remove</button>
@@ -7908,7 +8042,9 @@ async function saveOAuthClient() {
     }
     toast(r?.reconnect
       ? `OAuth client saved. ${r.reconnect} connection${r.reconnect === 1 ? '' : 's'} must be connected again (marked below).`
-      : 'OAuth client saved — Connect now works for everyone on this server.', r?.reconnect ? 10000 : undefined);
+      : r?.pushing || r?.waiting
+        ? `OAuth client saved. ${r.pushing ? `The new secret is going to ${r.pushing} running agent${r.pushing === 1 ? '' : 's'}. ` : ''}${r.waiting ? `${r.waiting} other${r.waiting === 1 ? '' : 's'} get${r.waiting === 1 ? 's' : ''} it at the next start: keep the old secret at Google until then.` : ''}`
+        : 'OAuth client saved — Connect now works for everyone on this server.', r?.reconnect || r?.waiting ? 10000 : undefined);
     await loadConnections();
   } catch (e) { toast(e.message, 10000); }
 }
@@ -8159,12 +8295,12 @@ async function switchProfile() {
   try {
     await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { aiProfileId: id } });
     const name = agents.find(x => x.id === forId)?.name || 'this agent';
-    if (confirm(`Saved. Rebuild "${name}" now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline. Tip: send /new in its chat afterwards — a fresh conversation suits a new model.`)) {
-      await api(`/v1/agents/${forId}/rebuild`, {
-        method: 'POST', body: { checkpoint },
+    if (confirm(`Saved. Rebuild "${name}" now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline; one that is not running stays that way and uses it from its next start. Tip: send /new in its chat afterwards — a fresh conversation suits a new model.`)) {
+      const r = await api(`/v1/agents/${forId}/rebuild`, {
+        method: 'POST', body: { checkpoint, stoppedWaits: true },
       });
-      toast(checkpoint
-        ? 'Saving conversation to memory, then rebuilding…'
+      toast(r?.atNextStart ? 'Saved. It is not running, so it stays that way: it starts on the new AI source next time.'
+        : checkpoint ? 'Saving conversation to memory, then rebuilding…'
         : 'Rebuilding with the new AI source');
       if (editAgentId === forId) editDlg.close();
     } else {
@@ -8437,7 +8573,8 @@ function addSetupField() {
   renderParamList();
 }
 
-function removeSetupField(i) { editParams.splice(i, 1); renderParamList(); }
+// A press fires no input or change event: an edit all the same, so the sheet's state redraw holds off (HB-0444).
+function removeSetupField(i) { editParams.splice(i, 1); v2SheetEdited = true; renderParamList(); }
 
 async function saveSetupFields() {
   $('paramSaveBtn').disabled = true;
@@ -8468,7 +8605,7 @@ function renderSetupValues(a) {
   row.hidden = !editable;
   if (!editable) return;
   const envNote = envParams.length
-    ? `<div class="sub">🔑 ${envParams.map(p => esc(p.key.toUpperCase())).join(', ')} — credential${envParams.length > 1 ? 's' : ''}; change under the Environment tab.</div>`
+    ? `<div class="sub">🔑 ${envParams.map(p => esc(p.key.toUpperCase())).join(', ')} — credential${envParams.length > 1 ? 's' : ''}; change under Advanced → Environment.</div>`
     : '';
   const dsNote = dsParams.length
     ? `<div class="sub">📚 ${dsParams.map(p => esc(p.label || p.key)).join(', ')} — repo binding${dsParams.length > 1 ? 's' : ''}; manage under the Data tab.</div>`
@@ -8786,6 +8923,11 @@ function openModelPrices() {
 // and the whole machine's budget for the machine owner. Saving one runs the
 // budget check at once: a raised budget starts a paused agent again.
 const bgMoney = (x) => (x >= 100 ? '$' + Math.round(x).toLocaleString('en-US') : '$' + (Math.round(x * 100) / 100).toFixed(2));
+/** A month's or a pace's dollars, never a bare $0.00 for use with no known price (HB-0402). */
+const bgCost = (x, unknown) => (!unknown ? bgMoney(x) : x > 0 ? `${bgMoney(x)} + <span class="bg-hi">no price known</span>` : '<span class="bg-hi">no price known</span>');
+const bgSpentCost = (a) => bgCost(a.spent, !!a.unpriced && (a.unpriced.month > 0 || !!a.unpriced.model));
+const bgLastCost = (a) => bgCost(a.lastMonth, !!a.unpriced && a.unpriced.last > 0);
+const bgRateCost = (a) => bgCost(a.monthlyNow, !!a.unpriced?.rate);
 const bgMonthName = (m) => new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7) - 1, 15)).toLocaleDateString(undefined, { month: 'long', timeZone: 'UTC' });
 async function loadBudgets() {
   const el = $('budgetsBody'); if (!el) return;
@@ -8796,7 +8938,7 @@ function bgState(v) {
   if (!v) return '';
   const pace = v.onPace && v.onPace > v.spent ? ` · on pace for ${bgMoney(v.onPace)}` : '';
   const cls = v.level ? ' class="bg-hi"' : '';
-  return `<span${cls}>${bgMoney(v.spent)} of ${bgMoney(v.usd)} (${v.pct}%)</span>${pace}${v.paused ? ' · <b>paused</b>' : v.downgraded ? ` · <b>on ${esc(v.downgraded.to.replace(/^.*\//, ''))}</b> until ${esc(v.resetsOn)}` : ''}`;
+  return `<span${cls}>${bgMoney(v.spent)} of ${bgMoney(v.usd)} (${v.pct}%)</span>${pace}${v.paused?.staysStopped ? ' · <b>stopped</b>' : v.paused ? ' · <b>paused</b>' : v.downgraded ? ` · <b>on ${esc(v.downgraded.to.replace(/^.*\//, ''))}</b> until ${esc(v.resetsOn)}` : ''}`;
 }
 function bgControls(key, b, suggested, manager) {
   const usd = b ? b.usd : '';
@@ -8834,18 +8976,18 @@ function renderBudgets(d) {
   const month = bgMonthName(d.month);
   const mine = (d.agents || []).filter((a) => a.state !== 'ARCHIVED');
   const rows = mine.map((a) => `<tr><td class="bg-l">${esc(a.name)}${a.billing === 'plan' ? ' <span class="sub">(plan)</span>' : a.billing === 'local' ? ' <span class="sub">(local)</span>' : ''}</td>
-    <td>${bgMoney(a.spent)}</td><td>${bgMoney(a.lastMonth)}</td><td>${bgMoney(a.monthlyNow)}</td>
+    <td>${bgSpentCost(a)}</td><td>${bgLastCost(a)}</td><td>${bgRateCost(a)}</td>
     <td class="bg-l">${bgStepControls(a.id, a.alertEvery)}${a.alertEvery ? `<div class="sub">${bgStepState(a.alertEvery)}</div>` : ''}</td>
-    <td class="bg-l"><div class="bg-form">${bgControls(a.id, a.budget, a.suggested, a.manager)}</div>${a.budget ? `<div class="sub">${bgState(a.budget)}</div>` : ''}</td></tr>`).join('');
+    <td class="bg-l"><div class="bg-form">${bgControls(a.id, a.budget, a.unpriced?.model ? 0 : a.suggested, a.manager)}</div>${a.budget && !(a.unpriced?.model && !a.spent) ? `<div class="sub">${bgState(a.budget)}</div>` : ''}${a.priceNote ? `<div class="sub bg-hi" style="font-weight:400">${esc(a.priceNote)}</div>` : ''}${a.chatNote && (a.budget || a.alertEvery) ? `<div class="sub bg-hi" style="font-weight:400">${esc(a.chatNote)}</div>` : ''}</td></tr>`).join('');
   const m = d.machine;
   const machine = m ? `<div class="pair" style="margin:0 0 10px;flex-wrap:wrap;gap:8px;align-items:center"><b>This whole Hatchabot</b>
       <span class="sub">${bgMoney(m.spent)} in ${esc(month)} so far · ${bgMoney(m.lastMonth)} last month · every agent, everyone's</span>
       <div class="bg-form" style="flex-basis:100%"><span class="sub">Tell me</span>${bgStepControls('machine', m.alertEvery)}${m.alertEvery ? `<span class="sub">${bgStepState(m.alertEvery)}</span>` : ''}</div>
       <div class="bg-form" style="flex-basis:100%"><span class="sub">Monthly limit</span>${bgControls('machine', m.budget, 0, false)}${m.budget ? `<span class="sub">${bgState(m.budget)}</span>` : ''}</div>
-      <div class="sub" style="flex-basis:100%">Here "pause it" pauses, and "cheaper model" moves, every agent but your Hatchabot agent when the machine reaches its budget.</div></div>` : '';
+      <div class="sub" style="flex-basis:100%">Here "pause it" pauses, and "cheaper model" moves, every agent but your Hatchabot agent when the machine reaches its budget.</div>${m.priceNote ? `<div class="sub bg-hi" style="flex-basis:100%;font-weight:400">${esc(m.priceNote)}</div>` : ''}${m.chatNote && (m.budget || m.alertEvery) ? `<div class="sub bg-hi" style="flex-basis:100%;font-weight:400">${esc(m.chatNote)}</div>` : ''}</div>` : '';
   return `${machine}<div class="mp-wrap"><table class="mp-tbl bg-tbl"><thead><tr><th>Agent</th><th>${esc(month)}</th><th>Last month</th><th>A month now</th><th style="text-align:left">Tell me</th><th style="text-align:left">Monthly limit</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="6" class="sub">No agents yet.</td></tr>'}</tbody></table></div>
-    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. <b>Tell me every $…</b>: a message (at most one an hour per agent) and a line under Alerts each time this month's spend passes another step — at $100, $200, $300 … for 100; it counts from when you set it, and starts again each month. <b>Monthly limit</b>: you hear at 80% and at 100% (under Alerts, and once on your Hatchabot agent's chat). <b>Cheaper model</b> moves it at 100% to the cheapest model its AI source offers until the 1st — it keeps answering; raise the budget to switch it back sooner (change its model yourself and the budget leaves it alone). <b>Pause it</b> stops the agent at 100% until the 1st — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st); anyone who writes to it on Telegram gets one reply saying so. Empty a box and Save to remove a budget.</p>`;
+    <p class="sub mp-note">US dollars at API list prices, the same as the cost badges — on a Claude plan it is an equivalent, not a bill. <b>Tell me every $…</b>: a message (at most one an hour per agent) and a line under Alerts each time this month's spend passes another step — at $100, $200, $300 … for 100; it counts from when you set it, and starts again each month. A model with no known price shows "no price known", not $0, and a limit cannot be enforced on what it costs. <b>Monthly limit</b>: you hear at 80% and at 100% (under Alerts, and once on your Hatchabot agent's chat). <b>Cheaper model</b> moves it at 100% to the cheapest model its AI source offers until the 1st — it keeps answering; raise the budget to switch it back sooner (change its model yourself and the budget leaves it alone). <b>Pause it</b> stops the agent at 100% until the 1st — raise the budget or start it to bring it back sooner (started by hand, it runs on until the 1st); anyone who writes to it on Telegram gets one reply saying so. Empty a box and Save to remove a budget.</p>`;
 }
 async function saveBudget(key, btn) {
   const raw = bgInput(btn, 'bgUsd_' + key)?.value.trim();
@@ -8870,9 +9012,11 @@ async function v2LoadBudgetRow(id) {
     if (!a || $('v2BudgetRow')?.dataset.agent !== id) return;
     el.innerHTML = `<div class="bg-rows">
         <span class="sub">Tell me</span><div class="bg-form">${bgStepControls(id, a.alertEvery)}${a.alertEvery ? `<span class="sub">${bgStepState(a.alertEvery)}</span>` : ''}</div>
-        <span class="sub">Limit</span><div class="bg-form">${bgControls(id, a.budget, a.suggested, a.manager)}</div>
+        <span class="sub">Limit</span><div class="bg-form">${bgControls(id, a.budget, a.unpriced?.model ? 0 : a.suggested, a.manager)}</div>
       </div>
-      <div class="sub" style="margin-top:8px">${a.budget ? bgState(a.budget) + ' · ' : ''}${bgMoney(a.spent)} in ${esc(bgMonthName(d.month))} so far, ${bgMoney(a.lastMonth)} last month, about ${bgMoney(a.monthlyNow)} a month at its pace now (API prices${a.billing === 'plan' ? '; on your Claude plan an equivalent' : ''}).${a.alertEvery || a.budget ? '' : ` Every $${Math.max(1, Math.round(a.suggested / 4))} would tell you a few times a month.`} <a href="#" onclick="openBudgets();return false">All budgets</a></div>`;
+      ${a.priceNote ? `<div class="sub bg-hi" style="margin-top:8px;font-weight:400">${esc(a.priceNote)}</div>` : ''}
+      ${a.chatNote && (a.budget || a.alertEvery) ? `<div class="sub bg-hi" style="margin-top:8px;font-weight:400">${esc(a.chatNote)}</div>` : ''}
+      <div class="sub" style="margin-top:8px">${a.budget && !(a.unpriced?.model && !a.spent) ? bgState(a.budget) + ' · ' : ''}${bgSpentCost(a)} in ${esc(bgMonthName(d.month))} so far, ${bgLastCost(a)} last month, about ${bgRateCost(a)} a month at its pace now (API prices${a.billing === 'plan' ? '; on your Claude plan an equivalent' : ''}).${a.alertEvery || a.budget || a.unpriced?.model ? '' : ` Every $${Math.max(1, Math.round(a.suggested / 4))} would tell you a few times a month.`} <a href="#" onclick="openBudgets();return false">All budgets</a></div>`;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 /** Settings → AI sources, with Budgets open. */
@@ -9275,9 +9419,9 @@ function renderFleetUsage(f) {
   // The By agent table went (Chris, 2026-10-05: less to read): the picker above
   // the chart narrows to any agents, and each agent's Usage tab has its own.
   const planStar = (f.pricing?.billing?.plan > 0) || (f.rightSize?.planUSD > 0);
-  // Spike warnings of the last week (sent to Telegram when they happened); ✕ clears one, "Clear all" every one.
+  // Spike warnings of the last week (sent to the owner's chat when they happened); ✕ clears one, "Clear all" every one.
   const earlier = (f.alerts || []).filter(recEarlierSpike);
-  const alerts = earlier.map((x) => `<div class="sub" style="margin:2px 0;display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.covered ? ' · told with its loop' : x.told ? '' : ' · not sent (no Telegram)'}</span>`
+  const alerts = earlier.map((x) => `<div class="sub" style="margin:2px 0;display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.covered ? ' · told with its loop' : x.told ? '' : ' · not sent (no chat app reaches you)'}</span>`
     + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" onclick="dismissSpike('${jsq(x.agentId)}','${jsq(x.at)}')">✕</button></div>`).join('')
     + (earlier.length ? `<div class="sub" style="margin-top:2px">Earlier this week. A spike in the last day is under Recommended, above.</div>` : '')
     + (earlier.length > 1 ? `<div style="text-align:right;margin-top:2px"><button class="hbtn" style="font-size:12px" onclick="dismissSpike()">Clear all</button></div>` : '');
@@ -9881,6 +10025,7 @@ function editCronJob(id) {
   // One-shot ("at") tasks are still edited by asking the agent.
   if (!c.scheduleExpr && !c.everyMs) { toast('This is a one-shot task — edit it by asking the agent, or delete and re-add.'); return; }
   cronEditingId = id;
+  v2SheetEdited = true; // the form is filled by this press, with no event: a state redraw would disarm its Save (HB-0444)
   $('cronName').value = c.name || '';
   $('cronMode').value = c.everyMs && !c.scheduleExpr ? 'every' : 'cron';
   cronModeChanged();
@@ -10202,7 +10347,8 @@ async function shareInviteTg() {
 /**
  * Every action that rebuilds a RUNNING agent right now asks first — a rebuild
  * stops whatever the agent is doing (Chris added Telegram to an agent mid-job,
- * 2026-09-25). A stopped agent has nothing to interrupt, so no question then.
+ * 2026-09-25). A stopped agent has nothing to interrupt, and a change does not
+ * start it (it comes up with it when next started; HB-0420), so no question then.
  * `what` names the action; the answer is the user's, so the caller stops on false.
  */
 function confirmRebuild(id, what) {
@@ -10215,6 +10361,9 @@ function confirmRebuild(id, what) {
 }
 async function rebuild(id) {
   if (!confirmRebuild(id, 'Rebuild')) return;
+  // Asked for by name, this is the one thing that does start a stopped agent: say so.
+  const down = agents.find(x => x.id === id);
+  if (down?.state === 'STOPPED' && !confirm(`A rebuild ends with "${down.name}" running, on its chat apps and able to spend on its AI source. It is ${down.hibernatedAt ? 'asleep' : 'stopped'} now.\n\nRebuild and start it?`)) return;
   try {
     await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
     toast('Rebuilding — memory is kept');
@@ -10247,12 +10396,12 @@ async function rebuildAll(btn) {
   // Each agent keeps its own guards server-side (busy, moved-away, in-flight).
   for (const a of list) {
     try {
-      await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: {} });
-      started++;
+      const r = await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+      if (r?.atNextStart) skipped++; else started++;
     } catch { skipped++; }
   }
   if (btn) btn.disabled = false;
-  toast(`Rebuilding ${started} agent${started === 1 ? '' : 's'}, ${atOnce} at a time — about ${minutes} minute${minutes === 1 ? '' : 's'}${skipped ? `. ${skipped} skipped (busy or already changing)` : ''}. Memory is kept.`, 12000);
+  toast(`Rebuilding ${started} agent${started === 1 ? '' : 's'}, ${atOnce} at a time — about ${minutes} minute${minutes === 1 ? '' : 's'}${skipped ? `. ${skipped} skipped (busy, already changing, or stopped just now)` : ''}. Memory is kept.`, 12000);
   await refresh(false);
 }
 
@@ -11200,8 +11349,68 @@ async function approve(id, code, asSelf, kind = 'telegram', who = '') {
 // The caller's own account (email + linked Telegram). Drives the "That's me"
 // button on pairing cards and the Telegram line under Settings → You.
 let myAccount = {};
+/**
+ * What only the machine's owner can use, hidden from anyone else: every save
+ * there would be refused (HB-0443). Only on a known "no": a failed read of the
+ * account leaves them showing, and the server guards them either way.
+ */
+function paintMachineOwnerOnly() {
+  for (const id of ['extraKeysHead', 'mediaKeyDrawer', 'searchKeyDrawer', 'addRunnerBlock', 'botInvDrawer']) $(id).hidden = myAccount.hostOwner === false;
+}
+/**
+ * Who this page is for. Sign out reloads, but a session that ends by a 401 and a
+ * sign-in do not, so the page itself outlives the person (HB-0446). When the session
+ * ends the chat leaves the page at once; what it held waits, out of sight, until the
+ * next account is read. The same account gets it back. Another finds nothing of the
+ * last one's, here or in what the page held for them. Read again on each meta refresh,
+ * which also catches another tab having signed in as someone else.
+ */
+let pagePerson = null, pagePersonAway = false, pagePersonRead = 0, pageCleared = false;
+function pageSessionEnded() {
+  pagePersonAway = true; pageCleared = false;
+  window.__sfEnrolShown = false; // whoever comes next is taken to add a factor if they need one
+  pagePersonRead++; // a read begun in that session does not say who comes next
+  webChatPutAway();
+}
+function pagePersonIs(ownerId) {
+  if (!ownerId) return;
+  const another = pagePerson ? pagePerson !== ownerId : pagePersonAway;
+  pagePerson = ownerId; pagePersonAway = false;
+  const cleared = pageCleared; pageCleared = false;
+  if (!another) return;
+  webChatForget();
+  if (!cleared) pageClearLast();
+}
+function pageClearLast() {
+  v2Close();
+  if ($('consoleDlg').open) closeConsole();
+  consoleTabs = [];
+  if (backupDlg.open) closeBackupCodes(); // off the page too, and what waits on them goes on
+  sfCloseTotp(); $('sfCurPw').value = ''; // Access is drawn again for whoever comes next: not a setup or a password of the last person's
+  document.querySelectorAll('dialog[open]:not(#loginDlg):not(#sfDlg)').forEach((d) => d.close());
+  aiRowsDrawn = {}; moveSourceState = null; applyModelState = null; migrateState = null;
+  reportCur = null; reportGen++; // a draft still loading does not paint
+  for (const id of ['reportTitle', 'reportWhat', 'reportRTitle', 'reportBody']) $(id).value = '';
+}
+/** A sign-in landed. Who it is comes first, so nothing of another account's is drawn for them, and what the path shows next (a recovery code) is not closed. */
+async function pageSignedIn() {
+  await loadMyAccount();
+  // Not told who: no second factor yet (Access is open for them to add one), or the read failed. What was open for the last person goes now,
+  // because the read that later succeeds must not close what this one has opened by then: their backup codes, a recovery code. Drafts wait for that read.
+  if (pagePersonAway && !pageCleared) {
+    pageClearLast();
+    pageCleared = true;
+    if (window.__sfEnrolShown && !aiDlg.open) void openAiDlg('access'); // drawn for them, not what the last person left
+  }
+  await refresh(true);
+}
 async function loadMyAccount() {
-  try { myAccount = await api('/v1/account'); } catch { myAccount = {}; }
+  const read = ++pagePersonRead;
+  try {
+    myAccount = await api('/v1/account');
+    if (read === pagePersonRead) pagePersonIs(myAccount.ownerId);
+  } catch { myAccount = {}; }
+  paintMachineOwnerOnly();
   loadRebuildPolicy(); // the cards' wording depends on it
   const el = $('tgLinkStatus');
   if (el) el.innerHTML = myAccount.telegramUserId
@@ -11322,9 +11531,19 @@ function rebuildableAgents() {
  * be undone quietly — the chat address changes.
  */
 let archivePending = null;
+/** Where its bot goes, as the server decides it (archive.ts copyElsewhere): the same split as del(), and nothing about a bot when it has none (HB-0418). */
+const archiveBotLeftToCopy = (a, state) => !!a?.botUsername && !!a.exportedAt && state !== 'RUNNING';
+function archiveBotWords(a, state) {
+  if (!a?.botUsername) return '';
+  const restore = 'When you restore it, it gets a DIFFERENT bot with a new link to send to members; the current link stops working.';
+  return archiveBotLeftToCopy(a, state)
+    ? `A copy of it was downloaded, so its Telegram bot @${a.botUsername} is NOT put back in the pool: it is left to the copy, which may be talking on it. ${restore}`
+    : `Its Telegram bot goes back in the pool for another agent to use, and members are told in the chat. ${restore}`;
+}
 function archiveAgent(id, name, state) {
   archivePending = { id, name };
   $('archiveName').textContent = `"${name}"`;
+  $('archiveBotNote').textContent = archiveBotWords(agents.find(a => a.id === id), state);
   // A checkpoint needs a live turn — only offer it for a RUNNING agent.
   const running = state === 'RUNNING';
   $('archiveCheckpointRow').style.display = running ? 'flex' : 'none';
@@ -11345,11 +11564,13 @@ function markArchiving(list) {
 async function confirmArchive() {
   if (!archivePending) return;
   const { id, name } = archivePending;
+  const was = agents.find(a => a.id === id);
+  const botDone = !was?.botUsername ? '' : archiveBotLeftToCopy(was, was.state) ? ` — bot @${was.botUsername} was left to the downloaded copy, not put back in the pool` : ' — its bot is back in the pool';
   const checkpoint = $('archiveCheckpointRow').style.display !== 'none' && $('archiveCheckpoint').checked;
   // Closed at once: the tile carries the progress from here.
   archivePending = null;
   archiveDlg.close();
-  archivingHere.set(id, { at: new Date().toISOString(), step: checkpoint ? 'archiving — saving its conversation to memory first' : 'archiving — stopping it and handing its bot back' });
+  archivingHere.set(id, { at: new Date().toISOString(), step: checkpoint ? 'archiving — saving its conversation to memory first' : `archiving — stopping it${was?.botUsername ? ' and handing its bot back' : ''}` });
   markArchiving(agents);
   renderV2();
   toast(checkpoint ? `Archiving "${name}" — saving its conversation to memory first (about 20 seconds)…` : `Archiving "${name}"…`, 30000, 'progress');
@@ -11362,7 +11583,7 @@ async function confirmArchive() {
     if (consoleTabs.some(t => t.id === id)) closeConsoleTab(id);
     if (v2AgentId === id) v2Close();
     if (r.checkpointWarning) toast(`"${name}" archived. ⚠ ${r.checkpointWarning}`, 12000);
-    else toast(`"${name}" archived — its bot is back in the pool.`);
+    else toast(`"${name}" archived${botDone}.`, botDone ? 8000 : undefined);
   } catch (e) {
     archivingHere.delete(id);
     const a = v2Find(id);
@@ -11453,7 +11674,8 @@ async function restoreAgent(id, name) {
     await api(`/v1/agents/${id}/restore`, { method: 'POST' });
     toast(`Restoring "${name}"…`);
     await refresh(false);
-  } catch (e) { toast(e.message); }
+    return true;
+  } catch (e) { toast(e.message); return false; }
 }
 
 /**
@@ -11675,10 +11897,13 @@ async function saveImagePin() {
     if (r.sameImage) toast(v ? `Pinned to ${v} — it already runs that image, so no rebuild.` : 'Back on the fleet default — it already runs that image, so no rebuild.');
     else if (a?.state === 'RUNNING' && a.runtimeRef) {
       if (!confirmRebuild(forId, v ? `Moving onto ${v}` : 'Returning to the fleet default image')) { toast('Pinned — it moves onto that image at its next rebuild.', 6000); await refresh(false); return; }
-      await api(`/v1/agents/${forId}/rebuild`, { method: 'POST', body: {} });
-      toast(v ? `Pinned to ${v} — rebuilding onto it now, memory kept (about a minute).` : 'Back on the fleet default — rebuilding, memory kept.');
+      // That read is the page's last poll, and the question above takes as long as it takes: stopped by now, it stays so.
+      const r2 = await api(`/v1/agents/${forId}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+      if (r2?.atNextStart) toast(v ? `Pinned to ${v} — it moves onto it when it next starts.` : 'Back on the fleet default image — it moves onto it when it next starts.');
+      else toast(v ? `Pinned to ${v} — rebuilding onto it now, memory kept (about a minute).` : 'Back on the fleet default — rebuilding, memory kept.');
     } else {
-      toast(v ? `Pinned to ${v} — it moves onto it at its next rebuild.` : 'Back on the fleet default image — applies at its next rebuild.');
+      // It stays down; Start or a wake is the rebuild (HB-0441).
+      toast(v ? `Pinned to ${v} — it moves onto it when it next starts.` : 'Back on the fleet default image — it moves onto it when it next starts.');
     }
     await refresh(false);
   } catch (e) { toast(e.message); }
@@ -11935,7 +12160,9 @@ function recheckNote(a) {
 
 // "Clear from Alerts": what is flagged, as a stable fingerprint (kinds, not
 // counts that tick — more cap hits do not re-flag; a NEW restart or a new
-// rebuild reason does). Stored on the agent, so every device agrees.
+// rebuild reason does). Stored on the agent, so every device agrees. A key that
+// names a kind only (failed, pending, opsDrift...) leaves the stored Clear on the
+// server when that thing ends, so the next one shows (Store.dropAttentionAckKeys).
 function attentionFingerprint(a) {
   // A Check all finding is this page's alone (gone on a reload): kept out, or a
   // Clear made with one on screen would come back after every reload.
@@ -12049,6 +12276,8 @@ function agentAttention(a) {
   // all: the agent refuses Start and the rest until it is chosen. Keyed on its id.
   if (a.operation?.status === 'held' && v2Mine(a)) out.push({ key: 'op:' + a.operation.id, icon: '⏸', why: a.operation.outcome || `${a.operation.kindLabel || 'An operation'} is waiting for your choice` });
   if (a.state === 'FAILED') out.push({ key: 'failed', icon: '❗', why: a.stateReason ? 'it failed — the reason is beside its status' : 'it failed', failure: true });
+  // Stopped, and nobody meant it to be: a move undone whose source did not start (HB-0416). Its next run clears it.
+  if (a.state === 'STOPPED' && a.stateReason && v2Mine(a)) out.push({ key: 'not-started', icon: '⚠', why: a.stateReason });
   if (a.pendingAction) out.push({ key: 'pending', icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
   // No pool bot was free when it came back (or was cloned/imported): it went on web-only rather than wait.
   if (a.telegramSkipped) out.push({ key: 'nobot:' + a.telegramSkipped.at, icon: '📵', why: 'No Telegram bot was free — it is running in the web app; attach a bot later (its settings → Messaging → Telegram)' });
@@ -12088,7 +12317,7 @@ function agentAttention(a) {
   // It can still reach something it should not (access overview: Sharing → Access).
   if (a.accessAlert?.line) out.push({ key: a.accessAlert.key, icon: '🔑', why: a.accessAlert.line });
   // "Tell me every $X" steps are the information the owner asked for: their message, the tooltip and Usage say them, not Alerts (v2.158.0).
-  if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', sev: 85, why: "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
+  if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', sev: 85, why: a.budgetPaused.staysStopped ? "this Hatchabot's monthly budget is used up, and it was stopped by hand: it stays stopped until you start it" : "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
   if (a.machineBudget?.line && a.machineBudget.level === 100) out.push({ key: `mbudget:${a.machineBudget.month}:${a.machineBudget.level}:${a.machineBudget.usd}`, icon: '💵', sev: 85, rec: 'budget:machine', why: 'This Hatchabot (every agent): ' + a.machineBudget.line.replace(/^Over /, 'over ').replace(/^Used /, 'used ') + ' (Usage → Recommended)' });
   if (a.ops && v2Mine(a)) out.push(...v2MachineAlerts());
   if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Resources shows its memory against the cap` });
@@ -12098,19 +12327,23 @@ function agentAttention(a) {
   return out.map((x, i) => [x, i]).sort(([x, i], [y, j]) => (y.sev ?? V2_ATTN_SEV[y.key.split(':')[0]] ?? 40) - (x.sev ?? V2_ATTN_SEV[x.key.split(':')[0]] ?? 40) || i - j).map(([x]) => x);
 }
 /** Alerts severity by key: an operation waiting for a choice and a failure first, then a loop, a budget at 100% and a spike (their own sev), then the rest. */
-const V2_ATTN_SEV = { op: 100, failed: 95, pending: 70, opsDrift: 65, nobot: 50, unsynced: 50, template: 45, migrated: 45, rebuild: 42 };
+const V2_ATTN_SEV = { op: 100, failed: 95, 'not-started': 90, pending: 70, opsDrift: 65, nobot: 50, unsynced: 50, template: 45, migrated: 45, rebuild: 42 };
 
 let agentTodos = null, pendingTodoName = null, todosBusy = false;
-/** The names of the agents that exist now, lower-cased: a plan carrying one of them is done. */
-const todoMadeNames = () => new Set(agents.filter(a => a.state !== 'DELETED').map(a => a.name.trim().toLowerCase()));
+/**
+ * A plan is done when one of your own agents with its name was made after it. An
+ * older agent, or one shared with you, says nothing about the plan: every plan
+ * carrying such a name was deleted the moment it was added (HB-0447).
+ */
+const todoIsMade = (t) => agents.some(a => a.state !== 'DELETED' && v2Mine(a) && a.name.trim().toLowerCase() === t.name.trim().toLowerCase()
+  && (!a.createdAt || !t.createdAt || a.createdAt >= t.createdAt));
 async function loadTodos() {
   if (todosBusy) return;
   todosBusy = true;
   try {
     try { agentTodos = (await api('/v1/agent-todos')).todos || []; } catch { agentTodos = []; }
     // Created since? An agent now carrying a planned name retires the plan.
-    const live = todoMadeNames();
-    for (const t of agentTodos.filter(t => live.has(t.name.trim().toLowerCase()))) {
+    for (const t of agentTodos.filter(todoIsMade)) {
       try { await api(`/v1/agent-todos/${t.id}`, { method: 'DELETE' }); } catch {}
       agentTodos = agentTodos.filter(x => x.id !== t.id);
     }
@@ -12120,8 +12353,7 @@ async function loadTodos() {
 /** A planned agent was made (from its ghost tile, or by hand) since the plans were read: retire it. */
 function retireMadeTodos() {
   if (!agentTodos?.length || todosBusy) return;
-  const live = todoMadeNames();
-  if (agentTodos.some(t => live.has(t.name.trim().toLowerCase()))) void loadTodos();
+  if (agentTodos.some(todoIsMade)) void loadTodos();
 }
 async function addTodo(boxId = 'v2TodoNew') {
   const name = ($(boxId)?.value || '').trim();
@@ -12436,8 +12668,9 @@ function v2Status(a) {
   else if (waiting && v2Mine(a)) st = { cls: 'waiting', glyph: '👤', label: 'Someone wants to join' };
   else if ((a.stuck || []).length && v2Mine(a) && a.state === 'RUNNING' && !attentionCleared(a)) st = { cls: 'blocked', glyph: '🔁', label: 'Stuck in a loop — using tokens' };
   else if (limited) st = { cls: 'blocked', glyph: '⏳', label: 'AI source rate-limited' };
+  else if (a.state === 'STOPPED' && a.stateReason && v2Mine(a) && !attentionCleared(a)) st = { cls: 'blocked', glyph: '!', label: 'Stopped: it did not start again' };
   else if (a.state === 'STOPPED' && a.hibernatedAt) st = { cls: 'stopped', glyph: '💤', label: 'Asleep — wakes when someone writes to it, or when you open it' };
-  else if (a.state === 'STOPPED' && (a.budget?.paused || a.budgetPaused)) st = { cls: 'stopped', glyph: '⏸', label: `Paused — ${a.budget?.paused ? 'its' : "this Hatchabot's"} monthly budget is used up` };
+  else if (a.state === 'STOPPED' && !(a.budget?.paused?.staysStopped ?? a.budgetPaused?.staysStopped) && (a.budget?.paused || a.budgetPaused)) st = { cls: 'stopped', glyph: '⏸', label: `Paused — ${a.budget?.paused ? 'its' : "this Hatchabot's"} monthly budget is used up` };
   else if (a.state === 'STOPPED') st = { cls: 'stopped', glyph: '⏸', label: 'Stopped' };
   else if (a.hostUnreachable) st = { cls: 'stopped', glyph: '⚠', label: `Its machine${a.hostName ? ` (${a.hostName})` : ''} isn't answering — asleep or offline` };
   else if (why.length && v2Mine(a) && !attentionCleared(a)) st = { cls: 'note', glyph: '⚑', label: 'Worth a look' };
@@ -12622,7 +12855,7 @@ function v2ViewKey(a, view = v2View) {
       if (v2Unread(a)) return ['n:3', '💬 To read'];
       // Cleared means gone (Chris, 2026-10-04): back with the fine ones until something new happens.
       if (attentionCleared(a)) return ['n:9', 'Fine'];
-      if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '❌ Failed or changed by hand'];
+      if (a.state === 'FAILED' || a.opsDrift || (a.state === 'STOPPED' && a.stateReason && v2Mine(a))) return ['n:1', '❌ Failed or changed by hand'];
       if (a.rebuild) return ['n:4', a.rebuild.level === 'required' ? '🔄 To rebuild (required)' : '🔄 To rebuild'];
       if (agentAttention(a).length) return ['n:5', '⚠ Alerts'];
       return ['n:9', 'Fine'];
@@ -13111,7 +13344,12 @@ window.addEventListener('pointerup', async (e) => {
       if (a.state !== 'ARCHIVED') archiveAgent(a.id, a.name, a.state);
       return renderV2();
     }
-    if (a.state === 'ARCHIVED') { await restoreAgent(a.id, a.name); return; }
+    // Restored into the group it was dropped on, which is what the strip and the
+    // caret promised: the drop goes on as any other once it is back (HB-0448).
+    if (a.state === 'ARCHIVED') {
+      if (!await restoreAgent(a.id, a.name)) return renderV2();
+      if (!t.newGroup && !v2Manual() && (t.group ?? '') === (a.group ?? '')) return;
+    }
     if (t.newGroup) {
       // A fresh group with a placeholder name, then straight into renaming it
       // where it stands (no prompt box, Chris 2026-09-25).
@@ -13218,6 +13456,7 @@ function v2EmbedPanes(a, tab) {
   if (v2EditFor !== a.id) {
     prepareEdit(a.id, a.name);
     v2EditFor = a.id;
+    v2SheetEdited = false;
     void loadEditFile(); void loadSnapshots();
   }
   for (const [paneId, heading] of list) {
@@ -13291,6 +13530,7 @@ function v2RenderSheet() {
   $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" id="v2tab-${k}" aria-selected="${k === v2Tab}" aria-controls="v2Pane" tabindex="${k === v2Tab ? 0 : -1}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
   v2ParkPanes();
   v2SheetSig = v2SheetSigOf(a);
+  v2SheetDrawnState = a.state;
   const pane = $('v2Pane');
   if (tabs.length) { pane.setAttribute('role', 'tabpanel'); pane.setAttribute('aria-labelledby', `v2tab-${v2Tab}`); }
   else { pane.removeAttribute('role'); pane.removeAttribute('aria-labelledby'); }
@@ -13357,7 +13597,7 @@ async function v2AppUpdate(id, btn, values) {
   try {
     const r = await api(`/v1/agents/${id}/app/update`, { method: 'POST', body: values ? { values } : {} });
     // "Its tests passed" only when it has tests and they ran (a manifest without any answers test: null).
-    toast(r.unchanged ? 'Already running the newest commit.' : `Updated to ${String(r.app.sha).slice(0, 12)}${r.test?.ok ? ' — its tests passed.' : ' (it has no tests to run).'}`);
+    toast(r.unchanged ? 'Already running the newest commit.' : r.refreshed?.length ? `Same commit; settings Hatchabot fills are up to date again: ${r.refreshed.join(', ')}.` : `Updated to ${String(r.app.sha).slice(0, 12)}${r.test?.ok ? ' — its tests passed.' : ' (it has no tests to run).'}`);
   } catch (e) {
     // A value it needs and has not got (a field made required, or one an older
     // version left blank): asked for here, since Update sends none (final
@@ -13748,7 +13988,7 @@ async function v2LoadFiles(id, path) {
       ${ws && (r.path || '') !== ws ? `<button onclick="v2LoadFiles('${jsq(id)}','${jsq(ws)}')">Workspace</button>` : ''}
       <a class="btn" href="${dl('archive', r.path || '')}" onclick="return sfLink(event, this, 'folder.tar.gz')" title="This folder as a .tar.gz">⬇ Whole folder</a>
       ${canUpload ? `<button onclick="$('v2UploadInput').click()" title="Put a file from this computer into this folder">⬆ Upload…</button><input type="file" id="v2UploadInput" multiple hidden onchange="v2UploadFiles('${jsq(id)}','${jsq(r.path || '')}', this.files)">` : ''}
-      <span class="sub">Click a name to open it in a new tab, ⬇ to download. ${canUpload ? 'Drop files on the list to upload them here.' : "OpenClaw's own state — uploads go in the workspace or outside .openclaw."} Its workspace holds what it wrote; memory is under .openclaw.</span></div></div>
+      <span class="sub">Click a name to open it here, ⬇ to download. ${canUpload ? 'Drop files on the list to upload them here.' : "OpenClaw's own state — uploads go in the workspace or outside .openclaw."} Its workspace holds what it wrote; memory is under .openclaw.</span></div></div>
     <div id="v2FilesDrop">${r.entries.length ? `<table class="tbl"><thead><tr>${[['name', 'Name', ''], ['size', 'Size', ' class="num"'], ['mtime', 'Changed', '']].map(([k, l, cls]) => `<th${cls}><a href="#" class="v2fsort${v2FilesSort.key === k ? ' on' : ''}" onclick="event.preventDefault();v2FilesSortBy('${jsq(id)}','${k}')" title="Sort by ${l.toLowerCase()}">${l}${v2FilesSort.key === k ? (v2FilesSort.dir > 0 ? ' ▲' : ' ▼') : ''}</a></th>`).join('')}<th></th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="sub" style="padding:8px 0">Empty folder.</div>'}</div>
     <div id="v2UploadNote" class="sub" hidden></div>`;
   if (canUpload) {
@@ -13824,7 +14064,7 @@ function v2MemberAbout(a) {
 let webChatAgentId = null;
 // Per agent: one waiting reply blocked Send for every other agent, and its
 // "…thinking" line was taken off whichever chat was open (review, 2026-10-09).
-const webChatSending = new Set();
+let webChatSending = new Set();
 const webChatWait = (id) => [...$('wchatLog').querySelectorAll('.wchat-msg.wait')].find(el => el.dataset.wait === id);
 const webChatBubble = (role, text, cls = '') => `<div class="wchat-msg${role === 'user' ? ' me' : ''}${cls}">${esc(text)}</div>`;
 const webChatScroll = () => { const l = $('wchatLog'); l.scrollTop = l.scrollHeight; };
@@ -13862,11 +14102,76 @@ function openGuestConsole(a, sessionKey) {
   renderConsoleTabs();
   $('consoleDlg').showModal();
 }
+/**
+ * The box belongs to one agent at a time. What it held for another agent waits
+ * in webChatDrafts, so text never carries into the wrong agent's chat, where
+ * Enter would send it, and switching agent loses nothing.
+ */
+let webChatDrafts = new Map();
+let webChatBoxFor = null;
+/**
+ * Per agent: messages kept as sent that may not have arrived (502, 504, no answer),
+ * each with how many times the same words were in the log before it. Reopening draws
+ * the log from the server, so this is where such a message is got back from (HB-0446).
+ */
+let webChatUnsure = new Map();
+/** The session is over: nothing of this person's stays on the page or can be sent. What they had waits (pagePersonIs). */
+function webChatPutAway() {
+  const box = $('wchatText');
+  if (webChatBoxFor && box.value) webChatDrafts.set(webChatBoxFor, box.value);
+  box.value = '';
+  webChatBoxFor = null; webChatAgentId = null;
+  $('wchatLog').innerHTML = ''; $('wchatErr').textContent = '';
+  $('wchatNote').textContent = ''; $('wchatNote').hidden = true;
+  if (webChatDlg.open) webChatDlg.close();
+}
+/** Another account is here. New holders, not emptied ones: a send still waiting writes to its own person's, which nobody reads now. */
+function webChatForget() {
+  webChatPutAway();
+  webChatDrafts = new Map(); webChatUnsure = new Map(); webChatSending = new Set();
+}
+function webChatShowDraft(id) {
+  if (webChatBoxFor === id) return;
+  const box = $('wchatText');
+  if (webChatBoxFor && box.value) webChatDrafts.set(webChatBoxFor, box.value);
+  box.value = webChatDrafts.get(id) ?? '';
+  webChatDrafts.delete(id);
+  webChatBoxFor = id;
+}
+/** A refused message goes back to its own agent's box, ahead of anything typed since (HB-0446, HB-0477). `drafts`: the person who sent it. */
+function webChatGiveBack(id, text, drafts = webChatDrafts) {
+  const box = $('wchatText');
+  const ahead = (typed) => typed ? `${text}\n${typed}` : text;
+  if (drafts === webChatDrafts && webChatBoxFor === id) box.value = ahead(box.value);
+  else drafts.set(id, ahead(drafts.get(id)));
+}
+/**
+ * The log has been read: a message that may not have arrived and is not in it comes
+ * back to the box, and is said to. Never sent again by itself. A log that could not be
+ * read tells nothing, so the message waits for the next time.
+ */
+function webChatOfferUnsure(id, r) {
+  const unsure = webChatUnsure.get(id);
+  if (!unsure || r.note) return;
+  webChatUnsure.delete(id);
+  const inLog = (text) => (r.messages || []).filter(m => m.role === 'user' && m.text.trim() === text).length;
+  const lost = [...new Set(unsure.filter(u => inLog(u.text) <= u.seen).map(u => u.text))];
+  if (!lost.length) return;
+  for (const text of lost.reverse()) webChatGiveBack(id, text); // each goes ahead of the last: the first sent ends up first
+  $('wchatErr').textContent = `${lost.length === 1 ? 'A message you sent is' : 'Messages you sent are'} not in this conversation, so ${lost.length === 1 ? 'it' : 'they'} may not have been delivered. ${lost.length === 1 ? 'It is' : 'They are'} back in the box: send or clear as you wish.`;
+}
 async function openWebChatPanel(id, note = '') {
   const a = v2Find(id); if (!a) return;
+  // Signed in again, and who it is not read yet: the last person's draft waits for that.
+  if (pagePersonAway) {
+    await loadMyAccount();
+    if (pagePersonAway) { toast('Could not check who is signed in. Try again in a moment.'); return; }
+  }
+  const drafts = webChatDrafts;
   $('wchatNote').textContent = note;
   $('wchatNote').hidden = !note;
   webChatAgentId = id;
+  webChatShowDraft(id);
   $('wchatSend').disabled = webChatSending.has(id);
   $('wchatAgent').textContent = a.name;
   $('wchatErr').textContent = '';
@@ -13875,16 +14180,17 @@ async function openWebChatPanel(id, note = '') {
   $('wchatText').focus();
   try {
     const r = await api(`/v1/agents/${id}/chat`);
-    if (webChatAgentId !== id) return;
+    if (webChatAgentId !== id || webChatDrafts !== drafts) return;
     // A message sent while the history loaded stays; the history goes above it.
     const sent = [...$('wchatLog').querySelectorAll('.wchat-msg')];
     $('wchatLog').innerHTML = (r.messages || []).map(m => webChatBubble(m.role, m.text)).join('')
       || (sent.length ? '' : `<div class="sub" id="wchatEmpty">${esc(r.note || 'Nothing here yet — say hello.')}</div>`);
     for (const el of sent) $('wchatLog').append(el);
     if (webChatSending.has(id) && !webChatWait(id)) $('wchatLog').insertAdjacentHTML('beforeend', `<div class="wchat-msg wait" data-wait="${esc(id)}">…thinking</div>`);
+    webChatOfferUnsure(id, r);
     webChatScroll();
   } catch (e) {
-    if (webChatAgentId !== id) return;
+    if (webChatAgentId !== id || webChatDrafts !== drafts) return;
     $('wchatEmpty')?.remove();
     $('wchatErr').textContent = e.message;
   }
@@ -13893,31 +14199,45 @@ async function webChatSend() {
   const id = webChatAgentId, box = $('wchatText');
   const text = box.value.trim();
   if (!id || !text || webChatSending.has(id)) return;
-  webChatSending.add(id); $('wchatSend').disabled = true;
+  // This person's, for when the answer lands: by then the next person may be signed in.
+  const drafts = webChatDrafts, unsure = webChatUnsure, sending = webChatSending;
+  const stillHere = () => webChatDrafts === drafts && !pagePersonAway; // anything else: nothing said, on a sign-in screen or to someone else
+  const onScreen = () => webChatDrafts === drafts && webChatAgentId === id;
+  sending.add(id); $('wchatSend').disabled = true;
   const name = v2Find(id)?.name || 'The agent';
   $('wchatErr').textContent = '';
   $('wchatEmpty')?.remove();
   box.value = '';
-  $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('user', text) + `<div class="wchat-msg wait" data-wait="${esc(id)}">…thinking</div>`);
+  // Its own bubble, kept by reference: a reopen reloads the log without it, and the last message then is a delivered one.
+  const log = $('wchatLog');
+  const seen = [...log.querySelectorAll('.wchat-msg.me')].filter(el => el.textContent === text).length;
+  log.insertAdjacentHTML('beforeend', webChatBubble('user', text));
+  const bubble = log.lastElementChild;
+  log.insertAdjacentHTML('beforeend', `<div class="wchat-msg wait" data-wait="${esc(id)}">…thinking</div>`);
   webChatScroll();
   try {
     const r = await api(`/v1/agents/${id}/chat`, { method: 'POST', body: { text } });
-    if (webChatAgentId === id) { webChatWait(id)?.remove(); $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('assistant', r.reply)); }
-    else toast(`${name} answered — open its chat to read it.`, 8000); // not dropped without a word
+    if (onScreen()) { webChatWait(id)?.remove(); $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('assistant', r.reply)); }
+    else if (stillHere()) toast(`${name} answered — open its chat to read it.`, 8000); // not dropped without a word
   } catch (e) {
-    if (webChatAgentId === id) webChatWait(id)?.remove();
-    else toast(`${name}: ${e.message}`, 8000);
-    // It can't give a guest a member's (limited) turn until it is rebuilt: the
-    // message was not delivered, so it comes back into the box (step 2).
-    if (e.code === 'needs-rebuild' && webChatAgentId === id) {
-      [...$('wchatLog').querySelectorAll('.wchat-msg.me')].at(-1)?.remove();
-      if (!box.value) box.value = text;
-    }
-    // Busy, too many this hour, no answer in time, not allowed, needs a rebuild: said where they are typing.
-    if (webChatAgentId === id) $('wchatErr').textContent = e.message;
+    // Refused (4xx): not in the conversation, so it comes back into its box and leaves
+    // the log. Busy, too many this hour, not running, a guest's limited turn until a
+    // rebuild (step 2), a session that ended, a second factor not given: all of them
+    // (HB-0446). Anything else may have got through, and sending it again could say it
+    // twice: no answer in time (504), no answer at all, or a failure after the gateway
+    // had accepted it (502: src/orchestrator/webChat.ts has one exit for before and
+    // after). It stays as sent, and that is said; reopening checks it (webChatOfferUnsure).
+    const refused = e.status >= 400 && e.status < 500;
+    if (refused) { bubble.remove(); webChatGiveBack(id, text, drafts); }
+    else unsure.set(id, [...(unsure.get(id) ?? []), { text, seen }]);
+    // The server's own words already say so for 502 and 504.
+    const said = refused || e.status === 502 || e.status === 504 ? e.message : `${e.message}${/[.!?…]$/.test(e.message) ? '' : '.'} It may have got through: reopen this chat to see before you send it again.`;
+    // Said where they are typing; if they have moved on, in a toast.
+    if (onScreen()) { webChatWait(id)?.remove(); $('wchatErr').textContent = said; }
+    else if (stillHere()) toast(`${name}: ${said}${refused ? ' Your message is back in its box.' : ''}`, 8000);
   } finally {
-    webChatSending.delete(id);
-    if (webChatAgentId === id) $('wchatSend').disabled = false;
+    sending.delete(id);
+    if (onScreen()) $('wchatSend').disabled = false;
     webChatScroll();
   }
 }
@@ -13925,7 +14245,8 @@ async function webChatSend() {
 $('wchatText').addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); void webChatSend(); }
 });
-webChatDlg.addEventListener('close', () => { webChatAgentId = null; });
+// The close event comes later (with an animation frame): reopened by then, the chat now showing stays live.
+webChatDlg.addEventListener('close', () => { if (!webChatDlg.open) webChatAgentId = null; });
 
 /** Why a tab that reads from the running container is empty, in the agent's
  *  real state: a rebuild or a failure is not "stopped — start it". */
@@ -13993,7 +14314,7 @@ function v2Pane(a, tab) {
         <span class="sub">Takes about a minute. Do this after changing its image, its data folders, or the agents it can ask — and whenever Hatchabot says an update is waiting.</span>`) : ''}
       <div class="v2danger"><h4>Archive or delete</h4><div class="v2v">
         ${a.archiving ? '<span class="sub">Archiving…</span>' : ''}
-        ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) && !a.archiving ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
+        ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) && !a.archiving ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, `title="Keep it and its memory${a.botUsername ? '; hand its Telegram bot back' : ''}"`) : ''}
         ${B('Delete…', `v2Close();del('${id}','${n}')`, 'class="danger"')}
         <span class="sub" style="flex-basis:100%">${a.state === 'DELETING'
           // A delete the process was stopped in stays DELETING: Delete again finishes it (HB-0265); the server turns one away while a delete still runs.
@@ -14068,6 +14389,12 @@ function v2Pane(a, tab) {
   return '';
 }
 
+/** What a chat-app change does to the agent now, in a confirm: a running one rebuilds, one that is not running stays so (HB-0420). */
+function chanApplyNote(id) {
+  const a = agents.find(x => x.id === id);
+  return !a || a.state === 'RUNNING' ? 'It rebuilds now — anything it is doing stops. It restarts to apply this.'
+    : a.state === 'STOPPED' ? `It stays ${a.hibernatedAt ? 'asleep' : 'stopped'}; this applies when it next starts.` : 'It restarts to apply this.';
+}
 async function v2AddTelegram(id, withToken) {
   const body = {};
   if (withToken) {
@@ -14077,7 +14404,7 @@ async function v2AddTelegram(id, withToken) {
   if (!confirmRebuild(id, 'Connecting Telegram')) return;
   try {
     const r = await api(`/v1/agents/${id}/telegram`, { method: 'POST', body });
-    toast(`Connected @${r.username} — rebuilding so it answers there (memory kept).`, 6000);
+    toast(r.atNextStart ? `Connected @${r.username}. It stays down, and answers there once it next starts (memory kept).` : `Connected @${r.username} — rebuilding so it answers there (memory kept).`, 6000);
     await refresh(false);
   } catch (e) {
     if (/pool/i.test(e.message) && !withToken) { $('v2TgToken').hidden = false; $('v2TgTokenIn').focus(); return; }
@@ -14085,10 +14412,10 @@ async function v2AddTelegram(id, withToken) {
   }
 }
 async function v2RemoveTelegram(id, name, bot) {
-  if (!confirm(`Detach @${bot} from "${name}"?\n\nIt keeps everything it knows, and you keep talking to it here. People who reach it on Telegram lose access and get a goodbye message. The bot goes back to your pool for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
+  if (!confirm(`Detach @${bot} from "${name}"?\n\nIt keeps everything it knows, and you keep talking to it here. People who reach it on Telegram lose access and get a goodbye message. The bot goes back to your pool for another agent. ${chanApplyNote(id)}`)) return;
   try {
-    await api(`/v1/agents/${id}/telegram`, { method: 'DELETE' });
-    toast(`@${bot} is back in your pool.`, 6000);
+    const r = await api(`/v1/agents/${id}/telegram`, { method: 'DELETE' });
+    toast(`@${bot} is back in your pool.${r?.atNextStart ? ' It stays down; this applies when it next starts.' : ''}`, 6000);
     await refresh(false);
   } catch (e) { toast(e.message, 8000); }
 }
@@ -14206,7 +14533,7 @@ async function v2LoadChans(id) {
       </div>
       ${a.ops ? '' : `<div class="v2chan-rooms">
         <label for="chanKnocks-${kind}" style="margin:0">Who can reach it</label>
-        <select id="chanKnocks-${kind}" style="width:auto"${canChange ? '' : ' disabled'} onchange="chanAllowKnocks('${jsq(id)}', this.value === 'on')">
+        <select id="chanKnocks-${kind}" style="width:auto"${canChange ? '' : ' disabled'} onchange="chanAllowKnocks('${jsq(id)}', this.value === 'on', this)">
           <option value="off"${r.allowKnocks ? '' : ' selected'}>Invite only (default)</option>
           <option value="on"${r.allowKnocks ? ' selected' : ''}>Anyone can knock</option>
         </select>
@@ -14214,7 +14541,7 @@ async function v2LoadChans(id) {
       </div>`}
       ${kind === 'telegram' ? `<div class="v2chan-rooms">
         <label for="chanRich-telegram" style="margin:0">Rich messages</label>
-        <select id="chanRich-telegram" style="width:auto"${canChange ? '' : ' disabled'} onchange="chanRichMessages('${jsq(id)}', this.value === 'off')">
+        <select id="chanRich-telegram" style="width:auto"${canChange ? '' : ' disabled'} onchange="chanRichMessages('${jsq(id)}', this.value === 'off', this)">
           <option value="on"${c.richMessages === false ? '' : ' selected'}>On (default)</option>
           <option value="off"${c.richMessages === false ? ' selected' : ''}>Off — plain text</option>
         </select>
@@ -14235,31 +14562,37 @@ async function chanSwap(id, kind) {
     + `• It keeps its memory, files, settings and members — nobody has to pair again.\n`
     + `• Everyone must open the NEW bot and say hi; ${label} will not move the old chat.\n`
     + `• The old ${kind === 'slack' ? 'app' : 'bot'} ${kind === 'telegram' ? 'goes back to the pool' : `is parked under Settings → ${label}`}, and its chat stops answering.\n\n`
-    + `The agent rebuilds afterwards — about a minute; anything it is doing stops.`)) return;
+    + (a && a.state !== 'RUNNING' ? chanApplyNote(id) : `The agent rebuilds afterwards — about a minute; anything it is doing stops.`))) return;
   try {
     const r = kind === 'telegram'
       ? await api(`/v1/agents/${id}/channel/swap`, { method: 'POST', body: {} })
       : await api(`/v1/agents/${id}/channels/${kind}/swap`, { method: 'POST', body: {} });
-    toast(`Moved to ${kind === 'telegram' ? `@${r.to}` : `“${r.channel?.botName || 'the spare bot'}”`}${r.told ? ` — told ${r.told} ${r.told === 1 ? 'person' : 'people'} on the old bot` : ''}. Rebuilding…`, 10000);
+    toast(`Moved to ${kind === 'telegram' ? `@${r.to}` : `“${r.channel?.botName || 'the spare bot'}”`}${r.told ? ` — told ${r.told} ${r.told === 1 ? 'person' : 'people'} on the old bot` : ''}. ${r.atNextStart ? 'It stays down; this applies when it next starts.' : 'Rebuilding…'}`, 10000);
     await refresh(true);
     v2LoadChans(id);
   } catch (e) { toast(e.message, 9000); }
 }
-async function chanAllowKnocks(id, on) {
+/** A save that failed: the select goes back to what the server last said, so it never shows a door shut that is open (HB-0450). Works with the network down, when a reload would not. */
+function chanSelectBack(select) {
+  const drawn = select && [...select.options].find(o => o.defaultSelected);
+  if (drawn) select.value = drawn.value;
+}
+async function chanAllowKnocks(id, on, select) {
   try {
     await api(`/v1/agents/${id}/allow-knocks`, { method: 'POST', body: { on } });
     const a = agents.find(x => x.id === id); if (a) a.allowKnocks = on;
     toast(on ? 'Anyone can knock — you approve each one.' : 'Invite only — strangers are turned away.');
     v2LoadChans(id);
-  } catch (e) { toast(e.message); }
+  } catch (e) { chanSelectBack(select); toast(e.message); }
 }
-async function chanRichMessages(id, off) {
+async function chanRichMessages(id, off, select) {
   try {
     // null = clear back to the managed default (on) instead of pinning true.
     await api(`/v1/agents/${id}`, { method: 'PATCH', body: { richMessages: off ? false : null } });
     toast(off ? 'Plain text — applies on the next Rebuild.' : 'Rich messages on (default) — applies on the next Rebuild.');
     await refresh(false);
-  } catch (e) { toast(e.message, 10000); }
+    v2LoadChans(id); // drawn afresh: what is saved now is what a later failure goes back to
+  } catch (e) { chanSelectBack(select); toast(e.message, 10000); }
 }
 /** Telegram: the group chats the gateway has seen, as the room picker. */
 async function chanFindRooms(id, btn) {
@@ -14428,23 +14761,37 @@ function chanShowConnected(c) {
   $('chanGo').hidden = true;
   $('chanClose').textContent = 'Done';
   $('chanBody').innerHTML = `
-    <p>It is <b>${esc(c.displayName || label)}</b>. It restarts now to pick this up (its memory is kept).</p>
+    <p>It is <b>${esc(c.displayName || label)}</b>. ${c.atNextStart ? 'It stays stopped, and picks this up when it next starts (its memory is kept).' : 'It restarts now to pick this up (its memory is kept).'}</p>
     ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
     <ol class="v2steps">
       ${httpsUrl(c.addToServerUrl) ? `<li><a class="btn primary" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add it to your server</a>. People can only message it once they share a server with it.</li>` : ''}
       <li>${httpsUrl(c.deepLink) ? `<a class="btn${httpsUrl(c.addToServerUrl) ? '' : ' primary'}" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open ${label}</a>` : `Open ${label}`} and send it a direct message. ${c.youAreLinked ? 'It already knows you.' : `Your message shows up here as a request: approve it with <b>That's me</b>. (A ${label} bot can be seen by a whole server, so nobody is linked on their first message alone.)`}</li>
     </ol>
-    <div class="v2wait" id="chanWait"><span class="spinner" aria-hidden="true"></span> ${c.youAreLinked ? 'Restarting…' : 'Waiting for your request…'}</div>`;
+    <div class="v2wait" id="chanWait"><span class="spinner" aria-hidden="true"></span> ${c.atNextStart ? 'Waiting for it to be started…' : c.youAreLinked ? 'Restarting…' : 'Waiting for your request…'}</div>`;
   clearInterval(chanWatch);
   const id = chanFor, kind = chanKind;
-  chanWatch = setInterval(async () => {
-    if (!chanDlg.open) return clearInterval(chanWatch);
+  let linkShown = false;
+  // A check can take longer than the 4 s between them: only the newest answer so far counts (review of HB-0411).
+  let asked = 0, answered = 0;
+  const watch = chanWatch = setInterval(async () => {
+    if (!chanDlg.open) return clearInterval(watch);
+    const turn = ++asked;
     try {
       const r = await api(`/v1/agents/${id}/channels`);
+      // Linked is about the person; answering is about the agent, read now. It may be
+      // stopped until someone starts it, rebuilding, or still RUNNING with its rebuild
+      // queued (an operation). "Now" only once it is up.
+      const a = await api(`/v1/agents/${id}`).catch(() => null);
+      if (chanWatch !== watch || !chanDlg.open || turn < answered) return;
+      answered = turn;
+      const up = a?.state === 'RUNNING' && !a.rebuildOnStart && !a.operation;
       if (Array.isArray(r?.channels) && r.channels.find(x => x.kind === kind)?.youAreLinked) {
-        clearInterval(chanWatch);
-        $('chanWait').innerHTML = `✓ Linked. It answers you on ${label} now.`;
-        if ($('v2Chans')) void v2LoadChans(id);
+        if (up) clearInterval(watch);
+        $('chanWait').innerHTML = `✓ Linked. It answers you on ${label} ${up ? 'now' : a?.state === 'STOPPED' ? 'once it is started' : 'once it is back up'}.`;
+        if ((up || !linkShown) && $('v2Chans')) void v2LoadChans(id);
+        linkShown = true;
+      } else if (up && c.atNextStart) {
+        $('chanWait').innerHTML = '<span class="spinner" aria-hidden="true"></span> Waiting for your request…';
       }
     } catch { /* keep waiting */ }
   }, 4000);
@@ -14456,7 +14803,7 @@ async function chanRecheck(id, kind, btn) {
   try {
     const c = await api(`/v1/agents/${id}/channels/${kind}/recheck`, { method: 'POST', body: {} });
     if (c.placesChanged && confirmRebuild(id, `Answering in its new ${kind === 'slack' ? 'channels' : 'servers'}`)) {
-      await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} }).then(() => toast('Rebuilding — it answers in the new places when it is back.')).catch(e => toast(e.message, 8000));
+      await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } }).then((r) => toast(r?.atNextStart ? 'Saved. It is not running, so it stays that way: it answers in the new places from its next start.' : 'Rebuilding — it answers in the new places when it is back.')).catch(e => toast(e.message, 8000));
     }
     toast(c.warnings?.length ? `${V2_CHAN_LABEL[kind]}: ${c.warnings.length} thing${c.warnings.length === 1 ? '' : 's'} still to fix.` : `${V2_CHAN_LABEL[kind]}: all good.`);
     if ($('v2Chans')) void v2LoadChans(id);
@@ -14473,8 +14820,8 @@ async function chanSaveRooms(id, kind, btn) {
       toast('Saved — applies on the next Rebuild.', 6000);
     } else {
       if (!confirmRebuild(id, 'Changing its group chats')) { btn.disabled = false; return; }
-      await api(`/v1/agents/${id}/channels/${kind}`, { method: 'PATCH', body: { rooms: mode === 'room' ? { mode, roomId } : { mode } } });
-      toast(mode === 'room' ? `Saved. It restarts to join that ${kind === 'slack' ? 'channel' : 'server'}.` : mode === 'members' ? `Saved: every ${kind === 'slack' ? 'channel' : 'server'} it is in, for people you admitted. It restarts to apply this.` : 'Saved: direct messages only. It restarts to apply this.', 6000);
+      const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'PATCH', body: { rooms: mode === 'room' ? { mode, roomId } : { mode } } });
+      toast(r?.atNextStart ? 'Saved. It is not running, so it stays that way: this applies when it next starts.' : mode === 'room' ? `Saved. It restarts to join that ${kind === 'slack' ? 'channel' : 'server'}.` : mode === 'members' ? `Saved: every ${kind === 'slack' ? 'channel' : 'server'} it is in, for people you admitted. It restarts to apply this.` : 'Saved: direct messages only. It restarts to apply this.', 6000);
     }
     await refresh(false);
     v2LoadChans(id);
@@ -14486,11 +14833,11 @@ async function chanRemove(id, kind) {
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
   if (kind === 'telegram') return v2RemoveTelegram(id, a?.name || '', a?.botUsername || '');
   if (kind !== 'slack'
-    ? !confirm(`Detach Discord from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Discord, with its name and servers, ready for another agent. It rebuilds now — anything it is doing stops.`)
-    : !confirm(`Detach ${label} from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
+    ? !confirm(`Detach Discord from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Discord, with its name and servers, ready for another agent. ${chanApplyNote(id)}`)
+    : !confirm(`Detach ${label} from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. ${chanApplyNote(id)}`)) return;
   try {
     const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
-    toast(r.parked ? `${label} detached — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} detached.`, 5000);
+    toast((r.parked ? `${label} detached — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} detached.`) + (r.atNextStart ? ' It stays down; this applies when it next starts.' : ''), 5000);
     await refresh(false);
   } catch (e) { toast(e.message, 8000); }
 }
@@ -14561,12 +14908,24 @@ async function v2SetGroup(id, value) {
  *  plain poll — each repaint reloaded them, and an upload lost its progress. */
 const V2_SELF_LOADING = { files: 1, channels: 1, slack: 1, usage: 1 };
 let v2SheetSig = '';
+/** The state the open tab was drawn in, and whether the person has changed anything in the sheet's forms since they were filled. */
+let v2SheetDrawnState = null, v2SheetEdited = false;
 const v2SheetSigOf = (a) => JSON.stringify([a.id, a.state, a.hibernatedAt ?? null, a.runtimeRef ?? null, a.botUsername ?? null, a.otherChannels ?? [], pairings[a.id] ?? []]);
 function v2RefreshSheet() {
   if (!v2AgentDlg.open) return;
   const pane = $('v2Pane');
   const a = v2Find(v2AgentId);
   const same = V2_SELF_LOADING[v2Tab] && a && v2Mine(a) && v2SheetSigOf(a) === v2SheetSig;
+  // A tab of edit sections was drawn for one state: "It is stopped — start it" stayed
+  // after Start from the bar. Redrawn, and its forms filled again, unless the person
+  // has an edit in them or a field in use: then the next poll asks again (HB-0444).
+  if (V2_EMBED[v2Tab] && a && a.state !== v2SheetDrawnState && !v2SheetEdited && !(pane.contains(document.activeElement) && document.activeElement.matches('input, textarea, select'))) {
+    const top = pane.scrollTop;
+    v2EditFor = null;
+    v2RenderSheet();
+    pane.scrollTop = top;
+    return;
+  }
   // Tabs holding the edit sections manage their own state; only repaint the bar.
   const busy = V2_EMBED[v2Tab] || same || pane.querySelector('#healthDlgBody') || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
   if (busy) v2RenderSheetBar(); else { const top = pane.scrollTop; v2RenderSheet(); pane.scrollTop = top; }
@@ -14574,7 +14933,9 @@ function v2RefreshSheet() {
 // The close event arrives a task later: reopened by then (close one agent,
 // open the next), it must not clear the agent now showing — that left the
 // sheet deaf to updates and its Usage tab on "Loading…" (2026-09-29).
-v2AgentDlg.addEventListener('close', () => { if (v2AgentDlg.open) return; v2ParkPanes(); v2AgentId = null; v2EditFor = null; });
+v2AgentDlg.addEventListener('close', () => { if (v2AgentDlg.open) return; v2ParkPanes(); v2AgentId = null; v2EditFor = null; v2SheetEdited = false; });
+// Only a person's change fires these; a form being filled does not.
+for (const ev of ['input', 'change']) $('v2Pane').addEventListener(ev, () => { v2SheetEdited = true; });
 
 // ---- icon picker ---------------------------------------------------------------------
 const V2_EMOJI = ['📈', '💹', '🧾', '⚖️', '💰', '🏢', '🏡', '🚗', '✈️', '🧭', '📅', '✅', '☑️', '🍳', '🥗', '🏃', '🩺', '🛡️',
@@ -14751,17 +15112,22 @@ async function openReport(id) {
 async function reportLoadDrafts() {
   let list = [];
   try { list = await api('/v1/problem-reports'); } catch { /* none */ }
-  const open = list.filter(r => !r.sentAt).slice(0, 5);
+  // Opened on GitHub is not filed: this page cannot see Submit pressed there. So
+  // one opened stays listed, marked, until it is discarded here (HB-0437).
+  const open = [...list.filter(r => !r.sentAt).slice(0, 5), ...list.filter(r => r.sentAt).slice(0, 5)];
   $('reportDrafts').innerHTML = !open.length ? '' : '<div class="sub" style="margin-bottom:4px">Drafts</div>' + open.map(r =>
     `<button type="button" class="reportdraft" data-id="${esc(r.id)}" onclick="reportShow(this.dataset.id)" style="display:flex;gap:8px;width:100%;text-align:left">
-      <span class="grow">${esc(r.title)}</span><span class="sub">${r.by === 'agent' ? 'by your Hatchabot agent · ' : ''}${esc(ago(r.createdAt))}</span></button>`).join('');
+      <span class="grow">${esc(r.title)}</span><span class="sub">${r.by === 'agent' ? 'by your Hatchabot agent · ' : ''}${r.sentAt ? `opened on GitHub ${esc(ago(r.sentAt))}` : esc(ago(r.createdAt))}</span></button>`).join('');
 }
 function reportPaint(r) {
   reportCur = r;
   $('reportForm').hidden = true; $('reportReview').hidden = false;
   $('reportRTitle').value = r.title; $('reportBody').value = r.body;
-  $('reportReviewNote').innerHTML = `${r.by === 'agent' ? '<b>Your Hatchabot agent wrote this.</b> Check its diagnosis reads right. ' : ''}`
-    + 'Read it through: it becomes a <b>public</b> issue on GitHub. Keys, file paths, addresses and this machine\'s name are masked; anything else you or the agent wrote is not — edit it here.';
+  $('reportReviewNote').innerHTML = (r.sentAt ? `<b>You opened this on GitHub ${esc(ago(r.sentAt))}.</b> If you pressed Submit there it is filed, and Discard removes it from this list; if not, open it again. ` : '')
+    + `${r.by === 'agent' ? '<b>Your Hatchabot agent wrote this.</b> Check its diagnosis reads right. ' : ''}`
+    + '<b>Read every line:</b> it becomes a <b>public</b> issue on GitHub, and no automatic masking can make free text fully safe. '
+    + 'Masked, in your edits too: keys and settings named like them, invite and reset codes, file paths (system folders like /usr stay, as far as nothing in them looks like yours), IP and MAC addresses, email addresses and phone numbers, your username, the names of your agents and their members, and your machines\' names and addresses. '
+    + 'Not masked: a person, place or machine Hatchabot has no record of, a relative path, a word after a space in a path when nothing later on the line looks like a path, a program\'s name or a lowercase folder inside a system folder, a part of a name or a username that is also a common word, written in lowercase, or a password in plain words — edit those here. A sentence that names a second path can go with the first. Masks read like {path} or {name}.';
   // The playbook may already explain it: say so before anything is filed (2026-10-07).
   const known = r.known || [];
   $('reportKnown').hidden = !known.length;
@@ -15145,7 +15511,7 @@ function initV2() {
   wrapBody(healthDlg, 'healthDlgBody', false);
   // The voice and web-search keys are outside services an agent can use —
   // they sit with the Google accounts under Connections, not with AI sources.
-  $('paneConn').insertAdjacentHTML('beforeend', '<h4 class="v2sec">Keys for extra abilities</h4>');
+  $('paneConn').insertAdjacentHTML('beforeend', '<h4 class="v2sec" id="extraKeysHead">Keys for extra abilities</h4>');
   $('paneConn').append($('mediaKeyDrawer'), $('searchKeyDrawer'));
   // Long introductions: two lines, with "More" to read the rest.
   for (const el of document.querySelectorAll('dialog > .sub, section > .sub:first-of-type, #cronBody > .sub, [id$="DlgBody"] > .sub')) {

@@ -149,8 +149,47 @@ async function writeSshConfigBlock(host: string, dir: string): Promise<void> {
 export function runnerSetupSnippet(pubKey: string): string {
   return [
     `mkdir -p ~/.ssh && chmod 700 ~/.ssh`,
-    `grep -qF '${pubKey}' ~/.ssh/authorized_keys 2>/dev/null || echo '${pubKey}' >> ~/.ssh/authorized_keys`,
-    `chmod 600 ~/.ssh/authorized_keys`,
+    // The key on a line of its own, whatever the file ended with: added after a
+    // last line with no newline it became part of that line's comment, sshd never
+    // read it, and pasting this again found the text and did nothing (HB-0434).
+    // The key's own two words are what is looked for, so a line that has it any
+    // other way is the owner's and stays to the byte, and nothing is added beside
+    // it: `from="10.0.0.1" <key>` and `restrict,command="…" <key>` limit it, `# <key>`
+    // disabled it, a longer comment or CRLF only dress it. The one repair is a true
+    // glue, a complete earlier key line running straight into the whole key (what
+    // the old snippet's append left), split into both keys, and only when no line
+    // has the key any other way. Written through, so a symlink stays one. Awk in the
+    // C locale: a Mac's stops on a comment that is not valid UTF-8.
+    `k='${pubKey}'; b='${pubKey.trim().split(/\s+/).slice(0, 2).join(' ')}'; a=~/.ssh/authorized_keys; n="$a.agentclaw-new"`,
+    `[ -e "$a" ] || : >| "$a"`,
+    // A copy left by a write-back that failed may be the only whole text: never overwritten.
+    `if [ -e "$n" ]; then echo "WARNING: $n is left from an earlier try: compare it with $a, then delete it and paste this again"`,
+    `elif ! grep -qxF "$k" "$a"; then`,
+    `  p='`,
+    String.raw`  function kt(s) { return s ~ /^(ssh|ecdsa|sk)-[A-Za-z0-9@.-]+[ \t]+[A-Za-z0-9+\/]+=*([ \t]|$)/ }`,
+    String.raw`  function kl(s, i, c, q) { sub(/^[ \t]+/, "", s); if (kt(s)) return 1; if (substr(s, 1, 1) == "#") return 0`,
+    String.raw`    for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (c == "\"") q = !q; else if (c == "\\" && q) i++; else if (!q && (c == " " || c == "\t")) break }`,
+    String.raw`    s = substr(s, i); sub(/^[ \t]+/, "", s); return kt(s) }`,
+    String.raw`  function has(s, i) { while ((i = index(s, b))) { if (substr(s, i + length(b), 1) !~ /[A-Za-z0-9+\/=]/) return 1; s = substr(s, i + 1) } return 0 }`,
+    String.raw`  { h = ""; g = 0; e = length($0) - length(k); if (e > 0 && substr($0, e + 1) == k) { h = substr($0, 1, e); if (h !~ /[ \t]$/ && kl(h)) g = 1 }`,
+    `    if (m == "fix") { if (g) { print h; print k } else print; next }`,
+    `    if (has($0)) { if (g) y = 1; else o = 1 } }`,
+    `  END { if (m != "fix") { if (o) print "other"; else if (y) print "glued"; else print "none" } }'`,
+    // grep says 2 when it cannot read the file: s is then not `none`, or the key would
+    // go on blind, straight onto a last line this could not see the end of.
+    `  s=none; grep -qF "$b" "$a"; case $? in 0) s="$(LC_ALL=C awk -v k="$k" -v b="$b" -v m=scan "$p" "$a")" ;; 1) ;; *) s= ;; esac`,
+    `  case "$s" in`,
+    `    none) [ -z "$(tail -c1 "$a")" ] || echo >> "$a"; printf '%s\\n' "$k" >> "$a" ;;`,
+    `    other) echo "NOTE: this key is already in $a, on a line with more on it (options, a comment, or commented out). That line was left as it is: if this machine refuses the key, look there." ;;`,
+    `    glued) if [ ! -w "$a" ]; then echo "WARNING: could not put the key on its own line in $a: it is read-only"`,
+    `      elif ! LC_ALL=C awk -v k="$k" -v b="$b" -v m=fix "$p" "$a" >| "$n"; then rm -f "$n"; echo "WARNING: could not write $n, so $a was left as it was"`,
+    `      elif cat "$n" >| "$a"; then rm -f "$n"`,
+    `      else echo "WARNING: could not write $a; if it is now cut short, its whole text is in $n"; fi ;;`,
+    `    *) echo "WARNING: could not read $a, so the key was not added and the file was left as it was. Make it readable with chmod 600, then paste this again" ;;`,
+    `  esac`,
+    `fi`,
+    // Not one it cannot read: that is said above, and the owner's to change.
+    `[ ! -r "$a" ] || chmod 600 "$a"`,
     // zsh reads ~/.zshenv for every invocation, including non-interactive ssh
     // (macOS default shell); bash reads ~/.bashrc via sshd's shell (Linux
     // distros commonly source it non-interactively; harmless where not).

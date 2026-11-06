@@ -172,6 +172,7 @@ esac
 timeout 600 bash -c "$(declare -f L); L launch $IMAGE $VM --vm -c limits.cpu=4 -c limits.memory=8GiB -d root,size=40GiB" </dev/null >"$OUT/launch.log" 2>&1 \
   || { bad "launch a fresh $IMAGE VM ($(tail -1 "$OUT/launch.log"))"; exit 1; }
 VM_STARTED=1
+machine_load >"$OUT/load.log"
 # Wait for cloud-init where the image has it (Ubuntu's, debian/12/cloud); a
 # plain image has none and is ready once it answers. One command asks both: a
 # failed "has it cloud-init?" could mean the VM's agent was not up yet, and the
@@ -259,9 +260,16 @@ QS=$(sed 's/\r//g' "$OUT"/install-*.log | grep -c '\[y/N\] y')
 vmi 'hatchabot doctor' >"$OUT/doctor.log"
 grep -q "^All good" "$OUT/doctor.log" && ok "hatchabot doctor: $(grep '^All good' "$OUT/doctor.log")" || bad "hatchabot doctor — $(grep '^✗' "$OUT/doctor.log" | sed -n 1,2p | tr '\n' ' ')"
 vmi 'hbt help | sed -n 1p' | grep -q 'hbt is the same command' && ok "hatchabot and hbt are on the PATH" || bad "hbt is not on the PATH"
-# doctor says "Release vX", or "Running vX, but vY is available locally". The
-# whole tag: cut at the suffix, a run of v2.132.0-test read as a pass on v2.132.0.
-ver() { grep -oE '(Release|Running) v[0-9][0-9A-Za-z.+-]*' | sed -n 1p | cut -d' ' -f2; }
+# The release doctor says is running: "Release vX", "Running vX, but the stable
+# channel names vY", or, once a version was named (`hbt upgrade vY`, --channel vY),
+# "Pinned to vY: …" or "Pinned to vY (running vX): …" (HB-0404). With a pin, the one
+# running when it names one: a pin on vY while vX runs is not a run on vY. The whole
+# tag: cut at the suffix, a run of v2.132.0-test read as a pass on v2.132.0.
+ver() {
+  sed -nE -e 's/.*Pinned to [^ ]+ \(running (v[0-9][0-9A-Za-z.+-]*)\).*/\1/p' \
+    -e 's/.*Pinned to (v[0-9][0-9A-Za-z.+-]*):.*/\1/p' \
+    -e 's/.*(Release|Running) (v[0-9][0-9A-Za-z.+-]*).*/\2/p' | sed -n 1p
+}
 REL=$(ver <"$OUT/doctor.log")
 
 cat >"$OUT/firstrun.sh" <<'EOF'
@@ -342,6 +350,9 @@ EOF
       || { bad "autonomous-agent regression: ${SUM:-did not finish} — $(grep -E '^(✗|▸.*FAILED)' "$OUT/regression.log" | sed -n 1,2p | tr '\n' ' ')"
            vm 'journalctl --user -u hatchabot -n 200 --no-pager' >"$OUT/service.log" 2>&1; }
   fi
+else
+  # live.mjs records a run that says this as a skip: no agent answered on this machine.
+  echo "SKIP: step 4 did not run (no --ai-source), so no agent was made on this install. Not a pass."
 fi
 
 # A step that prints nothing when the VM has gone counts nothing either.
@@ -349,6 +360,7 @@ vm_stopped && vm_failed "the VM stopped by itself"
 
 # live.mjs reads this line: the version here is the one the run ended on (HB-0378).
 echo
+machine_load >>"$OUT/load.log"; tail -1 "$OUT/load.log"
 echo "── $PASS passed, $FAIL failed · ${REL:-release unknown} · logs: $OUT ──"
 printf '%s\n' "${RESULTS[@]}" >"$OUT/summary.txt"
 [ "$FAIL" = 0 ]

@@ -104,6 +104,30 @@ describe('scripts/land.sh lands commits on main through a pull request', () => {
     expect(readFileSync(join(w.work, 'scratch.txt'), 'utf8')).toBe('not committed\n');
   });
 
+  it('--no-wait with nothing that will merge it (the dev repo): not "landed", exit 3, with the command (HB-0439)', () => {
+    const w = world('green', false);
+    writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+    const before = w.git(w.origin, 'rev-parse', 'main');
+    const r = w.land('--no-wait');
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stdout).not.toContain('merging it (rebase) here');
+    expect(r.stderr).toContain('Nothing will merge https://github.com/example-owner/example/pull/7 by itself');
+    expect(r.stderr).toMatch(/gh pr merge https:\/\/github\.com\/example-owner\/example\/pull\/7 --repo \S+ --rebase --delete-branch/);
+    expect(r.stderr).toContain('git pull --rebase');
+    expect(w.git(w.origin, 'rev-parse', 'main')).toBe(before);
+    expect(w.ghLog()).not.toMatch(/pr merge \S+ --repo \S+ --rebase --delete-branch/);
+  });
+
+  it('--no-wait with GitHub\'s auto-merge on: it merges by itself, exit 0, and says so', () => {
+    const w = world('stuck', true);
+    writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+    const r = w.land('--no-wait');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('GitHub merges it (rebase) once its required checks pass');
+    expect(r.stdout).toContain('git pull --rebase');
+    expect(w.ghLog()).toMatch(/pr merge \S+ --repo \S+ --auto --rebase --delete-branch/);
+  });
+
   it('nothing to land: says so and does nothing', () => {
     const w = world('merge');
     const r = w.land();

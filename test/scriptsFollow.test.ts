@@ -278,6 +278,71 @@ describe('scripts/follow-channel.sh, a pinned upgrade killed part-way, with the 
   });
 });
 
+describe('scripts/follow-channel.sh, a pin left by a kill on a clone, with the real upgrade.sh (HB-0428)', () => {
+  /** `hatchabot upgrade v1.1.0` killed in the install. `record`: the pre-pin record its run wrote. */
+  const cut = (record: boolean, extra: Record<string, string>) => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-follow-pin-')); dirs.push(root);
+    const app = join(root, 'app'), home = join(root, 'home'), bin = join(root, 'bin');
+    for (const d of [join(app, 'scripts'), home, bin]) mkdirSync(d, { recursive: true });
+    const env = scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: 'true', HATCHABOT_UPGRADE_IMAGE: '0', ...extra });
+    const git = (...args: string[]) => execFileSync(REAL_GIT, args, { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    git('init', '-q', '-b', 'main');
+    for (const f of ['follow-channel.sh', 'upgrade.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    writeFileSync(join(app, 'scripts', 'release-target.sh'), `#!/usr/bin/env bash\necho "$1" >> '${root}/asked.log'\necho v1.0.0\n`, { mode: 0o755 });
+    writeFileSync(join(app, '.gitignore'), 'node_modules/\nnode_modules.prev/\ndata/\n');
+    for (const v of ['1.0.0', '1.1.0']) { writeFileSync(join(app, 'package.json'), JSON.stringify({ version: v })); git('add', '-A'); git('commit', '-qm', `v${v}`); git('tag', `v${v}`); }
+    git('checkout', '-q', 'v1.1.0');
+    mkdirSync(join(app, 'data')); writeFileSync(join(app, 'data', 'channel'), 'v1.1.0\n');
+    mkdirSync(join(app, 'node_modules')); writeFileSync(join(app, 'node_modules', 'half'), '');
+    mkdirSync(join(app, 'node_modules.prev')); writeFileSync(join(app, 'node_modules.prev', 'marker'), 'old deps');
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
+    const state = join(home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    const from = join(state, `upgrade-${key}.from`), pin = join(state, `upgrade-${key}.pin`);
+    writeFileSync(from, 'from v1.0.0\nto v1.1.0\n');
+    if (record) writeFileSync(pin, 'pin v1.1.0\nchannel stable\nuser \n');
+    const tick = () => spawnSync('bash', [join(app, 'scripts', 'follow-channel.sh'), 'stable'], { env, encoding: 'utf8' });
+    const channel = () => { const f = join(app, 'data', 'channel'); return existsSync(f) ? readFileSync(f, 'utf8').trim() : undefined; };
+    return { root, git, tick, channel, from, pin };
+  };
+
+  it('an install that fails on the repair\'s try: the channel comes back, and the timer asks it', () => {
+    const w = cut(true, { HATCHABOT_INSTALL_CMD: 'false' });
+    const r = w.tick();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain('Not pinned to v1.1.0');
+    expect(w.git('describe', '--tags', '--exact-match')).toBe('v1.0.0');
+    expect(w.channel()).toBe('stable');
+    expect(existsSync(w.from)).toBe(false);
+    expect(existsSync(w.pin)).toBe(false);
+    expect(w.tick().status).toBe(0);
+    expect(lines(join(w.root, 'asked.log'))).toEqual(['stable']);
+  });
+  it('a restart that fails on that try: the same', () => {
+    const w = cut(true, { HATCHABOT_RESTART_CMD: 'false' });
+    const r = w.tick();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.git('describe', '--tags', '--exact-match')).toBe('v1.0.0');
+    expect(w.channel()).toBe('stable');
+    expect(existsSync(w.pin)).toBe(false);
+  });
+  it('with no record, from an earlier upgrade.sh: the pin is taken off', () => {
+    const w = cut(false, { HATCHABOT_INSTALL_CMD: 'false' });
+    expect(w.tick().status).toBe(1);
+    expect(w.channel()).toBeUndefined();
+    expect(w.tick().status).toBe(0);
+    expect(lines(join(w.root, 'asked.log'))).toEqual(['stable']);
+  });
+  it('the release comes up: the pin was meant, and stays', () => {
+    const w = cut(true, {});
+    const r = w.tick();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.git('describe', '--tags', '--exact-match')).toBe('v1.1.0');
+    expect(w.channel()).toBe('v1.1.0');
+    expect(existsSync(w.pin)).toBe(false);
+    expect(w.tick().stdout).toBe('');
+  });
+});
+
 /** A throwaway origin with v1.0.0 and v1.1.0, and production cloned from it at v1.0.0. */
 function prodWorld(v11: Record<string, string> = {}, [oldTag, newTag] = ['v1.0.0', 'v1.1.0']) {
   const root = mkdtempSync(join(tmpdir(), 'hb-deploy-')); dirs.push(root);
@@ -568,7 +633,8 @@ exec ${JSON.stringify(REAL_GIT)} "$@"
       const k = await killedInCheckout(w);
       expect(lines(k.record)[0]).toBe('from v1.0.0');
       expect(lines(k.record)[1]).toBe('to v1.1.0');
-      expect(lines(k.record)[2]).toMatch(/^git \d+ /);
+      expect(lines(k.record)[2]).toBe('pins-recorded');
+      expect(lines(k.record)[3]).toMatch(/^git \d+ /);
       k.age();
       const r = w.deploy({ FAKE_DEPS_RC: '1' });
       expect(r.status, r.stdout + r.stderr).toBe(3);

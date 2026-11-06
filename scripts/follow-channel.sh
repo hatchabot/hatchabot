@@ -87,22 +87,28 @@ valid "$CHANNEL" || { echo "Usage: $0 stable|beta|latest   (or --install <channe
 # The channel chosen last wins over the one this timer was installed with:
 # `hatchabot upgrade beta` said it switched, while every tick went on
 # following stable (audit #043).
-REMEMBERED=""
-if [ -f "$CHANNEL_FILE" ]; then REMEMBERED="$(tr -d '[:space:]' < "$CHANNEL_FILE")"
-elif [ -f "$USER_CHANNEL_FILE" ]; then REMEMBERED="$(tr -d '[:space:]' < "$USER_CHANNEL_FILE")"; fi
+remembered() {
+  if [ -f "$CHANNEL_FILE" ]; then tr -d '[:space:]' < "$CHANNEL_FILE"
+  elif [ -f "$USER_CHANNEL_FILE" ]; then tr -d '[:space:]' < "$USER_CHANNEL_FILE"; fi
+}
+REMEMBERED="$(remembered)"
 # This install's own records, keyed on its path as the upgrade lock is: one
 # file for every install of the user's let a release that failed on one set
 # it aside on another, which then stayed behind (audit #034). The records
 # from before (unkeyed) are taken over by the first install that looks.
 KEY="$(printf %s "$DIR" | cksum | cut -d' ' -f1)"
 # Pinned by hand to a version (hatchabot upgrade vX.Y.Z): leave it there. But
-# not half-way: that upgrade killed (a swap cut off, or its record beside the
-# lock) goes to upgrade.sh, for the release pinned, which it puts the earlier
-# one back for and then finishes. Left for the next hand upgrade, the install
-# stayed half changed under a running timer (HB-0372).
+# not half-way: that upgrade killed (a swap cut off, its record beside the lock,
+# or the note of what the pin replaced, there from before the pin until the
+# release is up) goes to upgrade.sh, for the release pinned, which it puts the
+# earlier one back for and then finishes. If it cannot finish, it takes the pin
+# back. Left for the next hand upgrade, the install stayed half changed under a
+# running timer (HB-0372), or pinned to a release it never got, with this timer
+# quiet for good (HB-0428).
 PINNED=""
+repair_due() { [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ] || { [ -n "$PINNED" ] && [ -f "$STATE/upgrade-$KEY.pin" ]; }; }
 case "$REMEMBERED" in v[0-9]*)
-  [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ] || exit 0
+  [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ] || [ -f "$STATE/upgrade-$KEY.pin" ] || exit 0
   PINNED="$REMEMBERED" ;;
 esac
 if [ -n "$PINNED" ]; then CHANNEL="$PINNED"; TARGET="$PINNED"
@@ -121,7 +127,7 @@ else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
 # already, and a git install's upgrade killed part-way (its record beside the
 # lock) the new release checked out with half its dependencies: upgrade.sh
 # repairs both, so it runs (HB-0049, HB-0266).
-[ "$CUR" = "$TARGET" ] && [ ! -f .swapping ] && [ ! -f "$STATE/upgrade-$KEY.from" ] && exit 0
+[ "$CUR" = "$TARGET" ] && ! repair_due && exit 0
 mkdir -p "$STATE"
 FAILED="$STATE/follow-channel-failed-$KEY"
 TRIES="$STATE/follow-channel-tries-$KEY"; MAX_TRIES=8
@@ -131,7 +137,7 @@ done
 # A release set aside stays aside, but not with a cut swap or a killed
 # upgrade to repair: upgrade.sh puts the earlier release back first, then
 # tries this one once more.
-if [ ! -f .swapping ] && [ ! -f "$STATE/upgrade-$KEY.from" ] && [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
+if ! repair_due && [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
 # A release whose install keeps failing (exit 3: npm ci against a lockfile
 # that does not match, a driver that will not compile) is not tried every ten
 # minutes for ever: after each failure in a row the wait doubles (10 min,
@@ -143,7 +149,7 @@ case "${T_COUNT:-}${T_LAST:-}" in ''|*[!0-9]*) T_COUNT=0; T_LAST=0 ;; esac
 if [ "$T_TARGET" = "$TARGET" ] && [ "$T_COUNT" -gt 0 ]; then
   WAIT=$(( 10 * (1 << (T_COUNT - 1)) - 5 ))   # minutes, less 5 for the timer's own jitter: 5, 15, 35 …
   [ "$WAIT" -le 1440 ] || WAIT=1440
-  [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ] || [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
+  repair_due || [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
 else
   T_COUNT=0
 fi
@@ -161,7 +167,10 @@ else
   # Exit 1 = the release did not start and was rolled back: set aside at once.
   # 3 = it did not complete (the install step, the network): tried again, less
   # and less often. 2 = refused (local changes), 4 = an upgrade was running.
-  if [ "$rc" = 1 ]; then
+  # But a pin upgrade.sh took back is not tried again: the channel is, next tick.
+  if [ "$rc" != 1 ] && [ -n "$PINNED" ] && [ "$(remembered)" != "$PINNED" ]; then
+    echo "Upgrading to $PINNED did not complete (see above), so this machine is no longer pinned to it."
+  elif [ "$rc" = 1 ]; then
     echo "$TARGET" > "$FAILED"; rm -f "$TRIES"
     echo "Upgrading to $TARGET failed and was rolled back. It will not be retried; the channel's next release will be."
   elif [ "$rc" = 3 ] && [ $((T_COUNT + 1)) -ge "$MAX_TRIES" ]; then

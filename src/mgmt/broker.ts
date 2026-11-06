@@ -104,7 +104,7 @@ export interface ApiClient {
   startAgent(id: string): Promise<void>;
   stopAgent(id: string): Promise<void>;
   /** Accepted, not done: the answer may carry the rebuild's operation (followed by #rebuild). */
-  rebuildAgent(id: string): Promise<unknown>;
+  rebuildAgent(id: string, opts?: { stoppedWaits?: boolean }): Promise<unknown>;
   /** What became of the change, for the done message (live, staged, waiting); throws when the runtime refused it. */
   setModel(id: string, model: string): Promise<string | void>;
   /** What the card for "this agent → that model" should say (GET /v1/agents/:id/model-check). Optional: older fakes. */
@@ -715,8 +715,10 @@ export class Broker {
    * its end, so a confirmed card says rebuilt (or why not) rather than ✅ at
    * once (#127). An API without `raw` cannot follow: said as accepted.
    */
-  async #rebuild(agentId: string): Promise<string | void> {
-    const out = await this.api.rebuildAgent(agentId);
+  /** `afterChange`: to apply a change just made, so a stopped or sleeping agent stays so and has it when it next starts (HB-0420). */
+  async #rebuild(agentId: string, opts: { afterChange?: boolean } = {}): Promise<string | void> {
+    const out = await this.api.rebuildAgent(agentId, opts.afterChange ? { stoppedWaits: true } : undefined);
+    if ((out as { atNextStart?: boolean } | null)?.atNextStart) return 'It is not running, so it stays that way: this applies when it next starts.';
     const raw = this.api.raw;
     if (!raw) return 'The rebuild has started.';
     return (await followOperation(out, (path) => raw.call(this.api, 'GET', path))) ?? undefined;
@@ -732,7 +734,7 @@ export class Broker {
       if (followed) return followed;
       const done = REST_BY_NAME.get(name)?.done?.(out);
       if (r.rest.rebuild && r.agentId) {
-        const rebuilt = await this.#rebuild(r.agentId);
+        const rebuilt = await this.#rebuild(r.agentId, { afterChange: true });
         return [done, rebuilt].filter(Boolean).join('\n') || undefined;
       }
       return done;
@@ -748,10 +750,10 @@ export class Broker {
         return this.#need(this.api.buildBaseCandidate).call(this.api, r.spec!.version, r.spec!.packages);
       case 'try_base_candidate':
         await this.#need(this.api.setAgentImage).call(this.api, r.agentId, r.spec!.tag!);
-        return this.#rebuild(r.agentId);
+        return this.#rebuild(r.agentId, { afterChange: true });
       case 'end_base_trial':
         await this.#need(this.api.setAgentImage).call(this.api, r.agentId, null);
-        return this.#rebuild(r.agentId);
+        return this.#rebuild(r.agentId, { afterChange: true });
       case 'create_agent': {
         const s = r.spec!;
         const created = await this.api.createAgent({

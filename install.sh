@@ -24,6 +24,9 @@ set -euo pipefail
 # A function is read whole before any of it runs.
 main() {
 DIR="${HATCHABOT_DIR:-$HOME/hatchabot}"
+# With no slash at its end: "$DIR.partial" was otherwise a file inside a folder
+# not made yet, which failed the install and read as no room on the disk (HB-0429).
+while [ "$DIR" != / ] && [ "$DIR" != "${DIR%/}" ]; do DIR="${DIR%/}"; done
 # Which release to install — a channel, or an exact version:
 #   stable  (the default) what new users get; moved deliberately, after a soak
 #   beta    the next stable, for people willing to try it first
@@ -203,7 +206,10 @@ if [ "$OS" = Linux ] && [ -n "$PLATFORM" ]; then
 fi
 MODE=native
 if [ -d "$DIR/.git" ]; then MODE=native-existing
-elif [ -f "$DIR/BUNDLE.json" ]; then MODE=bundle-existing
+# Or a bundle upgrade that was cut off (.swapping, as upgrade.sh reads it), which
+# may have BUNDLE.json aside: it read as a foreign folder, and the advice to move
+# it aside left .env and data/ behind a new empty install (HB-0430).
+elif [ -f "$DIR/BUNDLE.json" ] || [ -f "$DIR/.swapping" ]; then MODE=bundle-existing
 elif [ "${HATCHABOT_NATIVE:-0}" != 1 ] && [ -n "$PLATFORM" ]; then MODE=bundle
 fi
 if [ "${HATCHABOT_DRY_RUN:-0}" = "1" ]; then
@@ -362,15 +368,18 @@ mf_matches() {
 # Returns 1 when there is no bundle to use (the native install takes over),
 # 2 when it could not be downloaded or checked for now (no network, a server
 # error): a blip used to turn into a native install, git, Node and a compiler
-# included, that nobody asked for (HB-0071).
+# included, that nobody asked for (HB-0071). 3 when this machine could not hold
+# it (a full disk, no permission): a heavier install on the same disk is no
+# answer (HB-0438), and nothing is left behind for a re-run to trip on (HB-0429).
 install_bundle() {
-  local name="hatchabot-$TAG-$PLATFORM.tar.gz" tmp want mrc mf code rc=0
+  local name="hatchabot-$TAG-$PLATFORM.tar.gz" tmp want mrc mf code rc=0 err partial
   tmp="$(mktemp -d)"
   echo "   downloading ${name}…"
   code="$(curl -sSL --retry 3 -o "$tmp/$name" -w '%{http_code}' "$BUNDLES/$TAG/$name" 2>/dev/null)" || rc=$?
   case "$rc:$code" in
     0:200|0:000) ;;   # 000: a file:// test bed
     0:404|37:*) echo "   (no bundle for $TAG on $PLATFORM)"; rm -rf "$tmp"; return 1 ;;
+    23:*) echo "   (could not write ${name}: curl 23)"; NO_ROOM_AT="$tmp"; bundle_room; rm -rf "$tmp"; return 3 ;;
     *) echo "   (could not download ${name}: curl ${rc}, HTTP ${code:-none})"; rm -rf "$tmp"; return 2 ;;
   esac
   # What the release vouches for (#38): its release-manifest.json names the
@@ -392,11 +401,27 @@ install_bundle() {
   else
     echo "   (could not fetch the release's manifest to check the bundle — not using it)"; rm -rf "$tmp"; return 2
   fi
-  tar -xzf "$tmp/$name" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+  # In English: its message is matched below, and read in any other language a
+  # full disk fell through to the native install on the same disk (HB-0438).
+  err="$(LC_ALL=C tar -xzf "$tmp/$name" -C "$tmp" 2>&1)" || {
+    printf '%s\n' "$err" | tail -n 3 | sed 's/^/   /'
+    case "$err" in
+      *"No space left"*|*"Disk quota"*) NO_ROOM_AT="$tmp"; bundle_room; rm -rf "$tmp"; return 3 ;;
+    esac
+    rm -rf "$tmp"; return 1
+  }
   ( cd "$tmp/hatchabot" && ./.node/bin/node -e 'new (require("better-sqlite3"))(":memory:").exec("SELECT 1")' ) >/dev/null 2>&1 \
     || { echo "   (the bundle does not run on this machine — falling back)"; rm -rf "$tmp"; return 1; }
-  mkdir -p "$(dirname "$DIR")"
-  mv "$tmp/hatchabot" "$DIR"
+  # Beside its place first, then a rename: across filesystems an mv is a copy
+  # that can stop part-way, and a partial $DIR read as a foreign folder or as an
+  # install to finish on the next run (HB-0429).
+  partial="$DIR.partial"
+  rm -rf "$partial"
+  if ! { mkdir -p "$(dirname "$DIR")" && mv "$tmp/hatchabot" "$partial" && mv "$partial" "$DIR"; }; then
+    NO_ROOM_AT="$(dirname "$DIR")"; bundle_room
+    rm -rf "$partial" "$tmp"
+    return 3
+  fi
   # Kept where the app and scripts/release-manifest.sh look (the data
   # directory, data/ on a new install), so the runtime image step below need
   # not fetch it again.
@@ -404,6 +429,9 @@ install_bundle() {
   rm -rf "$tmp"
   echo "   unpacked: Hatchabot with its own Node $("$DIR/.node/bin/node" --version) — nothing to compile"
 }
+# What the machine has where the bundle would not fit, in a line.
+NO_ROOM_AT=""; ROOM=""
+bundle_room() { ROOM="$(df -Pk "$NO_ROOM_AT" 2>/dev/null | awk 'END { if (NF >= 4) printf "%d MB free", $4 / 1024 }' || true)"; }
 # The native install: git, Node 22+ and build tools; a clone at the release.
 install_native() {
   if ! have git; then
@@ -451,11 +479,21 @@ Then re-run this installer. (Your .env, data/ and backups are untouched either w
 # says to, only upgraded it: "Already on", and the setup was never finished
 # (audit #041). Such an install goes on to the setup below instead.
 set_up() { [ -f "$DIR/.env" ] && [ "$INSTALLED" = "$DIR" ]; }
+# Before an upgrade: a channel is remembered here; a version is upgrade.sh's to
+# pin once that release is known to be there (HB-0428).
+remember_named() { case "$CHANNEL" in v[0-9]*) ;; *) remember_channel "$TAG" ;; esac; }
 case "$MODE" in
   bundle-existing)
-    if set_up; then
+    # A cut-off swap goes to upgrade.sh whatever else is true: it puts the previous
+    # release back first. scripts/ goes first in a swap, so a cut just there has it
+    # aside, and upgrade.sh is what must be run (HB-0430).
+    if [ -f "$DIR/.swapping" ] && [ ! -e "$DIR/scripts" ] && [ -e "$DIR/.prev-release/scripts" ]; then
+      { grep -vxF 'in scripts' "$DIR/.swapping" || [ $? = 1 ]; } > "$DIR/.swapping.tmp" && mv -f "$DIR/.swapping.tmp" "$DIR/.swapping"
+      mv "$DIR/.prev-release/scripts" "$DIR/"
+    fi
+    if set_up || [ -f "$DIR/.swapping" ]; then
       # A bundle install already here: an upgrade, with its own rollback.
-      remember_channel "$TAG"
+      remember_named
       cd "$DIR"
       exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL"
     fi
@@ -470,7 +508,7 @@ case "$MODE" in
     # 2026-10-09). A clone never set up, or whose setup did not finish, is a
     # first install (its .env is kept).
     if set_up; then
-      remember_channel "$TAG"
+      remember_named
       cd "$DIR"
       [ -x scripts/with-docker.sh ] && exec ./scripts/with-docker.sh ./scripts/upgrade.sh "$CHANNEL"
       exec ./scripts/upgrade.sh "$CHANNEL"
@@ -486,6 +524,7 @@ case "$MODE" in
     case "$brc" in
       0) ;;
       2) die "Could not download release $TAG's bundle, or what checks it, just now (no network?). Nothing was installed: re-run when the connection is back. (HATCHABOT_NATIVE=1 installs from source instead.)" ;;
+      3) die "Could not put release $TAG's bundle on this machine: no room or no permission (above)${ROOM:+, with $ROOM at $NO_ROOM_AT}. Nothing was installed. Free about 1 GB there, or set HATCHABOT_DIR or TMPDIR to somewhere with room, then re-run." ;;
       *) MODE=native; echo "   using the native install instead"; install_native ;;
     esac ;;
   native) install_native ;;

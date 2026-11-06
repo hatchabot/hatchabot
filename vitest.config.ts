@@ -9,6 +9,7 @@ export default defineConfig({
     // a run from here found four of them and ran 17,836 tests, theirs mid-edit
     // (2026-10-23). review-artifacts holds audit probes, not tests.
     exclude: [...configDefaults.exclude, '.claude/**', 'review-artifacts/**'],
+    setupFiles: ['test/support/ownDataFolder.ts'],
     // Route tests assert authorization by asserting *as* a given owner. The
     // header that allows that is off in production (see src/api/principal.ts).
     env: {

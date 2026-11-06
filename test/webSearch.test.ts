@@ -92,6 +92,19 @@ describe('asking Brave', () => {
     expect((await probeBrave('made-up', { fetchImpl: net(['down']).fetchImpl })).status).toBe('unreachable');
   });
 
+  it('a monthly limit of 0 is no cap: it works, with no count to show (HB-0454)', async () => {
+    const p = await probeBrave('made-up', { fetchImpl: net([{ status: 200, headers: QUOTA(0, 0) }]).fetchImpl, now: () => T0 });
+    expect(p).toEqual({ status: 'ok', detail: 'Brave works, on a plan with no monthly cap.' });
+  });
+  it('a count with no limit beside it says nothing about a cap (HB-0454)', async () => {
+    const p = await probeBrave('made-up', { fetchImpl: net([{ status: 200, headers: { 'x-ratelimit-remaining': '1, 0' } }]).fetchImpl });
+    expect(p.status).toBe('ok');
+  });
+  it('a refusal on such a plan is still a refusal', async () => {
+    const p = await probeBrave('made-up', { fetchImpl: net([{ status: 429, headers: QUOTA(0, 0) }]).fetchImpl, sleep: async () => {} });
+    expect(p.status).toBe('exhausted');
+  });
+
   it('at the last few queries it is low, and the key is never in what it says', async () => {
     const p = await probeBrave('made-up-secret', { fetchImpl: net([{ status: 200, headers: QUOTA(10) }]).fetchImpl });
     expect(p.status).toBe('low');
@@ -353,6 +366,17 @@ describe('watching the quota', () => {
     const s = await settledCheck(watch);
     expect(s).toMatchObject({ active: 'brave', why: 'Brave has quota.' });
     expect(w.notes).toEqual(['Web search moved to DuckDuckGo', 'Web search is back on Brave']);
+    expect(w.scripts.at(-1)!.script).toContain('want=""');
+  });
+
+  it('a fleet parked on DuckDuckGo by a metered plan goes back at the next check (HB-0454)', async () => {
+    const w = world({ key: 'made-up', agents: [running('a')] });
+    const parked = createSearchWatch({ ...w.base, fetchImpl: net([{ status: 429, headers: QUOTA(0) }, { status: 429, headers: QUOTA(0) }]).fetchImpl, now: () => T0 });
+    expect((await settledCheck(parked)).active).toBe('duckduckgo');
+    const watch = createSearchWatch({ ...w.base, fetchImpl: net([{ status: 200, headers: QUOTA(0, 0) }]).fetchImpl, now: () => T0 });
+    const s = await settledCheck(watch);
+    expect(s.active).toBe('brave');
+    expect(s.brave).toEqual({ status: 'ok', detail: 'Brave works, on a plan with no monthly cap.' });
     expect(w.scripts.at(-1)!.script).toContain('want=""');
   });
 

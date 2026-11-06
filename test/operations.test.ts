@@ -120,6 +120,69 @@ async function moveWorld(running = true) {
   return { w, target, id, ref, up, ctx, deps, running2 };
 }
 
+describe('move-host: a restart undoes it and the source will not start (HB-0416)', () => {
+  const told = () => {
+    const said: Array<{ ownerId: string; agentId: string; text: string }> = [];
+    return { said, tellOwner: async (ownerId: string, agentId: string, text: string) => { said.push({ ownerId, agentId, text }); return true; } };
+  };
+  it('undone before the flip: stopped with why, in Alerts, the owner told; Start clears it', async () => {
+    const m = await moveWorld();
+    crashAt('stopped');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    const start = m.w.provider.start.bind(m.w.provider);
+    m.w.provider.start = async () => { throw new Error('the port is taken'); };
+    const t = told();
+    await resumeOperations({ ...m.ctx, tellOwner: t.tellOwner });
+    expect(m.w.store.listOperations([m.id])[0]).toMatchObject({ status: 'failed' });
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ state: 'STOPPED', hostId: 'h1' });
+    expect(m.w.store.getAgent(m.id)!.stateReason).toMatch(/move to Test Runner failed.*did not start again.*press Start, or Rebuild/);
+    expect(t.said).toHaveLength(1);
+    expect(t.said[0]).toMatchObject({ ownerId: m.w.owner, agentId: m.id });
+    expect(t.said[0]!.text).toMatch(/"Test Agent".*not answering.*Press Start/);
+    m.w.provider.start = start;
+    const r = await m.w.f.inject({ method: 'POST', url: `/v1/agents/${m.id}/start`, headers: { 'x-hatchabot-owner': m.w.owner }, payload: {} });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ state: 'RUNNING' });
+    expect(m.w.store.getAgent(m.id)!.stateReason).toBeUndefined();
+  });
+  it('could not be finished after the flip: the same, even though the record last said RUNNING', async () => {
+    const m = await moveWorld();
+    crashAt('target-started');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    m.target.provision = async () => { throw new Error('the target is full'); };
+    m.w.provider.start = async () => { throw new Error('the port is taken'); };
+    const t = told();
+    await resumeOperations({ ...m.ctx, tellOwner: t.tellOwner });
+    expect(m.w.store.listOperations([m.id])[0]).toMatchObject({ status: 'failed' });
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ state: 'STOPPED', hostId: 'h1' });
+    expect(m.w.store.getAgent(m.id)!.stateReason).toMatch(/did not start again/);
+    expect(t.said).toHaveLength(1);
+  });
+  it('a chat app that does not take the message changes nothing', async () => {
+    const m = await moveWorld();
+    crashAt('stopped');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    m.w.provider.start = async () => { throw new Error('the port is taken'); };
+    await resumeOperations({ ...m.ctx, tellOwner: async () => { throw new Error('no network'); } });
+    expect(m.w.store.listOperations([m.id])[0]).toMatchObject({ status: 'failed' });
+    expect(m.w.store.getAgent(m.id)!.stateReason).toMatch(/did not start again/);
+  });
+  it('an undo that starts it says nothing, and tells nobody', async () => {
+    const m = await moveWorld();
+    crashAt('stopped');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    const t = told();
+    await resumeOperations({ ...m.ctx, tellOwner: t.tellOwner });
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ state: 'RUNNING' });
+    expect(m.w.store.getAgent(m.id)!.stateReason).toBeUndefined();
+    expect(t.said).toEqual([]);
+  });
+});
+
 describe('move-host: killed at every step, then a restart', () => {
   const FLIP = STEPS['move-host']!.findIndex((s) => s.key === 'host-flipped');
   for (const key of keysOf('move-host', '#succeeded')) {
@@ -239,6 +302,65 @@ describe('move-host: killed at every step, then a restart', () => {
     expect(m.w.store.embedTokenRow(m.id)).toMatchObject({ tokenHash: 'hash-before', hostId: 'h1' });
     expect(synced).toEqual([['h1', 'h2']]);
     expect(m.w.store.getAgent(m.id)).toMatchObject({ state: 'RUNNING', hostId: 'h1' });
+  });
+});
+
+describe('move-host: undone after a restart, and its source will not start again (HB-0416)', () => {
+  const over = (m: Awaited<ReturnType<typeof moveWorld>>) => {
+    const op = m.w.store.listOperations([m.id])[0]!;
+    expect(op.status).toBe('failed');
+    expect(op.recovery).toBeFalsy();
+    expect(op.outcome).toMatch(/did not start .*stopped.*Start.*Rebuild/);
+    expect(op.outcome).not.toMatch(/Try again|stays on/);
+    expect(operationRefusal(m.w.store, m.id)).toBeUndefined();
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ hostId: 'h1', state: 'STOPPED' });
+  };
+
+  it('before the flip: over, not held', async () => {
+    const m = await moveWorld();
+    crashAt('exported');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    m.w.provider.start = async () => { throw new Error('the port is taken'); };
+    await resumeOperations(m.ctx);
+    over(m);
+  });
+
+  it('after the flip, when the target will not come up and the undo does not start it: not "stays on"', async () => {
+    const m = await moveWorld();
+    crashAt('host-flipped');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    m.target.start = async () => { throw new Error('no room'); };
+    m.w.provider.start = async () => { throw new Error('the port is taken'); };
+    await resumeOperations(m.ctx);
+    over(m);
+  });
+
+  it('Put it back, and it does not start there: over, not held', async () => {
+    const m = await moveWorld();
+    crashAt('host-flipped');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    m.up.h2 = false;
+    await resumeOperations(m.ctx);
+    const op = m.w.store.listOperations([m.id])[0]!;
+    expect(op.status).toBe('held');
+    m.w.provider.start = async () => { throw new Error('the port is taken'); };
+    await recoverOperation(m.ctx, op.id, 'put-back');
+    over(m);
+  });
+
+  it('a hold left by an older release: Try again ends it either way', async () => {
+    const m = await moveWorld();
+    crashAt('exported');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    const row = m.w.store.listOperations([m.id])[0]!;
+    m.w.store.updateOperation(row.id, { status: 'held', outcome: 'It did not start it again.', recovery: { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' } });
+    const after = await recoverOperation(m.ctx, row.id, 'retry');
+    expect(after.status).toBe('rolled_back');
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ hostId: 'h1', state: 'RUNNING' });
   });
 });
 

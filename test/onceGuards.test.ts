@@ -40,8 +40,9 @@ describe('Add, clicked twice, adds one (HB-0062)', () => {
     expect([a.statusCode, b.statusCode].sort()).toEqual([201, 409]);
     expect((a.statusCode === 409 ? a : b).json().error).toMatch(/already being added/);
     expect(w.store.listHosts(w.owner).filter((h) => h.name === 'Garage box')).toHaveLength(1);
-    // Once answered, the endpoint is free again.
-    expect((await add()).statusCode).toBe(201);
+    // Once answered, the endpoint is free again, for a runner not already added (HB-0435).
+    const another = await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'Shed box', dockerHost: 'tcp://127.0.0.1:2' } });
+    expect(another.statusCode).toBe(201);
   });
 
   it('an AI source', async () => {

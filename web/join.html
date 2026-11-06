@@ -191,17 +191,18 @@ function initWebChat(info) {
           <label>Username</label><input id="user" autocomplete="username">
           <label>Password</label><input id="pass" type="password" autocomplete="current-password">
         </div>
+        <div class="notice" id="factorNote" role="alert" hidden></div>
         <button id="joinBtn">Join</button>`}
     <div class="err" id="err"></div>`;
   if (info.authMode === 'identity') { setupSignIn(joinWeb); return; }
   document.getElementById('joinBtn').onclick = () => joinWebAccount();
 }
 
-/** Accounts mode: join with the session this browser has; asked to sign in only when there is none. */
+/** Accounts mode: join with the session this browser has; asked to sign in only when there is none, told why when the second factor is what is missing. */
 async function joinWebAccount() {
   const btn = document.getElementById('joinBtn'), err = document.getElementById('err');
-  const acct = document.getElementById('acct');
-  btn.disabled = true; err.textContent = '';
+  const acct = document.getElementById('acct'), note = document.getElementById('factorNote');
+  btn.disabled = true; err.textContent = ''; note.hidden = true;
   try {
     if (!acct.hidden) {
       const r = await fetch('/v1/login', { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -211,6 +212,15 @@ async function joinWebAccount() {
     }
     const out = await postJoin();
     if (out.signIn) { acct.hidden = false; btn.textContent = 'Sign in and join'; document.getElementById('user').focus(); return; }
+    // Signed in, but this address wants a second factor first (HB-0400). The password was right: don't ask for it again.
+    if (out.secondFactor) {
+      acct.hidden = true; btn.textContent = 'Join';
+      // The app can ask for a factor, or add one after a link; otherwise it would only refuse them too.
+      const appHelps = out.secondFactor === 'required' || out.secondFactor === 'enrol';
+      note.innerHTML = esc(out.error) + (appHelps ? '<a class="btn alt" href="/" target="_blank" rel="noopener">Open Hatchabot</a>' : '');
+      note.hidden = false;
+      return;
+    }
     webChatDone(out);
   } catch (e) { err.textContent = e.message; }
   finally { btn.disabled = false; }
@@ -237,6 +247,7 @@ async function postJoin(idToken) {
     body: JSON.stringify({ code, name: document.getElementById('name').value, idToken }) });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && data.signIn) return { signIn: true };
+  if (res.status === 401 && data.secondFactor) return { secondFactor: data.secondFactor, error: data.error };
   if (!res.ok) throw new Error(data.error ?? 'Something went wrong');
   return data;
 }

@@ -38,12 +38,14 @@ export interface PublicRule {
    */
   firstFactorOk?: boolean;
   /**
-   * With firstFactorOk: this route ADDS a factor. A password alone is not
-   * enough for that at the public address (whoever has the password would
-   * enrol their own phone); the sign-in must also have just come from a link
-   * or a code sent out of band (publicAccess.ts, the pass's `en`).
+   * With firstFactorOk: this route ADDS a factor, or makes something that can.
+   * A password alone is not enough for that at the public address (whoever has
+   * the password would enrol their own phone); the sign-in must also have just
+   * come from a link or a code sent out of band (publicAccess.ts, the pass's `en`).
    */
   enrols?: boolean;
+  /** With enrols: what to say when that proof is missing, if not the words about adding a factor. */
+  refusal?: string;
 }
 
 const READ = ['GET', 'HEAD'] as const;
@@ -85,11 +87,14 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r('*', /^\/v1\/second-factor\/(totp|totp\/confirm|passkey\/options|passkey|backup-codes)$/, 'step-up', 'Adding or replacing a second factor', { firstFactorOk: true, enrols: true }),
   r(['DELETE'], /^\/v1\/second-factor\/:id$/, 'step-up', 'Removing a second factor'),
   r(['POST'], /^\/v1\/local-accounts$/, 'step-up', 'Managing accounts (add, remove, reset links)'),
-  // Your own password and recovery code: the routes ask for the current
-  // password themselves, so someone with no second factor is let through to
-  // that check (a member without one could otherwise never change a password
-  // here). The owner resetting SOMEONE ELSE's password always has a factor.
-  r(['POST'], /^\/v1\/local-accounts\/(:id\/password|me\/recovery-code)$/, 'step-up', 'Changing a password, making a recovery code (your own needs your current password as well)', { firstFactorOk: true }),
+  // Your own password: the route asks for the current one itself, so someone
+  // with no second factor is let through to that check (a member without one
+  // could otherwise never change a password here). The owner resetting SOMEONE
+  // ELSE's password always has a factor.
+  r(['POST'], /^\/v1\/local-accounts\/:id\/password$/, 'step-up', 'Changing a password (your own needs your current password as well)', { firstFactorOk: true }),
+  // A recovery code is itself proof enough to add a first factor, so making one
+  // needs the same proof as adding one: a password alone would mint its own (HB-0399).
+  r(['POST'], /^\/v1\/local-accounts\/me\/recovery-code$/, 'step-up', 'Making a recovery code (needs your current password as well; with no second factor yet, also a sign-in from a link or code sent to you)', { firstFactorOk: true, enrols: true, refusal: 'Your password alone cannot make a recovery code at this address. Make it at the private address, or ask whoever runs this Hatchabot for a reset link and make it right after using the link.' }),
   r(['DELETE', 'POST'], /^\/v1\/local-accounts\/:id(\/reset-link)?$/, 'step-up', 'Managing accounts (add, remove, reset links)'),
   r(['POST'], /^\/v1\/security\/sign-out\/:ownerId$/, 'step-up', 'Signing someone else out everywhere'),
   r('*', /^\/v1\/public-access(\/(off|invited-only|guests|qr\.svg))?$/, 'step-up', 'Public access: status, its address, and turning it off'),

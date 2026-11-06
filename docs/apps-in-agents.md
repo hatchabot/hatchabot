@@ -79,7 +79,9 @@ codebase gets deployed, updated and rolled back from Hatchabot.
   fill it with (e.g. `owner.telegram` before the owner links Telegram). What
   Hatchabot fills is held to the field's `type` like a value given (a `list`
   gets one item, a `number` filled from `owner.telegram` the number); one
-  that does not fit stops the install. A
+  that does not fit stops the install. The file keeps what was filled when it
+  was installed: after the fact changes (the agent's bot, Telegram linked later),
+  press Update. On the same commit it rewrites those fields and says which. A
   `list` given as items has them trimmed and blanks dropped, as `a, b` is. `"secret": true`
   marks a password or key: the dialog asks for it in a hidden box, never
   filled in, and a new agent's install that waits for the agent to be ready

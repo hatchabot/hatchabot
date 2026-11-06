@@ -92,7 +92,8 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
     // Before this turn is marked in flight — the wake refuses an agent that
     // looks busy, and a web turn counts as busy to the idle sweep.
     const asleep = found.hibernatedAt && found.state === 'STOPPED';
-    const agent = asleep ? await deps.ensureAwake(found, 'a web chat message') : found;
+    // A wake that fails (provider.start refused) leaves it asleep: answered below as not running, a refusal, because nothing was sent.
+    const agent = asleep ? await deps.ensureAwake(found, 'a web chat message').catch(() => found) : found;
     // The wake takes seconds: web chat taken away (or the person removed)
     // meanwhile is judged now, before the turn is sent (review, 2026-10-22).
     if (asleep && !allowed(found.id, me, reply)) return reply;
@@ -126,7 +127,9 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
           return reply.code(409).send({ code: 'needs-rebuild', error: webChatNeedsRebuild(agent.name) });
         default:
           deps.trace(agent.id)('webchat.failed', { userId: me, code: res.code });
-          return reply.code(502).send({ error: 'The turn did not complete. Try again; if it keeps failing, tell its owner.' });
+          // The script's one failure exit covers before the gateway took the message and after
+          // ("run ended", a closed connection): it may be in the conversation, so no plain "try again".
+          return reply.code(502).send({ error: 'The turn did not complete, and the message may have reached it. Reopen the chat to see before you send it again; if it keeps failing, tell its owner.' });
       }
     } finally {
       deps.inFlight.delete(key);

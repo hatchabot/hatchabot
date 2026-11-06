@@ -185,6 +185,18 @@ describe('who may chat on the web', () => {
     expect(w.store.getAgent('a1')).toMatchObject({ state: 'RUNNING', hibernatedAt: undefined });
   });
 
+  it('a wake that fails is a refusal: nothing was sent, and the page gives the text back (review of HB-0446)', async () => {
+    const w = await world();
+    await w.provider.stop(w.runtimeRef);
+    w.store.setAgentState('a1', 'STOPPED');
+    w.store.setHibernated('a1', new Date().toISOString());
+    w.provider.start = async () => { throw new Error('its image was pruned'); };
+    const res = await w.chat(SAM, 'wake up');
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toContain('not running');
+    expect(turns(w.provider)).toHaveLength(0);
+  });
+
   it('web chat taken away while the agent wakes sends no turn (review, 2026-10-22)', async () => {
     const w = await world();
     await w.provider.stop(w.runtimeRef);

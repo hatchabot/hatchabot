@@ -117,19 +117,19 @@ export const LIVE_TESTS = [
     area: ['src/orchestrator/adopt.ts', 'src/orchestrator/cronImport.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
   },
   {
-    name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', endsOnRelease: true, minutes: '20–40', aiTurns: 'one', parallel: true,
+    name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', endsOnRelease: true, minutes: '20–40', aiTurns: 'about eight',
     needs: 'LXD on this machine; pass -- --ai-source "<an AI source name>"; stop the VM afterwards',
     proves: 'a stranger\'s install on a brand-new Linux machine, and the first things a new owner does',
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
   {
-    name: 'clean-install-ubuntu-2204', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'ubuntu:22.04'], against: 'checkout', endsOnRelease: true, minutes: '20–40', aiTurns: 'one', parallel: true,
+    name: 'clean-install-ubuntu-2204', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'ubuntu:22.04'], against: 'checkout', endsOnRelease: true, minutes: '20–40', aiTurns: 'about eight',
     needs: 'as clean-install; the oldest glibc the bundle supports (2.35)',
     proves: 'the clean install on Ubuntu 22.04 (a glibc bug broke stable there once)',
     area: ['install.sh', 'scripts/setup-host.sh', 'scripts/install-service.sh', 'scripts/build-bundle.sh', 'scripts/ensure-deps.sh', 'scripts/sqlite-driver.sh', 'scripts/link-cli.sh', 'scripts/first-run-link.sh', 'scripts/clean-install-test.sh', 'package.json', 'package-lock.json'],
   },
   {
-    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'hb-debian-12'], against: 'checkout', endsOnRelease: true, minutes: '5–40', aiTurns: 'one', parallel: true,
+    name: 'clean-install-debian-12', cmd: ['bash', 'scripts/clean-install-test.sh'], args: ['--image', 'hb-debian-12'], against: 'checkout', endsOnRelease: true, minutes: '5–40', aiTurns: 'about eight',
     // LXD's image server has no arm64 Debian 12 VM image; Debian's own cloud
     // image, prepared once into a local LXD image, runs on either CPU (2026-10-09).
     needs: 'as clean-install, plus the local LXD image hb-debian-12 (scripts/make-debian-test-image.sh, once)',
@@ -308,15 +308,32 @@ function checkoutVersion() {
 /**
  * The order to run what is due: tests flagged `parallel` touch none of the
  * live install's agents (privacy reads GitHub, upgrade-check uses temporary
- * databases, the clean installs their own throwaway VMs), so they run
- * alongside the rest. Everything else runs one at a time: they make test
- * agents on the live install (its agent limit), share its Docker, and the
- * runner test points the runner's default image at an old one while it runs.
+ * databases), so they run alongside the rest. Everything else runs one at a
+ * time: they make test agents on the live install (its agent limit), share its
+ * Docker, and the runner test points the runner's default image at an old one
+ * while it runs. The clean installs touch no agent either, but a VM started
+ * alongside the others has stopped by itself on every such run (HB-0381).
  */
 export function planRun(due, tests = LIVE_TESTS) {
   const byName = new Map(tests.map((t) => [t.name, t]));
   const names = due.filter((d) => !d.manual).map((d) => d.test);
   return { parallel: names.filter((n) => byName.get(n)?.parallel), serial: names.filter((n) => !byName.get(n)?.parallel) };
+}
+
+/**
+ * run-due's arguments. --args <name>="<its arguments>" passes a test its own
+ * (e.g. the runner test's --old-image). --ai-source <name> goes to every clean
+ * install whole: a source's name may hold spaces, which --args splits on.
+ */
+export function runDueArgs(rest) {
+  const extra = new Map();
+  let aiSource = '';
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '--args') { const [n, ...v] = String(rest[++i] ?? '').split('='); extra.set(n, v.join('=').split(/\s+/).filter(Boolean)); }
+    else if (rest[i] === '--ai-source') aiSource = String(rest[++i] ?? '');
+  }
+  const tag = rest.find((a, i) => !a.startsWith('--') && rest[i - 1] !== '--args' && rest[i - 1] !== '--ai-source');
+  return { extra, aiSource, tag };
 }
 
 // ---- the commands --------------------------------------------------------------
@@ -354,19 +371,17 @@ async function main() {
   }
   if (cmd === 'run-due') {
     // Every test due for this release: the parallel ones alongside the one-at-a-time chain.
-    // --args <name>="<its arguments>" passes a test its own (e.g. the runner test's --old-image).
-    const extra = new Map();
-    for (let i = 0; i < rest.length; i++) if (rest[i] === '--args') { const [n, ...v] = String(rest[++i] ?? '').split('='); extra.set(n, v.join('=').split(/\s+/).filter(Boolean)); }
-    const tag = rest.find((a, i) => !a.startsWith('--') && rest[i - 1] !== '--args') || (await installVersion()).version;
-    if (!tag || !tagExists(tag)) { console.error(`usage: live.mjs run-due [<tag>] [--args <name>="<args>"]… (no tag ${tag ?? ''} here)`); process.exit(2); }
+    const { extra, aiSource, tag: named } = runDueArgs(rest);
+    const tag = named || (await installVersion()).version;
+    if (!tag || !tagExists(tag)) { console.error(`usage: live.mjs run-due [<tag>] [--ai-source <name>] [--args <name>="<args>"]… (no tag ${tag ?? ''} here)`); process.exit(2); }
     const { parallel, serial } = planRun(dueFor(tag, runs));
     if (!parallel.length && !serial.length) { console.log(`✓ No live test is due for ${tag}.`); return; }
     const logs = mkdtempSync(join(tmpdir(), 'hb-live-'));
     console.log(`${parallel.length + serial.length} due for ${tag} — alongside: ${parallel.join(', ') || 'none'}; one at a time: ${serial.join(', ') || 'none'}. Logs: ${logs}/<test>.log`);
     const one = (name) => new Promise((resolve) => {
       const out = createWriteStream(join(logs, `${name}.log`));
-      const args = extra.get(name);
-      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'run', name, ...(args ? ['--', ...args] : [])], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+      const args = [...(extra.get(name) ?? []), ...(aiSource && LIVE_TESTS.find((t) => t.name === name)?.endsOnRelease ? ['--ai-source', aiSource] : [])];
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'run', name, ...(args.length ? ['--', ...args] : [])], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
       child.stdout.pipe(out, { end: false }); child.stderr.pipe(out, { end: false });
       const t0 = Date.now();
       console.log(`▶ ${name}`);
@@ -414,7 +429,7 @@ async function main() {
     if (ended) console.log(`Not a pass: this run ended on ${ended}, and the release under test is ${release.version}. It installs the public stable and upgrades to the public latest, so it says nothing about ${release.version} until that is published. Publish it and run this again (published but not the latest: pass -- --upgrade-to ${release.version}).`);
     process.exit(code === 0 && !ended ? 0 : 1);
   }
-  console.error('usage: live.mjs list | due [<tag>] | run <name> [--note <text>] [-- args] | run-due [<tag>] [--args <name>="<args>"]… | gate <tag>');
+  console.error('usage: live.mjs list | due [<tag>] | run <name> [--note <text>] [-- args] | run-due [<tag>] [--ai-source <name>] [--args <name>="<args>"]… | gate <tag>');
   process.exit(2);
 }
 

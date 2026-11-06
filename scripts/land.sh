@@ -10,6 +10,10 @@
 # it waits for every check itself and merges. Then it brings local main to
 # what landed. Work not yet committed is left as it was.
 #
+# --no-wait opens the pull request and stops there. That is enough only with
+# GitHub's auto-merge on: otherwise the merge is this script's own, so it exits 3
+# with the command to merge by hand, and local main stays as it is either way.
+#
 # A failed check (or a pull request closed meanwhile) turns auto-merge off,
 # closes the pull request and deletes its branch: nothing merges later
 # behind your back; the commits stay on local main to fix and land again.
@@ -17,11 +21,13 @@
 #
 #   scripts/land.sh [--no-wait] [--timeout <minutes>] [--footer <text>]
 #
-# Exit: 0 landed (or nothing to land); 1 a check failed and the pull request
+# Exit: 0 landed (or nothing to land), or with --no-wait auto-merge is on and
+# GitHub merges it; 1 a check failed and the pull request
 # is closed, the pull request was closed, or a push / merge failed; 2 refused
 # before anything was pushed; 3 the pull request is still open: still waiting
 # at the timeout (with auto-merge it merges by itself, else the message says
-# how to merge it), or a check failed and it could not be closed.
+# how to merge it), --no-wait with nothing that will merge it, or a check failed
+# and it could not be closed.
 # HATCHABOT_LAND_DIRECT=1 pushes straight to main instead — only for a
 # remote with no such rule (the script tests' throwaway remote).
 set -euo pipefail
@@ -81,10 +87,13 @@ REQUIRED="$(gh api "repos/$SLUG/rules/branches/main" --jq '[.[] | select(.type =
 if [ "${REQUIRED:-0}" != 0 ] && gh pr merge "$URL" --repo "$SLUG" --auto --rebase --delete-branch >/dev/null 2>&1; then
   AUTO=1
   echo "→ $URL: GitHub merges it (rebase) once its required checks pass"
+  [ "$WAIT" = 1 ] || { echo "  Not waiting for it: once it has merged, git pull --rebase."; exit 0; }
 else
+  # The merge below is the only one on this path: leaving "landed" here left the
+  # pull request open for good, with the caller believing otherwise (HB-0439).
+  [ "$WAIT" = 1 ] || die "Nothing will merge $URL by itself (no auto-merge here), and --no-wait does not stay to do it. Once its checks pass: gh pr merge $URL --repo $SLUG --rebase --delete-branch, then git pull --rebase." 3
   echo "→ $URL: merging it (rebase) here once every check has passed"
 fi
-[ "$WAIT" = 1 ] || exit 0
 
 fail() {   # fail MESSAGE — nothing may merge later behind the caller's back
   local now

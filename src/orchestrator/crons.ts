@@ -316,22 +316,43 @@ export async function ensureConversation(provider: RuntimeProvider, runtimeRef: 
  * conversation was gone the run failed before the chat was ever reached
  * (review R10, 2026-10-23). It runs on its own now, as an app-made task does.
  */
-function deliveryArgs(target: CronTarget | undefined, opts: { unbind?: boolean } = {}): string[] {
+function deliveryArgs(target: CronTarget | undefined, opts: { unbind?: boolean; clearOld?: boolean } = {}): string[] {
   if (!target) return ['--no-deliver'];
-  if (isConversation(target)) return ['--session', 'current', '--session-key', target.session, '--announce', '--best-effort-deliver'];
-  return ['--announce', '--best-effort-deliver', '--channel', target.channel, '--to', target.to, ...(opts.unbind ? ['--session', 'isolated', '--clear-session-key'] : [])];
+  // `cron edit` patches: what the task named before stays unless cleared. Its
+  // thread and bot account were on the app it is leaving (HB-0401).
+  const oldRoute = opts.clearOld ? ['--clear-thread-id', '--clear-account'] : [];
+  if (isConversation(target)) {
+    return ['--session', 'current', '--session-key', target.session, '--announce', '--best-effort-deliver',
+      ...(opts.clearOld ? ['--clear-channel', '--clear-to'] : []), ...oldRoute];
+  }
+  return ['--announce', '--best-effort-deliver', '--channel', target.channel, '--to', target.to, ...(opts.unbind ? ['--session', 'isolated', '--clear-session-key'] : []), ...oldRoute];
 }
 
 /**
  * Point one task at `target`, or make it quiet when there is none. `job`: the
  * task as it is now; one bound to a conversation of its own is unbound when it
- * is pointed at a chat (see deliveryArgs).
+ * is pointed at a chat (see deliveryArgs), and one that names another chat app
+ * loses what it named there.
  */
-export async function retargetCron(provider: RuntimeProvider, runtimeRef: string, jobId: string, target: CronTarget | undefined, job?: Pick<Cron, 'sessionTarget' | 'sessionKey'>): Promise<boolean> {
+export async function retargetCron(provider: RuntimeProvider, runtimeRef: string, jobId: string, target: CronTarget | undefined, job?: Pick<Cron, 'sessionTarget' | 'sessionKey' | 'deliveryChannel'>): Promise<boolean> {
   const unbind = !!target && !isConversation(target) && !!job && bound(job);
-  const res = await provider.exec(runtimeRef, ['cron', 'edit', jobId, ...deliveryArgs(target, { unbind })]);
+  const named = job?.deliveryChannel;
+  const clearOld = !!target && !!named && MANAGED_APPS.has(named) && (isConversation(target) || target.channel !== named);
+  const res = await provider.exec(runtimeRef, ['cron', 'edit', jobId, ...deliveryArgs(target, { unbind, clearOld })]);
   return res.code === 0;
 }
+
+/** The chat apps Hatchabot attaches. A task naming another (a route its owner set up in OpenClaw) is theirs. */
+const MANAGED_APPS: ReadonlySet<string> = new Set(['telegram', 'discord', 'slack']);
+
+/**
+ * Announcing to a chat app the agent is no longer in: its bot was removed after
+ * the task was made. It names a channel and a recipient, so it is not implicit;
+ * with --best-effort-deliver every run still reads as ok, and the result reaches
+ * nobody (HB-0401). `attached`: the apps it is in now; undefined = not known.
+ */
+const namesRemovedApp = (j: Cron, attached: readonly string[] | undefined): boolean =>
+  !!attached && j.announce === true && !!j.deliveryChannel && MANAGED_APPS.has(j.deliveryChannel) && !attached.includes(j.deliveryChannel);
 
 /**
  * Every task of an agent that announces with no explicit recipient, pointed at
@@ -350,16 +371,21 @@ export async function retargetCron(provider: RuntimeProvider, runtimeRef: string
  * owner was linked nothing pointed them anywhere and they stayed quiet for
  * good (#64). They are pointed at the recipient once there is one; `held`
  * comes back as the ids still waiting, for the caller to keep.
+ *
+ * `attached`: the chat apps the agent is in. A task naming one it has since left
+ * is re-pointed the same way (namesRemovedApp); bound to a conversation of its
+ * own, it stays there and only drops the app.
  */
 export async function retargetImplicitCrons(
   provider: RuntimeProvider, runtimeRef: string, slug: string, target: CronTarget | undefined,
-  held: readonly string[] = [],
+  held: readonly string[] = [], attached?: readonly string[],
 ): Promise<{ changed: number; failed: number; held: string[] }> {
   const jobs = await listCrons(provider, runtimeRef, slug);
   const wasHeld = new Set(held);
   // Still quiet: a held task someone has since given a recipient (or removed) is theirs again.
   const waiting = jobs.filter((j) => !j.system && wasHeld.has(j.id) && j.announce === false);
-  const todo = jobs.filter((j) => !j.system && j.implicitDelivery);
+  const removed = (j: Cron) => namesRemovedApp(j, attached);
+  const todo = jobs.filter((j) => !j.system && (j.implicitDelivery || removed(j)));
   if (!todo.length && !waiting.length) return { changed: 0, failed: 0, held: [] };
   const to = await usableTarget(provider, runtimeRef, target);
   let changed = 0, failed = 0;
@@ -383,6 +409,11 @@ export async function retargetImplicitCrons(
   if (isConversation(to) && (change.length || waiting.some((j) => !bound(j)))) await ensureConversation(provider, runtimeRef, slug, to.session);
   for (const j of change) {
     if (await point(j.id, to, j)) changed++; else failed++;
+  }
+  if (isConversation(to)) {
+    for (const j of todo.filter((x) => bound(x) && removed(x))) {
+      if (await point(j.id, { session: j.sessionKey! }, j)) changed++; else failed++;
+    }
   }
   for (const j of waiting) {
     // A task bound to a conversation of its own goes back to announcing there.
@@ -431,12 +462,14 @@ export function cronStoreReadShell(slug: string): string {
  * The tasks a retarget pass would change, judged from the list alone (no
  * version check, no CLI): announcing to no one in particular (a task bound to
  * a conversation of its own stays, for an agent posting to its console
- * conversation), or held quiet earlier while there is now someone to post to.
+ * conversation), naming a chat app the agent has left, or held quiet earlier
+ * while there is now someone to post to.
  */
-export function tasksToRetarget(jobs: Cron[], target: CronTarget | undefined, held: readonly string[] = []): Cron[] {
+export function tasksToRetarget(jobs: Cron[], target: CronTarget | undefined, held: readonly string[] = [], attached?: readonly string[]): Cron[] {
   const wasHeld = new Set(held);
   return jobs.filter((j) => !j.system && (
     (j.implicitDelivery && !(isConversation(target) && bound(j)))
+    || namesRemovedApp(j, attached)
     || (!!target && wasHeld.has(j.id) && j.announce === false)));
 }
 
@@ -448,7 +481,7 @@ export function tasksToRetarget(jobs: Cron[], target: CronTarget | undefined, he
  * only the full pass (after a start, and daily) looks.
  */
 export async function pendingRetarget(
-  provider: RuntimeProvider, runtimeRef: string, slug: string, target: CronTarget | undefined, held: readonly string[] = [],
+  provider: RuntimeProvider, runtimeRef: string, slug: string, target: CronTarget | undefined, held: readonly string[] = [], attached?: readonly string[],
 ): Promise<{ ids: string[]; sig: string } | undefined> {
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug)) return undefined;
   const res = await provider.execShell(runtimeRef, cronStoreReadShell(slug)).catch(() => undefined);
@@ -461,7 +494,7 @@ export async function pendingRetarget(
     // The gateway reads a stored delivery with no mode as "announce" (row-codec, 2026.9).
     .map((j) => (j.delivery && typeof j.delivery === 'object' && j.delivery.mode === undefined ? { ...j, delivery: { ...j.delivery, mode: 'announce' } } : j));
   const stamp = new Map(jobs.map((j) => [String(j.id), Number(j.updatedAtMs) || 0]));
-  const due = tasksToRetarget(jobs.map(normalizeCron), target, held);
+  const due = tasksToRetarget(jobs.map(normalizeCron), target, held, attached);
   const ids = due.map((j) => j.id).sort();
   return { ids, sig: ids.map((id) => `${id}@${stamp.get(id)}`).join(',') };
 }

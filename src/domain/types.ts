@@ -153,6 +153,10 @@ export interface Agent {
   exportedAt?: string;
   /** Moved while stopped, so its new container has not run its rebuild hook yet: run at its next start (moveHost.ts). */
   rebuildHookDue?: string;
+  /** A change only a new container picks up was made while it stood stopped or asleep (since this time): its next start or wake is a rebuild (HB-0411). */
+  rebuildOnStart?: string;
+  /** A restore, clone, child or import: with no bot free its setup goes on web-only, not on a token prompt, at a Retry too. Cleared once it runs. */
+  webOnlyIfNoBot?: boolean;
   /** `never`: this agent stays awake whatever the machine's idle rule says. */
   hibernate?: 'never';
   /** When it was last woken: the idle clock restarts here, so a woken agent is not put straight back. */

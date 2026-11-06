@@ -225,6 +225,11 @@ export async function materializeConnection(
   // detaches before it lets the agent's turn go), is the record of intent,
   // and no caller may import past it (issue #18, 2026-10-09).
   if (!attach) return { ok: false, error: 'not attached to this agent' };
+  // When the client and token were read, not when the import ended: a reconnect
+  // while a slow import ran left the agent on the old token, stamped as newer
+  // than the new consent and so never shown as stale (audit #074). Before both
+  // reads, so a secret saved meanwhile counts as not received (HB-0427).
+  const readAt = new Date().toISOString();
   const clientRaw = await secrets.get(GOOGLE_CLIENT_REF).catch(() => null);
   const client = clientRaw ? parseOAuthClient(clientRaw) : null;
   if (!client) return { ok: false, error: 'Google OAuth client not configured' };
@@ -234,10 +239,6 @@ export async function materializeConnection(
     deps.log?.('connection.materialize_failed', { agentId: agent.id, email: conn.email, error: 'issued by a different OAuth client' });
     return { ok: false, error: `${conn.email} was connected with a different Google OAuth client — connect it again (⚙ Settings → Connections)` };
   }
-  // When the token was read, not when the import ended: a reconnect while a
-  // slow import ran left the agent on the old token, stamped as newer than
-  // the new consent and so never shown as stale (audit #074).
-  const readAt = new Date().toISOString();
   const refreshToken = await secrets.get(conn.secretRef).catch(() => null);
   if (!refreshToken) return { ok: false, error: 'connection token missing from the vault' };
 

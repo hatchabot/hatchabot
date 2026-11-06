@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
@@ -830,6 +830,109 @@ describe('a task an agent makes in its chat is re-pointed within minutes, cheapl
     provider.execLog.length = 0;
     await quick();
     expect(provider.execLog).toEqual([]);
+  });
+});
+
+describe('a task aimed at a chat app the agent is no longer in (HB-0401)', () => {
+  /** What the Schedule tab makes: names the channel and the owner on it. */
+  const job = (over: Record<string, unknown> = {}) => ({
+    id: 'j1', name: 'Morning note', enabled: true, sessionTarget: 'isolated',
+    delivery: { mode: 'announce', channel: 'telegram', to: TG_ID, bestEffort: true },
+    payload: { kind: 'agentTurn', message: 'Write the note.' }, updatedAtMs: 1000, ...over,
+  });
+  const runtime = async (jobs: unknown[], version = '2026.9.8') => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.infoOverride.set(ref, { openclawVersion: version });
+    p.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs }) });
+    const edits = () => p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit');
+    return { p, ref, edits };
+  };
+  const CONSOLE = { session: 'agent:kitchen:main' };
+
+  it('the last chat app gone: re-pointed at the console conversation, its old recipient cleared', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { p, ref, edits } = await runtime([job()]);
+    const r = await retargetImplicitCrons(p, ref, 'kitchen', CONSOLE, [], []);
+    expect(r).toEqual({ changed: 1, failed: 0, held: [] });
+    expect(edits()).toEqual([['cron', 'edit', 'j1', '--session', 'current', '--session-key', 'agent:kitchen:main', '--announce', '--best-effort-deliver',
+      '--clear-channel', '--clear-to', '--clear-thread-id', '--clear-account']]);
+  });
+
+  it('one of several gone: re-pointed at the app that is left', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { p, ref, edits } = await runtime([job()]);
+    const r = await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'discord', to: 'user:abc123' }, [], ['discord']);
+    expect(r.changed).toBe(1);
+    expect(edits()).toEqual([['cron', 'edit', 'j1', '--announce', '--best-effort-deliver', '--channel', 'discord', '--to', 'user:abc123', '--clear-thread-id', '--clear-account']]);
+  });
+
+  it('nobody to post to yet: quiet and remembered, as a task with no recipient is', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { p, ref, edits } = await runtime([job()]);
+    const r = await retargetImplicitCrons(p, ref, 'kitchen', undefined, [], ['discord']);
+    expect(r).toEqual({ changed: 1, failed: 0, held: ['j1'] });
+    expect(edits()).toEqual([['cron', 'edit', 'j1', '--no-deliver']]);
+  });
+
+  it('a task quiet and held with its old channel still on it loses that channel when it goes to the console', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { p, ref, edits } = await runtime([job({ delivery: { mode: 'none', channel: 'telegram', to: TG_ID } })]);
+    const r = await retargetImplicitCrons(p, ref, 'kitchen', CONSOLE, ['j1'], []);
+    expect(r).toEqual({ changed: 1, failed: 0, held: [] });
+    expect(edits()[0]).toEqual(expect.arrayContaining(['--clear-channel', '--clear-to']));
+  });
+
+  it('a task bound to a conversation of its own stays there, without the app it named', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { p, ref, edits } = await runtime([job({ sessionTarget: 'current', sessionKey: 'agent:kitchen:other' })]);
+    await retargetImplicitCrons(p, ref, 'kitchen', CONSOLE, [], []);
+    expect(edits()).toEqual([['cron', 'edit', 'j1', '--session', 'current', '--session-key', 'agent:kitchen:other', '--announce', '--best-effort-deliver',
+      '--clear-channel', '--clear-to', '--clear-thread-id', '--clear-account']]);
+  });
+
+  it('left alone: a task on an app still attached, one Hatchabot does not manage, a quiet one, and OpenClaw\'s own', async () => {
+    const { retargetImplicitCrons, pendingRetarget } = await import('../src/orchestrator/crons.js');
+    const jobs = [
+      job(),
+      job({ id: 'j2', delivery: { mode: 'announce', channel: 'whatsapp', to: '+15550100' } }),
+      job({ id: 'j3', delivery: { mode: 'none', channel: 'discord', to: 'user:abc123' } }),
+      job({ id: 'j4', declarationKey: 'openclaw.dreaming', delivery: { mode: 'announce', channel: 'discord', to: 'user:abc123' } }),
+    ];
+    const { p, ref, edits } = await runtime(jobs);
+    const target = { channel: 'telegram' as const, to: TG_ID };
+    expect(await retargetImplicitCrons(p, ref, 'kitchen', target, [], ['telegram'])).toEqual({ changed: 0, failed: 0, held: [] });
+    expect(edits()).toEqual([]);
+    p.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ jobs }) });
+    expect((await pendingRetarget(p, ref, 'kitchen', target, [], ['telegram']))!.ids).toEqual([]);
+  });
+
+  it('the quick check finds it, so a removal reaches the task within minutes', async () => {
+    const { pendingRetarget } = await import('../src/orchestrator/crons.js');
+    const { p, ref } = await runtime([]);
+    p.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [job()] }) });
+    expect(await pendingRetarget(p, ref, 'kitchen', CONSOLE, [], [])).toEqual({ ids: ['j1'], sig: 'j1@1000' });
+  });
+
+  it('the quick pass, end to end: a web-only agent\'s task for the bot it just lost lands in its console', async () => {
+    const { provider, f, store } = await world();
+    const ref = store.getAgent('a1')!.runtimeRef!;
+    provider.infoOverride.set(ref, { openclawVersion: '2026.9.8' });
+    provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [job()] }) });
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [job()] }) });
+    await (f as unknown as { quickCronRetarget: () => Promise<void> }).quickCronRetarget();
+    expect(provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit')[0]).toEqual(expect.arrayContaining(['--session-key', 'agent:kitchen:main', '--clear-channel', '--clear-to']));
+  });
+
+  it('not while its tasks are still being adopted: the next try would not know it had brought one over', async () => {
+    const { provider, f, store } = await world();
+    const ref = store.getAgent('a1')!.runtimeRef!;
+    provider.infoOverride.set(ref, { openclawVersion: '2026.9.8' });
+    provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [job()] }) });
+    provider.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [job()] }) });
+    vi.spyOn(store, 'listAdoptPending').mockReturnValue([{ agentId: 'a1', path: '/made/up' }] as never);
+    await (f as unknown as { retargetCronSweep: () => Promise<void> }).retargetCronSweep();
+    expect(provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit')).toEqual([]);
   });
 });
 

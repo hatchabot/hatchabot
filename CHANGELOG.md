@@ -2,6 +2,74 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.173.1] — 2026-11-05
+
+v2.173.0 and v2.172.2 were never published: v2.173.0 was stopped by the publisher's privacy gate, and v2.172.2 was never tagged. Everything listed under 2.173.0 and 2.172.2 below ships in this release, including the fix that stops a stolen password from adding a second factor at the public address, and Brave's metered plans no longer reading as "0 queries left".
+
+### Fixed
+- **Report a problem:** a code comment and three tests used an example Mac name that the privacy gate stopped; they use another invented name. Masking is unchanged.
+
+## [2.173.0] — 2026-11-05
+
+Fixes from a walk through what people actually do, area by area: stopped agents stay stopped, scheduled tasks follow a removed chat app, budgets say when they cannot be enforced, and backups and restores tell the truth.
+
+### Upgrading
+- **Stopped and sleeping agents** no longer start when you move them to another source or change a setting. The change is applied when they next start, and the card says one is waiting. Pressing Rebuild on one by name still starts it, and the page asks first. A Recover context asked for with the move does not run for them: each agent's owner presses it once it is up.
+- **While a move, restore or other long operation is not over,** changes that need a new container (a bot, a chat app, a browser, an image pin, a source switch) are refused with that operation's line.
+- **Budgets:** an agent on a model with no known price (any OpenAI or Google model) now shows "no price known" instead of $0.00, and a limit on it says it cannot be enforced.
+- **Report a problem** masks more than before, and masks now read `{path}`, `{name}` and so on. Container paths like `/app/` and `/home/node/` stay while nothing in them looks personal. Read every line: free text can never be fully safe.
+- **Runners:** adding an address you have already added is refused, and so is an `ssh://` address in IPv6 form: use a hostname or IPv4.
+- **`hatchabot upgrade vX`** with no such release is refused and changes nothing, and a machine already pinned to a release that does not exist gets the same answer from a plain `hatchabot upgrade`.
+
+### Fixed: agents
+- A failed setup no longer tells members "This agent has been removed", and an agent waiting for a bot token no longer turns FAILED on the next health sweep; Retry reuses a token you already pasted.
+- A failed restore, clone or import keeps its promise at Retry: with no bot free it comes back without Telegram, not on a token prompt.
+- A stopped agent whose rebuild is refused (a missing key, a source no longer shared) stays stopped with its container untouched, and the reason is shown. One pinned to an image while its rebuild was put off runs that image after Start.
+- A refused move no longer marks a stopped agent as having a copy elsewhere, so Archive and Delete park its bot as usual. A failed move says so when the agent did not start again: its operation shows as failed, it stays where it was, stopped, and Start and Rebuild stay open. The tile, Alerts and its page say so until it next runs, and the owner is told on their chat app when a restart undid the move.
+- A move is refused while an archive is saving the conversation to memory, or while a rebuild of that agent is waiting its turn, and a move to another Hatchabot is no longer refused because a different account there has an agent with the same id.
+
+### Fixed: sources, budgets and connections
+- Scheduled tasks follow when you remove a chat app: to the app that remains, or to the agent's console conversation. Before, they kept aiming at the removed bot and reached nobody, while runs showed ok.
+- Budget, spike and loop messages reach an owner on Discord or Slack. With no chat at all, Budgets says beside the alarm that no message will come.
+- A budget pause closes only once the agent is up. A Stop, drain or sleep before then wins: the end of the pause does not start it, and the tile, Alerts and the bot no longer promise it will. The cheaper-model budget and source switches no longer put a subscription agent on a model its OpenClaw cannot use.
+- **Update** on an app's same commit refreshes settings Hatchabot fills, such as the agent's Telegram bot, and says which changed.
+- A new secret for the same Google OAuth client goes to running agents at once. Others are marked until their next start; keep the old secret at Google until none is marked.
+
+### Fixed: sign-in and accounts
+- A web-chat invite at the public address says when a second factor is what is missing, and what to do, instead of asking for the right password again with no message.
+- Accounts list: a member with an unused or running reset link keeps their agent count and **Send a reset link**. An expired invitation says so and offers **Send a new invitation**, and **Copy invitation** gives the link's real expiry.
+- Turning on family accounts: if a crash interrupted the switch, trying again finishes it with a new recovery code. An account already in use is kept, and the message no longer says a restart will help.
+- Failing to reach Google no longer counts as failed sign-ins, so it cannot lock anyone out after Google returns.
+
+### Fixed: install, upgrade and backups
+- `hatchabot doctor` compares your release with what your channel names, and no longer offers a command that pins the machine. A pin is reported as one.
+- Report a problem masks runner users and hostnames, absolute paths (any script, spaces, Windows and network paths), public IP addresses, account usernames, parts of members' names, phones, MAC addresses, more credential forms (short passwords inside quoted or escaped JSON among them: if you filed a report that held one, change it), private key blocks and the codes in links. Generic words like docker stay, an everyday word alone stays in lowercase while a member's whole name goes in any case, a sentence that names a second path can be masked with the first, a bad runner address no longer breaks reports, and a very long draft no longer stalls the server. The panel and docs say what is and is not masked.
+- Backups under rootless Docker stay readable, and an archive that cannot be read back makes the set incomplete. A second run on the same day keeps the earlier run's whole archives available for restore.
+- The README's restore steps remove the old `-wal` and `-shm` files, so the restored database is exactly the backup. `HATCHABOT_BACKUP_KEEP_DAYS` reads the same in the panel and the script; a bad value means 14 and says so.
+- A pinned upgrade cut off by a kill or power cut no longer leaves the machine pinned to a release it never got: the timer tries it once, then goes back to the channel. A full disk is named as such during install and upgrade, with no fallback to a heavier install, and a folder this user cannot write is no longer called a full disk. A failed move of the bundle leaves nothing behind, and the installer repairs a cut-off upgrade instead of calling the folder foreign. The upgrade's runtime image step uses the Docker daemon `.env` names.
+- The runner setup snippet puts the key on its own line, and pasting it again repairs a key an older snippet stuck onto another line. A line with the key under options, a longer comment or commented out is left as it is, and the paste says so. Removing a runner row leaves browsers and memory search alone while another row points at the same machine, and says what to remove by hand if the match is only by Docker ID.
+- `uninstall --purge --backups` also removes the restore drill records it can tell are this install's, and names what is left in a kept folder. `scripts/land.sh --no-wait` says when nothing will merge the pull request.
+
+### Fixed: the page
+- Inviting someone no longer shares a second AI source when one is already shared, and says which it shared or why it could not. Errors on AI sources and new tokens appear beside the control you pressed, and a model you are choosing no longer snaps back while you are on the page.
+- **Clear** from Alerts ends with what it cleared, so a second failure or a second change to the Hatchabot agent's safety settings shows again.
+- Archive says where the bot really went. Accounts that do not own the machine no longer see forms only the owner can save. The agent page's tabs follow Start and Stop, and an unsaved edit is kept.
+- **Move agents here** keeps every skipped agent and its reason on screen. A refused web chat message goes back in that agent's box, ahead of anything typed since; one that failed after it may have reached the agent stays as sent, and says so, and if reopening does not show it, it comes back to the box with a note. Each agent keeps its own draft, and another person signing in on the same page never sees it. A send on a session that has ended returns its text. **Sync** is no longer undone by an unsaved edit to the model list. A planned name you already use is refused with a message, and an old agent of that name no longer deletes a plan.
+- Dragging an archived agent onto a group restores it into that group. A Tailscale entry left behind by a failed turn-on is shown, with the command to remove it. A failed save of Telegram settings puts the selects back. A report opened on GitHub stays listed, marked, until you discard it. Help text that named tabs and outcomes the app does not have is corrected.
+
+## [2.172.2] — 2026-11-05
+
+Closes a way past the public address's second factor rule. Upgrade if you have public access on.
+
+### Security
+- **Public access:** someone holding only a member's or guest's password, on an account with no second factor yet, could make a recovery code at the public address, use it to set a new password, and add their own authenticator. Making a recovery code there now needs the same proof as adding a first factor: a sign-in from a link or code sent to the person. Accounts with owner rights, and accounts that already have a factor, were not affected. At the private address nothing changes.
+
+### Fixed
+- **Web search:** a Brave key on a metered plan reports a monthly limit of 0, meaning no cap. Hatchabot read that as an empty key and moved the fleet to DuckDuckGo. After upgrading, **Test search** moves it back at once, and otherwise the next check does, within a day.
+
+### Changed
+- **Live tests:** `run-due` runs the clean installs one at a time, and takes `--ai-source "<name>"` for them. A clean install with no AI source now counts as a skip, because no agent was made on it. Each run logs the machine's load.
+
 ## [2.172.1] — 2026-11-03
 
 An agent with a Google account attached should no longer say it has none when OpenClaw's Code Mode is on.

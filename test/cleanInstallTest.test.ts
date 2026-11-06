@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 // @ts-expect-error — a plain .mjs script, no types
 import { endedOn, resultOf } from '../scripts/live.mjs';
+import { doctorReport, type DoctorFacts } from '../src/doctor.js';
 
 /**
  * scripts/clean-install-test.sh with no VM: a temp HOME and a PATH holding only
@@ -28,6 +29,8 @@ type World = {
   stopAt?: 'install' | 'firstrun';
   /** The version doctor reports before and after the upgrade. */
   before?: string; after?: string;
+  /** What doctor's release line says after the upgrade, when not `Release <after>`. */
+  afterDoctor?: string;
   installOk?: boolean;
   /** `lxc info` gets no answer, as from a busy LXD. */
   infoFails?: boolean;
@@ -87,7 +90,7 @@ case "$*" in
     exit 0 ;;
   *"is-active hatchabot"*) ${w.installOk === false ? 'echo inactive' : 'echo active'}; exit 0 ;;
   *BUNDLE.json*) exit 1 ;;
-  *doctor*) echo "All good"; [ -e "$R/upgraded" ] && echo "Release ${w.after ?? 'v9.1.0'}" || echo "Release ${w.before ?? 'v9.0.0'}"; exit 0 ;;
+  *doctor*) echo "All good"; [ -e "$R/upgraded" ] && echo "${w.afterDoctor ?? `Release ${w.after ?? 'v9.1.0'}`}" || echo "Release ${w.before ?? 'v9.0.0'}"; exit 0 ;;
   *help*) echo "hbt is the same command as hatchabot"; exit 0 ;;
   *upgrade*) touch "$R/upgraded"; echo "Now on ${w.after ?? 'v9.1.0'}"; exit 0 ;;
   *firstrun.sh*)
@@ -304,13 +307,25 @@ describe('a VM that stops by itself (HB-0381)', () => {
 });
 
 describe('the whole run with no VM (HB-0378)', () => {
+  /** The run as it would read had step 4 run: its SKIP line is tested on its own below. */
+  const withStep4 = (out: string) => out.replace(/^SKIP: step 4 .*$/m, '');
+  it('with no AI source it says step 4 did not run, so live.mjs does not record a pass', () => {
+    const r = run({ before: 'v9.0.0', after: 'v9.1.0' });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toMatch(/SKIP: step 4 did not run \(no --ai-source\)/);
+    expect(resultOf(r.code, r.out, 'v9.1.0')).toBe('skip');
+  }, T);
+  it('logs the load on a run that goes well, so a rerun can be compared with a failure', () => {
+    const r = run({ before: 'v9.0.0', after: 'v9.1.0' });
+    expect(r.out).toMatch(/load average now: [\d.]+ [\d.]+ [\d.]+/);
+  }, T);
   it('its last line says the version it ended on, in the form live.mjs reads', () => {
     const r = run({ before: 'v9.0.0', after: 'v9.1.0' });
     expect(r.code, r.out).toBe(0);
     expect(r.out).toMatch(/✓ hbt upgrade latest: v9\.0\.0 → v9\.1\.0/);
     expect(endedOn(r.out)).toBe('v9.1.0');
-    expect(resultOf(r.code, r.out, 'v9.1.0')).toBe('pass');
-    expect(resultOf(r.code, r.out, 'v9.2.0')).toBe('skip');
+    expect(resultOf(r.code, withStep4(r.out), 'v9.1.0')).toBe('pass');
+    expect(resultOf(r.code, withStep4(r.out), 'v9.2.0')).toBe('skip');
     expect(r.out).toMatch(/deleted hb-clean-/);
     expect(r.read('sg.log')).toBe(''); // the shim for lxc was the only way in
   }, T);
@@ -318,13 +333,66 @@ describe('the whole run with no VM (HB-0378)', () => {
     for (const [tag, plain] of [['v2.132.0-test', 'v2.132.0'], ['v2.172.0-rc.1', 'v2.172.0']] as const) {
       const r = run({ before: tag }, ['--no-upgrade']);
       expect(endedOn(r.out), r.out).toBe(tag);
-      expect(resultOf(r.code, r.out, tag)).toBe('pass');
-      expect(resultOf(r.code, r.out, plain)).toBe('skip'); // the false pass: a branch's bundle clearing the plain release
+      expect(resultOf(r.code, withStep4(r.out), tag)).toBe('pass');
+      expect(resultOf(r.code, withStep4(r.out), plain)).toBe('skip'); // the false pass: a branch's bundle clearing the plain release
     }
   }, T);
 
   it('--no-upgrade ends on what the channel installed', () => {
     const r = run({ before: 'v9.0.0' }, ['--no-upgrade']);
     expect(endedOn(r.out)).toBe('v9.0.0');
+  }, T);
+});
+
+describe('the version it reads from doctor (HB-0404)', () => {
+  /** The real doctor lines for a checkout, printed as `hatchabot doctor` prints them. */
+  const doctorSays = (checkout: DoctorFacts['checkout']) => {
+    const facts: DoctorFacts = {
+      nodeVersion: 'v22.22.2', dockerCli: true, dockerDaemon: { ok: true, arch: 'arm64', version: '27.1' },
+      envFile: { present: true, secretKey: true, password: true, authMode: 'accounts' },
+      db: { path: '/x/hatchabot.sqlite', present: true, sizeMb: 10 },
+      service: { manager: 'systemd', active: true, enabled: true },
+      controlPlane: { url: 'http://localhost:8080', ok: true, version: '9.0.0' },
+      diskFreeGb: 120, backups: { dir: '/b', lastSet: '2026-09-13', ageDays: 0 },
+      tailscale: { installed: true, up: true, dns: 'box.example.net' }, containers: { running: 1, total: 1 }, checkout,
+    };
+    return doctorReport(facts).map((l) => `${l.level === 'ok' ? '✓' : l.level === 'warn' ? '⚠' : '✗'} ${l.text}${l.fix ? `\n    → ${l.fix}` : ''}`).join('\n') + '\n';
+  };
+  /** The script's own `ver`, on that text. */
+  const ver = (text: string) => {
+    const def = /^ver\(\) \{\n[\s\S]*?\n\}$/m.exec(readFileSync('scripts/clean-install-test.sh', 'utf8'))![0];
+    return spawnSync('bash', ['-c', `${def}\nver`], { input: text, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }).stdout.trim();
+  };
+  /** As the run ends: its summary line, then live.mjs's verdict on it. */
+  const verdict = (v: string, release: string) => resultOf(0, `── 9 passed, 0 failed · ${v || 'release unknown'} · logs: /x ──\n`, release);
+
+  it('after `hbt upgrade vY` on vY, the pin is the release, and that run passes', () => {
+    const text = doctorSays({ tag: 'v9.1.0', pinned: 'v9.1.0', dirty: [] });
+    expect(text).toContain('Pinned to v9.1.0:');
+    expect(ver(text)).toBe('v9.1.0');
+    expect(verdict(ver(text), 'v9.1.0')).toBe('pass');
+  });
+  it('pinned to vY and running vX, it reads vX: no pass on vY', () => {
+    const text = doctorSays({ tag: 'v9.0.0', pinned: 'v9.1.0', dirty: [] });
+    expect(text).toContain('Pinned to v9.1.0 (running v9.0.0):');
+    expect(ver(text)).toBe('v9.0.0');
+    expect(verdict(ver(text), 'v9.1.0')).toBe('skip');
+    expect(verdict(ver(text), 'v9.0.0')).toBe('pass');
+  });
+  it('pinned, on a commit that is no release: nothing to read, and no pass', () => {
+    const text = doctorSays({ pinned: 'v9.1.0', dirty: [] });
+    expect(ver(text)).toBe('');
+    expect(verdict(ver(text), 'v9.1.0')).toBe('skip');
+  });
+  it('on a channel: the release, or the one running when the channel names another; a prerelease tag whole', () => {
+    expect(ver(doctorSays({ tag: 'v9.0.0', channel: 'stable', dirty: [] }))).toBe('v9.0.0');
+    expect(ver(doctorSays({ tag: 'v9.0.0', channel: 'stable', channelTarget: 'v9.1.0', dirty: [] }))).toBe('v9.0.0');
+    expect(ver(doctorSays({ tag: 'v9.1.0-test.2', pinned: 'v9.1.0-test.2', dirty: [] }))).toBe('v9.1.0-test.2');
+  });
+  it('the whole run: `--upgrade-to vY` ends on vY with doctor saying the pin, and the live test passes it', () => {
+    const r = run({ before: 'v9.0.0', after: 'v9.1.0', afterDoctor: 'Pinned to v9.1.0: a version named by hand, so automatic upgrades are paused' }, ['--upgrade-to', 'v9.1.0']);
+    expect(r.out).toContain('hbt upgrade v9.1.0: v9.0.0 → v9.1.0');
+    expect(endedOn(r.out)).toBe('v9.1.0');
+    expect(resultOf(r.code, r.out.replace(/^SKIP: step 4 .*$/m, ''), 'v9.1.0')).toBe('pass'); // as withStep4 above
   }, T);
 });

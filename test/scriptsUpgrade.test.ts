@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
@@ -305,7 +305,7 @@ exec ${JSON.stringify(REAL_GIT)} "$@"
   it('its own stale lock goes, every tracked file is put back, and the upgrade it asked for finishes', async () => {
     const w = world();
     const k = await killedInCheckout(w);
-    expect(readFileSync(k.record, 'utf8')).toMatch(/^from v1\.0\.0\nto v1\.2\.0\ngit \d+ /);
+    expect(readFileSync(k.record, 'utf8')).toMatch(/^from v1\.0\.0\nto v1\.2\.0\npins-recorded\ngit \d+ /);
     execFileSync('touch', ['-d', '10 minutes ago', k.record]); execFileSync('touch', ['-d', '9 minutes ago', k.indexLock]);
     const r = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['v1.2.0']);
     expect(r.status, r.stdout + r.stderr).toBe(3); // the repair, then this run's install fails: the old release, whole
@@ -560,5 +560,159 @@ describe('scripts/release-target.sh on a bundle install (no clone: it asks GitHu
     const noStable = bundleTree(`case "$*" in *channels.json*) echo '{"beta": "v2.0.0"}' ;; *) echo '{"tag_name": "v2.1.0"}' ;; esac`)('stable');
     expect(noStable.status).toBe(3);
     expect(noStable.stdout).not.toContain('v2.1.0');
+  });
+});
+
+describe('a version named by hand on a clone is a pin only once it can be (HB-0428)', () => {
+  const channel = (w: World) => { const f = join(w.install, 'data', 'channel'); return existsSync(f) ? readFileSync(f, 'utf8').trim() : undefined; };
+  it('a dirty tree: refused, no pin', () => {
+    const w = world();
+    mkdirSync(join(w.install, 'data')); writeFileSync(join(w.install, 'data', 'channel'), 'stable\n');
+    writeFileSync(join(w.install, 'package.json'), 'edited\n');
+    const r = run(w, {}, ['v1.1.0']);
+    expect(r.status, r.stdout + r.stderr).toBe(2);
+    expect(r.stdout).not.toContain('Pinned');
+    expect(channel(w)).toBe('stable');
+  });
+  it('no such tag: refused, no pin', () => {
+    const w = world();
+    const r = run(w, {}, ['v9.9.9']);
+    expect(r.status).toBe(2);
+    expect(channel(w)).toBeUndefined();
+  });
+  it('an install that fails, a release that does not start: the channel is put back', () => {
+    const w = world();
+    mkdirSync(join(w.install, 'data')); writeFileSync(join(w.install, 'data', 'channel'), 'beta\n');
+    const failed = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['v1.1.0']);
+    expect(failed.status, failed.stdout + failed.stderr).toBe(3);
+    expect(channel(w)).toBe('beta');
+    const bad = run(w, { HATCHABOT_INSTALL_CMD: 'true', FAKE_RESTART_RC: '1' }, ['v1.1.0']);
+    expect(bad.status, bad.stdout + bad.stderr).toBe(1);
+    expect(channel(w)).toBe('beta');
+  });
+  describe('a pin completed earlier is the person\'s, whatever a later upgrade leaves', () => {
+    /** Releases from v2.169.0 on: the pin goes in data/channel. The timer is a tracked script from here. */
+    const later = () => {
+      const w = world();
+      mkdirSync(join(w.install, 'data')); writeFileSync(join(w.install, 'data', 'channel'), 'stable\n');
+      writeFileSync(join(w.src, 'scripts', 'follow-channel.sh'), readFileSync('scripts/follow-channel.sh'), { mode: 0o755 });
+      for (const tag of ['v3.1.0', 'v3.2.0']) {
+        writeFileSync(join(w.src, 'package.json'), `{"name":"x","version":"${tag.slice(1)}"}\n`);
+        w.git(w.src, 'add', '-A'); w.git(w.src, 'commit', '-q', '-m', tag); w.git(w.src, 'tag', tag);
+      }
+      w.git(w.src, 'push', '-q', w.origin, 'main', '--tags');
+      writeFileSync(join(w.bin, 'die-in-install'), '#!/bin/sh\nkill -9 "$PPID"\nexit 1\n', { mode: 0o755 });
+      return w;
+    };
+    const state = (w: World, ext: string) => lockOf(w).replace(/\.lock\.d$/, ext);
+    const tick = (w: World) => spawnSync('bash', [join(w.install, 'scripts', 'follow-channel.sh'), 'stable'], {
+      encoding: 'utf8', env: { ...w.env, HATCHABOT_RESTART_CMD: join(w.bin, 'fake-restart'), HATCHABOT_UPGRADE_IMAGE: '0', HATCHABOT_INSTALL_CMD: 'true' },
+    });
+    const at = (w: World) => w.git(w.install, 'describe', '--tags', '--exact-match');
+    /** A lock nothing shows is the upgrade's own: older than the record, so every repair stops on it. */
+    const stuckLock = (w: World) => {
+      const f = join(w.install, '.git', 'index.lock');
+      writeFileSync(f, '');
+      const old = new Date(Date.now() - 2 * 3600_000);
+      utimesSync(f, old, old);
+      return f;
+    };
+    const killedLater = (w: World) => {
+      expect(run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v3.1.0']).status).toBe(0);
+      expect(channel(w)).toBe('v3.1.0');
+      const r = run(w, { HATCHABOT_INSTALL_CMD: join(w.bin, 'die-in-install') }, ['v3.2.0']);
+      expect(r.signal, r.stdout + r.stderr).toBe('SIGKILL');
+      expect(channel(w)).toBe('v3.2.0');
+      expect(readFileSync(state(w, '.pin'), 'utf8')).toContain('channel v3.1.0');
+    };
+
+    it('a later pin killed, its repair failing tick after tick: back to the pin, and it stays', () => {
+      const w = later();
+      killedLater(w);
+      const lock = stuckLock(w);
+      for (let i = 0; i < 3; i++) {
+        const r = tick(w);
+        expect(r.status, r.stdout + r.stderr).toBe(1);
+        expect(channel(w), `tick ${i}: ${r.stdout}`).toBe('v3.1.0');
+        expect(existsSync(state(w, '.pin'))).toBe(false);
+        expect(existsSync(state(w, '.from'))).toBe(true);
+      }
+      // The lock cleared by a person: repaired, on the pinned release and still pinned, the timer quiet.
+      rmSync(lock);
+      const fixed = tick(w);
+      expect(fixed.status, fixed.stdout + fixed.stderr).toBe(0);
+      expect(at(w)).toBe('v3.1.0');
+      expect(channel(w)).toBe('v3.1.0');
+      expect(existsSync(state(w, '.from'))).toBe(false);
+      expect(tick(w).stdout).toBe('');
+    });
+    it('a failed rollback leaves the record with no kill: the pin it was on stays through the repairs', () => {
+      const w = later();
+      expect(run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v3.1.0']).status).toBe(0);
+      // The install fails with a lock in the way, so the checkout back fails too.
+      writeFileSync(join(w.bin, 'lock-and-fail'), `#!/bin/sh\n: > ${JSON.stringify(join(w.install, '.git', 'index.lock'))}\nexit 1\n`, { mode: 0o755 });
+      const r = run(w, { HATCHABOT_INSTALL_CMD: join(w.bin, 'lock-and-fail') }, ['v3.2.0']);
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(channel(w)).toBe('v3.1.0');
+      expect(existsSync(state(w, '.from'))).toBe(true);
+      expect(existsSync(state(w, '.pin'))).toBe(false);
+      for (let i = 0; i < 2; i++) {
+        const t = tick(w);
+        expect(t.status, t.stdout + t.stderr).toBe(1);
+        expect(channel(w), `tick ${i}: ${t.stdout}`).toBe('v3.1.0');
+      }
+    });
+    it('a one-time pin an upgrade.sh from before the record left still comes off', () => {
+      const w = later();
+      killedLater(w);
+      // What that upgrade.sh leaves: the pin, its checkout's record as it wrote it, no pin record.
+      rmSync(state(w, '.pin'));
+      writeFileSync(state(w, '.from'), readFileSync(state(w, '.from'), 'utf8').replace('pins-recorded\n', ''));
+      stuckLock(w);
+      const r = tick(w);
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(channel(w), r.stdout).toBeUndefined();
+    });
+  });
+  it('a release that comes up is pinned', () => {
+    const w = world();
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['v1.1.0']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('Pinned to v1.1.0');
+    expect(readFileSync(join(w.home, '.config', 'hatchabot', 'channel'), 'utf8').trim()).toBe('v1.1.0'); // from before v2.169.0: the user's file
+  });
+});
+
+describe('the runtime image step uses the daemon .env names (HB-0431)', () => {
+  // A release that moves OpenClaw: the image step has what it needs. Docker and the
+  // fetch are shims that write down which daemon they were pointed at.
+  function imageWorld() {
+    const w = world();
+    mkdirSync(join(w.src, 'docker'));
+    writeFileSync(join(w.src, 'docker', 'Dockerfile.runtime'), 'ARG OPENCLAW_VERSION=2026.9.9\n');
+    writeFileSync(join(w.src, 'scripts', 'build-runtime-image.sh'), `#!/usr/bin/env bash\necho "fetch \${DOCKER_HOST:-default}" >> ${JSON.stringify(join(w.root, 'docker.log'))}\n`, { mode: 0o755 });
+    w.git(w.src, 'add', '-A'); w.git(w.src, 'commit', '-q', '-m', 'v3'); w.git(w.src, 'tag', 'v1.2.0');
+    w.git(w.src, 'push', '-q', w.origin, 'main', '--tags');
+    writeFileSync(join(w.bin, 'docker'), `#!/usr/bin/env bash\necho "$1 \${DOCKER_HOST:-default}" >> ${JSON.stringify(join(w.root, 'docker.log'))}\ncase "$1" in image) echo 2026.1.1 ;; esac\n`, { mode: 0o755 });
+    return w;
+  }
+  const log = (w: World) => readFileSync(join(w.root, 'docker.log'), 'utf8').trim().split('\n');
+  const up = (w: World, extra: Record<string, string> = {}) => run(w, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_UPGRADE_IMAGE: '1', ...extra }, ['v1.2.0']);
+
+  it('looks and fetches there, the last line of .env winning over the shell', () => {
+    const w = imageWorld();
+    writeFileSync(join(w.install, '.env'), "DOCKER_HOST=unix:///tmp/old.sock\nDOCKER_HOST='unix:///tmp/synthetic-tenant.sock' # the tenant\n");
+    w.git(w.install, 'config', 'core.excludesFile', '/dev/null');
+    writeFileSync(join(w.install, '.git', 'info', 'exclude'), '.env\n');
+    const r = up(w, { DOCKER_HOST: 'unix:///tmp/shell.sock' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(log(w)).toEqual(['image unix:///tmp/synthetic-tenant.sock', 'fetch unix:///tmp/synthetic-tenant.sock']);
+  });
+  it('no line in .env: the daemon it would have used, as before', () => {
+    const w = imageWorld();
+    writeFileSync(join(w.install, '.git', 'info', 'exclude'), '.env\n');
+    writeFileSync(join(w.install, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    expect(up(w).status).toBe(0);
+    expect(log(w)).toEqual(['image default', 'fetch default']);
   });
 });

@@ -226,14 +226,15 @@ function budgetItems(c: Ctx, machineOwner: boolean): Recommendation[] {
     const atLimit = v.paused || v.downgraded || v.level === 100;
     if (atLimit) {
       const daysLeft = Math.max(0, Math.round((1 - elapsed) * 30));
-      const title = v.paused ? `${whose} is paused by its budget` : v.downgraded ? `${whose} was moved to ${bare(v.downgraded.to)} by its budget` : `${whose} passed its ${whole(v.usd)} budget`;
-      const leave = v.paused ? `Left as it is, it stays paused until ${v.resetsOn} (about ${daysLeft} day${daysLeft === 1 ? '' : 's'})`
+      const stays = v.paused?.staysStopped;
+      const title = stays ? `${whose} is stopped, and has used its budget` : v.paused ? `${whose} is paused by its budget` : v.downgraded ? `${whose} was moved to ${bare(v.downgraded.to)} by its budget` : `${whose} passed its ${whole(v.usd)} budget`;
+      const leave = stays ? 'Left as it is, it stays stopped until you start it' : v.paused ? `Left as it is, it stays paused until ${v.resetsOn} (about ${daysLeft} day${daysLeft === 1 ? '' : 's'})`
         : v.downgraded ? `Left as it is, it runs on ${bare(v.downgraded.to)} until ${v.resetsOn}`
         : `Left as it is, it keeps working${v.onPace && v.onPace > v.usd ? ` and ends the month near ${money(v.onPace)}, ${money(v.onPace - v.usd)} over` : ''}`;
       out.push({
         id: `budget:${scope}`, kind: 'budget-limit', agents: agent ? [ref(agent)] : [], ...(agent ? {} : { machine: true as const }),
         title, concern: budgetLine(v, agent ? 'it' : 'this Hatchabot'), evidence,
-        effect: { text: `${leave}. Raising it to ${whole(raiseTo)} ${v.paused ? 'starts it again now' : v.downgraded ? 'switches it back now' : 'gives it room for the rest of the month'}`, billing: agent && c.billing(agent) === 'plan' ? 'plan' : 'api' },
+        effect: { text: `${leave}. Raising it to ${whole(raiseTo)} ${stays ? 'leaves room when you start it' : v.paused ? 'starts it again now' : v.downgraded ? 'switches it back now' : 'gives it room for the rest of the month'}`, billing: agent && c.billing(agent) === 'plan' ? 'plan' : 'api' },
         action: raise, secondary: [open], alert: true,
         rank: { group: GROUP['budget-limit'], money: Math.max(0, (pace ?? v.spent) - v.usd) },
         fingerprint: `${month}:100:${v.usd}:${v.paused ? 'p' : v.downgraded ? 'c' : 'w'}`,
@@ -265,7 +266,7 @@ function spikeItems(c: Ctx): Recommendation[] {
     out.push({
       id: `spike:${a.id}`, kind: 'spike', agents: [ref(a)],
       title: `${a.name} used ${tokensText(s.tokens)} tokens in 24 hours`, concern: `${than} — a scheduled task or a long conversation is the usual cause`,
-      evidence: [`Warned ${clockOf(s.at, c.now)}${s.covered ? ', with its loop' : s.told ? ' on your chat' : ' (not sent: no Telegram linked)'}`, ...(cost >= 0.01 ? [`≈ ${money(cost)} in the last 24 hours at API prices${c.billing(a) === 'plan' ? ' (an equivalent on your Claude plan)' : ''}`] : [])],
+      evidence: [`Warned ${clockOf(s.at, c.now)}${s.covered ? ', with its loop' : s.told ? ' on your chat' : ' (not sent: no chat app reaches you)'}`, ...(cost >= 0.01 ? [`≈ ${money(cost)} in the last 24 hours at API prices${c.billing(a) === 'plan' ? ' (an equivalent on your Claude plan)' : ''}`] : [])],
       action: { kind: 'open-usage', label: 'See it by the hour', agentId: a.id }, secondary: [],
       alert: true,
       rank: { group: GROUP.spike, money: cost },

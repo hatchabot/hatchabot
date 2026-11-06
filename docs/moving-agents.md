@@ -231,7 +231,7 @@ purpose:
 
 | What was interrupted | What Hatchabot does after the restart |
 |---|---|
-| A move to another machine, before the agent was recorded there | Undoes it: removes the half-made copy there (if that machine answers), and starts the agent again where it was if it was running |
+| A move to another machine, before the agent was recorded there | Undoes it: removes the half-made copy there (if that machine answers), and starts the agent again where it was if it was running. If it will not start, the move ends as failed and says so: the agent stays there stopped, with Start and Rebuild open |
 | A move to another machine, after it was recorded there | Finishes it: starts it there, settles its skills and memory index, then removes the old copy |
 | An import (a file, or a move arriving from another Hatchabot) | Undoes it completely — a half-imported agent never starts. Import the file again |
 | A move to another Hatchabot, after the agent was packed up | Asks the other server whether it arrived: yes — this copy stays stopped, marked as moved; no — it is started here again |

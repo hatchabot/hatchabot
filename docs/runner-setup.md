@@ -112,7 +112,7 @@ MB idle. On Docker Desktop it listens on the runner's loopback only.
 | Symptom | Cause / fix |
 |---|---|
 | `Connection refused` on add | SSH isn't enabled on the runner, or a firewall blocks 22. |
-| `Permission denied` / `Too many authentication failures` | The step-2 snippet wasn't run (key not authorized), or an old hand-made config block shadows the managed one. Re-run step 2; check `~/.ssh/config` on the control plane for a `Host <runner>` block with `IdentitiesOnly yes`. |
+| `Permission denied` / `Too many authentication failures` | The step-2 snippet wasn't run (key not authorized), or an old hand-made config block shadows the managed one. Re-run step 2 (it also repairs a key an older snippet stuck onto the end of another line); check `~/.ssh/config` on the control plane for a `Host <runner>` block with `IdentitiesOnly yes`. An address in IPv6 form cannot be used: use a hostname or an IPv4 address. |
 | `command not found: docker` | The runner's non-interactive PATH misses Docker (classic on macOS). Re-run the step-2 snippet; confirm with `ssh user@runner 'docker version'` — from a plain shell, *not* a terminal where an ssh-agent may paper over it. |
 | Reachable in your terminal, unreachable in the app | Your shell has an ssh-agent the service doesn't. The managed config block avoids agents entirely — verify with `env -i HOME=$HOME docker -H ssh://user@runner version`. |
 | Provision fails with "workspace failed" | Runtime image missing or stale on the runner — use **Install image**, then Retry. |

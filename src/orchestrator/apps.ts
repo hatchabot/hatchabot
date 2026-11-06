@@ -372,6 +372,28 @@ async function currentLink(d: InstallDeps, app: string): Promise<string> {
   if (r.code !== 0) throw new AppError(`Could not tell which release of ${app} is live (${errText(r) || 'no output'}), so nothing was changed. Try again.`);
   return r.stdout.trim();
 }
+/**
+ * The config fields Hatchabot fills whose value in the agent no longer matches
+ * the fact: its bot was swapped or removed, the owner linked Telegram later.
+ * They are written only at an install, so Update on the same commit said there
+ * was nothing to do while the app held the old bot's name (HB-0426). [] when
+ * the config cannot be read or judged: the install would report that itself.
+ */
+export async function staleFilledFields(d: InstallDeps, m: AppManifest): Promise<string[]> {
+  const filled = (m.config?.fields ?? []).filter((f) => f.from);
+  if (!filled.length) return [];
+  const live = `${appPaths(m.app).data}/${m.config?.file ?? 'config.json'}`;
+  const read = await sh(d, `if [ -e ${sq(live)} ]; then cat ${sq(live)}; fi`);
+  if (read.code !== 0) return [];
+  try {
+    const existing = (read.stdout.trim() ? JSON.parse(read.stdout) : {}) as Record<string, unknown>;
+    const { config } = mergeConfig(m, d.facts, existing, {});
+    // No value and an empty one are the same: a fact that was never there is no change.
+    const seen = (v: unknown) => (v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length) ? '' : JSON.stringify(v));
+    return filled.filter((f) => seen(existing[f.key]) !== seen(config[f.key])).map((f) => f.key);
+  } catch { return []; }
+}
+
 const shaOf = (link: string) => /releases\/([0-9a-f]{12,40})$/.exec(link)?.[1];
 
 /** The commit `current` points at now (undefined: not installed). */

@@ -156,12 +156,15 @@ hand: set `HATCHABOT_AUTH=accounts` in `.env` and restart.
 that expires in 48 hours; they open it, choose their own password, and are
 signed in. You never invent a password or send one through another app, and an
 unclaimed invitation shows in the roster with a **Copy invitation** button.
+One past its time says so, with **Send a new invitation**.
 
 The same panel offers **"Share my AI source with them"**, ticked by default —
 the step everyone forgets. An account with no source can do nothing, and the
 first thing it used to meet was a raw validation error. (A machine-login source
 is never shared automatically; that one hands over this machine's own Claude
-login and keeps its separate confirmation.)
+login and keeps its separate confirmation.) A source already shared meets the
+tick, so nothing more is shared; otherwise the invitation names the source it
+shared, or says that it could not share one.
 
 A member whose account has no source now sees a short page saying so, with the
 one sentence to send their host owner — not the owner's setup wizard telling

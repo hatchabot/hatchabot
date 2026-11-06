@@ -24,6 +24,22 @@ const INSTALL = readFileSync('install.sh', 'utf8');
 // Away from any terminal, so the installer's questions cannot reach one.
 const hasSetsid = spawnSync('sh', ['-c', 'command -v setsid']).status === 0;
 
+/**
+ * Links each folder's tools into one, the first of a name winning. It keeps its
+ * own list of names: where /bin links to /usr/bin every name comes up twice, and
+ * existsSync says false for a broken link, so asking the folder would link it again.
+ */
+function linkTools(from: string[], tools: string) {
+  const seen = new Set<string>();
+  for (const dir of from) {
+    for (const t of existsSync(dir) ? readdirSync(dir) : []) {
+      if (/^(docker.*|podman.*|sudo|sg|systemctl|launchctl|lxc|apt|apt-get|dpkg|curl|sh|id|git)$/.test(t) || seen.has(t)) continue;
+      seen.add(t);
+      symlinkSync(join(dir, t), join(tools, t));
+    }
+  }
+}
+
 /** A sandbox whose curl serves BODY for any URL (to the -o file) and logs the URL; sudo and sh only log. */
 function sandbox(body: string) {
   const root = mkdtempSync(join(tmpdir(), 'hb-pins-')); dirs.push(root);
@@ -38,15 +54,24 @@ echo "curl $url" >> '${log}'; cat '${join(root, 'body')}' > "$out"`);
   shim(bin, 'id', 'case "$1" in -u) echo 1000 ;; -un) echo someone ;; *) echo 1000 ;; esac');
   // The machine's tools, but no Docker (this machine's would be found) and nothing that reaches its services.
   const tools = join(root, 'tools'); mkdirSync(tools);
-  for (const dir of ['/usr/bin', '/bin']) {
-    for (const t of existsSync(dir) ? readdirSync(dir) : []) {
-      if (/^(docker.*|podman.*|sudo|sg|systemctl|launchctl|lxc|apt|apt-get|dpkg|curl|sh|id|git)$/.test(t) || existsSync(join(tools, t))) continue;
-      symlinkSync(join(dir, t), join(tools, t));
-    }
-  }
+  linkTools(['/usr/bin', '/bin'], tools);
   const calls = () => (existsSync(log) ? readFileSync(log, 'utf8') : '');
   return { root, bin, home, calls, env: (extra: Record<string, string> = {}) => scriptEnv(home, `${bin}:${tools}`, extra) };
 }
+
+describe('the sandbox builds on any machine (HB-0398)', () => {
+  it('takes a broken link in a folder that a second folder links to', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-pins-')); dirs.push(root);
+    const usr = join(root, 'usr-bin'), bin = join(root, 'bin'), tools = join(root, 'tools');
+    for (const d of [usr, tools]) mkdirSync(d);
+    symlinkSync(usr, bin);
+    symlinkSync(join(root, 'gone'), join(usr, 'broken'));
+    shim(usr, 'works', 'exit 0');
+    shim(usr, 'docker', 'exit 0');
+    linkTools([usr, bin], tools);
+    expect(readdirSync(tools).sort()).toEqual(['broken', 'works']);
+  });
+});
 
 describe('install.sh runs no unchecked remote code as root (HB-0035)', () => {
   it('pipes nothing it downloads into a shell, and never uses sudo -E', () => {

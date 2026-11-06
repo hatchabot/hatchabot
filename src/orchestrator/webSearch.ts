@@ -134,7 +134,9 @@ export async function probeBrave(key: string, deps: { fetchImpl?: typeof fetch; 
   if (r.status === 429 || r.status === 402) return { status: 'exhausted', detail: 'The Brave key has run out of quota.', ...quota };
   if (r.status === 401 || r.status === 403 || r.status === 422) return { status: 'rejected', detail: `Brave refused the key (${r.status}). It may be wrong, or its plan ended.` };
   if (!r.ok) return { status: 'busy', detail: `Brave answered ${r.status}. That is usually its own trouble and passes.` };
-  if (remaining !== undefined && remaining <= RESERVE) return { status: 'low', detail: `The Brave key has ${remaining} queries left.`, ...quota };
+  // A monthly limit of 0 means no cap, and remaining is then 0 too: a metered plan, not an empty key (HB-0454).
+  if (limit === 0) return { status: 'ok', detail: 'Brave works, on a plan with no monthly cap.' };
+  if (remaining !== undefined && limit !== undefined && remaining <= RESERVE) return { status: 'low', detail: `The Brave key has ${remaining} queries left.`, ...quota };
   return { status: 'ok', detail: remaining !== undefined ? `Brave works, with ${remaining}${limit !== undefined ? ` of ${limit}` : ''} queries left.` : 'Brave works.', ...quota };
 }
 

@@ -261,7 +261,9 @@ rm -rf node_modules.prev
 # and the rollback's too, with the dependencies aside (HB-0372).
 [ ! -e .git/index.lock ] || { echo "$PWD/.git/index.lock is held, so nothing was changed — try again later. If no git is running there, remove it: rm $PWD/.git/index.lock"; exit 3; }
 CHANGING=1
-printf 'from %s\nto %s\n' "$CUR" "$TAG" > "$FROM_FILE"
+# pins-recorded: upgrade.sh reads this record too, and a deploy pins nothing, so a
+# version in this install's channel file is the person's own (upgrade.sh, HB-0428).
+printf 'from %s\nto %s\npins-recorded\n' "$CUR" "$TAG" > "$FROM_FILE"
 if [ -d node_modules ]; then mv node_modules node_modules.prev; fi; ASIDE=1
 checkout_recorded --quiet "$TAG"
 # A failed install must not leave prod checked out at a tag it can't run.

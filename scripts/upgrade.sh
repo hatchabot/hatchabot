@@ -23,7 +23,9 @@ DIR="$PWD"
 
 # Checking out a release replaces this file while bash is still reading it.
 if [ -z "${HATCHABOT_UPGRADE_COPY:-}" ]; then
-  tmp="$(mktemp)"; cp "$0" "$tmp"
+  # Its own message and exit 3: under set -e a full temp folder ended this with
+  # exit 1, which the channel timer reads as "this release is bad" (HB-0438).
+  tmp="$(mktemp)" && cp "$0" "$tmp" || { echo "Could not make a temporary copy of this script (a full disk?): nothing was changed. Free some space, then try again."; exit 3; }
   HATCHABOT_UPGRADE_COPY="$tmp" HATCHABOT_UPGRADE_DIR="$DIR" exec bash "$tmp" "$@"
 fi
 DIR="$HATCHABOT_UPGRADE_DIR"; cd "$DIR"
@@ -40,6 +42,8 @@ RESTARTED=0     # 1 once the service was restarted onto the new release
 ASIDE=0         # 1 once a git install's node_modules was moved aside
 SERVING=0       # 1 once the new release is up: only tidying is left
 LOCK=""; STAGE=""
+PIN_ON=""       # the pin this run answers for, its own or one a killed run left; PRE_*: what it replaced
+PIN_RECORD=""; PRE_CHANNEL=""; PRE_USER_CHANNEL=""
 undo() { :; }   # set below, per kind of install
 finish() {
   local rc=$?
@@ -51,6 +55,13 @@ finish() {
   # the runtime image): it is upgraded, not a failure to try again (HB-0266).
   # What was half removed goes with the next upgrade.
   if [ "$SERVING" = 1 ]; then rm -f "$SWAPPING" "$FROM_FILE"; rc=0; fi
+  # A pin on a release this run did not end up on would hold the machine at one
+  # it is not running, with the timer quiet and the public address's safeguard off
+  # (HB-0428), so it goes back to what it replaced. Unless a channel was named since.
+  if [ -n "$PIN_ON" ]; then
+    if [ "$rc" != 0 ] && [ "$(remembered_channel)" = "$PIN_ON" ]; then unpin; fi
+    rm -f "$PIN_RECORD" "$PIN_RECORD.tmp"
+  fi
   # Only its holder lets it go: a lock cleared and taken by another run is theirs.
   [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
   rm -f "$HATCHABOT_UPGRADE_COPY"; [ -z "$STAGE" ] || rm -rf "$STAGE"
@@ -72,6 +83,7 @@ trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 # reads (remember_channel). install.sh and follow-channel.sh do the same.
 CHANNEL_FILE="$DIR/data/channel"; USER_CHANNEL_FILE="$HOME/.config/hatchabot/channel"; PER_INSTALL_FROM=v2.169.0
 remembered_channel() { local f; for f in "$CHANNEL_FILE" "$USER_CHANNEL_FILE"; do [ -f "$f" ] && { tr -d '[:space:]' < "$f"; return 0; }; done; return 0; }
+file_channel() { if [ -f "$1" ]; then tr -d '[:space:]' < "$1"; fi; }
 ARG="${1:-}"
 CHANNEL="$ARG"
 [ -n "$CHANNEL" ] || CHANNEL="$(remembered_channel)"
@@ -114,12 +126,37 @@ remember_channel() {
 }
 if [ "${HATCHABOT_UPGRADE_BY_TIMER:-}" != 1 ]; then
 case "$ARG" in stable|beta|latest) remember_channel "$ARG" ;; esac
+fi
 # A version named by hand is a pin: the channel timer leaves this machine
 # alone until a channel is named again (a rollback used to be undone within
-# ten minutes; use-case audit, 2026-09-27).
-case "$ARG" in v[0-9]*) remember_channel "$ARG" "$ARG"
-  echo "Pinned to $ARG — automatic upgrades pause here. Follow a channel again with: hatchabot upgrade stable" ;; esac
-fi
+# ten minutes; use-case audit, 2026-09-27). Written once that release is known
+# to be there, under the lock (below), not here: a mistyped version, a dirty
+# tree or a busy lock left a pin on a release never installed, with the timer
+# quiet for good and the public address's safeguard off (HB-0428).
+# What it replaces is written down first, beside the lock (PIN_RECORD): SIGKILL
+# or a power cut runs no finish, and the next run, the timer's as a rule, has to
+# know where to go back to if this release does not end up installed. A run that
+# took over a killed run's pin (below) goes back to what that pin replaced.
+pin_named() {
+  [ "${HATCHABOT_UPGRADE_BY_TIMER:-}" != 1 ] || return 0
+  case "$ARG" in v[0-9]*) ;; *) return 0 ;; esac
+  if [ -z "$PIN_ON" ]; then
+    PRE_CHANNEL="$(file_channel "$CHANNEL_FILE")"; PRE_USER_CHANNEL="$(file_channel "$USER_CHANNEL_FILE")"
+  fi
+  { printf 'pin %s\nchannel %s\nuser %s\n' "$ARG" "$PRE_CHANNEL" "$PRE_USER_CHANNEL" > "$PIN_RECORD.tmp" && mv -f "$PIN_RECORD.tmp" "$PIN_RECORD"; } \
+    || { echo "Could not write $PIN_RECORD (a full disk?), so nothing was changed. Free some space, then try again."; exit 3; }
+  PIN_ON="$ARG"
+  remember_channel "$ARG" "$ARG"
+  echo "Pinned to $ARG — automatic upgrades pause here. Follow a channel again with: hatchabot upgrade stable"
+}
+unpin() {
+  local f v
+  for f in CHANNEL_FILE USER_CHANNEL_FILE; do
+    if [ "$f" = CHANNEL_FILE ]; then v="$PRE_CHANNEL"; else v="$PRE_USER_CHANNEL"; fi
+    if [ -n "$v" ]; then mkdir -p "$(dirname "${!f}")"; printf '%s\n' "$v" > "${!f}"; else rm -f "${!f}"; fi
+  done
+  echo "Not pinned to $PIN_ON: the upgrade did not finish, so this machine goes on as it was."
+}
 
 # One upgrade at a time: the channel timer and a hand-run upgrade used to race
 # each other's node_modules.prev (30th audit). The lock lives outside the tree
@@ -171,6 +208,39 @@ fi
 # file in it before moving that file in: the next run puts the previous
 # release back first, then upgrades as usual.
 SWAPPING="$DIR/.swapping"; PREV="$DIR/.prev-release"
+FROM_FILE="${LOCK_PATH%.lock.d}.from"   # a git install's, described below
+# A pin a killed run left: `pin <release>`, `channel <what data/channel held>`,
+# `user <what the user's file held>`. This run now sees it through, and if that
+# release does not end up installed, finish puts those back (HB-0428): until then
+# the machine is held at a release it does not run, and the timer would have
+# nothing more to do. A channel named since, or a kill before the pin was written:
+# the record no longer means anything. An upgrade.sh from before the record left
+# only the pin and the swap to repair, so what the pin replaced is not known: it
+# comes off, which leaves the other file, then the timer's own channel.
+# Only that one: every upgrade.sh that writes the record says so in the swap's or
+# the checkout's own record (PINS_RECORDED), and writes the pin's record first. A
+# version with no pin record beside one of those is the person's own: a pin
+# completed earlier, or one a failed repair just put back while that repair is
+# still owed. Read as a leftover, the next failed repair deleted it (HB-0428).
+PIN_RECORD="${LOCK_PATH%.lock.d}.pin"; PINS_RECORDED="pins-recorded"
+CUT_RECORD="$FROM_FILE"; [ "$BUNDLED" = 0 ] || CUT_RECORD="$SWAPPING"
+if [ -f "$PIN_RECORD" ]; then
+  LEFT_PIN="$(sed -n 's/^pin //p' "$PIN_RECORD" | sed -n 1p)"
+  if [ -n "$LEFT_PIN" ] && [ "$(remembered_channel)" = "$LEFT_PIN" ]; then
+    PRE_CHANNEL="$(sed -n 's/^channel //p' "$PIN_RECORD" | sed -n 1p)"
+    PRE_USER_CHANNEL="$(sed -n 's/^user //p' "$PIN_RECORD" | sed -n 1p)"
+    PIN_ON="$LEFT_PIN"
+  else
+    rm -f "$PIN_RECORD"
+  fi
+elif [ -f "$CUT_RECORD" ] && ! grep -qx "$PINS_RECORDED" "$CUT_RECORD"; then
+  LEFT_PIN="$(remembered_channel)"
+  case "$LEFT_PIN" in v[0-9]*)
+    PRE_CHANNEL="$(file_channel "$CHANNEL_FILE")"; [ "$PRE_CHANNEL" != "$LEFT_PIN" ] || PRE_CHANNEL=""
+    PRE_USER_CHANNEL="$(file_channel "$USER_CHANNEL_FILE")"; [ "$PRE_USER_CHANNEL" != "$LEFT_PIN" ] || PRE_USER_CHANNEL=""
+    PIN_ON="$LEFT_PIN" ;;
+  esac
+fi
 # A name a bundle's file list may not touch: a path, or what is this machine's.
 not_ours() { case "$1" in ''|*/*|.|..|.env|data|.swapping|.swapping.tmp|.prev-release) return 0 ;; esac; return 1; }
 # Back to the release in .prev-release: the previous files moved back, then
@@ -227,7 +297,6 @@ RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tes
 # (SIGKILL, a power cut): the checkout may be on the new release with half
 # its dependencies installed, and the old ones in node_modules.prev. The next
 # run puts the old release back first, then upgrades as usual (HB-0043).
-FROM_FILE="${LOCK_PATH%.lock.d}.from"
 # Every checkout under the record writes its holder there first, by the process
 # that becomes git (pid and start time, as the lock's holder): a kill in the
 # checkout leaves .git/index.lock, and every later upgrade failed on it.
@@ -334,7 +403,9 @@ fi
 # (audit #035).
 if [ "$BUNDLED" = 1 ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
 else CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"; fi
-if [ "$CUR" = "$TARGET" ]; then echo "Already on $TARGET ($CHANNEL)."; exit 0; fi
+# Killed once that release was up: it is what is installed, so the pin was kept.
+if [ -n "$PIN_ON" ] && [ "$CUR" = "$PIN_ON" ]; then rm -f "$PIN_RECORD"; PIN_ON=""; PRE_CHANNEL=""; PRE_USER_CHANNEL=""; fi
+if [ "$CUR" = "$TARGET" ]; then pin_named; echo "Already on $TARGET ($CHANNEL)."; exit 0; fi
 case "$CHANNEL" in v[0-9]*) ;; *)
   # A channel never takes a machine backwards (this one may run ahead of it).
   if [[ "$CUR" == v* ]] && [ "$(vernewer "$CUR" "$TARGET")" = "$CUR" ]; then
@@ -358,9 +429,45 @@ if [ "$BUNDLED" = 1 ]; then
   PLATFORM="$(sed -nE 's/.*"platform":"([^"]+)".*/\1/p' BUNDLE.json)"
   NAME="hatchabot-$TARGET-$PLATFORM.tar.gz"
   BASE="${HATCHABOT_BUNDLE_BASE:-https://github.com/${HATCHABOT_SLUG:-hatchabot/hatchabot}/releases/download}"
-  STAGE="$(mktemp -d "$(dirname "$DIR")/.hatchabot-next-XXXXXX")"
+  # The disk, said as the disk: it read as "no bundle yet", or as a release that
+  # would not unpack, and the timer went on trying (HB-0438). A bundle's download
+  # and unpacked copy sit beside the install until the swap.
+  free_beside() { df -Pk "$(dirname "$DIR")" 2>/dev/null | awk 'END { if (NF >= 4) printf "%d MB free", $4 / 1024 }' || true; }
+  disk_full() {
+    local free
+    free="$(free_beside)"
+    echo "The disk holding $(dirname "$DIR") is full${free:+ ($free)}, so the $TARGET bundle could not be written there: nothing was changed. Free about 1 GB, then try again."
+    exit 3
+  }
+  # A folder that cannot be made there is not always the disk: a parent this user
+  # cannot write fails the same way, and "full" sent people freeing space.
+  no_stage() {
+    local at free
+    at="$(dirname "$DIR")"
+    if [ ! -w "$at" ]; then
+      echo "This user cannot write to $at, where the $TARGET bundle goes until the swap: nothing was changed. Fix that folder's permissions, then try again."
+      exit 3
+    fi
+    free="$(free_beside)"
+    echo "Could not make a folder in $at for the $TARGET bundle: no room or no permission there${free:+ ($free)}: nothing was changed. Free about 1 GB or fix that folder's permissions, then try again."
+    exit 3
+  }
+  STAGE="$(mktemp -d "$(dirname "$DIR")/.hatchabot-next-XXXXXX")" || no_stage
   sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
-  curl -fsSL --retry 3 -o "$STAGE/$NAME" "$BASE/$TARGET/$NAME" || { echo "No bundle for $TARGET on $PLATFORM yet — try again later."; exit 3; }
+  # What failed: this machine's disk (curl 23), no such file (a 404; 37 on a
+  # file:// test bed), or the network. A version named by hand that is not there
+  # is refused; a release a channel names may just not be published yet.
+  DL_RC=0; DL_CODE="$(curl -sSL --retry 3 -o "$STAGE/$NAME" -w '%{http_code}' "$BASE/$TARGET/$NAME")" || DL_RC=$?
+  case "$DL_RC:$DL_CODE" in
+    0:200|0:000) ;;
+    23:*) disk_full ;;
+    0:404|37:*)
+      case "$CHANNEL" in
+        v[0-9]*) if [ "${HATCHABOT_UPGRADE_BY_TIMER:-}" != 1 ]; then echo "There is no release $TARGET for $PLATFORM: nothing was changed. Check the version, or follow a channel with: hatchabot upgrade stable"; exit 2; fi ;;
+      esac
+      echo "No bundle for $TARGET on $PLATFORM yet — try again later."; exit 3 ;;
+    *) echo "Could not download the $TARGET bundle (curl $DL_RC, HTTP ${DL_CODE:-none}): nothing was changed — try again later."; exit 3 ;;
+  esac
   # What the release vouches for (#38): the bundle's size and sha256 as its
   # release-manifest.json names them (scripts/release-manifest.sh, which also
   # keeps the manifest for the runtime image step below). A manifest that is
@@ -377,13 +484,20 @@ if [ "$BUNDLED" = 1 ]; then
     3) echo "Could not fetch the $TARGET release's manifest to check its bundle — try again later."; exit 3 ;;
     *) echo "Not installing the $TARGET bundle: the release's manifest does not vouch for it (above). Staying on $CUR."; exit 3 ;;
   esac
-  tar -xzf "$STAGE/$NAME" -C "$STAGE" || { echo "Could not unpack the $TARGET bundle."; exit 3; }
+  TAR_ERR=""
+  # In English: its message is matched below.
+  TAR_ERR="$(LC_ALL=C tar -xzf "$STAGE/$NAME" -C "$STAGE" 2>&1)" || {
+    printf '%s\n' "$TAR_ERR" | tail -n 3
+    case "$TAR_ERR" in *"No space left"*|*"Disk quota"*) disk_full ;; esac
+    echo "Could not unpack the $TARGET bundle."; exit 3
+  }
   NEW="$STAGE/hatchabot"
   ( cd "$NEW" && ./.node/bin/node -e 'new (require("better-sqlite3"))(":memory:").exec("SELECT 1")' ) >/dev/null 2>&1 || { echo "The $TARGET bundle does not run on this machine — staying on $CUR."; exit 3; }
   # A bundle from before the file list: what it holds is what it has.
   [ -f "$NEW/.bundle-files" ] || ( cd "$NEW" && ls -A > .bundle-files )
   [ -f .bundle-files ] || ls -A "$NEW" > .bundle-files.guess
   OLDLIST="$( [ -f .bundle-files ] && cat .bundle-files || cat .bundle-files.guess )"; rm -f .bundle-files.guess
+  pin_named
   rm -rf "$PREV"; mkdir -p "$PREV"
   # What came in from the new bundle is written in .swapping (above), one name
   # a line, BEFORE it moves: a swap that stops part-way (a failed mv, or this
@@ -398,7 +512,7 @@ if [ "$BUNDLED" = 1 ]; then
     return 0
   }
   undo() { rollback_bundle; }
-  printf 'from %s\nto %s\nstage %s\n' "$CUR" "$TARGET" "$STAGE" > "$SWAPPING"
+  printf 'from %s\nto %s\nstage %s\n%s\n' "$CUR" "$TARGET" "$STAGE" "$PINS_RECORDED" > "$SWAPPING"
   CHANGING=1
   # One name at a time, the old one aside and the new one straight in, and
   # scripts/ first: cut off, the tree is short at most the one name being
@@ -477,8 +591,9 @@ rm -rf node_modules.prev
 # Another git's lock, with nothing moved yet: the checkout would fail on it,
 # and the rollback's too, with the dependencies aside (HB-0372).
 [ ! -e .git/index.lock ] || { echo "$DIR/.git/index.lock is held, so nothing was changed — try again later. If no git is running there, remove it: rm $DIR/.git/index.lock"; exit 3; }
+pin_named
 CHANGING=1
-printf 'from %s\nto %s\n' "$CUR" "$TARGET" > "$FROM_FILE"
+printf 'from %s\nto %s\n%s\n' "$CUR" "$TARGET" "$PINS_RECORDED" > "$FROM_FILE"
 if [ -d node_modules ]; then mv node_modules node_modules.prev; fi; ASIDE=1
 checkout_recorded --quiet "$TARGET"
 # Exit 3: the install step failed (usually transient) and the old release is back untouched.
@@ -497,7 +612,16 @@ fi
 # on OpenClaw 2026.7.1-2 two releases after 2026.9.6 became "the version
 # every install gets". Best effort: a failed pull is a line here, never a
 # failed upgrade, and the app's Settings → Images does the same on demand.
+# On the daemon the service uses: the one .env names (a tenant's rootless daemon
+# on a shared host), as setup-host.sh reads it; neither this shell nor the
+# timer has .env, so the image was looked for and fetched on the default daemon,
+# and the service's kept the old one (HB-0431). The last line wins, as systemd's
+# EnvironmentFile reads it.
 if [ "${HATCHABOT_UPGRADE_IMAGE:-1}" = 1 ] && command -v docker >/dev/null 2>&1; then
+  if [ -f .env ] && grep -q '^DOCKER_HOST=' .env; then
+    DH="$(sed -n 's/^DOCKER_HOST=//p' .env | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
+    if [ -n "$DH" ]; then export DOCKER_HOST="$DH"; else unset DOCKER_HOST; fi
+  fi
   WANT="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
   HAVE="$(docker image inspect hatchabot-runtime:latest --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
   # Only upwards: a promoted candidate newer than the default stays.

@@ -11,7 +11,7 @@ They run **before a release reaches anyone else**:
    `latest`), so the live install now runs the new release.
 2. `node scripts/live.mjs due` lists the live tests due for what the install
    runs, and why.
-3. Run them all: `node scripts/live.mjs run-due [--args runner-scenarios="--old-image <image>"]`
+3. Run them all: `node scripts/live.mjs run-due --ai-source "<name>" [--args runner-scenarios="--old-image <image>"]`
    (or one: `node scripts/live.mjs run <name> [-- its own arguments]`). Each
    result is added to [live-test-runs.md](live-test-runs.md); commit it.
 4. Promote. `scripts/promote.sh` refuses while any test is due for the tag
@@ -58,9 +58,9 @@ on a machine that can; it does not hold the gate here.
 | `restore-drill` | The newest complete nightly backup restores, every agent's archive into its own throwaway volume (no network, no secrets mounted), without touching the live system; writes its record under `<backups>/drills` | A backup set | 10–60 min | none |
 | `upgrade-check` | Databases made by older releases open with this one | Nothing (temporary databases) | 2–5 min | none |
 | `smoke-adopt` | Switching to Hatchabot: an OpenClaw agent is found and adopted web-only on a throwaway control plane; its workspace and tasks arrive, its console answers, its data folder mounts | Nothing (its own ports); `-- --with-telegram` takes over a bot from `.env.smoke` instead | 2–5 min | none |
-| `clean-install` | A stranger's install on a brand-new Linux machine, and a new owner's first steps | LXD here; `-- --ai-source "<name>"`; stop the VM after | 20–40 min | one |
-| `clean-install-ubuntu-2204` | The clean install on Ubuntu 22.04, the oldest glibc the bundle supports (a glibc bug broke stable there once) | As `clean-install` | 20–40 min | one |
-| `clean-install-debian-12` | The clean install on Debian 12 | As `clean-install`, plus the local LXD image `hb-debian-12`, made once with `scripts/make-debian-test-image.sh` from Debian's own cloud image (LXD's image server has no arm64 Debian VM image). It runs on either CPU | 5–40 min | one |
+| `clean-install` | A stranger's install on a brand-new Linux machine, and a new owner's first steps, then the agent regression on it | LXD here; `-- --ai-source "<name>"` (without it the agent step does not run, and the run is a skip); stop the VM after | 20–40 min | about eight |
+| `clean-install-ubuntu-2204` | The clean install on Ubuntu 22.04, the oldest glibc the bundle supports (a glibc bug broke stable there once) | As `clean-install` | 20–40 min | about eight |
+| `clean-install-debian-12` | The clean install on Debian 12 | As `clean-install`, plus the local LXD image `hb-debian-12`, made once with `scripts/make-debian-test-image.sh` from Debian's own cloud image (LXD's image server has no arm64 Debian VM image). It runs on either CPU | 5–40 min | about eight |
 | `shared-host` | Two tenants on one machine cannot reach each other | Test VMs. On hold with Hatchabot Cloud: never due | 30+ min | none |
 
 **No live test uses a Telegram bot.** Bots are scarce (about 20 per Telegram
@@ -71,9 +71,12 @@ Tests that make agents on the live install run **one at a time**: an account
 near its agent limit (`HATCHABOT_MAX_AGENTS_PER_ACCOUNT`) has room for few,
 they share its Docker, and the runner test points the runner's default image
 at an old one while it runs. Tests flagged `parallel` in the register touch
-no agent — `privacy` (reads GitHub), `upgrade-check` (temporary databases)
-and the three clean installs (their own throwaway VMs) — and `run-due` runs
-them alongside the others, each test's output in its own log file.
+no agent — `privacy` (reads GitHub) and `upgrade-check` (temporary
+databases) — and `run-due` runs them alongside the others, each test's output
+in its own log file. The three clean installs make no agent on the live
+install, but they also run one at a time: a VM started alongside the others
+kept stopping by itself (HB-0381). Give them a source with
+`run-due --ai-source "<name>"`.
 
 Not automated (check by hand before a release that touches them): Telegram
 end to end (only a person can message a bot), including a pool bot handed

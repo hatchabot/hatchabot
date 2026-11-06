@@ -145,16 +145,118 @@ function installWorld() {
   for (const refuse of ['sudo', 'apt-get', 'brew']) shim(bin, refuse, `echo "${refuse} $*" >> ${JSON.stringify(log)}; exit 1`);
   const dir = join(root, 'hatchabot');
   const w = { root, home, bin, releases, log, dir };
-  const run = (tag = TAG) => {
+  const run = (tag = TAG, extra: Record<string, string> = {}) => {
     const cmd = [resolve('install.sh'), tag];
     return spawnSync(hasSetsid ? 'setsid' : 'bash', hasSetsid ? ['bash', ...cmd] : cmd, {
       encoding: 'utf8', timeout: 60_000, input: '',
-      env: scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_DIR: dir, TMPDIR: root }),
+      env: scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_DIR: dir, TMPDIR: root, ...extra }),
     });
   };
   return { ...w, run };
 }
 const NAME = `hatchabot-${TAG}-linux-x64.tar.gz`;
+
+describe('install.sh when the bundle will not fit or will not move (HB-0429, HB-0438)', () => {
+  const REAL_MV = spawnSync('sh', ['-c', 'command -v mv'], { encoding: 'utf8' }).stdout.trim();
+  // A move that fails, part-way for the copy to the folder beside the install, as a full disk does.
+  const failingMv = (w: ReturnType<typeof installWorld>, to: string) => shim(w.bin, 'mv', `for last; do :; done
+case "$last" in ${to}) mkdir -p "$last"; echo half > "$last/half-copied"; echo "mv: cannot write: No space left on device" >&2; exit 1 ;; esac
+exec ${JSON.stringify(REAL_MV)} "$@"`);
+  const nothingLeft = (w: ReturnType<typeof installWorld>) => {
+    expect(existsSync(w.dir), 'the install folder').toBe(false);
+    expect(existsSync(`${w.dir}.partial`), 'the partial copy').toBe(false);
+    expect(read(w.log)).not.toContain('setup-host');
+    expect(read(w.log)).not.toContain('git clone');
+  };
+
+  it('the copy beside the folder fails: stopped with the reason, nothing left, no setup and no native install', () => {
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    failingMv(w, '*.partial');
+    const r = w.run();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('No space left on device');
+    expect(r.stderr).toContain("Could not put release " + TAG + "'s bundle on this machine");
+    expect(r.stdout).not.toContain('unpacked:');
+    nothingLeft(w);
+  });
+
+  it('a re-run with room recovers: the folder is whole, not "not a Hatchabot install"', () => {
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    failingMv(w, '*.partial');
+    expect(w.run().status).toBe(1);
+    rmSync(join(w.bin, 'mv'));
+    const again = w.run();
+    expect(again.status, again.stdout + again.stderr).toBe(0);
+    expect(again.stdout).toContain('unpacked: Hatchabot with its own Node');
+    expect(JSON.parse(read(join(w.dir, 'BUNDLE.json'))).tag).toBe(TAG);
+    expect(existsSync(`${w.dir}.partial`)).toBe(false);
+  });
+
+  it('a partial copy left by a killed installer does not get in the way', () => {
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    mkdirSync(`${w.dir}.partial`); writeFileSync(join(`${w.dir}.partial`, 'half-copied'), 'x');
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(join(w.dir, 'half-copied'))).toBe(false);
+    expect(existsSync(`${w.dir}.partial`)).toBe(false);
+  });
+
+  it('HATCHABOT_DIR with a trailing slash installs in that folder, not "no room" (HB-0429)', () => {
+    for (const end of ['/', '//']) {
+      const w = installWorld();
+      publish(w, TAG, 'linux-x64');
+      const r = w.run(TAG, { HATCHABOT_DIR: `${w.dir}${end}` });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toContain('unpacked: Hatchabot with its own Node');
+      expect(JSON.parse(read(join(w.dir, 'BUNDLE.json'))).tag).toBe(TAG);
+      expect(existsSync(join(w.dir, '.partial')), 'inside it').toBe(false);
+      expect(existsSync(`${w.dir}.partial`)).toBe(false);
+    }
+  });
+
+  it('tar out of space in another language: still the disk, as tar is asked in English (HB-0438)', () => {
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    shim(w.bin, 'tar', '[ "${LC_ALL:-}" = C ] && echo "tar: x: Cannot write: No space left on device" >&2 || echo "tar: x: Schreiben fehlgeschlagen: Auf dem Gerät ist kein Speicherplatz mehr verfügbar" >&2; exit 2');
+    const r = w.run(TAG, { LC_ALL: 'de_DE.UTF-8', LANG: 'de_DE.UTF-8' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/no room or no permission \(above\)/);
+    expect(r.stdout).not.toContain('using the native install');
+  });
+
+  it('tar out of space: the disk, not the native install on the same disk', () => {
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    shim(w.bin, 'tar', 'echo "tar: hatchabot/.node/bin/node: Cannot write: No space left on device" >&2; exit 2');
+    const r = w.run();
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('No space left on device');
+    expect(r.stderr).toMatch(/no room or no permission \(above\), with \d+ MB free at .*Nothing was installed/s);
+    expect(r.stdout).not.toContain('using the native install');
+    nothingLeft(w);
+  });
+
+  it('curl unable to write the download: the same, not "no network?"', () => {
+    const w = installWorld();
+    shim(w.bin, 'curl', 'echo 200; exit 23');
+    const r = w.run();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no room or no permission');
+    expect(r.stderr).not.toContain('no network?');
+    nothingLeft(w);
+  });
+
+  it('a tar that fails for another reason still falls back', () => {
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    shim(w.bin, 'tar', 'echo "gzip: stdin: not in gzip format" >&2; exit 2');
+    const r = w.run();
+    expect(r.stdout).toContain('using the native install instead');
+  });
+});
 
 describe('install.sh checks the bundle against the release manifest (#38)', () => {
   it('a bundle the manifest vouches for is installed, without the .sha256, and the manifest is kept', () => {

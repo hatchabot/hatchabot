@@ -339,10 +339,21 @@ images() {
     done
 }
 
+# The sets in the backup folder, by the test the removal uses: the folder also
+# holds drills/ and restore-safety folders, which are not sets (HB-0440).
+is_set() { [ -d "$1" ] && { [ -f "$1/backup-status.json" ] || [ -f "$1/hatchabot.sqlite" ]; }; }
+backup_sets() {
+  local d n=0
+  for d in "$BACKUP_DIR"/20??-??-??; do
+    if is_set "$d"; then n=$((n + 1)); fi
+  done
+  echo "$n"
+}
+
 say "This install"
 echo "  repo:      $REPO"
 echo "  data:      $DATA_DIR $([ -f "$DB_PATH" ] && echo "(database present)" || echo "(no database)")"
-echo "  backups:   $BACKUP_DIR $([ -d "$BACKUP_DIR" ] && echo "($(ls -1 "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d ' ') sets)" || echo "(none)")"
+echo "  backups:   $BACKUP_DIR $([ -d "$BACKUP_DIR" ] && echo "($(backup_sets) sets)" || echo "(none)")"
 if have docker; then
   echo "  agents:    $(containers | wc -l | tr -d ' ') containers, $(volumes | wc -l | tr -d ' ') volumes"
   echo "  images:    $(images | wc -l | tr -d ' ') runtime images"
@@ -614,12 +625,51 @@ if [ "$PURGE" = 1 ]; then
       [ -n "$o" ] && [ -d "$BACKUP_DIR/restore-safety-$o" ] || continue
       rm -rf "$BACKUP_DIR/restore-safety-$o" && echo "  removed the safety copies restores left in $BACKUP_DIR"
     done
+    # The restore drill records name agents' volumes, so they go, but only what can
+    # be told to be this install's (HB-0440): this folder may be a NAS other machines
+    # back up into, and a `drills` in it may be theirs or anyone's. A record says whose
+    # it is, or an older one names a set that says so: its mark or the key it saved.
+    # A set that is gone or carries neither says nothing, and with no key here nothing
+    # can be told at all. What stays is said.
+    is_mine() { [ -n "$1" ] && { [ "$1" = "$OWNER" ] || [ "$1" = "$ALT_OWNER" ]; }; }
+    drill_is_mine() {
+      local by sd
+      grep -q '^{"version":1,"set":".*"startedAt":.*"volumes":\[.*"isolation":' "$1" 2>/dev/null || return 1
+      by="$(sed -n 's/^.*"owner":"\([0-9a-f]*\)".*$/\1/p' "$1" | sed -n 1p)"
+      if [ -n "$by" ]; then is_mine "$by"; return; fi
+      sd="$(sed -n 's/^{"version":1,"set":"\([^"]*\)".*$/\1/p' "$1" | sed -n 1p)"
+      case "$sd" in 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
+      is_set "$BACKUP_DIR/$sd" || return 1
+      by="$(cat "$BACKUP_DIR/$sd/.backup-owner" 2>/dev/null || true)"
+      if [ -z "$by" ] && [ -f "$BACKUP_DIR/$sd/secret-key.env" ]; then by="$(key_owner "$BACKUP_DIR/$sd/secret-key.env")"; fi
+      is_mine "$by"
+    }
+    DRILLS="$BACKUP_DIR/drills"
+    if [ -L "$DRILLS" ]; then echo "  kept $DRILLS: it is a link to another folder, and its records may not be this install's"
+    elif [ -d "$DRILLS" ]; then
+      DRILLS_GONE=0
+      for f in "$DRILLS"/20??-??-??T??-??-??Z.json; do
+        if [ -f "$f" ] && [ ! -L "$f" ] && drill_is_mine "$f"; then rm -f "$f" && DRILLS_GONE=$((DRILLS_GONE + 1)); fi
+      done
+      # Its lock goes with them, unless a drill is running: another install's, if any.
+      case "$(ls -A "$DRILLS" 2>/dev/null | tr '\n' ' ')" in
+        ".lock "|".lock .lock.takeover ")
+          holder="$(cat "$DRILLS/.lock/pid" 2>/dev/null || true)"
+          if [ -z "$holder" ] || ! ps -p "$holder" >/dev/null 2>&1; then rm -rf "$DRILLS/.lock" "$DRILLS/.lock.takeover"; fi ;;
+      esac
+      if rmdir "$DRILLS" 2>/dev/null; then
+        [ "$DRILLS_GONE" = 0 ] || echo "  removed the restore drill records in $BACKUP_DIR"
+      else
+        [ "$DRILLS_GONE" = 0 ] || echo "  removed $DRILLS_GONE restore drill records from $DRILLS"
+        echo "  kept what is left in $DRILLS: this install cannot tell it is its own, or a drill is running there. Records name agents' volumes: delete it if it is yours"
+      fi
+    fi
     # Nor another install's sets, when two share the folder: a set names the
     # install that made it (.backup-owner), or an older one the key it saved,
     # fingerprinted as backup-volumes.sh's key_owner does (HB-0280).
     SETS=0; THEIRS=0
     for d in "$BACKUP_DIR"/20??-??-??; do
-      [ -d "$d" ] && { [ -f "$d/backup-status.json" ] || [ -f "$d/hatchabot.sqlite" ]; } || continue
+      is_set "$d" || continue
       so="$(cat "$d/.backup-owner" 2>/dev/null || true)"
       if [ -z "$so" ] && [ -n "$OWNER" ] && [ -f "$d/secret-key.env" ]; then so="$(key_owner "$d/secret-key.env")"; fi
       if [ -n "$OWNER" ] && [ -n "$so" ] && [ "$so" != "$OWNER" ] && [ "$so" != "$ALT_OWNER" ]; then THEIRS=$((THEIRS + 1)); continue; fi
@@ -628,7 +678,7 @@ if [ "$PURGE" = 1 ]; then
     echo "  removed $SETS backup sets from $BACKUP_DIR"
     [ "$THEIRS" = 0 ] || echo "  kept $THEIRS sets another Hatchabot install made there"
     if rmdir "$BACKUP_DIR" 2>/dev/null; then echo "  removed $BACKUP_DIR (empty now)"
-    else echo "  kept $BACKUP_DIR itself: it holds more than Hatchabot's backup sets"; fi
+    else echo "  kept $BACKUP_DIR itself: it still holds $(ls -A "$BACKUP_DIR" 2>/dev/null | sed -n '1,6p' | tr '\n' ' ')"; fi
   fi
   # What stays: without --backups, this install's; otherwise one made before folders
   # were per install, under an old key, or another install's. Nothing says whose.
@@ -701,7 +751,7 @@ else
     echo "  · $(images | wc -l | tr -d " ") runtime images"
   fi
   [ -f "$DB_PATH" ] && echo "  · the database at $DB_PATH — every agent, member and setting"
-  [ -d "$BACKUP_DIR" ] && echo "  · $(ls -1 "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d " ") backup sets in $BACKUP_DIR"
+  [ -d "$BACKUP_DIR" ] && echo "  · $(backup_sets) backup sets in $BACKUP_DIR"
   echo
   [ -z "$RUNNERS" ] || { echo "NOT STOPPED — these run on other machines (runners), which this script does not reach:"; printf '%s\n' "$RUNNERS" | sed 's/^/  · /'; echo; }
   echo "For a clean slate instead:  ./scripts/uninstall.sh --purge --backups"

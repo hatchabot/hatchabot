@@ -34,8 +34,12 @@ export interface DoctorFacts {
   containers?: { running: number; total: number;
     /** RUNNING agent containers still on docker's shared bridge network (made before v1.16's isolation). */
     sharedNetwork?: number };
-  /** Which release this checkout sits on, and whether a newer tag is present. */
-  checkout?: { tag?: string; latestTag?: string; dirty?: string[] };
+  /**
+   * Which release this install runs and what it is meant to run: the channel
+   * chosen last (data/channel), and the release that channel names as far as
+   * this machine has seen. `pinned`: a version named by hand instead of a channel.
+   */
+  checkout?: { tag?: string; channel?: string; channelTarget?: string; pinned?: string; dirty?: string[] };
   /** Compressed swap (orchestrator/swap.ts): what the machine has, and who is set to use it. */
   swap?: {
     state: CompressedSwap;
@@ -100,11 +104,22 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
       fix: 'git -C . stash   (or commit them), then re-run the installer',
     });
   }
-  if (f.checkout?.tag && f.checkout.latestTag && f.checkout.tag !== f.checkout.latestTag) {
+  // Against what the channel names, never the newest tag this machine has seen:
+  // a fetch brings in tags nobody promoted, and naming one to `hatchabot upgrade`
+  // pins the machine there, which stops its upgrades and, with public access on,
+  // answers 503 (HB-0404). So the fix names no version.
+  if (f.checkout?.pinned) {
     out.push({
       level: 'warn',
-      text: `Running ${f.checkout.tag}, but ${f.checkout.latestTag} is available locally`,
-      fix: `hatchabot upgrade ${f.checkout.latestTag}   (keeps the channel, takes the upgrade lock, rolls back on failure)`,
+      text: `Pinned to ${f.checkout.pinned}${f.checkout.tag !== f.checkout.pinned ? ` (running ${f.checkout.tag ?? 'a commit that is no release'})` : ''}: a version named by hand, so automatic upgrades are paused`,
+      fix: 'hatchabot upgrade stable   (follows a channel again: stable, beta or latest)',
+    });
+  } else if (f.checkout?.tag && f.checkout.channelTarget && releaseBehind(f.checkout.tag, f.checkout.channelTarget)) {
+    const channel = f.checkout.channel ?? 'stable';
+    out.push({
+      level: 'warn',
+      text: `Running ${f.checkout.tag}, but the ${channel} channel names ${f.checkout.channelTarget}`,
+      fix: `hatchabot upgrade   (stays on ${channel}, takes the upgrade lock, rolls back on failure)`,
     });
   } else if (f.checkout?.tag) {
     out.push({ level: 'ok', text: `Release ${f.checkout.tag}` });
@@ -314,20 +329,51 @@ export async function publicAccessFacts(env: Record<string, string>, dbPath: str
   };
 }
 
-/** Git facts about this checkout. Offline: it reads the tags already fetched,
- *  so "behind" means "behind what this machine has seen". */
-export function checkoutFacts(dir = process.cwd()): DoctorFacts['checkout'] {
+/** a is older than b, as release tags: v2.35.0-beta.1 comes before v2.35.0 (as upgrade.sh's vernewer). */
+export function releaseBehind(a: string, b: string): boolean {
+  const parts = (v: string) => /^v?(\d+)\.(\d+)\.(\d+)(-.*)?$/.exec(v);
+  const [x, y] = [parts(a), parts(b)];
+  if (!x || !y) return false;
+  for (const i of [1, 2, 3]) if (x[i] !== y[i]) return Number(x[i]) < Number(y[i]);
+  return !!x[4] && !y[4];
+}
+
+/** The channel chosen last for this install (data/channel, else the user's file from before v2.169.0), as upgrade.sh reads it. */
+function rememberedChannel(dir: string, home: string): string {
+  for (const f of [join(dir, 'data', 'channel'), join(home, '.config', 'hatchabot', 'channel')]) {
+    try { const v = readFileSync(f, 'utf8').replace(/\s/g, ''); if (v) return v; } catch { /* not there */ }
+  }
+  return 'stable';
+}
+
+/** Git facts about this checkout. Offline: it reads the tags and channels file already
+ *  fetched, so "behind" means "behind what the channel names, as far as this machine has seen". */
+export function checkoutFacts(dir = process.cwd(), home = homedir()): DoctorFacts['checkout'] {
   const git = (...args: string[]) => sh('git', ['-C', dir, ...args]);
+  const remembered = rememberedChannel(dir, home);
+  const pinned = /^v[0-9]/.test(remembered) ? remembered : undefined;
+  const channel = pinned ? undefined : remembered;
+  const onChannel = { ...(channel ? { channel } : {}), ...(pinned ? { pinned } : {}) };
   if (!git('rev-parse', '--git-dir')) {
     // A bundle install (install.sh) has no clone: its release is in BUNDLE.json, and it cannot be "dirty".
     try {
       const b = JSON.parse(readFileSync(join(dir, 'BUNDLE.json'), 'utf8')) as { tag?: unknown };
-      if (typeof b.tag === 'string' && /^v\d/.test(b.tag)) return { tag: b.tag, dirty: [] };
+      if (typeof b.tag === 'string' && /^v\d/.test(b.tag)) return { tag: b.tag, dirty: [], ...onChannel };
     } catch { /* not a bundle either */ }
     return undefined;
   }
   const tag = git('describe', '--tags', '--exact-match')?.trim() || undefined;
-  const latestTag = git('tag', '-l', 'v[0-9]*', '--sort=-v:refname')?.split('\n')[0]?.trim() || undefined;
+  // As release-target.sh resolves it: stable and beta from channels.json on main,
+  // latest (and a beta not named) the newest tag that is no prerelease.
+  const newest = () => git('tag', '-l', 'v[0-9]*', '--sort=-v:refname')?.split('\n').map((t) => t.trim()).find((t) => t && !/-(rc|beta|alpha)/.test(t));
+  let channelTarget: string | undefined;
+  if (channel === 'latest') channelTarget = newest();
+  else if (channel === 'stable' || channel === 'beta') {
+    try {
+      const named = (JSON.parse(git('show', 'origin/main:channels.json') ?? '{}') as Record<string, unknown>)[channel];
+      channelTarget = typeof named === 'string' && /^v\d/.test(named) ? named : channel === 'beta' ? newest() : undefined;
+    } catch { /* no channels file seen yet: nothing to compare with */ }
+  }
   // Porcelain lines are "XY path", but the captured output is trimmed, so the
   // first line may have lost its leading space — strip the status flags by
   // shape, not by a fixed width (that ate a character off the filename).
@@ -335,7 +381,7 @@ export function checkoutFacts(dir = process.cwd()): DoctorFacts['checkout'] {
     .split('\n')
     .map((l) => l.replace(/^\s*[A-Z?!ADMRCU ]{1,2}\s+/, '').trim())
     .filter(Boolean);
-  return { tag, latestTag, dirty };
+  return { tag, ...onChannel, ...(channelTarget ? { channelTarget } : {}), dirty };
 }
 
 function sh(cmd: string, args: string[], timeout = 8000): string | undefined {

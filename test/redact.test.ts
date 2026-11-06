@@ -6,6 +6,25 @@ import { SLACK_APP_TOKEN } from './support/fixtures.js';
 /** A failure message must say enough to act on and never carry a credential. */
 
 describe('redacting a failure', () => {
+  it('a credential field inside a string, however it is escaped, or written as a hash', () => {
+    expect(redactSecrets(JSON.stringify({ error: 'login failed: {"username":"quincy","password":"made-up-1","apiKey":"abc"}' })))
+      .toBe('{"error":"login failed: {\\"username\\":\\"quincy\\",\\"password\\":\\"***\\",\\"apiKey\\":\\"***\\"}"}');
+    expect(redactSecrets(String.raw`{"body":"{\"password\":\"made-up-1\"}"}`)).toBe(String.raw`{"body":"{\"password\":\"***\"}"}`);
+    expect(redactSecrets(String.raw`\\"token\\": \\"made-up-1\\", next`)).toBe(String.raw`\\"token\\": \\"***\\", next`);
+    expect(redactSecrets(`'password' => 'made-up-1'`)).toBe(`'password' => '***'`);
+    expect(redactSecrets(`"password"=>"made-up-1"`)).toBe(`"password"=>"***"`);
+    expect(redactSecrets(String.raw`\"max_tokens\":\"400\"`)).toBe(String.raw`\"max_tokens\":\"400\"`);
+  });
+  it("the shell's PWD holds a folder, not a password: only a value that starts like a path, and only by that exact name", () => {
+    expect(redactSecrets('PWD=/srv/Smith Family/x ; USER=root')).toBe('PWD=/srv/Smith Family/x ; USER=root');
+    expect(redactSecrets('OLDPWD=~/x')).toBe('OLDPWD=~/x');
+    // Sudo writes neither of these: a quoted name, and a `;` right against it, are a password.
+    expect(redactSecrets('"PWD": "/made-up"')).toBe('"PWD": "***"');
+    expect(redactSecrets('Server=db;Uid=sa;PWD=/made-up;')).toBe('Server=db;Uid=sa;PWD=***;');
+    expect(redactSecrets('PWD=~made-up')).toBe('PWD=***');
+    for (const [a, b] of [['PWD=hunter2', 'PWD=***'], ['pwd=/hunter2', 'pwd=***'], ['DB_PWD=/hunter2', 'DB_PWD=***']] as const) expect(redactSecrets(a), a).toBe(b);
+  });
+
   it('masks the credentials that turn up in error text', () => {
     const cases: Array<[string, string]> = [
       ['connect ECONNREFUSED http://ops:9fZk3pQ7sample@172.19.0.1:8091', 'ops:9fZk3pQ7sample'],

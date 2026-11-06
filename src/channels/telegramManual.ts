@@ -73,7 +73,14 @@ export class TelegramManualProvisioner implements ChannelProvisioner {
     };
   }
 
-  async release(accountId: string, _opts?: ReleaseOptions): Promise<void> {
+  async release(accountId: string, opts?: ReleaseOptions): Promise<void> {
+    // A setup that failed: the token goes back to waiting for its Retry, or the
+    // owner would have to paste it again (HB-0414). As when first pasted, it
+    // waits in memory, so a restart before the Retry asks for it again.
+    if (opts?.reason === 'setup-failed' && opts.agentId && !this.#pending.has(opts.agentId)) {
+      const token = await this.secrets.get(`telegram/bot/${accountId}`).catch(() => undefined);
+      if (token) this.#pending.set(opts.agentId, { username: accountId, token });
+    }
     // The user owns this bot. We drop our copy of the token and leave the bot
     // itself alone — deleting someone else's bot is not ours to do. No goodbye
     // is sent from here: without the token there is nothing to send it with,

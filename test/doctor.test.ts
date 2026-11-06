@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { doctorReport, probeControlPlane, type DoctorFacts } from '../src/doctor.js';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { checkoutFacts, doctorReport, probeControlPlane, releaseBehind, type DoctorFacts } from '../src/doctor.js';
+import { scriptEnv } from './helpers/scriptEnv.js';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll } from 'vitest';
 
 const healthy: DoctorFacts = {
   nodeVersion: 'v22.22.2', dockerCli: true, dockerDaemon: { ok: true, arch: 'arm64', version: '27.1' },
@@ -55,22 +55,86 @@ describe('checkout freshness', () => {
   // and it still crashes" — the laptop install hit exactly this: the
   // installer refused a dirty tree, the restart script relaunched the same
   // broken build, and nothing said so.
-  it('warns when a newer tag is sitting there unused', () => {
-    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.1', latestTag: 'v1.8.2', dirty: [] } });
+  it('warns when the channel names a newer release, and the fix names no version (HB-0404)', () => {
+    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.1', channel: 'stable', channelTarget: 'v1.8.2', dirty: [] } });
     const line = lines.find((l) => l.text.includes('v1.8.1'))!;
     expect(line.level).toBe('warn');
-    expect(line.fix).toContain('hatchabot upgrade v1.8.2'); // through the upgrade command, never a bare checkout (audit, 2026-10-23)
+    expect(line.text).toContain('the stable channel names v1.8.2');
+    // Through the upgrade command, never a bare checkout (audit, 2026-10-23), and
+    // with no version: a version named there is a pin (upgrade.sh).
+    expect(line.fix).toMatch(/^hatchabot upgrade  /);
+    expect(line.fix).not.toMatch(/v1\.8/);
+    expect(line.fix).not.toContain('keeps the channel');
+  });
+
+  it('a machine ahead of its channel, or on it, is not told to move (HB-0404)', () => {
+    for (const checkout of [{ tag: 'v1.8.3', channel: 'stable', channelTarget: 'v1.8.2' }, { tag: 'v1.8.2', channel: 'stable', channelTarget: 'v1.8.2' }, { tag: 'v1.8.2', channel: 'stable' }]) {
+      const lines = doctorReport({ ...healthy, checkout: { ...checkout, dirty: [] } });
+      expect(lines.find((l) => l.text === `Release ${checkout.tag}`)?.level).toBe('ok');
+    }
+  });
+
+  it('a pin is said to be one, with the way back (HB-0404)', () => {
+    const line = doctorReport({ ...healthy, checkout: { tag: 'v1.8.1', pinned: 'v1.8.1', dirty: [] } }).find((l) => l.text.includes('Pinned'))!;
+    expect(line.level).toBe('warn');
+    expect(line.text).toMatch(/automatic upgrades are paused/);
+    expect(line.fix).toContain('hatchabot upgrade stable');
+  });
+
+  it('reads prereleases as coming before their release', () => {
+    expect(releaseBehind('v2.35.0-beta.1', 'v2.35.0')).toBe(true);
+    expect(releaseBehind('v2.35.0', 'v2.35.0-beta.1')).toBe(false);
+    expect(releaseBehind('v2.9.0', 'v2.10.0')).toBe(true);
+    expect(releaseBehind('v2.10.0', 'v2.9.0')).toBe(false);
+    expect(releaseBehind('abc1234', 'v2.9.0')).toBe(false);
+  });
+
+  // A real clone's tags: promoted, newer and unpromoted, and a prerelease that sorts first.
+  describe('checkoutFacts, on a clone in a sandbox (HB-0404)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-doctor-'));
+    const home = join(root, 'home'); mkdirSync(home);
+    const dir = join(root, 'install'); mkdirSync(dir);
+    const env = scriptEnv(home, '/usr/bin:/bin');
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' }).trim();
+    beforeAll(() => {
+      git('init', '-q', '-b', 'main');
+      writeFileSync(join(dir, 'channels.json'), '{"stable":"v2.0.0","beta":"v2.1.0"}\n');
+      git('add', '-A'); git('commit', '-q', '-m', 'x');
+      for (const t of ['v1.9.0', 'v2.0.0', 'v2.1.0', 'v2.2.0', 'v3.0.0-beta.1']) git('tag', t);
+      git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+      git('checkout', '-q', '--detach', 'v1.9.0');
+    });
+    afterAll(() => { rmSync(root, { recursive: true, force: true }); });
+    const line = () => doctorReport({ ...healthy, checkout: checkoutFacts(dir, home) }).find((l) => /Running|Release|Pinned/.test(l.text))!;
+
+    it('compares with what the channel names, not the newest tag', () => {
+      const f = checkoutFacts(dir, home)!;
+      expect(f.channel).toBe('stable'); expect(f.channelTarget).toBe('v2.0.0');
+      expect(line().fix).not.toMatch(/v\d/);
+      expect(line().text).toContain('names v2.0.0');
+    });
+    it('follows the channel chosen for this install', () => {
+      mkdirSync(join(dir, 'data'), { recursive: true });
+      writeFileSync(join(dir, 'data', 'channel'), 'latest\n');
+      expect(checkoutFacts(dir, home)!.channelTarget).toBe('v2.2.0'); // not the prerelease that sorts first
+      writeFileSync(join(dir, 'data', 'channel'), 'beta\n');
+      expect(checkoutFacts(dir, home)!.channelTarget).toBe('v2.1.0');
+      writeFileSync(join(dir, 'data', 'channel'), 'v1.9.0\n');
+      expect(checkoutFacts(dir, home)!.pinned).toBe('v1.9.0');
+      expect(line().text).toContain('Pinned to v1.9.0');
+      rmSync(join(dir, 'data'), { recursive: true });
+    });
   });
 
   it('warns about local changes, because they block the installer', () => {
-    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.2', latestTag: 'v1.8.2', dirty: ['src/api/routes.ts', 'web/index.html'] } });
+    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.2', channel: 'stable', channelTarget: 'v1.8.2', dirty: ['src/api/routes.ts', 'web/index.html'] } });
     const line = lines.find((l) => l.text.includes('local changes'))!;
     expect(line.level).toBe('warn');
     expect(line.text).toContain('src/api/routes.ts');
   });
 
   it('says which release is running when it is current and clean', () => {
-    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.2', latestTag: 'v1.8.2', dirty: [] } });
+    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.2', channel: 'stable', channelTarget: 'v1.8.2', dirty: [] } });
     expect(lines.find((l) => l.text === 'Release v1.8.2')?.level).toBe('ok');
     expect(lines.some((l) => l.text.includes('local changes'))).toBe(false);
   });

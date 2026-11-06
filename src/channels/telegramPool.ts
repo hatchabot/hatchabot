@@ -595,7 +595,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // A moved bot is live on the other machine under the same agent: no
     // farewell, and no idle name queued for it (the caller retires the row).
     if (opts.reason === 'moved') return;
-    if (departing && opts.reason !== 'swapped') await this.#farewell(row.secret_ref, departing, opts.reason ?? 'deleted');
+    if (departing && opts.reason !== 'swapped' && opts.reason !== 'setup-failed') await this.#farewell(row.secret_ref, departing, opts.reason ?? 'deleted');
     // The idle name is PARKED, not applied now. Renames are the scarce thing
     // here — Telegram grants roughly one per bot every few hours — and an
     // archive followed by a restore used to spend two of them: one to

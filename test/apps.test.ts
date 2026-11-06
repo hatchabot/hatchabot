@@ -503,6 +503,47 @@ describe('the app routes', () => {
     expect(provider.calls).toEqual([]);
   });
 
+  it('Update on the same commit refreshes what Hatchabot fills once the fact has changed; otherwise it says nothing is new (HB-0426)', async () => {
+    const { f, store, provider } = await app();
+    const dir = repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'telegram_account', from: 'agent.telegramAccount' }] } });
+    const bot = (id: string, username: string) => store.insertChannel({ id, agentId: 'a1', kind: 'telegram', accountId: username, secretRef: `channel/${id}`, deepLink: `https://t.me/${username}`, createdAt: 'now' } as never);
+    bot('c1', 'firstbot');
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    const config = () => JSON.parse(readFileSync(join(provider.root('mock://a1'), 'demoapp/data/config.json'), 'utf8')) as Record<string, unknown>;
+    expect(config()).toMatchObject({ telegram_account: 'firstbot', mailbox: 'demo@example.org' });
+    const sha = store.getAgentApp('a1')!.sha;
+    // Nothing changed: nothing to do, and nothing installed.
+    const same = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    expect(same.json()).toMatchObject({ unchanged: true });
+    // The agent's bot was swapped: the app's copy is stale.
+    store.deleteChannelForAgent('a1');
+    bot('c2', 'secondbot');
+    const upd = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    expect(upd.statusCode).toBe(200);
+    expect(upd.json().unchanged).toBeUndefined();
+    expect(upd.json().refreshed).toEqual(['telegram_account']);
+    expect(config()).toMatchObject({ telegram_account: 'secondbot', mailbox: 'demo@example.org', mode: 'shadow' });
+    expect(store.getAgentApp('a1')).toMatchObject({ sha });
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} })).json()).toMatchObject({ unchanged: true });
+    // The bot removed: an optional field empties.
+    store.deleteChannelForAgent('a1');
+    const gone = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    expect(gone.json().refreshed).toEqual(['telegram_account']);
+    expect(config().telegram_account).toBe('');
+  });
+
+  it('a required field with nothing left to fill it says so at Update, and the app stays as it was (HB-0426)', async () => {
+    const { f, store, provider } = await app();
+    const dir = repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'telegram_account', from: 'agent.telegramAccount', required: true }] } });
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'firstbot', secretRef: 'channel/c1', deepLink: 'https://t.me/firstbot', createdAt: 'now' } as never);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    store.deleteChannelForAgent('a1');
+    const r = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toMatch(/nothing to fill telegram_account/);
+    expect(JSON.parse(readFileSync(join(provider.root('mock://a1'), 'demoapp/data/config.json'), 'utf8')).telegram_account).toBe('firstbot');
+  });
+
   it('an update whose source now names another app is refused; the old app, its record and its tasks stay (audit #012)', async () => {
     const { f, store, provider } = await app();
     provider.jobs = [];

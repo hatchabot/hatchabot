@@ -44,6 +44,12 @@ fi
 
 # Pre-rename .env files: alias AGENTCLAW_* → HATCHABOT_* (existing HATCHABOT_* wins).
 for v in $(compgen -A variable AGENTCLAW_ 2>/dev/null); do n="HATCHABOT_${v#AGENTCLAW_}"; [ -n "${!n+x}" ] || export "$n=${!v}"; done
+# Whose record this is: the mark this install's backup sets carry (key_owner in
+# backup-volumes.sh), a fingerprint and never the key. uninstall.sh goes by it, as
+# two installs or machines can share the folder (HB-0440).
+DRILL_BY="$(node -e '
+  const key = process.env.HATCHABOT_SECRET_KEY;
+  if (key) process.stdout.write(require("node:crypto").createHash("sha256").update("hatchabot-backup-owner\0" + key).digest("hex").slice(0, 16));' 2>/dev/null || true)"
 BASE="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
 [ -d "$BASE" ] || [ -n "${HATCHABOT_BACKUP_DIR:-}" ] || { [ -d "$HOME/agentclaw-backups" ] && BASE="$HOME/agentclaw-backups"; }
 IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
@@ -93,8 +99,8 @@ write_record() {
   result=passed; [ "$fail" -eq 0 ] || result=failed
   local file
   file="$RECORD_DIR/$(date -u +%Y-%m-%dT%H-%M-%SZ).json"
-  printf '{"version":1,"set":"%s","setState":"%s","startedAt":"%s","finishedAt":"%s","durationSec":%d,"trigger":"%s","result":"%s","reason":"%s","database":"%s","key":"%s","volumes":[%s],"isolation":{"network":"none","memory":"%s","cpus":"%s"}}\n' \
-    "$SET_DATE" "$SET_STATE" "$started" "$(date -u +%FT%TZ)" "$SECONDS" "$TRIGGER" "$result" "$REASON" "$db_result" "$key_result" "$vols" "$LIM_MEMORY" "$LIM_CPUS" \
+  printf '{"version":1,"set":"%s","setState":"%s","startedAt":"%s","finishedAt":"%s","durationSec":%d,"trigger":"%s","result":"%s","reason":"%s","database":"%s","key":"%s","owner":"%s","volumes":[%s],"isolation":{"network":"none","memory":"%s","cpus":"%s"}}\n' \
+    "$SET_DATE" "$SET_STATE" "$started" "$(date -u +%FT%TZ)" "$SECONDS" "$TRIGGER" "$result" "$REASON" "$db_result" "$key_result" "$DRILL_BY" "$vols" "$LIM_MEMORY" "$LIM_CPUS" \
     > "$file.tmp" && mv -f "$file.tmp" "$file" || true
   # The newest 30 records are kept.
   find "$RECORD_DIR" -maxdepth 1 -type f -name '20*.json' | sort -r | tail -n +31 | while IFS= read -r old; do rm -f "$old"; done

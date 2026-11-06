@@ -43,11 +43,15 @@ kept). The nightly prune never touches it: it removes dated folders only.
 { "version": 1, "set": "2026-10-08", "setState": "complete",
   "startedAt": "…", "finishedAt": "…", "durationSec": 412,
   "trigger": "scheduled", "result": "passed",
-  "database": "ok", "key": "ok",
+  "database": "ok", "key": "ok", "owner": "0123456789abcdef",
   "volumes": [ { "volume": "hatchabot-kitchen-1-vol", "readable": true,
                  "layout": true, "restored": true, "result": "passed" } ],
   "isolation": { "network": "none", "memory": "1g", "cpus": "1" } }
 ```
+
+`owner` is the mark this install's backup sets carry (`.backup-owner`, a
+fingerprint of its key), empty with no key to hand. An uninstall removes only
+records it can tell are its own, as the folder may be shared.
 
 Per volume: `readable` (the whole gzip stream and tar listing read),
 `layout` (the listing holds files under `agents/`, the tree OpenClaw boots

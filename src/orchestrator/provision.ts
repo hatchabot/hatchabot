@@ -329,7 +329,8 @@ async function runProvisionStepsInner(
           );
         }
         rollback.push(async () => {
-          await channel.release(result.accountId);
+          // Not a farewell: it can be retried, and memory is intact on a restore (HB-0412).
+          await channel.release(result.accountId, { reason: 'setup-failed', agentId });
           store.deleteChannelForAgent(agentId);
         });
         provisioned = {
@@ -1032,7 +1033,7 @@ export function renderRefusedRecently(agentId: string, withinMs = 6 * 3_600_000)
 }
 /**
  * Why the agent's last rebuild was refused at render time, if it was (each
- * rebuild clears it first). That rebuild returns the agent RUNNING as it was:
+ * rebuild clears it first). That rebuild leaves the agent running or stopped as it was:
  * its operation is a failure all the same, not "Rebuilt" (audit #092).
  */
 export function renderRefusalOf(agentId: string): string | undefined {
@@ -1194,6 +1195,30 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       }
     }
   }
+  // Render the new spec BEFORE stopping what runs: a refusal at render time
+  // (an engine-free image with the memory service off, an un-shared source,
+  // a missing secret) used to leave a working agent stopped and FAILED. Now
+  // it keeps running and the trail says why (night review, 2026-09-27); a
+  // stopped one stays as it was, its container untouched and Start still
+  // open to it (HB-0419). The manager is the exception: its spec rotates the
+  // door token, which the old container must not keep using, so it stops
+  // first as before.
+  let early: Awaited<ReturnType<typeof buildRuntimeSpec>> | undefined;
+  renderRefused.delete(agentId);
+  const renderedEarly = async (): Promise<boolean> => {
+    try {
+      early = await buildRuntimeSpec(deps, agentId);
+      return true;
+    } catch (err) {
+      const reason = userMessageFor(err);
+      log('rebuild.failed', { agentId, reason, error: String(err), keptAs: agent.state });
+      forgetEmbedDecision(agentId);
+      renderRefused.set(agentId, { at: Date.now(), reason });
+      return false;
+    }
+  };
+  // Stopped, before REBUILDING: nothing leads from there back to STOPPED.
+  if (!agent.ops && agent.state === 'STOPPED' && !(await renderedEarly())) return store.getAgent(agentId)!;
   // Visible immediately: the chip must not read RUNNING while the container
   // is being replaced.
   store.setAgentState(agentId, 'REBUILDING');
@@ -1210,25 +1235,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       'that was the save attempt, not your message. Nothing you sent was lost.').catch(() => {});
   };
 
-  // Render the new spec BEFORE stopping what runs: a refusal at render time
-  // (an engine-free image with the memory service off, an un-shared source,
-  // a missing secret) used to leave a working agent stopped and FAILED. Now
-  // it keeps running and the trail says why (night review, 2026-09-27). The
-  // manager is the exception: its spec rotates the door token, which the
-  // old container must not keep using, so it stops first as before.
-  let early: Awaited<ReturnType<typeof buildRuntimeSpec>> | undefined;
-  renderRefused.delete(agentId);
-  if (!agent.ops && agent.state === 'RUNNING') {
-    try {
-      early = await buildRuntimeSpec(deps, agentId);
-    } catch (err) {
-      const reason = userMessageFor(err);
-      log('rebuild.failed', { agentId, reason, error: String(err), keptRunning: true });
-      forgetEmbedDecision(agentId);
-      renderRefused.set(agentId, { at: Date.now(), reason });
-      return store.setAgentState(agentId, 'RUNNING');
-    }
-  }
+  if (!agent.ops && agent.state === 'RUNNING' && !(await renderedEarly())) return store.setAgentState(agentId, 'RUNNING');
   try {
     await provider.stop(agent.runtimeRef).catch(() => {}); // may already be stopped
     const spec = early ?? (await buildRuntimeSpec(deps, agentId));
@@ -1364,8 +1371,16 @@ export function recordApplied(store: Store, agentId: string, spec?: RuntimeSpec)
   const agent = store.getAgent(agentId);
   const rendered = spec && renderedFrom.get(spec);
   const profile = agent && store.getAIProfile(agent.aiProfileId);
+  // A container made from a spec starts its restart and memory counts again and
+  // has the manager's lockdown put back: a later one is new, not what a Clear covered (HB-0409).
+  if (agent && spec) store.dropAttentionAckKeys(agentId, ['restart:', 'memory', 'opsDrift']);
   if (agent && rendered) store.setAgentApplied(agentId, rendered.profileId, rendered.model);
   else if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
+  // This container was made from the settings as they are: nothing is owed to
+  // its next start. Only with a spec: a model written onto a stopped agent's
+  // volume (applyModelNow) makes no container, and the old one still lacks the
+  // change, a bot it gave back among them (HB-0411).
+  if (spec && agent?.rebuildOnStart) store.setRebuildOnStart(agentId, null);
   const d = embedDecision.get(agentId);
   if (d) {
     store.setAgentEmbedApplied(agentId, d.used);

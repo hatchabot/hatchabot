@@ -234,6 +234,11 @@ describe('runBudgets', () => {
     expect(told).toHaveLength(1);
     expect(told[0]!.text).toContain('it was already stopped, so it stays stopped.');
     expect(told[0]!.text).not.toContain('it is paused until');
+    // The tile, Alerts and the bot promise no start that will not come (review of HB-0419).
+    const view = budgetView(store, store.getBudget('a9')!, 12, NOW, 'UTC', 'a9');
+    expect(view.paused!.staysStopped).toBe(true);
+    expect(budgetLine(view, 'it')).toContain('it stays stopped until you start it');
+    expect(budgetLine(view, 'it')).not.toContain('starts again');
     // Raised: the record closes; nothing is started.
     store.setBudget('a9', OWNER, 40, 'pause', iso(NOW));
     expect((await runBudgets(deps, NOW + MIN, { record: false })).resumed).toEqual([]);
@@ -528,7 +533,7 @@ describe('"cheaper model" at the limit', () => {
     store.setBudget('k4', OWNER, 10, 'cheaper', iso(NOW));
     store.setModelProfile('k4', profile(NOW, opus(NOW - DAY, 12)), iso(NOW));
     await runBudgets(deps, NOW);
-    expect(told[0]!.text).toContain('it was already on the cheapest model its source offers, so it keeps working as it is');
+    expect(told[0]!.text).toContain('its source offers nothing cheaper it can run, so it keeps working as it is');
   });
 
   it('a budget\'s switch is not Right-size\'s: no verdict, no switch-back card, not in the savings', () => {
@@ -563,6 +568,15 @@ describe('a paused agent answers on Telegram, once a chat', () => {
     return store;
   };
   const msg = (id: number, chat: number, at: number, type = 'private', bot = false) => ({ update_id: id, message: { date: Math.floor(at / 1000), chat: { id: chat, type }, from: { is_bot: bot } } });
+
+  it('an agent its owner stopped by hand: the bot does not promise it back on the 1st', async () => {
+    const store = await paused();
+    store.disownBudgetPause('t1');
+    const later = NOW + 5 * MIN;
+    const { f, sent } = fakeTelegram([msg(11, 4242, later)]);
+    expect(await pausedReplySweep({ store, secretOf: async () => 'token-x', fetchImpl: f }, later + 2 * MIN)).toBe(0);
+    expect(sent).toEqual([]);
+  });
 
   it('one reply per person, not to groups or bots or older messages; nothing confirmed', async () => {
     const store = await paused();
@@ -1007,5 +1021,171 @@ describe('budgets that act together, and messages that did not get through', () 
       expect(r.statusCode).toBe(400);
     }
     expect(store.usageAlertsSince(new Date(Date.now() - DAY).toISOString(), { ownerId: OWNER })).toHaveLength(2);
+  });
+});
+
+describe('spend on a model with no known price is unknown, not $0 (HB-0402)', () => {
+  const NOPRICE = 'gpt-made-up-1';
+  async function routes() {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'Key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key', createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'oa', ownerId: OWNER, name: 'Other vendor', vendor: 'openai', kind: 'api_key', model: NOPRICE, secretRef: 'ai/oa', createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'lo', ownerId: OWNER, name: 'Local', vendor: 'local', kind: 'api_key', model: 'plain-local-model', secretRef: 'ai/lo', createdAt: 'now' } as never);
+    const agent = (id: string, profileId: string) => store.insertAgent({
+      id, ownerId: OWNER, name: `Agent ${id}`, slug: id, state: 'RUNNING', aiProfileId: profileId, hostId: 'h1', runtimeRef: `mock://${id}`,
+      persona: '', sharedMemory: true, webOnly: true, createdAt: '2026-08-01T00:00:00Z', updatedAt: 'now',
+    } as never);
+    agent('n1', 'oa'); agent('c1', 'key'); agent('l1', 'lo'); agent('m1', 'key');
+    const f = Fastify();
+    await registerRoutes(f, { store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} } as never, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never });
+    const now = Date.now();
+    const at = now;
+    store.setModelProfile('n1', profile(now, { [NOPRICE]: model({ [at]: { input: 5_000_000, output: 1_000_000 } }) }), iso(now));
+    store.setModelProfile('c1', profile(now, opus(at, 2)), iso(now));
+    store.setModelProfile('l1', profile(now, { 'plain-local-model': model({ [at]: { input: 9_000 } }), 'ollama/some-model': model({ [at]: { input: 9_000 } }) }), iso(now));
+    // On a priced model now, part of the month on one with no price.
+    store.setModelProfile('m1', profile(now, { ...opus(at, 1), [NOPRICE]: model({ [at]: { input: 7_000 } }) }), iso(now));
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    recordCostDays(store, machineTz(), now);
+    const row = async (id: string) => (await f.inject({ method: 'GET', url: '/v1/budgets', headers: as(OWNER) })).json().agents.find((a: { id: string }) => a.id === id);
+    return { store, f, row };
+  }
+
+  it('dailyCosts keeps the unpriced tokens beside the dollars; local models are not unpriced', () => {
+    const t = Date.parse('2026-10-20T03:00:00Z');
+    const p = profile(t, { [NOPRICE]: model({ [t]: { input: 5_000, output: 1_000, cacheRead: 100, cacheWrite: 10 } }), 'ollama/some-model': model({ [t]: { input: 4_000 } }) });
+    const d = dailyCosts(p, 'UTC');
+    expect(d.days.get('2026-10-20')).toBe(0);
+    expect(d.unpriced.get('2026-10-20')).toBe(6_110);
+    expect(dailyCosts(p, 'UTC', { local: true }).unpriced.size).toBe(0);
+    expect(dailyCosts(profile(t, opus(t, 1)), 'UTC').unpriced.size).toBe(0);
+  });
+
+  it('the store keeps them per day, the partial day at the larger, and adds them up by month', () => {
+    const store = new Store(new Database(':memory:'));
+    store.setCostDays('a', new Map([['2026-10-01', 0], ['2026-10-02', 0]]), '2026-10-01', new Map([['2026-10-01', 500], ['2026-10-02', 70]]));
+    store.setCostDays('a', new Map([['2026-10-01', 0], ['2026-10-02', 0]]), '2026-10-01', new Map([['2026-10-01', 100], ['2026-10-02', 50]]));
+    expect(store.unpricedBetween('2026-10-01', '2026-10-31').get('a')).toBe(550);
+    expect(store.unpricedBetween('2026-11-01', '2026-11-30').size).toBe(0);
+  });
+
+  it('GET /v1/budgets says no price is known, instead of letting $0 stand', async () => {
+    const { row } = await routes();
+    const n = await row('n1');
+    expect(n).toMatchObject({ spent: 0, unpriced: { model: NOPRICE, month: 6_000_000, rate: true } });
+    expect(n.priceNote).toMatch(/No price known for gpt-made-up-1.*cannot be enforced/);
+    const m = await row('m1');
+    expect(m.spent).toBe(1);
+    expect(m.unpriced).toMatchObject({ month: 7_000 });
+    expect(m.unpriced.model).toBeUndefined();
+    expect(m.priceNote).toMatch(/not counted/);
+    for (const id of ['c1', 'l1']) {
+      const a = await row(id);
+      expect(a.unpriced).toBeUndefined();
+      expect(a.priceNote).toBeUndefined();
+    }
+  });
+
+  it('a limit or an alarm set on such an agent says it cannot be enforced', async () => {
+    const { f, row } = await routes();
+    let r = await f.inject({ method: 'PUT', url: '/v1/agents/n1/budget', headers: as(OWNER), payload: { usd: 50, atLimit: 'pause' } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().message).toContain('cannot be enforced');
+    r = await f.inject({ method: 'PUT', url: '/v1/agents/n1/spend-alert', headers: as(OWNER), payload: { every: 5 } });
+    expect(r.json().message).toContain('cannot be enforced');
+    // Taken off: nothing to warn about.
+    r = await f.inject({ method: 'PUT', url: '/v1/agents/n1/budget', headers: as(OWNER), payload: { usd: null } });
+    expect(r.json().message).not.toContain('cannot be enforced');
+    // A priced agent is not told anything of the kind.
+    r = await f.inject({ method: 'PUT', url: '/v1/agents/c1/budget', headers: as(OWNER), payload: { usd: 50 } });
+    expect(r.json().message).not.toContain('price');
+    expect((await row('n1')).priceNote).toBeDefined();
+  });
+
+  it('the machine total says how many agents it leaves out', async () => {
+    const { f } = await routes();
+    const g = (await f.inject({ method: 'GET', url: '/v1/budgets', headers: as(OWNER) })).json();
+    expect(g.machine.priceNote).toMatch(/2 agents/);
+    const r = await f.inject({ method: 'PUT', url: '/v1/budgets/machine', headers: as(OWNER), payload: { usd: 100 } });
+    expect(r.json().message).toMatch(/2 agents/);
+    const s = await f.inject({ method: 'PUT', url: '/v1/spend-alert/machine', headers: as(OWNER), payload: { every: 10 } });
+    expect(s.json().message).toMatch(/2 agents/);
+  });
+});
+
+describe('an owner no chat reaches, and one on Discord (HB-0403)', () => {
+  const DISCORD_ID = '2'.repeat(18);
+  async function routes(discord: boolean) {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'Key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key', createdAt: 'now' } as never);
+    const agent = async (id: string, extra: Record<string, unknown> = {}) => {
+      const { runtimeRef } = await provider.provision({ agentId: id, slug: id, workspace: { files: {}, configPatch: { agentId: id, authMode: 'api-key' } }, env: {} } as never);
+      store.insertAgent({ id, ownerId: OWNER, name: `Agent ${id}`, slug: id, state: 'RUNNING', aiProfileId: 'key', hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, webOnly: true, createdAt: '2026-08-01T00:00:00Z', updatedAt: 'now', ...extra } as never);
+    };
+    await agent('m1', { ops: true });
+    await agent('w1');
+    const secrets = new Map([['channel/m1/discord', 'made-up-secret']]);
+    if (discord) {
+      store.insertChannel({ id: 'cd', agentId: 'm1', kind: 'discord', accountId: 'managerbot', secretRef: 'channel/m1/discord', deepLink: 'https://example.test/x', createdAt: 'now' } as never);
+      store.insertMembership({ id: 'mem-m1', agentId: 'm1', userId: OWNER, role: 'owner', status: 'active', joinedAt: 'now' } as never);
+      store.bindMemberIdentity('m1', OWNER, 'discord', DISCORD_ID);
+    }
+    const dms: Array<{ to: string; text: string }> = [];
+    const f = Fastify();
+    await registerRoutes(f, {
+      store, secrets: { put: async () => {}, get: async (r: string) => secrets.get(r) ?? 'x', delete: async () => {} } as never,
+      providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
+      connectors: { discord: { dm: async (_s: string, to: string, text: string) => { dms.push({ to, text }); return true; } } as never },
+    });
+    const now = Date.now();
+    store.setModelProfile('w1', profile(now, opus(now, 45)), iso(now));
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    recordCostDays(store, machineTz(), now);
+    return { store, f, dms };
+  }
+
+  it('a budget passing 80% with the manager on Discord is told there, and marked told', async () => {
+    const { f, dms, store } = await routes(true);
+    const r = await f.inject({ method: 'PUT', url: '/v1/agents/w1/budget', headers: as(OWNER), payload: { usd: 50 } });
+    expect(r.json().message).not.toContain('can reach you');
+    expect(dms).toHaveLength(1);
+    expect(dms[0]).toMatchObject({ to: DISCORD_ID });
+    expect(dms[0]!.text).toContain('of its $50 budget');
+    expect(store.budgetMark('w1', r.json().budget.month, 80, 50)?.toldAt).toBeTruthy();
+    const g = (await f.inject({ method: 'GET', url: '/v1/budgets', headers: as(OWNER) })).json();
+    expect(g.agents.find((a: { id: string }) => a.id === 'w1').chatNote).toBeUndefined();
+    expect(g.machine.chatNote).toBeUndefined();
+  });
+
+  it('a step alarm on the Discord path is told too', async () => {
+    const { f, dms, store } = await routes(true);
+    await f.inject({ method: 'PUT', url: '/v1/agents/w1/spend-alert', headers: as(OWNER), payload: { every: 10 } });
+    // Set when the month had spent nothing: the spend has since passed several steps.
+    const { machineTz } = await import('../src/orchestrator/budgets.js');
+    primeSpendAlert(store, 'w1', 10, 0, Date.now(), machineTz());
+    await f.inject({ method: 'PUT', url: '/v1/agents/w1/budget', headers: as(OWNER), payload: { usd: 10_000 } });
+    expect(dms.some((d) => d.text.includes('you hear every $10'))).toBe(true);
+  });
+
+  it('with no chat at all, setting a limit or a step says no message will come, and the page row says so', async () => {
+    const { f, dms } = await routes(false);
+    let r = await f.inject({ method: 'PUT', url: '/v1/agents/w1/budget', headers: as(OWNER), payload: { usd: 50 } });
+    expect(r.json().message).toContain('No chat app can reach you');
+    r = await f.inject({ method: 'PUT', url: '/v1/agents/w1/spend-alert', headers: as(OWNER), payload: { every: 5 } });
+    expect(r.json().message).toContain('No chat app can reach you');
+    r = await f.inject({ method: 'PUT', url: '/v1/agents/w1/spend-alert', headers: as(OWNER), payload: { every: null } });
+    expect(r.json().message).not.toContain('No chat app');
+    r = await f.inject({ method: 'PUT', url: '/v1/budgets/machine', headers: as(OWNER), payload: { usd: 500 } });
+    expect(r.json().message).toContain('No chat app can reach you');
+    r = await f.inject({ method: 'PUT', url: '/v1/spend-alert/machine', headers: as(OWNER), payload: { every: 500 } });
+    expect(r.json().message).toContain('No chat app can reach you');
+    const g = (await f.inject({ method: 'GET', url: '/v1/budgets', headers: as(OWNER) })).json();
+    expect(g.agents.find((a: { id: string }) => a.id === 'w1').chatNote).toContain('No chat app can reach you');
+    expect(g.machine.chatNote).toContain('No chat app can reach you');
+    expect(dms).toEqual([]);
   });
 });

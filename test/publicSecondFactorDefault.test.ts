@@ -47,6 +47,34 @@ describe('a second factor is required of every password account at the public ad
     expect(h.store.listSecondFactors(m.id, { unconfirmed: true })).toEqual([]);
   }, 30_000);
 
+  it('a password alone cannot make a recovery code at the public address and use it to enrol (HB-0399)', async () => {
+    h = ctx.h = await publicApp();
+    await h.addAccount('owner', { owner: true });
+    const m = await h.addAccount('member');
+    await h.app.publicAccess!.evaluate();
+    const thief = await h.signIn('member', m.password);
+    const made = await h.pub('/v1/local-accounts/me/recovery-code', { jar: thief, body: { current: m.password } });
+    expect(made.status).toBe(403);
+    expect(made.json.secondFactor).toBe('enrol-link');
+    expect(made.json.error).toMatch(/recovery code/);
+    expect(made.json.recoveryCode).toBeUndefined();
+    expect(h.store.localAccount(m.id)?.recoveryHash ?? null).toBeNull();
+    // Their password still works, and the account is as it was.
+    expect((await h.signIn('member', m.password))).toBeTruthy();
+    expect(h.store.listSecondFactors(m.id, { unconfirmed: true })).toEqual([]);
+    // The private address is not affected.
+    const cookie = await privCookie(h, 'member', m.password);
+    const here = await h.app.inject({ method: 'POST', url: '/v1/local-accounts/me/recovery-code', headers: { cookie }, payload: { current: m.password } });
+    expect(here.statusCode).toBe(200);
+    // A code made there still vouches at the public address, and a sign-in it
+    // vouches for may make the next one.
+    const recovered = new Jar();
+    expect((await h.pub('/v1/local-accounts/recover-with-code', { jar: recovered, body: { username: 'member', code: here.json().recoveryCode, password: 'another-password-of-theirs' } })).status).toBe(200);
+    const next = await h.pub('/v1/local-accounts/me/recovery-code', { jar: recovered, body: { current: 'another-password-of-theirs' } });
+    expect(next.status, JSON.stringify(next.json)).toBe(200);
+    expect(next.json.recoveryCode).toBeTruthy();
+  }, 30_000);
+
   it('the old setting cannot switch it off: =0 is ignored (and reported), =1 changes nothing', async () => {
     h = ctx.h = await publicApp({ env: { HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL: '0' } });
     await h.addAccount('owner', { owner: true });

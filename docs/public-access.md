@@ -192,6 +192,8 @@ has no second factor yet, so the owner can send each a reset link.
   it at the private address. So a member who has no factor yet and cannot
   reach the private address asks the owner for a reset link, and adds one
   right after using it. The page says so, once, where it cannot be missed.
+  Making a recovery code needs the same proof, since a code made with the
+  password alone would vouch for itself.
 - **A lost phone.** Backup codes get you in. Without them: sign in at the
   private address, where no second factor is asked; the owner can also clear
   anyone's factors (`hatchabot second-factor reset <user>`). Clearing the
@@ -311,7 +313,8 @@ reads inside the agent (docs/access-overview-design.md).
 | step-up | Adding or replacing a second factor |
 | step-up | Removing a second factor |
 | step-up | Managing accounts (add, remove, reset links) |
-| step-up | Changing a password, making a recovery code (your own needs your current password as well) |
+| step-up | Changing a password (your own needs your current password as well) |
+| step-up | Making a recovery code (needs your current password as well; with no second factor yet, also a sign-in from a link or code sent to you) |
 | step-up | Signing someone else out everywhere |
 | step-up | Public access: status, its address, and turning it off |
 | step-up | The security record |
@@ -368,6 +371,11 @@ Folders routes; taking folders away, and the rest of the settings, do not.
 The console's WebSocket is held to the same rules as a signed-in request (the
 pass, its idle limit, the second factor), counts against the request
 ceilings, and so is the session `/v1/join` reads for a web-chat invitation.
+When a good sign-in is refused there only for want of a second factor, the
+answer says so, in the same terms as any other signed-in request of theirs
+(`secondFactor`: `required`, `enrol`, `enrol-link` or `missing`). No session, a
+changed cookie or a sign-in with no public pass gets the plain "Sign in to this
+Hatchabot first", so it says nothing about any account.
 Every open socket is closed when a safeguard goes off and when public access
 is turned off.
 

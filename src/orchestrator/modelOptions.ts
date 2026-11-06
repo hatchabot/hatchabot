@@ -87,6 +87,9 @@ export function modelOption(model: string): ModelOption | undefined {
   return BY_ID.get(modelKey(model));
 }
 
+/** A model that runs on the owner's own machine: no bill, so no price is missing. */
+export const LOCAL_MODEL = /^(ollama|local|lmstudio|llamacpp)\//i;
+
 export interface TokenMix { input: number; output: number; cacheRead: number; cacheWrite: number }
 
 /** The API price of a token mix on a model, in USD; undefined when the model has no known price. */

@@ -15,6 +15,7 @@ import {
 
   identityConfigFromEnv,
   IdentityError,
+  IdentityUnavailableError,
   IdentityVerifier,
   principalFor,
 } from './identity.js';
@@ -704,6 +705,8 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       opts.onAuthenticated?.(principal);
       return { ok: true, ownerId: principal.ownerId, email: principal.email };
     } catch (err) {
+      // Could not check is not a guess: counted, an outage locked people out after it ended (HB-0424).
+      if (err instanceof IdentityUnavailableError) return reply.code(503).header('retry-after', '60').send({ error: err.userMessage });
       noteFailure(req);
       if (err instanceof IdentityError) return reply.code(401).send({ error: err.userMessage });
       throw err;

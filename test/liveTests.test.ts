@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // @ts-expect-error — a plain .mjs script, no types
-import { LIVE_TESTS, committedRuns, dueFor, endedOn, planRun, readRuns, resultOf, touches } from '../scripts/live.mjs';
+import { LIVE_TESTS, committedRuns, dueFor, endedOn, planRun, readRuns, resultOf, runDueArgs, touches } from '../scripts/live.mjs';
 
 /**
  * The live tests' register (scripts/live.mjs): every test names a script that
@@ -42,12 +42,22 @@ describe('running what is due', () => {
   it('runs the tests that touch no agent alongside the rest, and the rest one at a time', () => {
     const due = ['privacy', 'transfer', 'clean-install', 'runner-scenarios', 'upgrade-check'].map((test) => ({ test, why: '' }));
     const plan = planRun([...due, { test: 'clean-install-debian-12', why: '', manual: 'elsewhere' }]);
-    expect(plan.parallel).toEqual(['privacy', 'clean-install', 'upgrade-check']);
-    expect(plan.serial).toEqual(['transfer', 'runner-scenarios']);
+    expect(plan.parallel).toEqual(['privacy', 'upgrade-check']);
+    expect(plan.serial).toEqual(['transfer', 'clean-install', 'runner-scenarios']);
   });
   it('flags as parallel only tests that make no agent on the live install', () => {
     const parallel = tests.filter((t) => t.parallel).map((t) => t.name).sort();
-    expect(parallel).toEqual(['clean-install', 'clean-install-debian-12', 'clean-install-ubuntu-2204', 'privacy', 'upgrade-check']);
+    expect(parallel).toEqual(['privacy', 'upgrade-check']);
+  });
+});
+
+describe('run-due arguments', () => {
+  it('keeps a source name with spaces whole, and does not take it for the tag', () => {
+    const r = runDueArgs(['--ai-source', 'A source name', 'v9.1.0', '--args', 'runner-scenarios=--old-image x:1']);
+    expect(r.aiSource).toBe('A source name');
+    expect(r.tag).toBe('v9.1.0');
+    expect(r.extra.get('runner-scenarios')).toEqual(['--old-image', 'x:1']);
+    expect(runDueArgs(['--ai-source', 'v9.1.0']).tag).toBeUndefined();
   });
 });
 

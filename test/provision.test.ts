@@ -304,6 +304,18 @@ describe('rebuildAgent', () => {
     expect(w.store.getAgent(agent.id)!.runtimeRef).toBe(refBefore);
   });
 
+  it('a new container ends what its Clear from Alerts covered, so the next one shows again (HB-0409)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    // Restart and memory counts start again with the container, and a rebuild puts the lockdown back. Disk use carries on.
+    w.store.setAgentAttentionAck(agent.id, 'disk:12\nmemory\nopsDrift\nrestart:1');
+    await rebuildAgent(w.deps, agent.id);
+    expect(w.store.getAgent(agent.id)!.attentionAck).toBe('disk:12');
+    w.store.setAgentAttentionAck(agent.id, 'opsDrift');
+    await rebuildAgent(w.deps, agent.id);
+    expect(w.store.getAgent(agent.id)!.attentionAck).toBeUndefined();
+  });
+
   it('takes the pre-rebuild snapshot BEFORE stopping/replacing the container', async () => {
     // The snapshot moved out of the route into the task; it must still run
     // while the agent is RUNNING and before the old container is torn down —

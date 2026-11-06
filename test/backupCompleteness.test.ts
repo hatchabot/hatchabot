@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
-import { agentsMissingFromSet, listBackups, readSetStatus } from '../src/orchestrator/backups.js';
+import { agentsMissingFromSet, keepDays, listBackups, readSetStatus } from '../src/orchestrator/backups.js';
 import { doctorReport, type DoctorFacts } from '../src/doctor.js';
 
 // Review, 2026-09-29: a partial nightly set showed healthy (only the dated
@@ -107,6 +107,7 @@ echo "$*" >> "${root}/local.log"
 case "$1 $2" in
   "volume ls") printf '%s\\n' ${volumes.map((v) => `'${v}'`).join(' ')} ;;
   "image inspect") exit 0 ;;
+  "info --format") if [ -f "${root}/rootless" ]; then echo '[name=seccomp name=rootless name=cgroupns]'; else echo '[name=seccomp name=cgroupns]'; fi ;;
   run*)
     # A slow volume: the run holds its lock long enough for another to look.
     if [ -f "${root}/slow" ]; then sleep 1; fi
@@ -118,6 +119,9 @@ case "$1 $2" in
     case "$vol" in *broken*) echo torn > "$out/$f"; exit 2;; esac
     # A client killed (137) while its container goes on writing.
     case "$vol" in *killed*) echo part > "$out/$f"; exit 137;; esac
+    # What a rootless daemon made of the chown: this user may rename it, not read it.
+    if [ -f "${root}/unreadable" ] && grep -q chown <<<"\${@: -1}"; then echo x > "$out/$f"; chmod 000 "$out/$f"; exit 0; fi
+    if [ -f "${root}/killing-at" ] && [ "$vol" = "$(cat "${root}/killing-at")" ]; then exit 2; fi
     # A volume with a fixture tree runs the script's own tar command for
     # real, /data and /out pointed at temp dirs (review, 2026-09-29).
     if [ -d "${root}/vols/$vol" ]; then
@@ -297,6 +301,128 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
     const r = w.run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(existsSync(join(w.setDir(), 'agentclaw-old-garden.tgz'))).toBe(true);
+  });
+});
+
+describe('scripts/backup-volumes.sh under a rootless or remapped daemon (HB-0406)', () => {
+  const VOLS = ['hatchabot-kitchen-1-vol', 'hatchabot-notes-2-vol'], REFS = ['docker://hatchabot-kitchen-1', 'docker://hatchabot-notes-2'];
+  it('an archive this user cannot read back fails the set: named, nothing pruned, no unreadable file left', () => {
+    const w = scriptWorld(VOLS, REFS);
+    const old = w.oldSet(['hatchabot-kitchen-1-vol.tgz']);
+    writeFileSync(join(w.root, 'unreadable'), '');
+    const r = w.run();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/hatchabot-kitchen-1-vol: docker wrote the archive as uid \d+, and \S+ cannot read it/);
+    expect(w.record()).toMatchObject({ state: 'incomplete', failed: 2, captured: [] });
+    expect(readSetStatus(w.setDir()).failedVolumes).toEqual(VOLS);
+    expect(readdirSync(w.setDir()).filter((f) => f.includes('.tgz'))).toEqual([]);
+    expect(existsSync(old)).toBe(true);
+  });
+  it('an unreadable archive does not replace a whole one from earlier the same day', () => {
+    const w = scriptWorld(VOLS, REFS);
+    expect(w.run().status).toBe(0);
+    writeFileSync(join(w.root, 'unreadable'), '');
+    expect(w.run().status).toBe(1);
+    expect(readFileSync(join(w.setDir(), 'hatchabot-kitchen-1-vol.tgz'), 'utf8')).toBe('fake\n');
+  });
+  it('rootless: no chown in the container, whose root already is this user, and the set is complete', () => {
+    const w = scriptWorld(VOLS, REFS);
+    writeFileSync(join(w.root, 'rootless'), '');
+    writeFileSync(join(w.root, 'unreadable'), ''); // the chown, were there one, would spoil it
+    const r = w.run();
+    expect(r.status, r.stderr).toBe(0);
+    expect(w.localLog()).not.toMatch(/^run .*chown/m);
+    expect(w.record()).toMatchObject({ state: 'complete', failed: 0, captured: VOLS });
+  });
+  it('a normal daemon still hands the archive to this user', () => {
+    const w = scriptWorld(VOLS, REFS);
+    expect(w.run().status).toBe(0);
+    expect(w.localLog()).toMatch(/^run .*chown \d+:\d+ '\/out\/hatchabot-kitchen-1-vol\.tgz\.part'/m);
+  });
+});
+
+describe('scripts/backup-volumes.sh: a second run of the same day (HB-0433)', () => {
+  const VOLS = ['hatchabot-kitchen-1-vol', 'hatchabot-notes-2-vol'], REFS = ['docker://hatchabot-kitchen-1', 'docker://hatchabot-notes-2'];
+  const failing = (w: ReturnType<typeof scriptWorld>, vol: string) => writeFileSync(join(w.root, "killing-at"), vol);
+  it('cut short, it keeps what the morning wrote whole counted, for a restore to use', async () => {
+    const w = scriptWorld(VOLS, REFS);
+    expect(w.run().status).toBe(0);
+    expect(w.record().captured).toEqual(VOLS);
+    // The noon run, stopped by a restart while it writes the first volume.
+    writeFileSync(join(w.root, 'slow'), '');
+    const c = spawn('bash', [join(w.repo, 'scripts', 'backup-volumes.sh')], {
+      env: { HOME: join(w.root, 'home'), PATH: `${w.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HATCHABOT_BACKUP_DIR: w.backups, HATCHABOT_PREFIX: 'hatchabot', NODE_PATH: join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..') },
+      stdio: 'ignore',
+    });
+    const before = (w.localLog().match(/^run /gm) ?? []).length;
+    const t0 = Date.now();
+    while ((w.localLog().match(/^run /gm) ?? []).length === before && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
+    c.kill('SIGTERM');
+    await new Promise((r) => c.on('exit', r));
+    const st = readSetStatus(w.setDir());
+    expect(st.complete).toBe(false);
+    expect(st.captured).toEqual(VOLS); // both whole, though the second run reached neither
+  }, 30_000);
+  it('a volume that fails in the second run is failed; the other stays captured once, not twice', () => {
+    const w = scriptWorld(VOLS, REFS);
+    expect(w.run().status).toBe(0);
+    failing(w, 'hatchabot-notes-2-vol');
+    expect(w.run().status).toBe(1);
+    const st = readSetStatus(w.setDir());
+    expect(st.failedVolumes).toEqual(['hatchabot-notes-2-vol']);
+    expect(st.captured!.filter((v) => v === 'hatchabot-kitchen-1-vol')).toHaveLength(1);
+    expect(readFileSync(join(w.setDir(), 'hatchabot-notes-2-vol.tgz'), 'utf8')).toBe('fake\n'); // the morning's is still there
+  });
+  it('an earlier record names only what is really there; a record from before "captured" counts the archives it has', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    mkdirSync(w.today(), { recursive: true });
+    writeFileSync(join(w.today(), 'backup-status.json'), JSON.stringify({ state: 'complete', captured: ['hatchabot-gone-9-vol', 'x; touch /tmp/no'] }));
+    expect(w.run().status).toBe(0);
+    expect(w.record().captured).toEqual(['hatchabot-kitchen-1-vol']);
+    const v = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    mkdirSync(v.today(), { recursive: true });
+    writeFileSync(join(v.today(), 'hatchabot-old-3-vol.tgz'), 'whole');
+    writeFileSync(join(v.today(), 'backup-status.json'), JSON.stringify({ state: 'complete' }));
+    expect(v.run().status).toBe(0);
+    expect(v.record().captured.sort()).toEqual(['hatchabot-kitchen-1-vol', 'hatchabot-old-3-vol']);
+  });
+  it('a volume docker no longer has is missing, however whole its morning archive', () => {
+    const w = scriptWorld(VOLS, REFS);
+    expect(w.run().status).toBe(0);
+    const v = scriptWorld(['hatchabot-kitchen-1-vol'], REFS);
+    mkdirSync(v.today(), { recursive: true });
+    writeFileSync(join(v.today(), 'hatchabot-notes-2-vol.tgz'), 'whole');
+    writeFileSync(join(v.today(), 'backup-status.json'), JSON.stringify({ state: 'complete', captured: ['hatchabot-notes-2-vol'] }));
+    expect(v.run().status).toBe(1);
+    expect(v.record()).toMatchObject({ state: 'incomplete', missing: ['hatchabot-notes-2-vol'] });
+  });
+});
+
+describe('HATCHABOT_BACKUP_KEEP_DAYS has one reading (HB-0432)', () => {
+  const VOLS = ['hatchabot-kitchen-1-vol'], REFS = ['docker://hatchabot-kitchen-1'];
+  const was = process.env.HATCHABOT_BACKUP_KEEP_DAYS;
+  afterEach(() => { if (was === undefined) delete process.env.HATCHABOT_BACKUP_KEEP_DAYS; else process.env.HATCHABOT_BACKUP_KEEP_DAYS = was; });
+  it.each(['14d', '0', '-3', '3.5', 'abc', '0x10', '', '99999999999999999999'])('%j: a whole run, the panel and the script both at 14 days, and said', (value) => {
+    process.env.HATCHABOT_BACKUP_KEEP_DAYS = value;
+    expect(keepDays()).toBe(14);
+    const w = scriptWorld(VOLS, REFS);
+    const young = w.oldSet(['x.tgz'], '2026-01-03', 5); // would go under -mtime +0
+    const old = w.oldSet(['y.tgz'], '2026-01-02', 30);
+    const r = w.run({ HATCHABOT_BACKUP_KEEP_DAYS: value });
+    expect(r.status, r.stderr).toBe(0);
+    if (value) expect(r.stderr).toContain('is not a whole number of days above 0: keeping 14 days');
+    expect(r.stdout).toContain('keeping 14 days');
+    expect(w.record().state).toBe('complete');
+    expect(existsSync(young)).toBe(true);
+    expect(existsSync(old)).toBe(false);
+  });
+  it.each([['7', 7], ['007', 7], [' 30 ', 30]])('%j reads the same in both', (value, days) => {
+    process.env.HATCHABOT_BACKUP_KEEP_DAYS = String(value);
+    expect(keepDays()).toBe(days);
+    const r = scriptWorld(VOLS, REFS).run({ HATCHABOT_BACKUP_KEEP_DAYS: String(value) });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`keeping ${days} days`);
+    expect(r.stderr).not.toContain('keeping 14 days');
   });
 });
 
@@ -801,4 +927,46 @@ it('a missing key does not discard the key from an earlier run of the same dated
   expect(w.run().status).toBe(1);
   expect(w.record().state).toBe('incomplete');
   expect(readFileSync(keyFile, 'utf8')).toBe(saved);
+});
+
+// The README's restore steps, run as written, after an unclean stop: copying only the
+// main file left -wal beside it, and the next open replayed it onto the backup (HB-0407).
+describe("README's restore of the database (HB-0407)", () => {
+  const nodePath = join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..');
+  const killed = (root: string) => {
+    // A server's life: a backup taken, more written, then killed, so -wal and -shm stay.
+    const r = spawnSync(process.execPath, ['-e', `
+      const D = require("better-sqlite3");
+      const db = new D("data/hatchabot.sqlite");
+      db.pragma("journal_mode = WAL"); db.pragma("wal_autocheckpoint = 0");
+      db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+      const add = db.prepare("INSERT INTO t (v) VALUES (?)");
+      for (let i = 0; i < 50; i++) add.run("old" + i);
+      db.backup("set/hatchabot.sqlite").then(() => {
+        for (let i = 0; i < 500; i++) add.run("new" + i);
+        db.prepare("UPDATE t SET v = ? WHERE id = 1").run("changed-after-backup");
+        process.kill(process.pid, "SIGKILL");
+      });`], { cwd: root, env: { HOME: root, PATH: '/usr/bin:/bin', NODE_PATH: nodePath }, encoding: 'utf8' });
+    expect(r.signal, r.stderr).toBe('SIGKILL');
+    expect(existsSync(join(root, 'data', 'hatchabot.sqlite-wal'))).toBe(true);
+  };
+  const read = (root: string) => {
+    const db = new Database(join(root, 'data', 'hatchabot.sqlite'));
+    try { return { n: (db.prepare('SELECT count(*) n FROM t').get() as { n: number }).n, first: (db.prepare('SELECT v FROM t WHERE id = 1').get() as { v: string }).v }; } finally { db.close(); }
+  };
+  const world = () => { const root = tmp('hb-restore-'); mkdirSync(join(root, 'data')); mkdirSync(join(root, 'set')); killed(root); return root; };
+  const sh = (root: string, cmd: string) => { const r = spawnSync('sh', ['-c', cmd], { cwd: root, env: { HOME: root, PATH: '/usr/bin:/bin' }, encoding: 'utf8' }); expect(r.status, r.stderr).toBe(0); };
+
+  it('the steps as the README gives them bring back exactly what the backup holds', () => {
+    const block = /Put `hatchabot\.sqlite` in place[\s\S]*?```sh\n([\s\S]*?)```/.exec(readFileSync('README.md', 'utf8'))?.[1];
+    expect(block).toContain('rm -f data/hatchabot.sqlite-wal');
+    const root = world();
+    sh(root, block!.replace(/<backup-dir>/g, 'set'));
+    expect(read(root)).toEqual({ n: 50, first: 'old0' });
+  });
+  it('the main file alone is what went wrong', () => {
+    const root = world();
+    sh(root, 'cp set/hatchabot.sqlite data/hatchabot.sqlite');
+    expect(read(root)).toEqual({ n: 550, first: 'changed-after-backup' });
+  });
 });

@@ -57,8 +57,11 @@ export interface ReleaseOptions {
    * told its members where to go, and a moved bot is live elsewhere (the
    * "removed" notice went out through a bot answering on the peer). `moved`
    * also leaves the idle name alone — the bot still serves the agent there.
+   * `setup-failed`: the rollback of a setup that can be retried. Nothing is over
+   * for the people on the agent, so no farewell; a pasted token is kept for
+   * the Retry (HB-0412, HB-0414).
    */
-  reason?: 'deleted' | 'archived' | 'detached' | 'swapped' | 'moved';
+  reason?: 'deleted' | 'archived' | 'detached' | 'swapped' | 'moved' | 'setup-failed';
   agentId?: string;
 }
 

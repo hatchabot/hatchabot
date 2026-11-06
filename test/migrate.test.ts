@@ -89,6 +89,12 @@ describe('preflight', () => {
     expect(a.aiModel).toBe('claude-opus-4-8');
   });
 
+  it('another account\'s agent with the same slug is no reason to refuse: the import\'s rule is per owner (HB-0421)', async () => {
+    const w = await world();
+    expect(preflight(w.store, 'someone-else', { slug: 'kitchen', accountId: 'freshbot', vendor: 'anthropic' }).reasons.join(' ')).not.toMatch(/already lives here/);
+    expect(preflight(w.store, 'o', { slug: 'kitchen', accountId: 'freshbot', vendor: 'anthropic' }).reasons.join(' ')).toMatch(/already lives here/);
+  });
+
   it('refuses a slug or bot that already lives here, and says which', async () => {
     const w = await world();
     const a = preflight(w.store, 'o', { slug: 'kitchen', accountId: 'kitchenbot' });
@@ -583,6 +589,38 @@ describe('review, 2026-09-29: a failed move of a sleeping agent', () => {
     expect(a.state).toBe('STOPPED');
     expect(a.hibernatedAt).toBe(at); // the wake poll will still answer its messages
     expect(a.hibernateMark).toBe(42);
+  });
+
+  it('a refused move leaves no mark of a copy, so Archive and Delete park its bot as usual (HB-0413)', async () => {
+    const w = await world();
+    await w.provider.stop(w.store.getAgent('a1')!.runtimeRef!);
+    w.store.setAgentState('a1', 'STOPPED');
+    peerResponds({ importStatus: 400, import: { error: 'disk full' } });
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/disk full/);
+    expect(w.store.getAgent('a1')!.exportedAt).toBeUndefined();
+  });
+
+  it('a file the owner downloaded before the refused move stays marked (HB-0413)', async () => {
+    const w = await world();
+    await w.provider.stop(w.store.getAgent('a1')!.runtimeRef!);
+    w.store.setAgentState('a1', 'STOPPED');
+    w.store.setAgentExportedAt('a1', '2026-11-01T00:00:00.000Z');
+    peerResponds({ importStatus: 400, import: { error: 'disk full' } });
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/disk full/);
+    expect(w.store.getAgent('a1')!.exportedAt).toBe('2026-11-01T00:00:00.000Z');
+  });
+
+  it('a running agent that did not start again is not called unchanged, and the owner is told to Start it (HB-0416)', async () => {
+    const w = await world();
+    peerResponds({ importStatus: 400, import: { error: 'disk full' } });
+    w.provider.start = async () => { throw new Error('the port is taken'); };
+    const err = await migrateAgent(w.deps as any, 'a1', PEER).catch((e: Error) => e);
+    expect(String(err)).toMatch(/disk full/);
+    expect(String(err)).toMatch(/did not start again here/);
+    expect(String(err)).not.toMatch(/unchanged/);
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+    expect(w.store.listOperations(['a1'], 1)[0]).toMatchObject({ kind: 'migrate', status: 'failed', outcome: expect.stringMatching(/did not start again here/) });
+    expect(w.store.getAgent('a1')!.stateReason).toMatch(/did not start again here.*Press Start/);
   });
 
   it('a successful move leaves it plain stopped (asleep, it would wake beside its copy)', async () => {

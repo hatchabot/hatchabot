@@ -34,6 +34,14 @@ export class IdentityError extends Error {
   }
 }
 
+/** The token could not be checked at all, which says nothing about the token (HB-0424). */
+export class IdentityUnavailableError extends IdentityError {
+  constructor(userMessage: string) {
+    super(userMessage);
+    this.name = 'IdentityUnavailableError';
+  }
+}
+
 export interface VerifiedToken {
   sub: string;
   email?: string;
@@ -62,6 +70,8 @@ export class IdentityVerifier {
   #lastAttempt = 0;
   /** The fetch under way, if any; true when it brought new certs. */
   #inflight: Promise<boolean> | undefined;
+  /** The last fetch failed: an unknown key may simply be one we could not get. */
+  #lastFetchFailed = false;
 
   async #certFor(kid: string): Promise<string> {
     const now = this.#config.now?.() ?? Date.now();
@@ -80,19 +90,18 @@ export class IdentityVerifier {
         });
       this.#inflight = Promise.resolve()
         .then(fetcher)
-        .then((certs) => { this.#certs = certs; this.#fetchedAt = now; return true; }, () => false)
+        .then((certs) => { this.#certs = certs; this.#fetchedAt = now; this.#lastFetchFailed = false; return true; }, () => { this.#lastFetchFailed = true; return false; })
         .finally(() => { this.#inflight = undefined; });
     }
     // A fetch under way, this request's or another's, is waited for: the
     // throttle used to send the second of two first sign-ins straight to
     // the empty cache, and it was refused while the first got in.
-    if (this.#inflight) {
-      const fetched = await this.#inflight;
-      // A Google outage must not log everyone out: keep serving the cached
-      // keys and only fail if this particular kid was never seen.
-      if (!fetched && !this.#certs[kid]) {
-        throw new IdentityError('Could not reach Google to verify your login.');
-      }
+    if (this.#inflight) await this.#inflight;
+    // A Google outage must not log everyone out: keep serving the cached
+    // keys and only fail if this particular kid was never seen. Between
+    // fetches too: the once-a-minute limit made a retry look like a bad key.
+    if (this.#lastFetchFailed && !this.#certs[kid]) {
+      throw new IdentityUnavailableError('Could not reach Google to verify your login.');
     }
     const cert = this.#certs[kid];
     if (!cert) throw new IdentityError('Your login could not be verified — try signing in again.');

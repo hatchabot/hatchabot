@@ -5,7 +5,7 @@
  * step that silently broke the first live runner when done by hand.
  */
 import { describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -139,7 +139,8 @@ describe('ensureSshConfigBlock', () => {
 describe('runnerSetupSnippet', () => {
   it('authorizes the key idempotently and fixes PATH for non-interactive ssh', () => {
     const s = runnerSetupSnippet('ssh-ed25519 AAAA test-key');
-    expect(s).toContain("grep -qF 'ssh-ed25519 AAAA test-key'"); // no duplicate lines
+    expect(s).toContain("k='ssh-ed25519 AAAA test-key'");
+    expect(s).toContain('grep -qxF "$k"'); // a whole line: no duplicates, and a glued-on key is not "there"
     expect(s).toContain('authorized_keys');
     expect(s).toContain('/usr/local/bin'); // the macOS docker-not-found fix
     expect(s).toContain('command -v docker'); // self-check at the end
@@ -150,13 +151,202 @@ describe('runnerSetupSnippet on a runner (in a sandbox: a temp HOME and a PATH o
   const sandbox = () => {
     const home = mkdtempSync(join(tmpdir(), 'acl-runnerhome-'));
     mkdirSync(join(home, 'bin'));
-    for (const c of ['mkdir', 'chmod', 'grep', 'cat', 'rm', 'cp', 'mv']) {
+    for (const c of ['mkdir', 'chmod', 'grep', 'cat', 'rm', 'cp', 'mv', 'tail', 'awk']) {
       const at = ['/usr/bin', '/bin'].map((d) => join(d, c)).find((f) => existsSync(f));
       if (at) symlinkSync(at, join(home, 'bin', c));
     }
     return { home, env: { HOME: home, PATH: join(home, 'bin') } };
   };
-  const shells = ['/bin/bash', '/bin/zsh', '/bin/sh'].filter((sh) => existsSync(sh));
+  // zsh wherever it is: a Mac's default, and not on every machine this runs on.
+  const zsh = spawnSync('sh', ['-c', 'command -v zsh'], { encoding: 'utf8' }).stdout.trim();
+  const shells = ['/bin/bash', zsh || '/bin/zsh', '/bin/sh'].filter((sh) => existsSync(sh));
+
+  describe('authorized_keys (HB-0434)', () => {
+    const NEW = 'ssh-ed25519 AAAAnew agentclaw control-plane -> runner';
+    const paste = (sh: string, env: NodeJS.ProcessEnv) => spawnSync(sh, ['-c', `set -o noclobber\n${runnerSetupSnippet(NEW)}`], { env, encoding: 'utf8' });
+    const keys = (home: string, text?: string) => {
+      const f = join(home, '.ssh', 'authorized_keys');
+      if (text !== undefined) { mkdirSync(join(home, '.ssh'), { recursive: true }); writeFileSync(f, text); }
+      return readFileSync(f, 'utf8');
+    };
+    it('a last line with no newline stays whole, the key on its own line; a second paste changes nothing', () => {
+      for (const sh of shells) {
+        const { home, env } = sandbox();
+        keys(home, 'ssh-ed25519 AAAAold someone-at-laptop');
+        for (let i = 0; i < 2; i++) expect(paste(sh, env).status, sh).toBe(0);
+        expect(keys(home), sh).toBe(`ssh-ed25519 AAAAold someone-at-laptop\n${NEW}\n`);
+        expect(statSync(join(home, '.ssh', 'authorized_keys')).mode & 0o777, sh).toBe(0o600);
+      }
+    });
+    it('a key an earlier paste glued on is split off, keeping both, and pasting again now repairs it', () => {
+      for (const sh of shells) {
+        const { home, env } = sandbox();
+        keys(home, `ssh-ed25519 AAAAold someone-at-laptop${NEW}\nssh-ed25519 AAAAother x\n`);
+        expect(paste(sh, env).status, sh).toBe(0);
+        expect(keys(home), sh).toBe(`ssh-ed25519 AAAAold someone-at-laptop\n${NEW}\nssh-ed25519 AAAAother x\n`);
+        expect(readdirSync(join(home, '.ssh')).filter((f) => f.includes('agentclaw-new')), sh).toEqual([]);
+      }
+    });
+    it('a file this user cannot read: said so plainly, not one byte written, its mode kept; once readable a paste works', () => {
+      if (process.getuid?.() === 0) return; // root reads everything
+      for (const sh of shells) {
+        for (const text of ['ssh-rsa AAAAold someone-at-laptop', `ssh-rsa AAAAold someone-at-laptop\n${NEW}\n`]) {
+          const { home, env } = sandbox();
+          keys(home, text);
+          const f = join(home, '.ssh', 'authorized_keys');
+          chmodSync(f, 0o200);
+          const r = paste(sh, env);
+          expect(r.status, sh).toBe(0);
+          expect(r.stdout + r.stderr, sh).toMatch(/WARNING: could not read .*authorized_keys, so the key was not added/);
+          expect(statSync(f).mode & 0o777, sh).toBe(0o200);
+          chmodSync(f, 0o600);
+          expect(readFileSync(f, 'utf8'), sh).toBe(text);
+          // Made readable, the same paste does what it does for any file.
+          expect(paste(sh, env).status, sh).toBe(0);
+          expect(keys(home), sh).toBe(text.endsWith('\n') ? text : `${text}\n${NEW}\n`);
+        }
+      }
+    });
+    describe('a line that has the key any other way is the owner\'s: left to the byte, nothing added', () => {
+      const BLOB = 'ssh-ed25519 AAAAnew';
+      const MINE = 'ssh-rsa AAAAmine someone-at-laptop';
+      const cases: Record<string, string> = {
+        'from= options': `from="10.0.0.1" ${NEW}\n`,
+        'from= options, no final newline': `${MINE}\nfrom="10.0.0.1" ${NEW}`,
+        'restrict,command= options': `restrict,command="/usr/bin/docker system dial-stdio" ${NEW}\n`,
+        'a command that itself looks like a key': `command="ssh-rsa AAAAquoted c" ${NEW}\n`,
+        'options with no key of their own, run into it': `from="10.0.0.1"${NEW}\n`,
+        'options, the key under another comment': `from="10.0.0.1" ${BLOB} the owner's own name\n`,
+        'options, the key with no comment': `from="10.0.0.1" ${BLOB}\n`,
+        'disabled by a comment': `# disabled by owner: ${NEW}\n`,
+        'disabled, no space': `#${NEW}\n`,
+        'disabled, a comment that names a key first': `# ${MINE}${NEW}\n`,
+        'a longer comment': `${NEW} and more\n`,
+        'a longer comment, run on': `${NEW}-and-more\n`,
+        'another comment': `${BLOB} the owner's own name\n`,
+        'CRLF endings': `${MINE}\r\n${NEW}\r\n`,
+        'a later key run onto it (the key itself is read)': `${NEW}ssh-ed25519 AAAAlater y\n`,
+        'a space before it, not a glue': `${MINE} ${NEW}\n`,
+        'limited on one line, glued on another: the limit stands': `from="10.0.0.1" ${NEW}\n${MINE}${NEW}\n`,
+      };
+      for (const [name, text] of Object.entries(cases)) {
+        it(name, () => {
+          for (const sh of shells) {
+            const { home, env } = sandbox();
+            keys(home, text);
+            for (let i = 0; i < 2; i++) {
+              const r = paste(sh, env);
+              expect(r.status, `${sh}: ${r.stderr}`).toBe(0);
+              expect(keys(home), sh).toBe(text);
+              expect(r.stdout, sh).toContain('this key is already in');
+            }
+            expect(readdirSync(join(home, '.ssh')).filter((f) => f.includes('agentclaw-new')), sh).toEqual([]);
+          }
+        });
+      }
+    });
+    describe('a true glue, in every shell', () => {
+      const glues: Record<string, string> = {
+        'an earlier key with a comment': 'ssh-ed25519 AAAAold someone-at-laptop',
+        'an earlier key with no comment': 'ssh-ed25519 AAAAold',
+        'an earlier key with options, which stay on it': 'from="10.0.0.2",command="echo hi there" ssh-rsa AAAAold+/= c',
+      };
+      for (const [name, old] of Object.entries(glues)) {
+        it(name, () => {
+          for (const sh of shells) {
+            const { home, env } = sandbox();
+            keys(home, `# mine\n${old}${NEW}\nssh-rsa AAAAother y\n`);
+            const r = paste(sh, env);
+            expect(r.status, `${sh}: ${r.stderr}`).toBe(0);
+            expect(keys(home), sh).toBe(`# mine\n${old}\n${NEW}\nssh-rsa AAAAother y\n`);
+            expect(r.stdout, sh).not.toContain('this key is already in');
+            expect(paste(sh, env).status, sh).toBe(0);
+            expect(keys(home), sh).toBe(`# mine\n${old}\n${NEW}\nssh-rsa AAAAother y\n`);
+          }
+        });
+      }
+      it('the other lines keep their CRLF, and each glue in the file is split', () => {
+        const { home, env } = sandbox();
+        keys(home, `ssh-rsa AAAAa c\r\nssh-rsa AAAAb d${NEW}\nssh-rsa AAAAe f${NEW}\n`);
+        expect(paste(shells[0]!, env).status).toBe(0);
+        expect(keys(home)).toBe(`ssh-rsa AAAAa c\r\nssh-rsa AAAAb d\n${NEW}\nssh-rsa AAAAe f\n${NEW}\n`);
+      });
+    });
+    describe('the write-back of a repair', () => {
+      const GLUED = `ssh-ed25519 AAAAold x${NEW}\nssh-rsa AAAAother y\n`, SPLIT = `ssh-ed25519 AAAAold x\n${NEW}\nssh-rsa AAAAother y\n`;
+      const COPY = 'authorized_keys.agentclaw-new';
+      it('failing cuts the file short: the whole text stays beside it, it is said, and the next paste does not overwrite it', () => {
+        for (const sh of shells) {
+          const { home, env } = sandbox();
+          keys(home, GLUED);
+          // A disk that fills between the copy and the write: `>|` has already emptied the file.
+          rmSync(join(home, 'bin', 'cat'));
+          writeFileSync(join(home, 'bin', 'cat'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+          const r = paste(sh, env);
+          expect(r.stdout, sh).toContain(`could not write ${home}/.ssh/authorized_keys; if it is now cut short, its whole text is in ${home}/.ssh/${COPY}`);
+          expect(keys(home), sh).toBe('');
+          expect(readFileSync(join(home, '.ssh', COPY), 'utf8'), sh).toBe(SPLIT);
+          const again = paste(sh, env);
+          expect(again.stdout, sh).toContain(`${home}/.ssh/${COPY} is left from an earlier try`);
+          expect(readFileSync(join(home, '.ssh', COPY), 'utf8'), sh).toBe(SPLIT);
+          expect(keys(home), sh).toBe('');
+        }
+      });
+      it('the copy that cannot be written leaves the file as it was', () => {
+        const { home, env } = sandbox();
+        keys(home, GLUED);
+        const awk = readlinkSync(join(home, 'bin', 'awk'));
+        rmSync(join(home, 'bin', 'awk'));
+        writeFileSync(join(home, 'bin', 'awk'), `#!/bin/sh\ncase "$*" in *m=fix*) echo half; exit 1 ;; esac\nexec '${awk}' "$@"\n`, { mode: 0o755 });
+        const r = paste(shells[0]!, env);
+        expect(r.stdout).toContain(`could not write ${home}/.ssh/${COPY}, so ${home}/.ssh/authorized_keys was left as it was`);
+        expect(keys(home)).toBe(GLUED);
+        expect(existsSync(join(home, '.ssh', COPY))).toBe(false);
+      });
+      it('a read-only file is said, and no copy is left', () => {
+        if (process.getuid?.() === 0) return;
+        const { home, env } = sandbox();
+        keys(home, GLUED);
+        chmodSync(join(home, '.ssh', 'authorized_keys'), 0o400);
+        const r = paste(shells[0]!, env);
+        expect(r.stdout).toContain('it is read-only');
+        expect(readFileSync(join(home, '.ssh', 'authorized_keys'), 'utf8')).toBe(GLUED);
+        expect(existsSync(join(home, '.ssh', COPY))).toBe(false);
+      });
+    });
+    it('a different key that only starts the same is not this one', () => {
+      const { home, env } = sandbox();
+      keys(home, 'ssh-ed25519 AAAAnewer agentclaw control-plane -> runner\n');
+      expect(paste(shells[0]!, env).status).toBe(0);
+      expect(keys(home)).toBe(`ssh-ed25519 AAAAnewer agentclaw control-plane -> runner\n${NEW}\n`);
+    });
+    it('a comment with bytes that are not UTF-8 is read as it is', () => {
+      const { home, env } = sandbox();
+      mkdirSync(join(home, '.ssh'));
+      const f = join(home, '.ssh', 'authorized_keys');
+      const text = Buffer.concat([Buffer.from('ssh-rsa AAAAold caf'), Buffer.from([0xe9]), Buffer.from(`${NEW}\n`)]);
+      writeFileSync(f, text);
+      expect(paste(shells[0]!, env).status).toBe(0);
+      expect(readFileSync(f)).toEqual(Buffer.concat([Buffer.from('ssh-rsa AAAAold caf'), Buffer.from([0xe9]), Buffer.from(`\n${NEW}\n`)]));
+    });
+    it('a line already whole, and a file with a final newline or none yet, are left as they are', () => {
+      const { home, env } = sandbox();
+      expect(paste(shells[0]!, env).status).toBe(0);
+      expect(keys(home)).toBe(`${NEW}\n`);
+      keys(home, `ssh-ed25519 AAAAold x\n${NEW}\nssh-ed25519 AAAAmore y\n`);
+      expect(paste(shells[0]!, env).status).toBe(0);
+      expect(keys(home)).toBe(`ssh-ed25519 AAAAold x\n${NEW}\nssh-ed25519 AAAAmore y\n`);
+    });
+    it('a symlinked file stays a symlink', () => {
+      const { home, env } = sandbox();
+      mkdirSync(join(home, '.ssh'));
+      writeFileSync(join(home, 'dot-keys'), `ssh-ed25519 AAAAold x${NEW}`);
+      symlinkSync(join(home, 'dot-keys'), join(home, '.ssh', 'authorized_keys'));
+      expect(paste(shells[0]!, env).status).toBe(0);
+      expect(lstatSync(join(home, '.ssh', 'authorized_keys')).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(home, 'dot-keys'), 'utf8')).toBe(`ssh-ed25519 AAAAold x\n${NEW}\n`);
+    });
+  });
 
   it('puts the PATH line above a ~/.bashrc that returns early for non-interactive shells (HB-0315)', () => {
     for (const sh of shells) {

@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { generateKeyPairSync, createSign } from 'node:crypto';
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import { IdentityVerifier, IdentityError, principalFor } from '../src/api/identity.js';
-import { registerAuth } from '../src/api/auth.js';
+import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
+import { publicApp } from './helpers/publicApp.js';
 import { principalOf } from '../src/api/principal.js';
 
 const PROJECT = 'hatchabot-504222';
@@ -298,4 +299,92 @@ describe('identity auth mode', () => {
     });
     expect(res.statusCode).toBe(401);
   });
+});
+
+describe('a Google outage is not a failed sign-in (HB-0424)', () => {
+  const LIMIT = 10;
+  beforeEach(() => _resetLoginThrottle());
+  afterEach(() => _resetLoginThrottle());
+
+  /** A verifier whose fetch of Google's keys fails while `outage.on`, and a clock to move past its once-a-minute limit. */
+  const flaky = () => {
+    const outage = { on: true, clock: NOW };
+    const v = new IdentityVerifier({ projectId: PROJECT, now: () => outage.clock, fetchCerts: async () => { if (outage.on) throw new Error('offline'); return certs(); } });
+    return { v, outage };
+  };
+  const session = (f: FastifyInstance, idToken: string) => f.inject({ method: 'POST', url: '/v1/session', payload: { idToken } });
+  const appWith = async (verifierNow: IdentityVerifier) => {
+    const f = Fastify();
+    await registerAuth(f, { secret: Buffer.alloc(32, 3), mode: 'identity', verifier: verifierNow });
+    return f;
+  };
+
+  it('retries during an outage are told so, are not counted, and a good token works when Google is back', async () => {
+    const { v, outage } = flaky();
+    const f = await appWith(v);
+    // More than the limit, both on fresh fetches and inside the once-a-minute limit on them.
+    for (let i = 0; i < LIMIT * 3; i++) {
+      if (i % 3 === 0) outage.clock += 61_000;
+      const r = await session(f, makeToken());
+      expect(r.statusCode, `try ${i}`).toBe(503);
+      expect(r.json().error).toMatch(/Could not reach Google/);
+      expect(r.headers['retry-after']).toBe('60');
+    }
+    outage.on = false;
+    outage.clock += 61_000;
+    const back = await session(f, makeToken());
+    expect(back.statusCode, back.body).toBe(200);
+  });
+
+  it('what was checked and refused still counts: a bad token, and a key Google does not have', async () => {
+    const { v, outage } = flaky();
+    outage.on = false;
+    const f = await appWith(v);
+    expect((await session(f, makeToken())).statusCode).toBe(200); // the keys are in
+    for (let i = 0; i < LIMIT; i++) {
+      const r = await session(f, i % 2 ? makeToken({}, { kid: 'kid-made-up' }) : 'not.a.token');
+      expect(r.statusCode, `try ${i}`).toBe(401);
+    }
+    expect((await session(f, makeToken())).statusCode).toBe(429);
+  });
+
+  it('during an outage a malformed token still counts, and known keys keep working', async () => {
+    const { v, outage } = flaky();
+    const lasting = makeToken({ exp: Math.floor(NOW / 1000) + 4 * 3600 });
+    outage.on = false;
+    const f = await appWith(v);
+    expect((await session(f, lasting)).statusCode).toBe(200);
+    outage.on = true;
+    outage.clock += 3_600_000 + 61_000; // the cache has aged out, and the fetch fails
+    expect((await session(f, lasting)).statusCode).toBe(200);
+    // A key never seen cannot be checked now: reported, not counted.
+    expect((await session(f, makeToken({ exp: Math.floor(NOW / 1000) + 4 * 3600 }, { kid: 'kid-made-up' }))).statusCode).toBe(503);
+    expect((await session(f, 'not.a.token')).statusCode).toBe(401);
+    for (let i = 1; i < LIMIT; i++) await session(f, 'not.a.token');
+    expect((await session(f, lasting)).statusCode).toBe(429);
+  });
+
+  it('at the public address an outage neither locks the address nor goes on the record as a burst', async () => {
+    const { v, outage } = flaky();
+    const h = await publicApp({ mode: 'identity', verifier: v });
+    try {
+      // The machine's owner with an authenticator app, so that the address is serving; uid-abc is someone it knows.
+      h.store.insertHost({ id: 'h', ownerId: 'user-owner', kind: 'local', provider: 'mock', name: 'm', settings: {}, createdAt: 'now' });
+      h.store.recordAccount('user-owner', 'made-up-owner@example.com');
+      h.store.insertSecondFactor({ id: 'f', ownerId: 'user-owner', kind: 'totp', data: 'sealed' });
+      h.store.recordAccount('user-uid-abc');
+      await h.app.publicAccess!.evaluate();
+      expect(h.app.publicAccess!.status().failing).toEqual([]);
+      for (let i = 0; i < LIMIT * 2; i++) {
+        if (i % 3 === 0) outage.clock += 61_000;
+        const r = await h.pub('/v1/session', { body: { idToken: makeToken() } });
+        expect([r.status, r.json.error], `try ${i}`).toEqual([503, 'Could not reach Google to verify your login.']);
+      }
+      expect(h.store.listSecurityLog().filter((e) => /burst|lock/i.test(e.kind))).toEqual([]);
+      outage.on = false;
+      outage.clock += 61_000;
+      const back = await h.pub('/v1/session', { body: { idToken: makeToken() } });
+      expect(back.status, JSON.stringify(back.json)).toBe(200);
+    } finally { h.app.server.closeAllConnections(); await h.close(); }
+  }, 60_000);
 });

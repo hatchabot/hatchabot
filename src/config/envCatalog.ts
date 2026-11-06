@@ -77,7 +77,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   // Data and backups
   s('data', 'HATCHABOT_DB', null, 'The registry and secret store (SQLite). Unset: data/hatchabot.sqlite in this folder. Production keeps it outside the checkout.'),
   s('data', 'HATCHABOT_BACKUP_DIR', null, 'Where nightly backups go (absolute path; may be a NAS mount). Unset: ~/hatchabot-backups.'),
-  s('data', 'HATCHABOT_BACKUP_KEEP_DAYS', '14', 'How many days of nightly backups to keep.'),
+  s('data', 'HATCHABOT_BACKUP_KEEP_DAYS', '14', 'How many days of nightly backups to keep: a whole number above 0, anything else means 14.'),
   s('data', 'HATCHABOT_DRILL_EVERY', 'off', 'Automatic restore drills: off, weekly or daily. A drill restores each agent\'s newest backup into a throwaway volume with no network, between 05:00 and 07:00 after that night\'s backup (Settings → Backups).'),
 
   // Limits

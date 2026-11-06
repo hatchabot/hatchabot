@@ -131,6 +131,11 @@ describe('a member of someone else\'s agent', () => {
     expect(theirs.gatewayPort).toBeUndefined();
     const list = (await b.f.inject({ method: 'GET', url: '/v1/agents', headers: { 'x-hatchabot-owner': 'member' } })).json();
     expect(list[0].dataSources[0].hostPath).toBeUndefined();
+    // Why it did not start names the owner's machines: theirs alone (HB-0416).
+    b.store.setAgentState('shared', 'STOPPED');
+    b.store.markNotStarted('shared', 'The move to Spare Box failed, and it did not start again on This machine.');
+    expect((await b.f.inject({ method: 'GET', url: '/v1/agents/shared', headers: H })).json().stateReason).toMatch(/Spare Box/);
+    expect((await b.f.inject({ method: 'GET', url: '/v1/agents/shared', headers: { 'x-hatchabot-owner': 'member' } })).json().stateReason).toBeUndefined();
   });
 });
 

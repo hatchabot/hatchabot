@@ -482,6 +482,53 @@ describe('usernames are unique regardless of case', () => {
 });
 
 describe('invitations instead of invented passwords', () => {
+  it('the roster: pending means no password yet and a live code; a spent or running reset changes nothing (HB-0422)', async () => {
+    const { f, store } = await app();
+    const first = await bootstrap(f);
+    const cookie = cookieOf(first);
+    const roster = async () => (await f.inject({ method: 'GET', url: '/v1/local-accounts', headers: { cookie } })).json() as Array<{ username: string; pending?: boolean; invitationExpired?: boolean; claimPath?: string; claimExpires?: string }>;
+    const row = async (u: string) => (await roster()).find((a) => a.username === u)!;
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const soon = new Date(Date.now() + 600_000).toISOString();
+
+    // A member with a password, whose reset link ran out unused.
+    const member = await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie }, payload: { username: 'member', password: 'a-long-made-up-passphrase' } });
+    store.setLocalAccountClaim(member.json().id, 'spent-reset-code', past);
+    let r = await row('member');
+    expect(r).toMatchObject({ pending: false, invitationExpired: false });
+    expect(r.claimPath).toBeUndefined();
+    // …and one whose reset link is still good: no invitation either, and the code is not listed.
+    store.setLocalAccountClaim(member.json().id, 'running-reset-code', soon);
+    r = await row('member');
+    expect(r).toMatchObject({ pending: false, invitationExpired: false });
+    expect(r.claimPath).toBeUndefined();
+    expect(r.claimExpires).toBeUndefined();
+
+    // A live invitation: pending, with its link and when that really ends.
+    const invited = await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie }, payload: { username: 'invited' } });
+    r = await row('invited');
+    expect(r).toMatchObject({ pending: true, invitationExpired: false, claimPath: invited.json().claimPath });
+    store.setLocalAccountClaim(invited.json().id, 'short-lived-invite', soon);
+    expect((await row('invited')).claimExpires).toBe(soon);
+
+    // Expired: says so, no dead link to copy, and what the sign-in page would refuse is not offered.
+    store.setLocalAccountClaim(invited.json().id, 'dead-invite', past);
+    r = await row('invited');
+    expect(r).toMatchObject({ pending: false, invitationExpired: true });
+    expect(r.claimPath).toBeUndefined();
+    expect((await f.inject({ method: 'GET', url: '/v1/local-accounts/claim?code=dead-invite' })).statusCode).toBe(404);
+
+    // A new link renews it, and it works.
+    const renewed = await f.inject({ method: 'POST', url: `/v1/local-accounts/${invited.json().id}/reset-link`, headers: { cookie }, payload: {} });
+    expect(renewed.statusCode).toBe(200);
+    r = await row('invited');
+    expect(r).toMatchObject({ pending: true, invitationExpired: false, claimPath: renewed.json().claimPath });
+    expect(r.claimExpires).toBe(renewed.json().expiresAt);
+    const claimed = await f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code: renewed.json().claimPath.split('=')[1], password: 'another-made-up-passphrase' } });
+    expect(claimed.statusCode).toBe(200);
+    expect(await row('invited')).toMatchObject({ pending: false, invitationExpired: false });
+  });
+
   it('creates a pending account, which cannot sign in until it is claimed', async () => {
     const { f, store } = await app();
     const first = await bootstrap(f);

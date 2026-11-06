@@ -542,6 +542,18 @@ sources → 💵 **Budgets** (every agent of yours in one table: this month, las
 month, a month at its pace now, and a suggested budget about 1.25× that,
 rounded), or ask the Hatchabot agent (`set_budget`, a card you confirm).
 
+A model with no known price (the price list holds Anthropic's models only, so
+any OpenAI or Google model) cannot be measured in dollars. Budgets shows "no
+price known" instead of $0.00, and saving a limit or a step on such an agent
+says it cannot be enforced. The tokens are kept per day, and the machine's total
+says how many agents it leaves out.
+
+**Where the messages go:** to you personally, on the first that exists: your
+Hatchabot agent's bot, then the agent's own, on Telegram, Discord or Slack
+wherever you are linked. With none of those, Budgets says so beside an alarm you
+have set and when you save it: no message will come, a limit still acts, and
+the Alerts line and the tile's tooltip are what you have.
+
 - **At 80% and at 100%**: one message on your Hatchabot agent's chat; at 100%
   a line under Alerts, and before mid-month an 80% budget is a
   [Recommended](#recommended-one-list-of-cost-advice) item ("Used 84% of its
@@ -550,7 +562,8 @@ rounded), or ask the Hatchabot agent (`set_budget`, a card you confirm).
   warns afresh.
 - **At the limit** — your choice per budget: **warn me** (the default: it keeps
   working), **cheaper model**, or **pause it**. *Cheaper model* (v2.124.0)
-  moves it to the cheapest model its AI source offers, live, until the 1st —
+  moves it to the cheapest model its AI source offers that its runtime can
+  use, live, until the 1st —
   it keeps answering; its own model comes back on the 1st or as soon as the
   budget is raised, and a model you set by hand wins for the rest of the
   month. Stopping and starting it, or archiving it, keeps that promise: an
@@ -1130,7 +1143,8 @@ Sharing · Schedule · Advanced**.
   that conversation; only its result is added to it. A task you asked the
   agent for in its console lands in the same place. Tasks made quiet
   (`--quiet`) post nowhere; their runs are read in the app. Needs OpenClaw
-  2026.9 or newer; on an older one a task on such an agent is quiet.
+  2026.9 or newer; on an older one a task on such an agent is quiet. Remove a
+  chat app and, within minutes, tasks aimed at it follow these same rules.
 
 **📝 Chat → Memory** (card) asks the agent to write the current
 conversation's key facts into MEMORY.md now (~20s) — a checkpoint, so the
@@ -2321,7 +2335,9 @@ migrate-source <from> --to <shared source>`, the twin of the app's **Migrate
 all off…**, moves **every** agent on a source, other accounts' included, and
 rebuilds them: it lists them with their owners and asks first (`--yes` skips
 the question); `--no-checkpoint` skips Chat → Memory (when the old source is
-already dead), and `--recover` restores lost context afterwards.
+already dead), and `--recover` restores lost context afterwards, on the running
+ones: a stopped or sleeping agent gets **Recover context** by hand from its own
+owner once it is up.
 
 A profile's **Shared** toggle lets every account on this server use it for
 their agents. That is a credential hand-off, not a metered proxy — share only
@@ -2335,7 +2351,9 @@ it is busy or idle. **Archive** (the foot of the agent's Overview, or drag its i
 agent is kept whole — container, volume, memory, members, settings — and stops,
 but its bot goes back in the pool for another agent to lease. A pasted,
 hand-minted token is parked in the pool too; it burns the same BotFather slot,
-so it is just as worth recycling.
+so it is just as worth recycling. The exception is an agent with a downloaded
+copy, stopped since: its bot is left to the copy, and the dialog and the
+message after say so. A web-only agent has no bot, and they say nothing of one.
 
 The one thing archiving does not preserve is the **chat address**. Members are
 told so in the chat, by the old bot, before it is renamed:
@@ -2418,6 +2436,16 @@ What the machine does on its own is its owner's choice (⚙ Settings → Hosts �
 - *Required, plus the rest overnight*: recommended ones too, in the quiet hours
   (`HATCHABOT_REBUILD_QUIET_HOURS`, default `3-5`, local time).
 - *Only when I press Rebuild*: nothing happens on its own.
+
+A change of yours that needs a new container (another AI source, its browser,
+an image pin, a chat app added or removed, where a bot answers) rebuilds a
+running agent at once. A stopped or sleeping one is not started for it: it
+stays down, its card says **A change is waiting**, and its next Start or wake is
+a rebuild with the change in it, under any of these policies. Bulk **Move to
+source**, **Switch & rebuild** and **Migrate all** work the same way, for other
+accounts' agents too. Only pressing **Rebuild** on it starts a stopped agent, and
+the app says so first. A sleeping agent given a Discord or Slack bot does come
+up, since nothing wakes it for those.
 
 `hatchabot rebuild --outdated [--required] [--dry-run]` rebuilds every running
 agent that needs it and prints why; it exits non-zero when the server refused

@@ -32,10 +32,12 @@ export function backupsDir(): string {
 }
 
 /** Retention the script enforces, surfaced so the panel can say how long a
- *  backup will live. */
+ *  backup will live. The same reading as scripts/backup-volumes.sh: a whole
+ *  number of days above 0, anything else 14 (HB-0432). */
 export function keepDays(): number {
-  const n = Number(process.env.HATCHABOT_BACKUP_KEEP_DAYS);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 14;
+  const v = (process.env.HATCHABOT_BACKUP_KEEP_DAYS ?? '').replace(/\s/g, '');
+  const days = /^\d+$/.test(v) ? Number(v.replace(/^0+/, '')) : 0;
+  return days > 0 && days <= 999_999 ? days : 14;
 }
 
 export interface BackupVolume {

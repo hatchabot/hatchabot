@@ -44,6 +44,8 @@ export interface ResumeContext {
   requeueRebuild?: (op: Operation) => boolean;
   /** How to reach an agent's apps (the routes' appDeps); undefined when it has no runtime. */
   appDeps?: (agentId: string) => InstallDeps | undefined;
+  /** Tell an owner on their chat app (the routes' tellOwner), for what a restart settles with nobody watching. */
+  tellOwner?: (ownerId: string, agentId: string, text: string) => Promise<boolean>;
   /** What a Start runs once it is up (the routes' clearPinsWhenUp), for an agent a recovery started. */
   afterStart?: (agentId: string) => void;
   /** An archive's Discord and Slack bots, parked as it finishes (the routes' parkArchivedChannels). */
@@ -81,6 +83,8 @@ async function runKind(ctx: ResumeContext, op: Operation, action: string | undef
       const deps = {
         store: ctx.store, secrets: ctx.secrets, channel: ctx.channel, embedder: ctx.embedder,
         providerForHost: ctx.providerForHost, answers: ctx.answers, log, ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
+        // The owner's own choice has them on the page: only what a restart settles is told.
+        ...(!action && ctx.tellOwner ? { tell: ctx.tellOwner } : {}),
       };
       return action ? recoverMoveHost(deps, op.id, action) : resumeMoveHost(deps, op.id);
     }

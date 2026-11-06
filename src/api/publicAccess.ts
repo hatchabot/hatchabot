@@ -136,6 +136,13 @@ export interface PublicAccessApi {
    */
   refuseSession(rawReq: IncomingMessage, ownerId: string, opts?: { acceptingWebChat?: boolean }): string | undefined;
   /**
+   * What to tell someone refuseSession turned down only for want of a second
+   * factor: their sign-in is good, so they may hear what any signed-in request
+   * of theirs would (the open /v1/join route, HB-0400). Undefined for every
+   * other reason, which has to look like no sign-in at all.
+   */
+  factorRefusal(rawReq: IncomingMessage, ownerId: string, refused: string): { error: string; secondFactor: 'required' | 'enrol' | 'enrol-link' | 'missing' } | undefined;
+  /**
    * For a console socket that is already open (consoleSockets.ts re-judges
    * them): why it must close now (undefined: it may stay). `cookie` is the
    * Cookie header it was opened with; `lastActive` is when the browser last
@@ -242,6 +249,7 @@ const FIRST_FACTOR_NEEDS_LINK = 'Your password alone cannot add your first secon
 /** Someone who must have a second factor here and has none, by how they arrived. */
 const MUST_ENROL_NOW = 'This Hatchabot asks for a second factor at the public address. Add one now under Settings → You → Second factor: you have half an hour from the link you used.';
 const MUST_ENROL_NEEDS_LINK = 'This Hatchabot asks for a second factor at the public address, and your account has none yet. Ask whoever runs this Hatchabot for a reset link and add one right after using it, or add one at the private address (Settings → You → Second factor).';
+const OWNER_MUST_ENROL = 'Your account has owner rights and no second factor. Add one at the private address (Settings → You → Second factor); until then it cannot be used here.';
 const GUEST_CHAT_ONLY = 'Without a second factor you can chat here and nothing else. Add one at the private address, or ask whoever runs this Hatchabot for a reset link and add one right after using it.';
 /** New-device notices: one per recipient and account in this long, and at most this many a day per recipient and overall. */
 const NOTICE_EVERY_MS = 10 * 60_000;
@@ -649,7 +657,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       if (need === 'missing' || need === 'guest') {
         // Someone with owner rights enrols at the private address, always.
         if (need === 'missing' && hasOwnerRights(principal.ownerId)) {
-          return reply.code(403).send({ error: 'Your account has owner rights and no second factor. Add one at the private address (Settings → You → Second factor); until then it cannot be used here.', secondFactor: 'missing' });
+          return reply.code(403).send({ error: OWNER_MUST_ENROL, secondFactor: 'missing' });
         }
         // A chat-only guest the owner chose to let in with a password alone: the chat, and nothing else.
         if (need === 'guest' && guestMay(req.method, req.routeOptions?.url)) return;
@@ -657,7 +665,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
         // through to the route, which asks for the current password; adding
         // one also needs a sign-in that came by a link or code sent out of band.
         if (rule.cls === 'step-up' && rule.firstFactorOk) {
-          if (rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });
+          if (rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: rule.refusal ?? FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });
           return;
         }
         if (need === 'guest') return reply.code(403).send({ error: GUEST_CHAT_ONLY, secondFactor: 'guest' });
@@ -671,7 +679,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       }
       if (rule.cls === 'step-up') {
         if (need === 'no') {
-          if (rule.firstFactorOk && rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });
+          if (rule.firstFactorOk && rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: rule.refusal ?? FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });
           if (rule.firstFactorOk) return;
           return reply.code(403).send({ error: 'This needs a second factor at the public address. Add one under Settings → You → Second factor, or use the private address.', secondFactor: 'missing' });
         }
@@ -698,6 +706,20 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     }
     if (need === 'yes' && factorAt(pass, ownerId) === 0) return 'second factor not given';
     return undefined;
+  };
+
+  const factorRefusal: PublicAccessApi['factorRefusal'] = (rawReq, ownerId, refused) => {
+    if (refused === 'second factor not given') {
+      return { secondFactor: 'required', error: 'This address also asks for your second factor, and you have not given it in this browser yet. Open Hatchabot, give it there, then come back to this page and press Join.' };
+    }
+    if (refused !== 'no second factor') return undefined;
+    if (hasOwnerRights(ownerId)) return { secondFactor: 'missing', error: `${OWNER_MUST_ENROL} Then open this invitation again.` };
+    const headers = rawReq.headers as Record<string, string | string[] | undefined>;
+    const pass = passOf({ headers }, sessionValue({ headers, socket: rawReq.socket }));
+    if (pass && pass.en > Date.now()) return { secondFactor: 'enrol', error: `${MUST_ENROL_NOW} Then come back to this page and press Join.` };
+    // Only someone who owns nothing can be let in as a chat-only guest (refuseSession), and only if the owner chooses.
+    const couldBeGuest = !publicConfig().guestsWithoutSecondFactor && !!store?.localAccount(ownerId) && !!store?.ownsNothing(ownerId);
+    return { secondFactor: 'enrol-link', error: `${MUST_ENROL_NEEDS_LINK} Then open this invitation again.${couldBeGuest ? ' Or ask them to let chat-only guests in without a second factor.' : ''}` };
   };
 
   const stepUpRefusal = (req: FastifyRequest): { code: number; body: Record<string, unknown> } | undefined => {
@@ -833,7 +855,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     config: publicConfig, status, evaluate,
     setProbes: (p) => { probes = { ...probes, ...p }; },
     syncListener, stopListener, sessionMinted, sessionCleared, failureBurst, secondFactorPassed, secondFactorsChanged, secondFactorNeed, secondFactorGiven, hasOwnerRights,
-    refuseSession, refuseOpenSocket, stepUpRefusal, rpId, origins, afterSignIn, throttle: opts.throttle, secret,
+    refuseSession, factorRefusal, refuseOpenSocket, stepUpRefusal, rpId, origins, afterSignIn, throttle: opts.throttle, secret,
   };
   app.decorate('publicAccess', api);
   return api;

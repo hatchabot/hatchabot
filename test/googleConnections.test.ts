@@ -147,6 +147,72 @@ describe('replacing or removing the OAuth client', () => {
     expect(r.error).toMatch(/connect it again/);
   });
 
+  describe('a new secret for the same client reaches the agents holding its accounts (HB-0427)', () => {
+    const CID = 'cid.apps.googleusercontent.com';
+    /** Imported after the consent and before the new secret, as a working agent's was. */
+    const imported = async (w: { store: Store; connId: string }) => {
+      w.store.markConnectionMaterialized('a1', w.connId, w.store.getConnection(w.connId)!.createdAt);
+      await new Promise((r) => setTimeout(r, 3));
+    };
+    const attachment = async (f: any) => (await f.inject({ method: 'GET', url: '/v1/connections', headers: H })).json().connections[0].attachedTo[0];
+    const until = async (cond: () => boolean | Promise<boolean>) => { for (let i = 0; i < 200 && !(await cond()); i++) await new Promise((r) => setTimeout(r, 10)); };
+    const pushed = (w: { provider: MockProvider }, value: string) => {
+      const scripts = w.provider.execLog.filter((a) => a[0] === 'sh').map((a) => a[1] ?? '');
+      return scripts.some((x) => x.includes('gog auth credentials') && [...x.matchAll(/echo "([A-Za-z0-9+/=]+)" \| base64 -d > /g)].some((m) => Buffer.from(m[1]!, 'base64').toString('utf8').includes(value)));
+    };
+
+    it('a running agent gets it, and is not left marked', async () => {
+      const w = await connected();
+      w.store.attachConnection('a1', w.connId, false);
+      await imported(w);
+      const res = await put(w.f, { clientId: CID, clientSecret: 'FAKE-FIXTURE-ROTATED' });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ reconnect: 0, pushing: 1, waiting: 0 });
+      await until(async () => (await attachment(w.f)).secretPending === false);
+      expect(pushed(w, 'FAKE-FIXTURE-ROTATED')).toBe(true);
+      expect(await attachment(w.f)).toMatchObject({ secretPending: false, stale: false });
+    });
+
+    it('a stopped agent is marked as waiting, not given a check mark, until its next sync', async () => {
+      const w = await connected();
+      w.store.attachConnection('a1', w.connId, false);
+      await imported(w);
+      w.store.setAgentState('a1', 'STOPPED');
+      w.provider.execLog.length = 0;
+      const res = await put(w.f, { clientId: CID, clientSecret: 'FAKE-FIXTURE-ROTATED' });
+      expect(res.json()).toMatchObject({ pushing: 0, waiting: 1 });
+      expect(pushed(w, 'FAKE-FIXTURE-ROTATED')).toBe(false);
+      const list = (await w.f.inject({ method: 'GET', url: '/v1/connections', headers: H })).json().connections;
+      expect(list[0].attachedTo[0]).toMatchObject({ secretPending: true, stale: false });
+      expect(list[0].secretPendingCount).toBe(1);
+      expect(list[0].clientSecretAt).toBeUndefined();
+      // Its next start imports it with the new secret, which clears the mark.
+      const r = await materializeConnection({ store: w.store, secrets: w.secrets, provider: w.provider }, { id: 'a1', slug: 'mailer', runtimeRef: w.store.getAgent('a1')!.runtimeRef! }, w.connId);
+      expect(r.ok).toBe(true);
+      expect(await attachment(w.f)).toMatchObject({ secretPending: false });
+    });
+
+    it('saving the same secret again changes nothing and pushes nothing', async () => {
+      const w = await connected();
+      w.store.attachConnection('a1', w.connId, false);
+      await imported(w);
+      w.provider.execLog.length = 0;
+      const res = await put(w.f, { clientId: CID, clientSecret: 'FAKE-FIXTURE-VALUE' });
+      expect(res.json()).toMatchObject({ pushing: 0, waiting: 0 });
+      expect(await attachment(w.f)).toMatchObject({ secretPending: false });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(w.provider.execLog.filter((a) => a[0] === 'sh')).toEqual([]);
+    });
+
+    it('a connection from another client is not touched by a change to this one', async () => {
+      const w = await connected();
+      w.store.insertConnection({ id: 'c-other', ownerId: OWNER, kind: 'google', email: 'other@example.org', services: [], secretRef: 'connection/c-other', clientId: 'someone-elses.apps.example' });
+      w.store.attachConnection('a1', 'c-other', false);
+      const res = await put(w.f, { clientId: CID, clientSecret: 'FAKE-FIXTURE-ROTATED', confirm: true });
+      expect(res.json()).toMatchObject({ pushing: 0, waiting: 0 });
+    });
+  });
+
   it('Remove then Save of a different client is still caught (B058)', async () => {
     const w = await connected();
     expect((await w.f.inject({ method: 'DELETE', url: '/v1/google-oauth/client', headers: H })).statusCode).toBe(200);

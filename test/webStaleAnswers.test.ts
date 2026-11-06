@@ -97,7 +97,7 @@ describe('the AI tab: one press acts on the agent it was pressed for (audit #047
     c.editAgentId = 'a2'; $('editCheckpoint').checked = false;
     saved.open({}); await pending;
     expect(calls.map((x) => [x.method, x.url])).toEqual([['PATCH', '/v1/agents/a1'], ['POST', '/v1/agents/a1/rebuild']]);
-    expect(calls[1]!.body).toEqual({ checkpoint: true });
+    expect(calls[1]!.body).toEqual({ checkpoint: true, stoppedWaits: true });
     expect(closed).toEqual([]); // B's sheet stays open
   });
 

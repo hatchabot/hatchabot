@@ -179,7 +179,9 @@ export function applyReconcileRule(
 
   if (
     status.phase === 'absent' &&
-    (s === 'RUNNING' || s === 'STOPPED' || s === 'PROVISIONING' || s === 'REBUILDING')
+    // Parked on a human step: a failed setup's rollback removed the container
+    // and left its ref on the record, and it is waiting on them, as above (HB-0414).
+    (s === 'RUNNING' || s === 'STOPPED' || (s === 'PROVISIONING' && !agent.pendingAction) || s === 'REBUILDING')
   ) {
     store.setAgentState(agent.id, 'FAILED', 'The agent runtime is missing — tap Retry to rebuild it.');
     log('reconcile.runtime_missing', { agentId: agent.id, was: s });

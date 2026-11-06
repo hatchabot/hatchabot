@@ -110,7 +110,7 @@ Commands:
                                <target> and rebuild them. Lists the agents and
                                asks first. Names or ids. --no-checkpoint skips
                                Chat → Memory (use when the old source is dead);
-                               --recover restores lost context afterwards.
+                               --recover restores lost context afterwards, on the running ones.
   bots [--check]               Every Telegram bot this + your registered servers
                                use, flagging reclaimable/dead slots. --check adds
                                a live Telegram probe per bot.
@@ -1636,7 +1636,7 @@ async function main() {
         apply: ids,
         rebuild: flags.has('rebuild'),
       })).json();
-      console.log(`switched ${res.switched} agent(s) to "${target.name}"${res.rebuilding ? `, rebuilding ${res.rebuilding} now` : ' (rebuild to apply)'}`);
+      console.log(`switched ${res.switched} agent(s) to "${target.name}"${res.rebuilding ? `, rebuilding ${res.rebuilding} now` : res.atNextStart ? '' : ' (rebuild to apply)'}${res.atNextStart ? `; ${res.atNextStart} stopped or asleep stay so, and take it when they next start` : ''}`);
       for (const s of res.skipped ?? []) console.log(`  skipped ${s.name}: ${s.reason}`);
       return;
     }
@@ -1727,8 +1727,8 @@ async function main() {
       if (flags.has('now')) {
         // The switch is already recorded: a refused rebuild (busy, mid-checkpoint) must say so, not read as "nothing happened".
         try {
-          await jsonPost(`/v1/agents/${a.id}/rebuild`, {});
-          console.log(`"${a.name}" is rebuilding onto that AI source now (memory kept).`);
+          const r: any = await (await jsonPost(`/v1/agents/${a.id}/rebuild`, { stoppedWaits: true })).json().catch(() => null);
+          console.log(r?.atNextStart ? `"${a.name}" stays ${a.hibernatedAt ? 'asleep' : 'stopped'}, and is on that AI source when it next starts (memory kept).` : `"${a.name}" is rebuilding onto that AI source now (memory kept).`);
         } catch (err) {
           console.log(`The switch is recorded, but the rebuild could not start (${err instanceof Error ? err.message : String(err)}). Later: hatchabot rebuild "${a.name}"`);
         }
@@ -2130,8 +2130,10 @@ async function main() {
         const a = await resolveAgent(ctx, agentRef);
         const r: any = await (await jsonPost(`/v1/agents/${a.id}`, { image: toTag(image) }, 'PATCH')).json();
         if (r.sameImage) { console.log(`"${a.name}" pinned to ${toTag(image)} — it already runs that image, nothing to rebuild.`); return; }
-        await jsonPost(`/v1/agents/${a.id}/rebuild`, {}, 'POST');
-        console.log(`"${a.name}" is rebuilding on ${toTag(image)} (memory kept). Undo: hatchabot image unpin "${a.name}" && hatchabot rebuild "${a.name}"`);
+        const b: any = await (await jsonPost(`/v1/agents/${a.id}/rebuild`, { stoppedWaits: true }, 'POST')).json().catch(() => null);
+        console.log(b?.atNextStart
+          ? `"${a.name}" stays ${a.hibernatedAt ? 'asleep' : 'stopped'}, and moves onto ${toTag(image)} when it next starts (memory kept). Undo: hatchabot image unpin "${a.name}"`
+          : `"${a.name}" is rebuilding on ${toTag(image)} (memory kept). Undo: hatchabot image unpin "${a.name}" && hatchabot rebuild "${a.name}"`);
         return;
       }
       if (sub === 'promote') {
@@ -2428,7 +2430,7 @@ async function main() {
         body: JSON.stringify({ toProfileId: to.id, rebuild: true, checkpoint: !flags.has('no-checkpoint'), recoverAfter: flags.has('recover') }),
       });
       const r = (await res.json()) as any;
-      console.log(`moved ${r.switched} of ${r.agents}; rebuilding ${r.rebuilding}${(r.skipped ?? []).length ? '; skipped: ' + r.skipped.map((s: any) => s.name).join(', ') : ''}`);
+      console.log(`moved ${r.switched} of ${r.agents}; rebuilding ${r.rebuilding}${r.atNextStart ? `; ${r.atNextStart} stopped or asleep stay so, and take it when they next start` : ''}${r.notRecovered ? ` (${r.notRecovered} not recovered: once up, each agent's owner can press Recover context on its Personality tab in the app${r.notRecoveredOthers ? `; ${r.notRecoveredOthers} of them on other accounts` : ''})` : ''}${(r.skipped ?? []).length ? '; skipped: ' + r.skipped.map((s: any) => s.name).join(', ') : ''}`);
       console.log(`watch: hatchabot list --all   ·  then delete "${from.name}" in the app once none remain on it`);
       return;
     }
@@ -2759,7 +2761,7 @@ async function main() {
         if (!/^y(es)?$/i.test(typed.trim())) fail('not confirmed — nothing changed');
       }
       const r: any = await (await api(ctx, `/v1/agents/${a.id}/telegram`, { method: 'DELETE' })).json();
-      console.log(`@${r.released ?? a.botUsername} is back in your pool. "${a.name}" is rebuilding as a web-only agent — talk to it in the app; a bot can be attached again later.`);
+      console.log(`@${r.released ?? a.botUsername} is back in your pool. "${a.name}" ${r.atNextStart ? 'stays down, and is web-only when it next starts' : 'is rebuilding as a web-only agent'} — talk to it in the app; a bot can be attached again later.`);
       return;
     }
     case 'discord':
@@ -2779,7 +2781,7 @@ async function main() {
       if (sub === 'add') {
         const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/${app_}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pooled: 'first' }) })).json();
         if (r.error) fail(r.error);
-        console.log(`"${a.name}" is now “${r.botName ?? r.displayName ?? `a ${Label} bot`}” on ${Label} — rebuilding so it answers there (memory kept).`);
+        console.log(`"${a.name}" is now “${r.botName ?? r.displayName ?? `a ${Label} bot`}” on ${Label} — ${r.atNextStart ? 'it stays stopped, and answers there once it next starts' : 'rebuilding so it answers there'} (memory kept).`);
         return;
       }
       if (!flags.has('yes')) {
@@ -2788,7 +2790,7 @@ async function main() {
       }
       const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/${app_}`, { method: 'DELETE' })).json();
       if (r.error) fail(r.error);
-      console.log(`"${a.name}" is off ${Label}${r.parked ? '; its bot is parked for another agent' : ''}. It is rebuilding.`);
+      console.log(`"${a.name}" is off ${Label}${r.parked ? '; its bot is parked for another agent' : ''}. ${r.atNextStart ? 'It stays down, and this applies when it next starts.' : 'It is rebuilding.'}`);
       return;
     }
     case 'skip-telegram': {
@@ -2951,12 +2953,11 @@ async function main() {
         // Already so: the server changes nothing and starts no rebuild.
         if (!!a.browser === (want === 'on')) { console.log(`"${a.name}" ${want === 'on' ? 'already has its own browser' : 'has no browser'}: nothing to change.`); return; }
         const r: any = await (await api(ctx, `/v1/agents/${a.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ browser: want === 'on' }) })).json().catch(() => null);
-        // A rebuild already under way: saved, but no rebuild of its own
-        // started, and the next step is the owner's — say so, not "rebuilding" (HB-0357).
+        // A rebuild already under way, or an agent stopped or asleep (HB-0420):
+        // saved, but no rebuild of its own started — say so, not "rebuilding" (HB-0357).
         if (r?.browserPending) { console.log(`"${a.name}": ${r.browserPending}`); return; }
-        // The server rebuilds only a built agent at rest (running or
-        // stopped); archived, failed or not yet made, the switch waits for
-        // its next build, and no rebuild was started.
+        // The server rebuilds only a running agent; archived, failed or not
+        // yet made, the switch waits for its next build, and no rebuild was started.
         if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) {
           console.log(`"${a.name}": saved. No rebuild was started while it is ${a.state ?? 'not built'}; its next build ${want === 'on' ? 'gives it its own browser' : 'removes its browser'}.`);
           return;

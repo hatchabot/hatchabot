@@ -360,6 +360,22 @@ describe('audit 2026-09-11 follow-ups', () => {
     expect((await f.inject({ method: 'POST', url: '/v1/agent-todos', headers: as, payload: { name: '  ' } })).statusCode).toBe(400);
   });
 
+  it('planned agents: a name you already use is refused and said, archived ones too (HB-0447)', async () => {
+    const { f, store } = await world();
+    const name = store.getAgent('a1')!.name;
+    const plan = (n: string, headers = as) => f.inject({ method: 'POST', url: '/v1/agent-todos', headers, payload: { name: n } });
+    const refused = await plan(`  ${name.toUpperCase()} `);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error).toContain(`"${name}"`);
+    store.setAgentState('a1', 'ARCHIVED');
+    const archived = await plan(name);
+    expect(archived.statusCode).toBe(409);
+    expect(archived.json().error).toContain('(archived)');
+    expect((await f.inject({ method: 'GET', url: '/v1/agent-todos', headers: as })).json().todos).toEqual([]);
+    // Someone else's agent of that name is no reason: they can make their own.
+    expect((await plan(name, { 'x-hatchabot-owner': 'user-other' })).statusCode).toBe(200);
+  });
+
   it('a live model change does NOT clear a pending source switch (rebuild still flagged)', async () => {
     const { f, store, provider } = await world();
     store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Other', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p2', createdAt: 'now' });

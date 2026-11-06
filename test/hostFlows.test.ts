@@ -5,9 +5,10 @@
  * quickly with reachable:false without stalling the test.
  */
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 
@@ -70,6 +71,63 @@ describe('Runner hosts — GET /v1/hosts for a member (HB-0059)', () => {
     expect(local).toBeTruthy();
     expect(local.settings).toBeUndefined();
     expect(JSON.stringify(member)).not.toContain(RUNNER);
+  });
+});
+
+describe('Runner hosts: an address that can sign in, and one row a machine (HB-0435, HB-0436)', () => {
+  it('refuses an ssh:// address the key block cannot be written for, and saves nothing', async () => {
+    const w = await makeWorld();
+    for (const dockerHost of ['ssh://someone@[fd7a:115c::1]', 'ssh://[fd7a:115c::1]:22', 'ssh://a@b@c', 'ssh://someone@box/some/path']) {
+      const r = await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'R', dockerHost } });
+      expect(r.statusCode, dockerHost).toBe(400);
+      expect(r.json().error).toMatch(/hostname or an IPv4 address/);
+    }
+    expect(w.store.listHosts(w.owner).filter((h) => h.kind !== 'local')).toEqual([]);
+  });
+
+  it('refuses the same address again, naming the row, however it is written', async () => {
+    const w = await makeWorld();
+    expect((await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'First', dockerHost: RUNNER } })).statusCode).toBe(201);
+    const again = await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'Second', dockerHost: `${RUNNER}/` } });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toContain('already added, as "First"');
+    expect(w.store.listHosts(w.owner).filter((h) => h.kind !== 'local')).toHaveLength(1);
+  });
+
+  describe('another address for a machine that answers', () => {
+    // docker is a shim on PATH, whose answer says whose daemon each is, and a listener here is
+    // the machine that answers (the provider knocks before it asks docker anything).
+    const bin = mkdtempSync(join(tmpdir(), 'acl-hostflows-docker-'));
+    writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash
+args="$*"
+case "$args" in
+  *" version "*) echo 27.0 ;;
+  *" image inspect "*) echo ok ;;
+  *" info --format "*) case "$args" in *other*) echo id-other ;; *) echo id-studio ;; esac ;;
+esac
+`, { mode: 0o755 });
+    const path = process.env.PATH;
+    const door = createServer((c) => c.destroy());
+    const at = (who: string, host = '127.0.0.1') => `ssh://${who}@${host}:${(door.address() as AddressInfo).port}`;
+    beforeAll(async () => { process.env.PATH = `${bin}:${path}`; await new Promise<void>((r) => door.listen(0, '127.0.0.1', r)); });
+    afterAll(async () => { process.env.PATH = path; await new Promise((r) => door.close(r)); });
+    const add = (w: Awaited<ReturnType<typeof makeWorld>>, name: string, dockerHost: string) => w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name, dockerHost } });
+
+    it('the second is saved and warned about', async () => {
+      const w = await makeWorld();
+      const a = await add(w, 'Studio', at('sam'));
+      expect(a.statusCode, a.body).toBe(201);
+      expect(a.json().reachable).toBe(true);
+      expect(a.json().warning).toBeUndefined();
+      const b = await add(w, 'Studio tail', at('sam', 'localhost'));
+      expect(b.statusCode).toBe(201);
+      expect(b.json().warning).toContain('the same Docker as "Studio"');
+    });
+    it('a different machine is not', async () => {
+      const w = await makeWorld();
+      expect((await add(w, 'Studio', at('sam'))).json().warning).toBeUndefined();
+      expect((await add(w, 'Other', at('other'))).json().warning).toBeUndefined();
+    });
   });
 });
 

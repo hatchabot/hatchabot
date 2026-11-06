@@ -8,7 +8,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { clearBusy, markBusy } from '../src/orchestrator/busy.js';
-import type { MockProvider } from '../src/providers/mockProvider.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 const settle = async (until: () => boolean, ms = 3000) => {
@@ -105,6 +105,27 @@ describe('a rebuild already queued when the bot changes (2026-10-09)', () => {
     expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/rebuild`, headers: as(), payload: {} })).statusCode).toBe(202);
     return { w, id, released, letB: busyB.release };
   }
+
+  it('a move does not begin under it: the change it carries reaches the agent, and the move works after', async () => {
+    const { w, id, letB } = await queued();
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Spare Box', settings: {}, createdAt: 'now' });
+    const target = new MockProvider();
+    w.providers.set('mock2', target);
+    w.provider.daemonId = async () => 'daemon-source';
+    target.daemonId = async () => 'daemon-target';
+    const move = () => w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h2' } });
+    const refused = await move();
+    expect(refused.statusCode, refused.body).toBe(400);
+    expect(refused.json().error).toMatch(/rebuild of this agent is not over yet/);
+    expect(w.store.listOperations([id], 5).filter((o) => o.kind === 'move-host')).toEqual([]);
+    expect(w.store.getAgent(id)).toMatchObject({ state: 'RUNNING', hostId: 'h1' });
+    letB();
+    await settle(() => w.store.listOperations([id], 5).find((o) => o.kind === 'rebuild')?.status === 'succeeded' && w.store.getAgent(id)!.state === 'RUNNING');
+    expect(w.store.listOperations([id], 5).find((o) => o.kind === 'rebuild')).toMatchObject({ status: 'succeeded' });
+    const moved = await move();
+    expect(moved.statusCode, moved.body).toBe(200);
+    expect(w.store.getAgent(id)).toMatchObject({ state: 'RUNNING', hostId: 'h2' });
+  });
 
   it('a rebuild still follows the swap; the agent comes back up on the new bot', async () => {
     const { w, id, letB } = await queued();

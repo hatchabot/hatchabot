@@ -182,3 +182,19 @@ tests that run on their own.
 | 2026-10-31 | clean-install-ubuntu-2204 | fail | v2.171.1 | 1 |  |
 | 2026-10-31 | clean-install-ubuntu-2204 | fail | v2.171.1 | 1 |  |
 | 2026-11-01 | clean-install-ubuntu-2204 | pass | v2.171.1 | 2 |  |
+| 2026-11-04 | google-plain-request | pass | v2.172.1 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-04 | upgrade-check | pass | v2.172.1 | 1 |  |
+| 2026-11-04 | privacy | pass | v2.172.1 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-04 | clean-install-ubuntu-2204 | fail | v2.172.1 | 1 |  |
+| 2026-11-04 | clean-install | pass | v2.172.1 | 3 | no --ai-source: step 4, the agent regression, did not run |
+| 2026-11-04 | clean-install-debian-12 | pass | v2.172.1 | 3 | no --ai-source: step 4, the agent regression, did not run |
+| 2026-11-04 | runner-scenarios | pass | v2.172.1 | 13 | OpenClaw 2026.9.8 |
+| 2026-11-04 | transfer | pass | v2.172.1 | 6 | OpenClaw 2026.9.8 |
+| 2026-11-04 | apps | pass | v2.172.1 | 5 | OpenClaw 2026.9.8 |
+| 2026-11-04 | console | pass | v2.172.1 | 2 | OpenClaw 2026.9.8 |
+| 2026-11-04 | browser | pass | v2.172.1 | 6 | OpenClaw 2026.9.8 |
+| 2026-11-04 | candidate-gate | pass | v2.172.1 | 3 | OpenClaw 2026.9.8 |
+| 2026-11-04 | regress-autonomous | pass | v2.172.1 | 7 | OpenClaw 2026.9.8 |
+| 2026-11-04 | restore-drill | pass | v2.172.1 | 3 | OpenClaw 2026.9.8 |
+| 2026-11-04 | smoke-adopt | pass | v2.172.1 | 1 |  |
+| 2026-11-04 | clean-install-ubuntu-2204 | pass | v2.172.1 | 2 | no --ai-source: step 4, the agent regression, did not run |

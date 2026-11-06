@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
@@ -90,6 +90,14 @@ describe('archiving shows from the click, not from the end', () => {
     expect(again.json().error).toMatch(/already being archived/);
     // Nor does a rebuild start under it (the stop would cut it off).
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/rebuild', headers: as, payload: {} })).statusCode).toBe(409);
+    // Nor a move to another machine or another Hatchabot (HB-0417).
+    store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'cloud', provider: 'mock', name: 'Runner', settings: {}, createdAt: 'now' } as never);
+    const moved = await f.inject({ method: 'POST', url: '/v1/agents/a1/move-host', headers: as, payload: { hostId: 'h2' } });
+    expect(moved.statusCode).toBe(409);
+    expect(moved.json().error).toMatch(/Another operation/);
+    const rehosted = await f.inject({ method: 'POST', url: '/v1/agents/a1/rehost', headers: as, payload: { peerId: 'nobody' } });
+    expect(rehosted.statusCode).toBe(409);
+    expect(store.getAgent('a1')!.state).toBe('RUNNING');
 
     provider.release({ code: 0, stdout: 'DONE', stderr: '' });
     const res = await pending;
@@ -99,6 +107,33 @@ describe('archiving shows from the click, not from the end', () => {
     expect(res.json().checkpointWarning).toBeUndefined();
     const after = (await f.inject({ method: 'GET', url: '/v1/agents/a1', headers: as })).json();
     expect(after.archiving).toBeUndefined();
+  });
+
+  it('an Archive pressed while a move reads the machines: the move stands down, and the checkpoint is not cut off (HB-0417)', async () => {
+    const { f, store, provider } = await world();
+    store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'cloud', provider: 'mock', name: 'Runner', settings: {}, createdAt: 'now' } as never);
+    let reached!: () => void;
+    const atInfo = new Promise<void>((r) => { reached = r; });
+    let go!: () => void;
+    const gate = new Promise<void>((r) => { go = r; });
+    // Two machines, as far as the move can tell.
+    let daemon = 0;
+    provider.daemonId = async () => `daemon-${++daemon}`;
+    const info = provider.info.bind(provider);
+    const spy = vi.spyOn(provider, 'info').mockImplementationOnce(async (ref?: string) => { reached(); await gate; return info(ref); });
+    const moving = f.inject({ method: 'POST', url: '/v1/agents/a1/move-host', headers: as, payload: { hostId: 'h2' } });
+    await atInfo;
+    spy.mockRestore();
+    const archiving = f.inject({ method: 'POST', url: '/v1/agents/a1/archive', headers: as, payload: { checkpoint: true } });
+    await provider.turnStarted;
+    go();
+    const moved = await moving;
+    expect(moved.statusCode).toBe(409);
+    expect(moved.json().error).toMatch(/Another operation/);
+    expect(store.getAgent('a1')).toMatchObject({ state: 'RUNNING', hostId: 'h1' });
+    expect(store.listOperations(['a1'], 5).some((o) => o.kind === 'move-host')).toBe(false);
+    provider.release({ code: 0, stdout: 'DONE', stderr: '' });
+    expect((await archiving).json().state).toBe('ARCHIVED');
   });
 
   it('a checkpoint that fails still archives, with the warning, and the marker goes', async () => {

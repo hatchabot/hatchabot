@@ -34,6 +34,8 @@ export interface HibernateDeps {
   /** A required rebuild is waiting and the machine rebuilds on its own: the
    *  rebuild sweep only rebuilds running agents, so it stays up for it (HB-0034). */
   requiredRebuildDue?: (a: Agent) => Promise<boolean>;
+  /** A change is owed to its next start (Agent.rebuildOnStart): this wake is that rebuild, in the background, not a start of the old container. */
+  rebuildOnWake?: (a: Agent, why: string) => void;
   /** After a wake, once the store says RUNNING: e.g. clearing stale runtime pins when the gateway is up. */
   afterWake?: (a: Agent) => void;
   log: (agentId: string) => (event: string, detail?: Record<string, unknown>) => void;
@@ -222,6 +224,12 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
   if (a.migratedTo || deps.isBusy(a.id)) return a;
   const inFlight = waking.get(a.id);
   if (inFlight) return inFlight;
+  // Its old container does not have a change made while it slept (a source, a
+  // browser, a bot it gave back): this wake is the rebuild that was owed.
+  if (deps.rebuildOnWake && deps.store.getAgent(a.id)?.rebuildOnStart) {
+    deps.rebuildOnWake(deps.store.getAgent(a.id)!, why);
+    return deps.store.getAgent(a.id) ?? a;
+  }
   const p = (async () => {
     // Under the agent's lifecycle lock, judged again once it is held, as a
     // Start is: an Archive or a move that took the lock during the docker
@@ -232,6 +240,8 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
       woken = await whileBusy(a.id, async () => {
         const now = deps.store.getAgent(a.id);
         if (!now?.hibernatedAt || now.state !== 'STOPPED' || now.migratedTo) return undefined;
+        // Owed since the look above: left for the next wake, which rebuilds it.
+        if (deps.rebuildOnWake && now.rebuildOnStart) return undefined;
         const provider = deps.providerFor(now.hostId);
         try {
           if (now.runtimeRef) {

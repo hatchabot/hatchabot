@@ -2,7 +2,7 @@ import type { Agent } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import { HOUR_FIELDS } from './usage.js';
 import { coverageDays, type StoredProfile } from './modelScorecard.js';
-import { modelOption, priceMix, type TokenMix } from './modelOptions.js';
+import { LOCAL_MODEL, modelOption, priceMix, type TokenMix } from './modelOptions.js';
 
 /**
  * What each agent costs at API prices, for the home screen's cost badges
@@ -75,8 +75,6 @@ export interface AgentCost {
   /** Read before the sampler kept hour buckets: the profile's 30 days, scaled to the window. */
   approx?: boolean;
 }
-
-const LOCAL_MODEL = /^(ollama|local|lmstudio|llamacpp)\//i;
 
 /**
  * One agent's cost over `days` (a fraction for hours: 1/24 is the last hour)

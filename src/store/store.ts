@@ -457,6 +457,7 @@ export class Store {
       -- more than the 30 days those keep.
       CREATE TABLE IF NOT EXISTS agent_cost_days (
         agent_id TEXT NOT NULL, day TEXT NOT NULL, usd REAL NOT NULL,
+        unpriced_tokens REAL NOT NULL DEFAULT 0,
         PRIMARY KEY (agent_id, day)
       );
       -- A budget's 80% and 100% marks, once per month and amount: told once.
@@ -916,6 +917,7 @@ export class Store {
     // existed. Harmless when the column is already there.
     for (const alter of [
       `ALTER TABLE agents ADD COLUMN shared_memory INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE agent_cost_days ADD COLUMN unpriced_tokens REAL NOT NULL DEFAULT 0`,
       // When a removal was first recorded: one pending for over a day is an Alerts line (access overview).
       `ALTER TABLE connection_removals ADD COLUMN created_at TEXT`,
       `ALTER TABLE agents ADD COLUMN pending_action TEXT`,
@@ -1005,6 +1007,10 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN exported_at TEXT`,
       // Moved while stopped: its rebuild hook runs at its next start (moveHost.ts), set when that became due.
       `ALTER TABLE agents ADD COLUMN rebuild_hook_due TEXT`,
+      // A change only a new container picks up, made while it stood stopped or asleep: its next start is a rebuild (HB-0411).
+      `ALTER TABLE agents ADD COLUMN rebuild_on_start TEXT`,
+      // A restore, clone, child or import: with no bot free it goes on web-only, at a Retry too (HB-0415). Cleared once it runs.
+      `ALTER TABLE agents ADD COLUMN web_only_if_no_bot INTEGER`,
       `ALTER TABLE agents ADD COLUMN hibernate_mark INTEGER`,
       `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
       // Compressed swap (swap.ts): an agent's or a class's allowance on top of its memory cap; "off" or a size, NULL = inherit.
@@ -1074,6 +1080,7 @@ export class Store {
       // installation's client breaks every connection made with the old one.
       // NULL = made before this was recorded.
       `ALTER TABLE connections ADD COLUMN client_id TEXT`,
+      `ALTER TABLE connections ADD COLUMN client_secret_at TEXT`,
       `ALTER TABLE agent_connections ADD COLUMN attached_at TEXT`,
       `ALTER TABLE agent_connections ADD COLUMN materialized_at TEXT`,
       // An agent-scoped cli-token: when set, this token authenticates a CALLER
@@ -1750,6 +1757,8 @@ export class Store {
   }
 
   setAgentPendingAction(id: string, action: Agent['pendingAction'] | null): void {
+    // A step done, or a new one where none was waiting: not what a Clear covered (HB-0409).
+    if (!action || !this.getAgent(id)?.pendingAction) this.dropAttentionAckKeys(id, ['pending']);
     this.db
       .prepare(`UPDATE agents SET pending_action = ?, updated_at = ? WHERE id = ?`)
       .run(action ? JSON.stringify(action) : null, new Date().toISOString(), id);
@@ -1936,6 +1945,8 @@ export class Store {
     this.db
       .prepare(`UPDATE agents SET state = ?, state_reason = ?, updated_at = ? WHERE id = ?`)
       .run(next, reason ?? null, new Date().toISOString(), id);
+    // A failure that ended, or a new one: not what a Clear covered (HB-0409).
+    if (agent.state !== next && (agent.state === 'FAILED' || next === 'FAILED')) this.dropAttentionAckKeys(id, ['failed', 'state:FAILED']);
     // Running is awake, whichever path got it there (a rebuild, a reconcile,
     // a start): a sleeper's mark left on a RUNNING agent showed it ASLEEP and
     // sent the next sweep to stop it again (30th audit).
@@ -1961,6 +1972,18 @@ export class Store {
       this.db.prepare(`DELETE FROM agent_recent WHERE agent_id = ?`).run(id);
     }
     return this.getAgent(id)!;
+  }
+
+  /**
+   * Stopped, and nobody meant it to be: what happened and what brings it back, for
+   * its card and Alerts (HB-0416). Its next state change clears it, as any reason.
+   * A Clear from Alerts names this kind, so it would hide the next one: it goes.
+   */
+  markNotStarted(id: string, reason: string): void {
+    const state = this.getAgent(id)?.state;
+    if (state !== 'RUNNING' && state !== 'STOPPED') return;
+    this.setAgentState(id, 'STOPPED', reason);
+    this.dropAttentionAckKeys(id, ['not-started']);
   }
 
   /**
@@ -3597,6 +3620,21 @@ export class Store {
     if (one(`SELECT 1 FROM hosts WHERE owner_id = ? LIMIT 1`, userId)) return false;
     return true;
   }
+
+  /**
+   * A local account nobody has ever used: no sign-in since it was made (each
+   * signed-in request moves accounts.last_seen), and nothing hangs off it. What
+   * a crash half way through turning on family accounts leaves (HB-0423).
+   */
+  localAccountNeverUsed(id: string): boolean {
+    const a = this.localAccount(id);
+    if (!a || !this.ownsNothing(id)) return false;
+    const seen = this.db.prepare(`SELECT last_seen FROM accounts WHERE owner_id = ?`).get(id) as { last_seen: string | null } | undefined;
+    if (seen?.last_seen && Date.parse(seen.last_seen) - Date.parse(a.createdAt) > 10_000) return false;
+    if (this.db.prepare(`SELECT 1 FROM memberships WHERE user_id = ? LIMIT 1`).get(id)) return false;
+    for (const table of ['cli_tokens', 'second_factors', 'known_devices'] as const) if (this.db.prepare(`SELECT 1 FROM ${table} WHERE owner_id = ? LIMIT 1`).get(id)) return false;
+    return true;
+  }
   isChatOnlyGuest(userId: string): boolean {
     const one = (sql: string, ...args: unknown[]): boolean => !!this.db.prepare(sql).get(...args);
     if (!this.ownsNothing(userId)) return false;
@@ -4215,11 +4253,19 @@ export class Store {
   /**
    * An agent's cost per day. `partialDay`: the day the read's window starts
    * in, which it saw only part of: kept at the larger of the two.
+   * `unpriced`: that day's tokens on models with no known price.
    */
-  setCostDays(agentId: string, days: Map<string, number>, partialDay?: string): void {
-    const put = this.db.prepare(`INSERT INTO agent_cost_days (agent_id, day, usd) VALUES (?, ?, ?) ON CONFLICT(agent_id, day) DO UPDATE SET usd = excluded.usd`);
-    const max = this.db.prepare(`INSERT INTO agent_cost_days (agent_id, day, usd) VALUES (?, ?, ?) ON CONFLICT(agent_id, day) DO UPDATE SET usd = MAX(usd, excluded.usd)`);
-    this.db.transaction(() => { for (const [day, usd] of days) (day === partialDay ? max : put).run(agentId, day, usd); })();
+  setCostDays(agentId: string, days: Map<string, number>, partialDay?: string, unpriced?: Map<string, number>): void {
+    const put = this.db.prepare(`INSERT INTO agent_cost_days (agent_id, day, usd, unpriced_tokens) VALUES (?, ?, ?, ?) ON CONFLICT(agent_id, day) DO UPDATE SET usd = excluded.usd, unpriced_tokens = excluded.unpriced_tokens`);
+    const max = this.db.prepare(`INSERT INTO agent_cost_days (agent_id, day, usd, unpriced_tokens) VALUES (?, ?, ?, ?) ON CONFLICT(agent_id, day) DO UPDATE SET usd = MAX(usd, excluded.usd), unpriced_tokens = MAX(unpriced_tokens, excluded.unpriced_tokens)`);
+    this.db.transaction(() => { for (const [day, usd] of days) (day === partialDay ? max : put).run(agentId, day, usd, unpriced?.get(day) ?? 0); })();
+  }
+  /** Each agent's tokens over [fromDay, toDay] on models with no known price; only agents that have any. */
+  unpricedBetween(fromDay: string, toDay: string, agentIds?: string[]): Map<string, number> {
+    const rows = (agentIds
+      ? this.db.prepare(`SELECT agent_id, SUM(unpriced_tokens) AS tokens FROM agent_cost_days WHERE day >= ? AND day <= ? AND agent_id IN (SELECT value FROM json_each(?)) GROUP BY agent_id HAVING tokens > 0`).all(fromDay, toDay, JSON.stringify(agentIds))
+      : this.db.prepare(`SELECT agent_id, SUM(unpriced_tokens) AS tokens FROM agent_cost_days WHERE day >= ? AND day <= ? GROUP BY agent_id HAVING tokens > 0`).all(fromDay, toDay)) as Array<{ agent_id: string; tokens: number }>;
+    return new Map(rows.map((r) => [r.agent_id, r.tokens]));
   }
   /** Each agent's spend over [fromDay, toDay] (inclusive "YYYY-MM-DD"); every agent when agentIds is omitted. */
   costBetween(fromDay: string, toDay: string, agentIds?: string[]): Map<string, number> {
@@ -4324,6 +4370,15 @@ export class Store {
   /** The chats a paused agent's bot has answered: chat id → the newest update seen, and when it last replied. */
   setBudgetPauseReplies(agentId: string, month: string, replies: Record<string, { u: number; at: number }>): void {
     this.db.prepare(`UPDATE budget_pauses SET replies = ? WHERE agent_id = ? AND month = ?`).run(JSON.stringify(replies), agentId, month);
+  }
+  /**
+   * Stopped by its owner with a pause still open (a rebuild had it up, and no pass
+   * had closed the pause yet): the stop is theirs now, so the end of the pause
+   * starts nothing, as when it was stopped by hand before the limit (budgets.ts,
+   * HB-0419). True when there was one.
+   */
+  disownBudgetPause(agentId: string): boolean {
+    return this.db.prepare(`UPDATE budget_pauses SET already_stopped = 1 WHERE agent_id = ? AND kind = 'pause' AND resumed_at IS NULL AND already_stopped = 0`).run(agentId).changes > 0;
   }
   resumeBudgetPause(agentId: string, month: string, at: string, by: string): void {
     this.db.prepare(`UPDATE budget_pauses SET resumed_at = ?, resumed_by = ? WHERE agent_id = ? AND month = ? AND resumed_at IS NULL`).run(at, by, agentId, month);
@@ -4588,6 +4643,15 @@ export class Store {
     this.db.prepare(`UPDATE connections SET client_id = ? WHERE kind = ? AND client_id IS NULL`).run(clientId, kind);
   }
 
+  /**
+   * A new secret was saved for this client: an agent that last imported one of
+   * its connections before `at` holds the old secret. Returns those connections.
+   */
+  markClientSecretChanged(kind: string, clientId: string, at: string): string[] {
+    this.db.prepare(`UPDATE connections SET client_secret_at = ? WHERE kind = ? AND client_id = ?`).run(at, kind, clientId);
+    return (this.db.prepare(`SELECT id FROM connections WHERE kind = ? AND client_id = ?`).all(kind, clientId) as Array<{ id: string }>).map((r) => r.id);
+  }
+
   /** How many connections, across every account, a client other than `clientId` issued. */
   countConnectionsFromOtherClient(kind: string, clientId: string): number {
     return (this.db.prepare(`SELECT COUNT(*) AS n FROM connections WHERE kind = ? AND client_id IS NOT NULL AND client_id != ?`).get(kind, clientId) as { n: number }).n;
@@ -4601,10 +4665,10 @@ export class Store {
     return r ? { id: r.id, secretRef: r.secret_ref } : undefined;
   }
 
-  listConnections(ownerId: string): Array<{ id: string; kind: string; email: string; services: string[]; createdAt: string; clientId: string | null }> {
+  listConnections(ownerId: string): Array<{ id: string; kind: string; email: string; services: string[]; createdAt: string; clientId: string | null; clientSecretAt: string | null }> {
     return (this.db.prepare(`SELECT * FROM connections WHERE owner_id = ? ORDER BY email`).all(ownerId) as any[]).map((r) => ({
       id: r.id, kind: r.kind, email: r.email, services: JSON.parse(r.services ?? '[]'), createdAt: r.created_at,
-      clientId: r.client_id ?? null,
+      clientId: r.client_id ?? null, clientSecretAt: r.client_secret_at ?? null,
     }));
   }
 
@@ -4942,6 +5006,19 @@ export class Store {
   setAgentAttentionAck(id: string, ack: string | null): void {
     this.db.prepare(`UPDATE agents SET attention_ack = ? WHERE id = ?`).run(ack, id);
   }
+  /**
+   * What was flagged has ended, or happened again: its keys leave the owner's
+   * Clear from Alerts. These keys name a kind of thing, not an occurrence, so a
+   * Clear left in place would hide the next one for good (HB-0409). A key ending
+   * in `:` is a prefix. The rest of the Clear stands.
+   */
+  dropAttentionAckKeys(id: string, keys: readonly string[]): void {
+    const row = this.db.prepare(`SELECT attention_ack FROM agents WHERE id = ?`).get(id) as { attention_ack: string | null } | undefined;
+    if (!row?.attention_ack) return;
+    const had = row.attention_ack.split('\n');
+    const kept = had.filter((k) => !keys.some((d) => (d.endsWith(':') ? k.startsWith(d) : k === d)));
+    if (kept.length !== had.length) this.setAgentAttentionAck(id, kept.join('\n') || null);
+  }
   setAgentIcon(id: string, icon: string | null | undefined, color: string | null | undefined): void {
     const now = new Date().toISOString();
     if (icon !== undefined) this.db.prepare(`UPDATE agents SET icon = ?, updated_at = ? WHERE id = ?`).run(icon, now, id);
@@ -5130,12 +5207,16 @@ export class Store {
       .map((r) => ({ at: r.at, from: r.from_profile, to: r.to_profile }));
   }
 
-  /** What the runtime ran, exactly as it was recorded: a move put back to the runtime it left (moveHost.ts). */
-  restoreAgentApplied(id: string, a: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared' }): void {
+  /**
+   * What the runtime ran, exactly as it was recorded: a move put back to the
+   * runtime it left (moveHost.ts). A rebuild owed since then stays owed: that
+   * runtime does not have the change either.
+   */
+  restoreAgentApplied(id: string, a: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared'; rebuildOnStart?: string }): void {
     this.db
       .prepare(`UPDATE agents SET applied_profile_id = @p, applied_model = @m, applied_profile_prev = @prev,
-         applied_profile_at = @at, applied_embed_mode = @embed WHERE id = @id`)
-      .run({ p: a.profileId ?? null, m: a.model ?? null, prev: a.prevId ?? null, at: a.at ?? null, embed: a.embedMode ?? null, id });
+         applied_profile_at = @at, applied_embed_mode = @embed, rebuild_on_start = COALESCE(@owed, rebuild_on_start) WHERE id = @id`)
+      .run({ p: a.profileId ?? null, m: a.model ?? null, prev: a.prevId ?? null, at: a.at ?? null, embed: a.embedMode ?? null, owed: a.rebuildOnStart ?? null, id });
   }
 
   /** Record the current peer grant as installed. ONLY a provision/rebuild may
@@ -5532,6 +5613,16 @@ export class Store {
   /** Its container is new and its rebuild hook has not run in it yet (since `at`); null once it has. */
   setRebuildHookDue(agentId: string, at: string | null): void {
     this.db.prepare(`UPDATE agents SET rebuild_hook_due = ? WHERE id = ?`).run(at, agentId);
+  }
+
+  /** A change only a new container picks up is waiting (since `at`): its next start or wake is a rebuild. Null once a new container has it. */
+  setRebuildOnStart(agentId: string, at: string | null): void {
+    this.db.prepare(`UPDATE agents SET rebuild_on_start = ? WHERE id = ?`).run(at, agentId);
+  }
+
+  /** With no bot free, its setup goes on web-only rather than wait for a token: kept for a Retry (HB-0415). */
+  setAgentWebOnlyIfNoBot(agentId: string, on: boolean): void {
+    this.db.prepare(`UPDATE agents SET web_only_if_no_bot = ? WHERE id = ?`).run(on ? 1 : null, agentId);
   }
 
   setHibernated(agentId: string, at: string | null, mark?: number): void {
@@ -6185,6 +6276,8 @@ function rowToAgent(r: any): Agent {
     hibernatedAt: r.hibernated_at ?? undefined,
     exportedAt: r.exported_at ?? undefined,
     rebuildHookDue: r.rebuild_hook_due ?? undefined,
+    rebuildOnStart: r.rebuild_on_start ?? undefined,
+    webOnlyIfNoBot: r.web_only_if_no_bot ? true : undefined,
     hibernate: r.hibernate === 'never' ? 'never' : undefined,
     wokenAt: r.woken_at ?? undefined,
     hibernateMark: typeof r.hibernate_mark === 'number' ? r.hibernate_mark : undefined,

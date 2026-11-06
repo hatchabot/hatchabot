@@ -44,7 +44,7 @@ repository and installs natively. Release channels (stable, beta) are named in
 `channels.json`. Upgrades check out another release and restart the service;
 the doctor command prints what is wrong with an install.
 
-- `install.sh` — `install_bundle`, `install_native`, `newest_release`, `in_docker_group`: the one-line installer (`mf_fetch`, `mf_paths`, `mf_matches`: the bundle checked against the release's release-manifest.json, the .sha256 only for releases made before manifests).
+- `install.sh` — `install_bundle`, `install_native`, `bundle_room`, `remember_named`, `newest_release`, `in_docker_group`: the one-line installer (`mf_fetch`, `mf_paths`, `mf_matches`: the bundle checked against the release's release-manifest.json, the .sha256 only for releases made before manifests).
 - `scripts/release-manifest.sh` — `get`, `asset`, `image`, `load`, `data_dir`, `mf_required`: what a release vouches for — its release-manifest.json, checked and kept in the data directory (release-manifests/), and refused when missing from a release that must have one (v2.159.0 on); the same reader as `install.sh`.
 - `channels.json` — `stable`, `beta`: which release each channel points at.
 - `scripts/build-bundle.sh` — `PLATFORM`, `linux-arm64`, `darwin-arm64`: builds the per-platform release bundle.
@@ -56,11 +56,11 @@ the doctor command prints what is wrong with an install.
 - `scripts/launchd-plist.sh` — `xml`, `service`, `backup`: the macOS launchd jobs setup-host.sh installs (paths XML-escaped, the install dir an argument); `install.sh`, `scripts/uninstall.sh` — `plist_dir`: read the install dir back out of one.
 - `scripts/install-service.sh` — `sed_escape`, `systemctl`: installs the systemd user service on Linux.
 - `scripts/ensure-deps.sh` — `npm ci`, `ABI_STAMP`: installs dependencies only when the lockfile moved; checks the database driver again when Node changes.
-- `scripts/upgrade.sh` — `rollback`, `back_to_cur`, `restore_deps`, `restore_prev`, `remember_channel`, `vernewer`, `lock_left_over`, `take_lock`: the upgrade command (a channel or a tag), with rollback on failure; a bundle install's next bundle is checked by release-manifest.sh asset, and a bundle swap cut off part-way (its `.swapping` record) is put back at the next start. A git install's upgrade cut off part-way (its `FROM_FILE` beside the lock) is put back the same way (`repair_tree`, and `clear_own_index_lock` for a `.git/index.lock` its `checkout_recorded` shows is its own); a signal ends it through `finish`, which puts the old release back at once. The upgrade lock names its holder; `scripts/deploy-release.sh` takes the same lock.
-- `scripts/follow-channel.sh` — `--install`, `--uninstall`, `MAX_TRIES`, `REMEMBERED`, `PINNED`: optional timer that keeps an install on the channel chosen last (its `data/channel`; retries a failing install less often, then sets it aside; a pin is left alone unless an upgrade was killed part-way).
+- `scripts/upgrade.sh` — `rollback`, `back_to_cur`, `restore_deps`, `restore_prev`, `remember_channel`, `pin_named`, `unpin`, `PIN_RECORD`, `disk_full`, `no_stage`, `vernewer`, `lock_left_over`, `take_lock`: the upgrade command (a channel or a tag), with rollback on failure; a bundle install's next bundle is checked by release-manifest.sh asset, and a bundle swap cut off part-way (its `.swapping` record) is put back at the next start. A git install's upgrade cut off part-way (its `FROM_FILE` beside the lock) is put back the same way (`repair_tree`, and `clear_own_index_lock` for a `.git/index.lock` its `checkout_recorded` shows is its own); a signal ends it through `finish`, which puts the old release back at once. The upgrade lock names its holder; `scripts/deploy-release.sh` takes the same lock.
+- `scripts/follow-channel.sh` — `--install`, `--uninstall`, `MAX_TRIES`, `REMEMBERED`, `PINNED`, `repair_due`: optional timer that keeps an install on the channel chosen last (its `data/channel`; retries a failing install less often, then sets it aside; a pin is left alone unless an upgrade was killed part-way).
 - `scripts/deploy-release.sh` — `checkout_recorded`, `clear_own_index_lock`, `repair_tree`, `rollback`: a tagged release into the production checkout, and the repair of one killed part-way. `scripts/follow-latest.sh` — `verify_release`, `repair_cut`, `CUT_FROM`: the timer that deploys the newest tag, and repairs a killed deploy by the deploy script of the release it came from when the newest tag cannot be run or is behind.
 - `scripts/promote.sh` — `ci_gate`, `public_ci_note`: asks CI on the dev repo (a gate) and reads the public repo's (said, not a gate).
-- `scripts/uninstall.sh` — `--purge`, `--installed`, `volumes`, `other_installs`, `runner_agents`: removes the install it lives in (or, with `--installed`, the one the service runs), keeping data unless asked; a purge refuses while agents run on a runner (`--forget-runners`).
+- `scripts/uninstall.sh` — `--purge`, `--installed`, `volumes`, `other_installs`, `runner_agents`, `drill_is_mine`: removes the install it lives in (or, with `--installed`, the one the service runs), keeping data unless asked; a purge refuses while agents run on a runner (`--forget-runners`).
 - `scripts/upgrade-check.sh` — `CREATE TABLE IF NOT EXISTS`: checks that databases from older releases still open.
 - `bin/hatchabot.mjs` — `tsx`, `process.argv`: the hatchabot command; runs the CLI under tsx.
 - `src/cli.ts` — `parseArgs`, `matchAgent`, `'upgrade'`, `'doctor'`, `'reach'`: every CLI command, dispatched by name. `pickProfile` (the ⭐ default unless `--profile`, which takes an id or a name only one source has; create, app create, adopt, switch-source `--to`), `saveTarget` (`backup`/`get`: the destination made ready before the server is asked, replaced only once the download is complete; `renameRefused`: a file it could not replace), `agentsFilter` (`--agents`: given and empty is refused), `pairingTargets` (the agents a bare `hatchabot pairing` asks).
@@ -89,7 +89,7 @@ passkey, backup codes) is required of owners before public access can be on.
 - `src/api/requestOrigin.ts` — `registerOriginCheck`: refuses cross-site writes.
 - `src/api/routes.ts` — `'/v1/auth/family-accounts'`, `'/v1/local-accounts/recover'`, `'/v1/cli-tokens'`, `'/v1/accounts'`, `'/v1/account'`: switching to accounts, Telegram recovery, CLI tokens, the account menu.
 - `src/store/store.ts` — `local_accounts`, `accounts`, `session_epochs`, `second_factors`, `signin_links`, `cli_tokens`: where it is stored.
-- `web/index.html` — `showLogin`, `acctSignIn`, `forgotPassword`, `askSecondFactor`, `loadAccounts`, `turnOnFamilyAccounts`, `showRecoveryCode`: the sign-in screen and account management.
+- `web/index.html` — `showLogin`, `acctSignIn`, `pageSignedIn`, `pageSessionEnded`, `pagePersonIs`, `forgotPassword`, `askSecondFactor`, `loadAccounts`, `turnOnFamilyAccounts`, `showRecoveryCode`: the sign-in screen and account management.
 
 ## AI sources and Claude login
 
@@ -120,7 +120,7 @@ then starts the container and waits for it to be healthy. Rebuild re-runs the
 same seed against the existing volume, so memory survives. A seed failure names
 the step that failed.
 
-- `src/api/routes.ts` — `'/v1/agents'`, `'/v1/agents/:id/rebuild'`, `'/v1/agents/:id/provision'`, `'/v1/agents/:id/start'`, `'/v1/agents/:id/stop'`, `kickProvision`, `kickRebuild`, `rebuildSweep`: create, retry, rebuild, start and stop.
+- `src/api/routes.ts` — `'/v1/agents'`, `'/v1/agents/:id/rebuild'`, `'/v1/agents/:id/provision'`, `'/v1/agents/:id/start'`, `'/v1/agents/:id/stop'`, `kickProvision`, `kickRebuild`, `rebuildSweep`, `rebuildOrOwe`, `oweRebuild`, `operationRefuses`, `startStopped`, `pinNotRunYet`: create, retry, rebuild, start and stop. A change that needs a new container rebuilds a running agent; a stopped or sleeping one keeps it for its next start (`rebuildOnStart`, cleared by `recordApplied` with the spec of a container made in `src/orchestrator/provision.ts`; a wake goes through `rebuildOnWake` in `src/orchestrator/hibernate.ts`); under a long operation it is refused (`operationRefuses`).
 - `src/orchestrator/provision.ts` — `createAgentRecord`, `provisionAgent`, `runProvisionSteps`, `rebuildAgent`, `finishRebuild`, `finishInterruptedRebuild`, `buildRuntimeSpec`, `waitForHealthy`: the provisioning pipeline (a rebuild's steps after health in one place, run again for a rebuild a restart cut off after its container came up).
 - `src/providers/localDockerProvider.ts` — `provision`, `SEED_STEP_MARK`, `seedFailure`, `seedStepLabel`: the seed script and how its failure is reported.
 - `src/openclaw/configWriter.ts` — `buildConfigCommands`, `batchConfigCommands`, `seedInvocation`, `skipIf`: the OpenClaw config steps; skipIf and markers skip steps already done.
@@ -253,7 +253,8 @@ written into OpenClaw by the seed, so channel changes usually need a rebuild.
 - `src/openclaw/configWriter.ts` — `channelPluginDir`, `CHANNEL_ACCOUNT`: channel settings written into OpenClaw.
 - `src/api/routes.ts` — `'/v1/agents/:id/telegram'`, `'/v1/agents/:id/channels/:kind'`, `'/v1/pool'`, `'/v1/bot-inventory'`, `'/v1/agents/:id/invites'`, `'/v1/join'`, `'/v1/agents/:id/pairing/approve'`, `'/v1/agents/:id/members'`, `sweepPendingPairings`: channels, pool, invites and members.
 - `src/store/store.ts` — `channels`, `discord_bots`, `memberships`, `member_identities`, `invites`, `pairing_windows`: where it is stored.
-- `web/join.html` — `postJoin`, `joinWeb`, `initWebChat`: the page an invite link opens.
+- `web/join.html` — `postJoin`, `joinWeb`, `joinWebAccount`, `initWebChat`: the page an invite link opens.
+- `src/api/publicAccess.ts` — `factorRefusal`: what `/v1/join` says to a good sign-in refused for want of a second factor.
 - `web/index.html` — `v2LoadChans`, `v2AddTelegram`, `chanConnect`, `openChanSetup`, `loadPool`, `addPoolBot`, `invite`, `renderEditMembers`, `approve`, `denyPair`: the Messaging pane, pool and members.
 
 ## Web chat and the OpenClaw console
@@ -299,6 +300,7 @@ installed source and docs to diagnose problems.
 - `src/ops/opsWeb.ts` — `makeOpsWeb`, `OPS_WEB_TOOLS`: web search done by Hatchabot for the jailed manager.
 - `src/orchestrator/webSearch.ts` — `createSearchWatch`, `probeBrave`, `probeDuckDuckGo`, `applySearchScript`, `searchProviderFor`, `readAgentSearchTest`: which search the fleet uses, testing it, and moving agents off Brave when it runs out. `src/api/routes.ts` — `'/v1/web-search'`, `'/v1/web-search/check'`, `'/v1/agents/:id/search-test'`.
 - `src/ops/push.ts` — `createOpsPush`: Telegram messages to the owner when a card waits.
+- `src/channels/notify.ts` — `tellOwner`, `ownerChatRoutes`: a budget's, spike's or loop's message to the owner, by Telegram, Discord or Slack; `src/api/routes.ts` — `tellUsageSpike`, `chatNoteOf`.
 - `src/ops/notify.ts` — `createOpsNotifier`: posts outcomes back into the manager's conversation.
 - `src/openclaw/configWriter.ts` — `OPS_TOOLS_ALLOW`, `OPS_TOOLS_DENY`: the manager's OpenClaw tool lockdown.
 - `src/api/routes.ts` — `'/v1/ops-agent'`, `'/v1/ops-agent/suggest'`, `opsPeerOk`, `runOpsTurn`: creating the manager and asking it things.
@@ -345,7 +347,7 @@ per run: a copy of the database, the secret key, and one archive per agent
 volume. The app only reads metadata about those sets, can start a run, prune a
 set, or restore one agent's volume from a set.
 
-- `scripts/backup-volumes.sh` — `write_status`, `json_list`, `release_lock`, `lock_busy`, `pid_alive`, `reap_oneshot`, `tls_args`: the backup run itself (one run per set, a dead run's lock taken over one run at a time, another user's run never taken for dead; each archive container, here or on a runner, named and removed when its client fails; a tcp:// runner over verified TLS; retention keeps each agent's newest copy).
+- `scripts/backup-volumes.sh` — `write_status`, `json_list`, `earlier_captured`, `add_captured`, `ROOTLESS`, `KEEP_DAYS`, `release_lock`, `lock_busy`, `pid_alive`, `reap_oneshot`, `tls_args`: the backup run itself (an archive this user cannot read back fails the set; a later run of the day keeps what an earlier one wrote whole; one run per set, a dead run's lock taken over one run at a time, another user's run never taken for dead; each archive container, here or on a runner, named and removed when its client fails; a tcp:// runner over verified TLS; retention keeps each agent's newest copy).
 - `deploy/hatchabot-backup.timer` — `OnCalendar`: when it runs.
 - `deploy/hatchabot-backup.service` — `Type=oneshot`, `ExecStart`: what the timer starts (the backup script).
 - `src/orchestrator/backups.ts` — `listBackups`, `startBackup`, `pruneBackup`, `restoreAgentFromBackup`, `resumeBackupRestore`, `recoverBackupRestore`, `agentsMissingFromSet`, `keepDays`, `restoreSafetyDir`, `agentArchiveName`: reading and acting on backup sets. A restore writes its copy of how the agent was to `restoreSafetyDir` before the volume is replaced (removed once the restore ends either way; kept when its undo failed, or while a restore cut off by a restart is held for "Finish the restore" / "Put back the copy from before").
@@ -438,7 +440,7 @@ advice comes together in one ranked list, Recommended. Every dollar figure is to
 - `src/orchestrator/fleetUsage.ts` — `computeUsagePeriod`, `snapshotDailyUsage`: the Usage view by period.
 - `src/orchestrator/agentCosts.ts` — `costsFor`, `agentCost`, `spendSeries`, `priceParts`, `isSpendRange`, `isCostPeriod`: cost badges and the spend chart (its `unpriced` tokens), and the ranges and windows the routes accept.
 - `src/orchestrator/pricing.ts` — `MODEL_PRICES`, `estimateCost`, `priceList`: the price list.
-- `src/orchestrator/budgets.ts` — `runBudgets`, `budgetView`, `stepView`, `pausedReplySweep`: monthly budgets, step alerts and the pause.
+- `src/orchestrator/budgets.ts` — `runBudgets`, `budgetView`, `stepView`, `pausedReplySweep`, `dailyCosts`, `priceGapNote`: monthly budgets, step alerts and the pause, and what a dollar limit cannot see on a model with no known price.
 - `src/orchestrator/usageAlerts.ts` — `runUsageAlerts`, `findUsageSpikes`: "much more than usual" warnings.
 - `src/orchestrator/tokenHealth.ts` — `buildTokenHealth`, `loopSignals`, `THRESHOLDS`: the token steward's evidence.
 - `src/orchestrator/tokenWatch.ts` — `runTokenWatch`, `incidentMessage`, `loopCovering`: open and clear loop incidents; one cause, one message a day.
@@ -502,11 +504,11 @@ tail), masks private details, and builds a GitHub issue link. Nothing is sent by
 Hatchabot. The manager can read the installed source to diagnose first and save
 a draft. See `docs/field-reports.md`.
 
-- `src/orchestrator/problemReport.ts` — `buildReport`, `redactForPublic`, `issueUrl`, `searchSource`, `SEARCH_WORKER`, `SEARCH_LIMITS`, `readSource`, `sourcePath`, `realInside`: facts, masking, the link, and the source the manager may read (links checked by where they lead; searches bounded in a worker).
+- `src/orchestrator/problemReport.ts` — `buildReport`, `redactForPublic` (`maskPaths`, `judgePath`, `systemKeep`, `afterSpace`, `maskQueryValue`, `maskAddress`, `maskName`, `maskSshWords`, `maskCredentialForms`, `maskWords`, `maskUsers`, `maskPeople`, `isDefaultName`), `endpointIdentity`, `issueUrl`, `searchSource`, `SEARCH_WORKER`, `SEARCH_LIMITS`, `readSource`, `sourcePath`, `realInside`: facts, masking, the link, and the source the manager may read (links checked by where they lead; searches bounded in a worker).
 - `src/api/routes.ts` — `'/v1/problem-reports'`, `'/v1/problem-reports/:id'`, `'/v1/diagnostics'`, `'/v1/source'`, `'/v1/source/search'`, `reportFacts`, `reportRedaction`: drafts, diagnostics and source routes; the private names and known credentials a draft is masked with.
 - `src/mgmt/restTools.ts` — `'get_diagnostics'`, `'search_source'`, `'read_source'`, `'prepare_problem_report'`: the manager's tools for it.
 - `src/ops/opsAgent.ts` — `Settings questions, and reporting a bug in Hatchabot`: the manager's instructions for it.
-- `src/domain/redact.ts` — `redactSecrets`, `redactCredentialFields`, `maskKnownValues`: key masking shared with logs.
+- `src/domain/redact.ts` — `redactSecrets`, `redactCredentialFields`, `maskKnownValues`: key masking shared with logs; `maskKeyMaterial` (`keyRunEnd`, `isKeyLine`): whole key blocks and base64, for a public report only; `isShellFolder`: `PWD=` holds a folder, not a password.
 - `src/store/store.ts` — `problem_reports`, `ProblemReportRow`: where drafts are stored.
 - `web/index.html` — `openReport`, `reportCreate`, `reportOpenIssue`, `reportFromHash`: the review panel.
 
@@ -535,7 +537,7 @@ API through one fetch helper.
 - `src/api/routes.ts` — `'/'`, `'/v1/config'`, `'/v1/agents'`, `'/v1/agents/:id'`, `'/v1/recent'`, `'/v1/agents/:id/crons'`, `indexPage`: the page itself and the main reads behind it.
 - `src/orchestrator/recent.ts` — `RecentTracker`, `orderRecent`, `previewLine`: the Activity view and tile previews.
 - `src/orchestrator/crons.ts` — `listCrons`, `addCron`, `editCron`, `setCronEnabled`, `runCronNow`: scheduled tasks inside the agent.
-- `src/orchestrator/crons.ts` — `cronTargetFor`, `retargetImplicitCrons`, `pendingRetarget`, `cronStoreReadShell`: where a task's result goes (the owner's chat, or the web-chat conversation of an agent in no chat app), and re-pointing tasks with no recipient; `src/api/routes.ts` runs `retargetCronSweep` after a start and daily, and `quickCronRetarget` every 5 minutes (one read of the task store per agent, the CLI only for a task that needs changing).
+- `src/orchestrator/crons.ts` — `cronTargetFor`, `retargetImplicitCrons`, `pendingRetarget`, `cronStoreReadShell`: where a task's result goes (the owner's chat, or the web-chat conversation of an agent in no chat app), and re-pointing tasks with no recipient or aimed at a chat app the agent has left (`namesRemovedApp`); `src/api/routes.ts` runs `retargetCronSweep` after a start and daily, and `quickCronRetarget` every 5 minutes (one read of the task store per agent, the CLI only for a task that needs changing).
 - `web/sw.js` — `fetch`: the service worker for the installable app.
 - `scripts/check-web.mjs` — `checkHandlers`: static checks on the page (run by the tests).
 - `scripts/ui-clickthrough.mjs` — `--headless`: the click-through UI test (headless Chrome against the real page).

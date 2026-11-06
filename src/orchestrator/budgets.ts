@@ -2,7 +2,7 @@ import type { Agent } from '../domain/types.js';
 import type { BudgetRow, SpendAlertRow, Store } from '../store/store.js';
 import { HOUR_FIELDS } from './usage.js';
 import type { StoredProfile } from './modelScorecard.js';
-import { priceMix, type TokenMix } from './modelOptions.js';
+import { LOCAL_MODEL, priceMix, type TokenMix } from './modelOptions.js';
 
 /**
  * Budgets (docs/features.md, "Budgets"): a monthly limit in US dollars at API
@@ -77,10 +77,17 @@ export function monthElapsed(now: number, tz: string): number {
   return Math.min(1, Math.max(0, (day - 1 + (h + min / 60) / 24) / daysIn(l.slice(0, 7))));
 }
 
-/** An agent's cost per local day from its stored profile's hour buckets; the window's first (partial) day named. */
-export function dailyCosts(p: StoredProfile | undefined, tz: string): { days: Map<string, number>; partialDay?: string } {
+/**
+ * An agent's cost per local day from its stored profile's hour buckets; the
+ * window's first (partial) day named. `unpriced`: the tokens per day that ran on
+ * a model with no known price (OpenAI's and Google's, today). Their cost is not
+ * $0, it is unknown: they are kept apart so the page and a budget can say so
+ * (HB-0402). `local`: the agent's source is local, so nothing of it is billed.
+ */
+export function dailyCosts(p: StoredProfile | undefined, tz: string, opts: { local?: boolean } = {}): { days: Map<string, number>; unpriced: Map<string, number>; partialDay?: string } {
   const days = new Map<string, number>();
-  if (!p?.models) return { days };
+  const unpriced = new Map<string, number>();
+  if (!p?.models) return { days, unpriced };
   const perDay = new Map<string, Map<string, TokenMix>>();
   for (const [model, s] of Object.entries(p.models)) {
     for (const [h, v] of Object.entries(s.h ?? {})) {
@@ -95,11 +102,16 @@ export function dailyCosts(p: StoredProfile | undefined, tz: string): { days: Ma
     }
   }
   for (const [d, byModel] of perDay) {
-    let usd = 0;
-    for (const [model, mix] of byModel) usd += priceMix(model, mix) ?? 0;
+    let usd = 0, tokens = 0;
+    for (const [model, mix] of byModel) {
+      const priced = priceMix(model, mix);
+      if (priced !== undefined) usd += priced;
+      else if (!opts.local && !LOCAL_MODEL.test(model)) tokens += mix.input + mix.output + mix.cacheRead + mix.cacheWrite;
+    }
     days.set(d, usd);
+    if (tokens > 0) unpriced.set(d, tokens);
   }
-  return { days, ...(p.since ? { partialDay: dayKey(p.since, tz) } : {}) };
+  return { days, unpriced, ...(p.since ? { partialDay: dayKey(p.since, tz) } : {}) };
 }
 
 /** Write every agent's cost days from what the sampler stored. */
@@ -108,8 +120,10 @@ export function recordCostDays(store: Store, tz: string, now = Date.now()): void
   const profiles = store.modelProfiles(agents.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
   for (const [id, { profile }] of profiles) {
     if (profile.hourly !== true && !Object.values(profile.models ?? {}).some((s) => s.h && Object.keys(s.h).length)) continue;
-    const { days, partialDay } = dailyCosts(profile, tz);
-    if (days.size) store.setCostDays(id, days, partialDay);
+    const agent = agents.find((a) => a.id === id);
+    const local = !!agent && store.getAIProfile(agent.aiProfileId)?.vendor === 'local';
+    const { days, unpriced, partialDay } = dailyCosts(profile, tz, { local });
+    if (days.size) store.setCostDays(id, days, partialDay, unpriced);
   }
   store.pruneCostDays(dayKey(now - KEEP_DAYS * DAY, tz));
 }
@@ -117,6 +131,26 @@ export function recordCostDays(store: Store, tz: string, now = Date.now()): void
 /** Each agent's spend in a month ("YYYY-MM"). */
 export function monthSpend(store: Store, month: string, agentIds?: string[]): Map<string, number> {
   return store.costBetween(`${month}-01`, `${month}-31`, agentIds);
+}
+
+/** Each agent's tokens in a month ("YYYY-MM") on models with no known price. */
+export function monthUnpriced(store: Store, month: string, agentIds?: string[]): Map<string, number> {
+  return store.unpricedBetween(`${month}-01`, `${month}-31`, agentIds);
+}
+
+/**
+ * What a limit in dollars cannot see on an agent, in words ("" = nothing): the
+ * model it runs on now has no known price, or part of this month's use did.
+ */
+export function priceGapNote(gap: { model?: string; tokens: number }): string {
+  if (gap.model) return `No price known for ${bare(gap.model)}, so what it costs cannot be measured in dollars: a limit or "Tell me every $…" cannot be enforced on it.`;
+  if (gap.tokens > 0) return `${Math.round(gap.tokens).toLocaleString('en-US')} tokens this month ran on a model with no price known and are not counted: a limit or "Tell me every $…" sees only the rest.`;
+  return '';
+}
+/** The same for the machine's total: how many agents it leaves out, not who (they may be anyone's). */
+export function machinePriceGapNote(agents: number): string {
+  if (!agents) return '';
+  return `${agents} agent${agents === 1 ? '' : 's'} on this machine ${agents === 1 ? 'uses a model' : 'use models'} with no price known: this total leaves that spend out, so a limit or "Tell me every $…" here cannot count it.`;
 }
 
 /**
@@ -147,7 +181,8 @@ export interface BudgetView {
   /** "November 1": when a pause or a cheaper model ends by itself. */
   resetsOn: string;
   /** Paused by this budget now. */
-  paused?: { at: string };
+  /** staysStopped: stopped by hand as well, so the end of the pause does not start it. */
+  paused?: { at: string; staysStopped?: boolean };
   /** Moved to a cheaper model by this budget now. */
   downgraded?: { at: string; to: string };
   /** Started (or its model changed) by hand after this month's action: left alone until the 1st. */
@@ -169,7 +204,7 @@ export function budgetView(store: Store, b: BudgetRow, spent: number, now: numbe
     ...(elapsed >= 2 / 31 ? { onPace: r2(spent / elapsed) } : {}),
     level: levelOf(spent, b.usd),
     resetsOn: `${monthName(nextMonth(month))} 1`,
-    ...(open && act.kind === 'pause' ? { paused: { at: act.pausedAt } } : {}),
+    ...(open && act.kind === 'pause' ? { paused: { at: act.pausedAt, ...(act.alreadyStopped ? { staysStopped: true } : {}) } } : {}),
     ...(open && act.kind === 'cheaper' && act.toModel ? { downgraded: { at: act.pausedAt, to: act.toModel } } : {}),
     ...(act?.resumedBy === 'owner' ? { resumedByHand: true } : {}),
   };
@@ -182,6 +217,7 @@ const bare = (model: string) => model.replace(/^.*\//, '');
 /** The Alerts line for a budget at 80% or more ("" below that). */
 export function budgetLine(v: BudgetView, whose: string): string {
   const of = `its ${whole(v.usd)} budget for ${monthName(v.month)}`;
+  if (v.paused?.staysStopped) return `Over ${of} (${money(v.spent)}), and stopped by hand: it stays stopped until you start it`;
   if (v.paused) return `Paused: ${whose} used ${of} (${money(v.spent)}). It starts again on ${v.resetsOn} — or raise the budget, or start it now`;
   if (v.downgraded) return `Over ${of} (${money(v.spent)}): on ${bare(v.downgraded.to)} until ${v.resetsOn} — raise the budget to switch back now`;
   if (v.level === 100) return `Over ${of}: ${money(v.spent)} so far${v.onPace && v.onPace > v.spent ? `, on pace for ${money(v.onPace)}` : ''}${v.atLimit !== 'warn' && v.resumedByHand ? ' (you took over after its budget acted: left alone until the 1st)' : ''}`;
@@ -195,10 +231,10 @@ export interface BudgetDeps {
   tell(ownerId: string, agent: Agent, text: string): Promise<boolean>;
   /** Stop a running agent for its budget; false when it could not be stopped now (busy). */
   pause(agent: Agent): Promise<boolean>;
-  /** Start an agent a budget paused; false when it could not be started now. */
+  /** Start an agent a budget paused. False keeps the pause open for the next pass: it could not be started now, or only a rebuild was queued, which may never bring it up. */
   resume(agent: Agent): Promise<boolean>;
   /**
-   * Move an agent to the cheapest model its source offers (live), recorded in
+   * Move an agent to the cheapest model its source offers that its runtime can use (live), recorded in
    * the model ledger as the budget's; undefined when there is nothing cheaper.
    * `from` is its own model pin before (null: its source's default).
    */
@@ -240,8 +276,12 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
   const paused: string[] = [], resumed: string[] = [], downgraded: string[] = [];
 
   // 1. What ends: a new month, a budget raised, removed or changed, the agent gone, or the owner taking over.
-  for (const p of store.listBudgetPauses({ open: true })) {
-    const a = byId.get(p.agentId) ?? store.getAgent(p.agentId);
+  for (const listed of store.listBudgetPauses({ open: true })) {
+    // Each as it is NOW: an earlier agent's start in this pass can take minutes, and a
+    // Stop or a Start pressed meanwhile changes what this one is owed.
+    const p = store.getBudgetPause(listed.agentId, listed.month);
+    if (!p || p.resumedAt) continue;
+    const a = store.getAgent(p.agentId);
     if (!a || a.state === 'ARCHIVED' || a.state === 'DELETED') {
       // Archived on a cheaper model a budget chose: its own goes back on the record now, or a
       // restore from the archive would bring the cheaper one back for good.
@@ -268,9 +308,14 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
       }
       continue;
     }
-    // Started some other way than Start (a rebuild): still over → paused again below; not over → done.
+    // Started some other way than Start (a rebuild, its own resume below when it
+    // owed one): still over → paused again below; not over → done, once it is up.
+    // A rebuild still going, or one that failed, has not started it (HB-0419).
     if (a.state !== 'STOPPED') {
-      if (p.month !== month || !over(p.scope, 'pause')) store.resumeBudgetPause(p.agentId, p.month, nowIso, 'started');
+      if (a.state === 'RUNNING' && (p.month !== month || !over(p.scope, 'pause'))) {
+        store.resumeBudgetPause(p.agentId, p.month, nowIso, 'started');
+        deps.log?.('budget.resumed', { agentId: a.id, why: p.month !== month ? 'new-month' : 'budget-raised' });
+      }
       continue;
     }
     const why = p.month !== month ? 'new-month' : !over(p.scope, 'pause') ? 'budget-raised' : undefined;
@@ -278,12 +323,16 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     // Another pause budget that covers it still reached (its own, or the machine's): it stays
     // paused, or it would run until the next pass paused it again (report A09, 2026-10-22).
     if (over(a.id, 'pause') || (pausable(a) && over(MACHINE, 'pause'))) continue;
-    // Stopped by hand when the limit came: the budget stopped nothing, so it starts
-    // nothing. The record closes and the agent stays as its owner left it — before, a
-    // machine budget started every hand-stopped agent on the 1st (review R11, 2026-10-23).
-    if (p.alreadyStopped) {
+    // Stopped by hand when the limit came, or since (a rebuild had it up, and the owner
+    // pressed Stop before a pass closed this: Store.disownBudgetPause, HB-0419): the
+    // budget's stop is not what holds it, so it starts nothing. The record closes and the
+    // agent stays as its owner left it — before, a machine budget started every
+    // hand-stopped agent on the 1st (review R11, 2026-10-23). Asleep is the same: a pause
+    // takes the sleeper's mark off, so one with the mark was put to sleep since, and a
+    // message wakes it.
+    if (p.alreadyStopped || a.hibernatedAt) {
       store.resumeBudgetPause(p.agentId, p.month, nowIso, why);
-      deps.log?.('budget.pause_closed', { agentId: a.id, why, alreadyStopped: true });
+      deps.log?.('budget.pause_closed', { agentId: a.id, why, alreadyStopped: !!p.alreadyStopped });
       continue;
     }
     if (deps.isBusy(a.id)) continue;
@@ -541,8 +590,8 @@ export function budgetMessage(b: BudgetRow, spent: number, level: 80 | 100, mont
     // A switch the runtime refused: said as such, never as "already on the cheapest".
     const notYet = k ? (whole_ ? `${k} agent${k === 1 ? '' : 's'} could not be switched yet (${k === 1 ? 'its runtime refused' : 'their runtimes refused'} it; Hatchabot keeps trying)` : 'the switch to a cheaper model did not take (its runtime refused it), so it still runs on its own model; Hatchabot keeps trying') : '';
     const what = whole_
-      ? (n ? `${n} agent${n === 1 ? ' now runs' : 's now run'} on the cheapest model ${n === 1 ? 'its source offers' : 'their sources offer'} (not me)${k ? `; ${notYet}` : ''}` : k ? notYet : 'every agent was already on its cheapest model')
-      : acted[0]?.to ? `it now runs on ${bare(acted[0].to)}` : k ? notYet : `it was already on the cheapest model its source offers, so it keeps working as it is`;
+      ? (n ? `${n} agent${n === 1 ? ' now runs' : 's now run'} on the cheapest model ${n === 1 ? 'its source offers' : 'their sources offer'} (not me)${k ? `; ${notYet}` : ''}` : k ? notYet : 'no agent has a cheaper model it can run')
+      : acted[0]?.to ? `it now runs on ${bare(acted[0].to)}` : k ? notYet : `its source offers nothing cheaper it can run, so it keeps working as it is`;
     return `💵 Hatchabot: ${whose} has used its ${of} (${money(spent)}): ${what}${n ? ` until ${next}` : ''}.\n${n ? `Raise the budget to switch ${whole_ ? 'them' : 'it'} back now; change a model yourself and the budget leaves it alone until the 1st.` : 'Ask me to raise the budget, or have it pause at the limit.'}`;
   }
   return `💵 Hatchabot: ${whose} has used its ${of} (${money(spent)})${pace && pace > spent ? `, on pace for ${money(pace)}` : ''}. It keeps working: the budget is set to warn.\nAsk me to raise it, make ${whole_ ? 'the agents' : 'it'} cheaper, or have ${whole_ ? 'them' : 'it'} pause at the limit.`;
@@ -591,7 +640,7 @@ export async function pausedReplySweep(deps: ReplyDeps, now = Date.now()): Promi
   const f = deps.fetchImpl ?? fetch;
   let sent = 0;
   for (const p of store.listBudgetPauses({ open: true })) {
-    if (p.kind !== 'pause') continue;
+    if (p.kind !== 'pause' || p.alreadyStopped) continue; // stopped by hand: "back on the 1st" would not be true
     const a = store.getAgent(p.agentId);
     if (!a || a.state !== 'STOPPED') continue;
     const ch = store.listChannelsForAgent(a.id).find((c) => c.kind === 'telegram');

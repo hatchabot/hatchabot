@@ -551,3 +551,22 @@ describe('two attaches at once (night review, 2026-09-28)', () => {
     expect(await secrets.get(row.secretRef)).toBe('ok-good');
   });
 });
+
+describe('connecting a chat app to an agent that is not running', () => {
+  it('a stopped agent stays stopped and says so; a sleeping one comes up, since nothing wakes it for Discord (HB-0420)', async () => {
+    const { store, add, inject } = await setup();
+    const stopped = add();
+    const r = await inject('POST', `/v1/agents/${stopped}/channels/discord`, { token: 'ok-good' });
+    expect(r.statusCode).toBe(202);
+    expect(r.json().atNextStart).toBe(true);
+    expect(store.getAgent(stopped)!.rebuildOnStart).toBeTruthy();
+    expect(store.listOperations([stopped], 1).filter((o) => o.kind === 'rebuild')).toEqual([]);
+
+    const asleep = add();
+    store.setHibernated(asleep, new Date().toISOString(), 1);
+    const woke = await inject('POST', `/v1/agents/${asleep}/channels/discord`, { token: 'ok-spare' });
+    expect(woke.statusCode).toBe(202);
+    expect(woke.json().atNextStart).toBeUndefined();
+    expect(store.listOperations([asleep], 1).filter((o) => o.kind === 'rebuild').length).toBe(1);
+  });
+});

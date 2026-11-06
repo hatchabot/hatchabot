@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -299,9 +299,67 @@ describe('removing a runner (2026-10-09)', () => {
     w.provider.daemonId = w.home.daemonId.bind(w.home);
     const r = await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner1', headers: { 'x-hatchabot-owner': OWNER } });
     expect(r.statusCode).toBe(200);
+    expect(r.json().warning).toMatch(/same Docker as "box".*another machine.*remove/);
     expect(w.provider.embedderRemoved).toBe(false);
     expect(w.provider.browsers.size).toBe(1);
     expect(w.store.getHost('runner1')).toBeUndefined();
+  });
+  describe('another row on the same machine (HB-0435)', () => {
+    const second = (w: Awaited<ReturnType<typeof app>>, settings: Record<string, unknown> = {}, provider = 'mock-runner') =>
+      w.store.insertHost({ id: 'runner2', ownerId: OWNER, kind: 'cloud', provider, name: 'laptop-tail', settings, createdAt: '3' } as never);
+    it('its agents keep their browsers and memory search; only this row goes', async () => {
+      const w = await app();
+      second(w);
+      const r = await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner1', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(r.statusCode).toBe(200);
+      // Matched by daemon ID alone, and cloned machines share one: it may really be a
+      // machine left with what ran on it, so that is said (nothing there was removed).
+      expect(r.json().warning).toMatch(/same Docker as "laptop-tail".*another machine.*remove/);
+      expect(w.provider.embedderRemoved).toBe(false);
+      expect(w.provider.browsers.size).toBe(1);
+      expect(w.store.getHost('runner1')).toBeUndefined();
+      expect(w.store.getHost('runner2')).toBeDefined();
+      expect(w.secrets.map.has(`${EMBEDDER_KEY_REF}/runner1`)).toBe(false); // this row's own, here, still goes
+    });
+    it('the same address is the same machine: nothing to warn about', async () => {
+      const w = await app();
+      // Rows with an address get a real docker client: asked nothing here.
+      const asked = [vi.spyOn(LocalDockerProvider.prototype, 'reachable').mockResolvedValue(true), vi.spyOn(LocalDockerProvider.prototype, 'daemonId').mockResolvedValue('made-up-daemon')];
+      const settings = { dockerHost: 'ssh://studio.example.org' };
+      second(w, settings);
+      w.store.insertHost({ id: 'runner3', ownerId: OWNER, kind: 'cloud', provider: 'mock-runner', name: 'studio', settings, createdAt: '4' } as never);
+      const r = await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner3', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(r.statusCode).toBe(200);
+      expect(r.json().warning).toBeUndefined();
+      expect(w.provider.embedderRemoved).toBe(false);
+      asked.forEach((s) => s.mockRestore());
+    });
+    it('and with the other row gone too, the last one takes them', async () => {
+      const w = await app();
+      second(w);
+      expect((await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner2', headers: { 'x-hatchabot-owner': OWNER } })).statusCode).toBe(200);
+      expect(w.provider.embedderRemoved).toBe(false);
+      expect((await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner1', headers: { 'x-hatchabot-owner': OWNER } })).statusCode).toBe(200);
+      expect(w.provider.embedderRemoved).toBe(true);
+      expect(w.provider.browsers.size).toBe(0);
+    });
+    it('a row on another machine changes nothing', async () => {
+      const w = await app();
+      second(w, {}, 'mock');
+      expect((await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner1', headers: { 'x-hatchabot-owner': OWNER } })).statusCode).toBe(200);
+      expect(w.provider.embedderRemoved).toBe(true);
+    });
+    it('nor does one that does not answer: it cannot be told apart, and must not hold this up', async () => {
+      const w = await app();
+      second(w, {}, 'mock');
+      const local = w.home.daemonId.bind(w.home);
+      let asked = 0;
+      w.home.daemonId = async () => { if (++asked > 1) throw new Error('asleep'); return local(); }; // this machine answers once, then the other row does not
+      const r = await w.f.inject({ method: 'DELETE', url: '/v1/hosts/runner1', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(r.statusCode).toBe(200);
+      expect(asked).toBeGreaterThan(1);
+      expect(w.provider.embedderRemoved).toBe(true);
+    });
   });
   it('a runner that does not answer: removed here, and the owner is told what is left on it', async () => {
     const w = await app();

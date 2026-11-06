@@ -129,7 +129,8 @@ they are. A failed move can be made by hand: Actions → Promote images → Run
 workflow.
 
 When `land.sh` stops waiting (exit 3) its pull request stays open and
-merges later; promote.sh then exits 3 too and says so. Once it has merged,
+merges later (`--no-wait` on a repo with no auto-merge exits 3 too, and
+leaves the merge to you, with the command); promote.sh then exits 3 too and says so. Once it has merged,
 `git pull --rebase` and run the same `promote.sh` again: it finds the
 channel already on `main` and asks for the fast lane. Run again after a
 channel came back on the public repo (a release that carried an older

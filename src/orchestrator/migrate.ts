@@ -141,7 +141,9 @@ export function preflight(
 ): PreflightAnswer {
   const reasons: string[] = [];
 
-  if (store.listAllActiveAgents().some((a) => a.slug === req.slug)) {
+  // The import's own rule, per owner (importAgent; the unique index): another
+  // account's agent with this slug collides with nothing (HB-0421).
+  if (store.listAllActiveAgents().some((a) => a.slug === req.slug && a.ownerId === ownerId)) {
     reasons.push(`An agent with id "${req.slug}" already lives here.`);
   }
 
@@ -477,6 +479,12 @@ interface MigrateParams {
   runtimeRef: string;
   slept?: { at: string; mark?: number };
   /**
+   * Its downloaded-copy mark before the move's own export set it. Undone, no
+   * copy went anywhere, so its bot is parked as usual; a file the owner
+   * downloaded earlier stays marked (HB-0413). Absent on an older release's move.
+   */
+  exportedBefore?: string | null;
+  /**
    * Sent with the restore (MOVE_HEADER) so the other server can be asked
    * about this import itself. Absent on a move begun before 2026-10-09: that
    * one was never announced, so only its agent list can be read.
@@ -489,13 +497,14 @@ async function undoSource(
   deps: Pick<MigrateDeps, 'store' | 'log'>,
   provider: MigrateDeps['provider'],
   agentId: string,
-  p: Pick<MigrateParams, 'wasRunning' | 'runtimeRef' | 'slept'>,
+  p: Pick<MigrateParams, 'wasRunning' | 'runtimeRef' | 'slept' | 'exportedBefore'>,
   why: string,
 ): Promise<boolean> {
   const { store } = deps;
   const log = deps.log ?? (() => {});
   log('migrate.rolled_back', { agentId, why });
   if (p.slept && store.getAgent(agentId)?.state === 'STOPPED') store.setHibernated(agentId, p.slept.at, p.slept.mark);
+  if (p.exportedBefore !== undefined) store.setAgentExportedAt(agentId, p.exportedBefore);
   if (!p.wasRunning) return true;
   try {
     await provider.start(p.runtimeRef);
@@ -503,6 +512,7 @@ async function undoSource(
     return true;
   } catch (err) {
     log('migrate.restart_failed', { agentId, error: String(err) });
+    store.markNotStarted(agentId, 'A move to another Hatchabot was undone, and it did not start again here. Press Start, or Rebuild if it will not start.');
     return false;
   }
 }
@@ -515,6 +525,8 @@ async function settleArrived(deps: MigrateDeps, agentId: string, peerName: strin
   // or Retry from resurrecting a copy whose bot now belongs elsewhere — which
   // is exactly how a "successful" move ends with two live pollers.
   store.setAgentMigratedTo(agentId, `${peerName} (${new Date().toISOString().slice(0, 10)})`);
+  // Moved while stopped after an earlier try failed: what that one said is over.
+  { const now = store.getAgent(agentId); if (now?.state === 'STOPPED' && now.stateReason) store.setAgentState(agentId, 'STOPPED'); }
   // If the moved bot was a pool bot, retire it locally: its token now lives on
   // the peer, so the local pool row must not linger leased-forever (a slot
   // leak) NOR be freed for re-lease (which would hand the same token to a new
@@ -573,6 +585,7 @@ async function migrateAgentInner(
   const p: MigrateParams = {
     peerId: peer.id, peerName: peer.name, ownerId: agent.ownerId, slug: agent.slug, accountId: channel.accountId,
     wasRunning: agent.state === 'RUNNING', runtimeRef: agent.runtimeRef, ...(slept ? { slept } : {}),
+    exportedBefore: agent.exportedAt ?? null,
     moveId: randomUUID(),
   };
   const op = beginOperation(store, 'migrate', agentId, { ...p }, { requestedBy: opts.requestedBy });
@@ -650,8 +663,18 @@ async function migrateSteps(
   // again here (resumeMigrate): the two-pollers case.
   op.step('exported');
 
-  /** Put the source back exactly as we found it. */
-  const undo = async (why: string) => { await undoSource(deps, provider, agentId, p, why); };
+  /**
+   * Put the source back exactly as we found it. What the owner is told, and
+   * how the operation ends: never "unchanged" for an agent the move stopped
+   * and that did not come back, and an operation they will see (HB-0416).
+   */
+  const undo = async (why: string) => {
+    const back = await undoSource(deps, provider, agentId, p, why);
+    return {
+      said: back ? 'Your agent is unchanged' : 'It was stopped for the move and did not start again here: press Start',
+      end: (e: MigrateError) => { if (back) op.rolledBack(e.userMessage); else op.fail(e.userMessage); },
+    };
+  };
 
   /**
    * The import gave no definite answer. The import takes minutes (volume
@@ -666,11 +689,11 @@ async function migrateSteps(
   const settleUnanswered = async (why: string, status?: string): Promise<never> => {
     const landed = await destinationHasAgent(deps, peer, agent.slug, 12, p.moveId);
     if (landed === 'no') {
-      await undo(`transfer failed: ${why}`);
+      const undone = await undo(`transfer failed: ${why}`);
       const e = new MigrateError(
-        `The transfer to ${peer.name} failed${status ? ` (it answered ${status})` : ''}. Your agent is unchanged.`,
+        `The transfer to ${peer.name} failed${status ? ` (it answered ${status})` : ''}. ${undone.said}.`,
       );
-      op.rolledBack(e.userMessage);
+      undone.end(e);
       throw e;
     }
     if (landed === 'yes') {
@@ -727,15 +750,15 @@ async function migrateSteps(
     }
     // A real answer from the destination: it refused and rolled back.
     op.step('answered');
-    await undo(`import rejected: ${body.error}`);
+    const undone = await undo(`import rejected: ${body.error}`);
     const e = body.code === 'image_decision'
       ? new MigrateError(
         `${peer.name} doesn't have the image ${agent.image} and won't build it for this move` +
           `${body.problem ? ` (${body.problem})` : " (only that server's owner may build images there)"}. ` +
-          'Your agent is unchanged. Move it on that server\'s default image (CLI: --drop-pin), or Download a copy and import it there as its owner.',
+          `${undone.said}. Move it on that server's default image (CLI: --drop-pin), or Download a copy and import it there as its owner.`,
       )
-      : new MigrateError(`${peer.name} couldn't import it: ${body.error}. Your agent is unchanged.`);
-    op.rolledBack(e.userMessage);
+      : new MigrateError(`${peer.name} couldn't import it: ${body.error}. ${undone.said}.`);
+    undone.end(e);
     throw e;
   }
   if (!body || typeof body.state !== 'string') {
@@ -749,12 +772,12 @@ async function migrateSteps(
 
   // 4. Verify it actually came up there before we consider this done.
   if (remote.state !== 'RUNNING') {
-    await undo(`remote state ${remote.state}`);
+    const undone = await undo(`remote state ${remote.state}`);
     const e = new MigrateError(
-      `${peer.name} accepted the agent but it is ${remote.state} there. Your agent is unchanged — ` +
+      `${peer.name} accepted the agent but it is ${remote.state} there. ${undone.said} — ` +
         `check that server before trying again.`,
     );
-    op.rolledBack(e.userMessage);
+    undone.end(e);
     throw e;
   }
 

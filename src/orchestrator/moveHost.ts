@@ -54,6 +54,8 @@ export interface MoveDeps extends Omit<ProvisionDeps, 'provider'> {
   onOperation?: (id: string) => void;
   /** Move it onto the target's default image: its pin is dropped with the move, and put back if the move is undone. */
   dropPin?: boolean;
+  /** A rebuild of it is waiting its turn in the queue (the routes' `inflight`): no move begins under one. */
+  rebuildWaiting?: () => boolean;
 }
 
 export async function moveAgentToHost(
@@ -63,6 +65,17 @@ export async function moveAgentToHost(
 ): Promise<Agent> {
   return whileBusy(agentId, () => moveInner(deps, agentId, targetHostId));
 }
+
+/**
+ * A move undone whose source did not start again is over, and fails saying so
+ * (HB-0416). It is not held: a hold refuses Start, Rebuild, Move, Archive and
+ * Delete, and Rebuild is the cure when the old container is the fault (a pruned
+ * image, a taken port). The agent stays on its source, stopped.
+ */
+const NOT_STARTED = 'It is stopped there: press Start, or Rebuild if it will not start.';
+/** What its card and Alerts say until it next runs (Store.markNotStarted): a failed move's message is otherwise a toast, or nothing at all after a restart. */
+const notStartedReason = (p: Pick<MoveParams, 'toName' | 'fromName'>) => `The move to ${p.toName} failed, and it did not start again on ${p.fromName}. ${NOT_STARTED}`;
+const leftoverNote = (toName: string) => ` A copy that never started may be left on ${toName}; it is replaced the next time it moves there.`;
 
 async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string): Promise<Agent> {
   const { store, source, target } = deps;
@@ -114,6 +127,10 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
   // a machine Hatchabot no longer knew. A removal still under way sees the
   // operation begun below, in this same tick, and stops (HB-0275).
   if (!store.getHost(targetHostId)) throw new TransferError(`${targetHost.name} was removed meanwhile — the move was cancelled.`);
+  // A rebuild waiting its turn carries a change. At its turn, called off by this move,
+  // it keeps the change as a mark on the agent; the target's build clears that mark, and
+  // an undo cannot restore what it never saw, so the source ran on without the change.
+  if (deps.rebuildWaiting?.()) throw new TransferError('A rebuild of this agent is not over yet. Move it once that is done.');
 
   const oldRef = agent.runtimeRef;
   const wasRunning = agent.state === 'RUNNING';
@@ -128,7 +145,7 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     wasRunning, oldRef, keyBefore,
     appliedBefore: {
       profileId: agent.appliedProfileId, model: agent.appliedModel, prevId: agent.appliedProfilePrevId,
-      at: agent.appliedProfileAt, embedMode: agent.appliedEmbedMode,
+      at: agent.appliedProfileAt, embedMode: agent.appliedEmbedMode, rebuildOnStart: agent.rebuildOnStart,
     },
     ...(deps.dropPin && agent.image ? { droppedImage: agent.image } : {}),
   };
@@ -172,13 +189,23 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     dropMoveCopy(stateFile);
     rethrowIfCrash(err);
     // Only claim RUNNING if the container actually came back (export's rule).
+    let cameBack = true;
     if (wasRunning) {
       try {
         await source.start(oldRef);
         store.setAgentState(agentId, 'RUNNING');
       } catch (e) {
+        cameBack = false;
         log('move.source_restart_failed', { agentId, error: String(e) });
       }
+    }
+    keepPin(store, agentId, p, log);
+    // Not "nothing was changed" about an agent the move stopped (HB-0416).
+    if (!cameBack) {
+      store.markNotStarted(agentId, notStartedReason(p));
+      const e = new TransferError(`The move to ${targetHost.name} failed (its state could not be read), and it did not start again on ${sourceHost.name}. ${NOT_STARTED} (${String(err instanceof Error ? err.message : err).slice(0, 300)})`);
+      op.fail(e);
+      throw e;
     }
     const e = new TransferError(
       isDiskFull(err)
@@ -187,7 +214,6 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
           err instanceof Error ? err.message : err,
         ).slice(0, 300)})`,
     );
-    keepPin(store, agentId, p, log);
     op.rolledBack(e.userMessage);
     throw e;
   }
@@ -232,6 +258,11 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
       throw e;
     }
     log('move.rolled_back', { agentId, to: targetHostId, error: String(err) });
+    if (r.sourceStartFailed) {
+      const e = new TransferError(`The move to ${targetHost.name} failed and was undone, and it did not start again on ${sourceHost.name}. ${NOT_STARTED} (${String(err instanceof Error ? err.message : err).slice(0, 300)})`);
+      op.fail(e);
+      throw e;
+    }
     const e = new TransferError(
       `Move failed and was rolled back — the agent stays on ${sourceHost.name}. (${String(
         err instanceof Error ? err.message : err,
@@ -264,7 +295,7 @@ export interface MoveParams {
    * source runs on as before and the record says so again (audit #081).
    * Absent from a move recorded by an older release.
    */
-  appliedBefore?: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared' };
+  appliedBefore?: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared'; rebuildOnStart?: string };
   /** The image pin dropped for this move (dropPin): put back if it is undone (audit #086). */
   droppedImage?: string;
 }
@@ -344,7 +375,7 @@ async function completeOnTarget(
  *    anything was touched), so this can't touch the moved volume.
  */
 async function retireSource(
-  deps: { log?: (event: string, detail: Record<string, unknown>) => void },
+  deps: { store: Store; log?: (event: string, detail: Record<string, unknown>) => void },
   source: RuntimeProvider | undefined,
   op: OpHandle,
   agentId: string,
@@ -362,6 +393,8 @@ async function retireSource(
     log('move.source_cleanup_failed', { agentId, host: p.from, error: String(err) });
   }
   log('agent.moved', { agentId, from: p.from, to: p.to, toName: p.toName, wasRunning: p.wasRunning });
+  // Moved while stopped after an earlier move failed: what that one said is over.
+  { const now = deps.store.getAgent(agentId); if (now?.state === 'STOPPED' && now.stateReason) deps.store.setAgentState(agentId, 'STOPPED'); }
   op.done(`Moved to ${p.toName}.${left ? ` Its old copy on ${p.fromName} could not be removed yet.` : ''}`);
 }
 
@@ -436,6 +469,7 @@ async function putBack(
       if (s && s.state !== 'RUNNING') store.setAgentState(agentId, 'RUNNING');
     } catch (err) {
       sourceStartFailed = true;
+      store.markNotStarted(agentId, notStartedReason(p));
       log('move.source_restart_failed', { agentId, error: String(err) });
     }
   }
@@ -447,6 +481,13 @@ export interface MoveResumeDeps extends Omit<ProvisionDeps, 'provider'> {
   providerForHost: (hostId: string) => RuntimeProvider | undefined;
   /** Does this machine answer? Default: its daemon id within 20 s. */
   answers?: (p: RuntimeProvider) => Promise<boolean>;
+  /** Tell the owner on their chat app: a restart's undo happens with nobody watching (notify.ts, tellOwner). */
+  tell?: (ownerId: string, agentId: string, text: string) => Promise<boolean>;
+}
+
+/** A restart undid a move and the agent did not come back: it has stopped answering, and nobody is on the page. */
+async function tellNotStarted(deps: MoveResumeDeps, agent: Agent, p: MoveParams): Promise<void> {
+  await deps.tell?.(agent.ownerId, agent.id, `⚠ Hatchabot: a restart interrupted moving "${agent.name}" to ${p.toName}. The move was undone, and it did not start again on ${p.fromName}, so it is not answering. Press Start on its page, or Rebuild if it will not start.`).catch(() => false);
 }
 
 export const machineAnswers = async (p: RuntimeProvider): Promise<boolean> => {
@@ -496,7 +537,8 @@ const moveHoldChoices = (p: MoveParams) => ({
 /**
  * A move a restart cut off (the design's table, move-host rows):
  *  - before the host flip: undo — remove the target's leftovers if it
- *    answers, put the memory-search key back, start the source if it ran;
+ *    answers, put the memory-search key back, start the source if it ran
+ *    (one that will not start ends the move as failed: NOT_STARTED);
  *  - after the flip: finish — the second seed and the start on the target,
  *    its rebuild hook, skills and re-index, then remove the source's volume;
  *  - the machine it must use does not answer: hold, with
@@ -521,18 +563,16 @@ export async function resumeMoveHost(deps: MoveResumeDeps, opId: string): Promis
     // Before the flip: nothing on the target is in use yet. Undo.
     const targetUp = !!target && await answers(target);
     const r = await putBack(deps, source, targetUp ? target : undefined, agentId, p, { targetMayRun: false });
+    if (r.leftover) log('move.leftover', { agentId, host: p.to });
+    const left = r.leftover ? leftoverNote(p.toName) : '';
     if (r.sourceStartFailed) {
-      op.hold(
-        `The move to ${p.toName} was interrupted by a restart and undone, but ${p.fromName} did not start it again.`,
-        { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' },
-      );
+      op.fail(`The move to ${p.toName} was interrupted by a restart and undone, and it did not start again on ${p.fromName}. ${NOT_STARTED}${left}`);
+      await tellNotStarted(deps, agent, p);
       return;
     }
-    if (r.leftover) log('move.leftover', { agentId, host: p.to });
     op.rolledBack(
       `The move to ${p.toName} was interrupted by a restart and undone — it stays on ${p.fromName}` +
-        `${p.wasRunning ? ' and is running again' : ''}.` +
-        (r.leftover ? ` A copy that never started may be left on ${p.toName}; it is replaced the next time it moves there.` : ''),
+        `${p.wasRunning ? ' and is running again' : ''}.${left}`,
     );
     return;
   }
@@ -558,6 +598,11 @@ export async function resumeMoveHost(deps: MoveResumeDeps, opId: string): Promis
         return;
       }
       log('move.rolled_back', { agentId, to: p.to, error: String(err) });
+      if (r.sourceStartFailed) {
+        op.fail(`The move to ${p.toName} could not be finished after a restart and was undone, and it did not start again on ${p.fromName}. ${NOT_STARTED} (${String(err instanceof Error ? err.message : err).slice(0, 200)})`);
+        await tellNotStarted(deps, agent, p);
+        return;
+      }
       op.rolledBack(`The move to ${p.toName} could not be finished after a restart and was undone — it stays on ${p.fromName}. (${String(err instanceof Error ? err.message : err).slice(0, 200)})`);
       return;
     }
@@ -597,16 +642,13 @@ function endPutBack(
   deps: MoveResumeDeps, op: OpHandle, agentId: string, p: MoveParams,
   r: { leftover: boolean; sourceStartFailed: boolean },
 ): void {
+  if (r.leftover) deps.log?.('move.leftover', { agentId, host: p.to });
+  const left = r.leftover ? leftoverNote(p.toName) : '';
   if (r.sourceStartFailed) {
-    // The record is back on the source now: a retry undoes, it does not finish.
-    op.hold(`Put back on ${p.fromName}, but it did not start there.`, { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' });
+    op.fail(`Put back on ${p.fromName}, but it did not start there. ${NOT_STARTED}${left}`);
     return;
   }
-  if (r.leftover) deps.log?.('move.leftover', { agentId, host: p.to });
-  op.rolledBack(
-    `Put back on ${p.fromName}${p.wasRunning ? ' and running' : ''}.` +
-      (r.leftover ? ` A copy that never started may be left on ${p.toName}; it is replaced the next time it moves there.` : ''),
-  );
+  op.rolledBack(`Put back on ${p.fromName}${p.wasRunning ? ' and running' : ''}.${left}`);
 }
 
 /**

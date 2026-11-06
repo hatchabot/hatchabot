@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
@@ -354,6 +354,47 @@ describe('clearing an agent from Alerts', () => {
     // Someone else's agent cannot be cleared.
     expect((await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: { 'x-hatchabot-owner': 'user-other' }, payload: { attentionAck: 'x' } })).statusCode).toBe(404);
     await f.close();
+  });
+});
+
+describe('a Clear from Alerts lasts as long as what it cleared (HB-0409)', () => {
+  it('a failure that ended, or a new failure, is no longer covered, and the Recent line says so', async () => {
+    const { store, f } = await world();
+    store.insertAgent(agent('a1', 'Stock Watcher', { state: 'RUNNING' } as Partial<Agent>));
+    const ack = (id = 'a1') => store.getAgent(id)?.attentionAck;
+    store.setAgentState('a1', 'FAILED', 'first failure');
+    store.setAgentAttentionAck('a1', 'failed\nstate:FAILED');
+    store.setAgentState('a1', 'FAILED', 'the same failure, said again');
+    expect(ack(), 'still the same failure').toBe('failed\nstate:FAILED');
+    store.setAgentState('a1', 'PROVISIONING');
+    expect(ack(), 'a retry ends it').toBeUndefined();
+    store.setAgentState('a1', 'RUNNING');
+    // What else was cleared stays cleared.
+    store.setAgentAttentionAck('a1', 'disk:12\nfailed\nstate:FAILED');
+    store.setAgentState('a1', 'FAILED', 'an ack from before the upgrade, then a second failure');
+    expect(ack()).toBe('disk:12');
+    await f.close();
+  });
+
+  it('a step that was waiting on the owner and is done, or a new one, is no longer covered', async () => {
+    const { store, f } = await world();
+    store.insertAgent(agent('a1', 'Stock Watcher'));
+    const step = { type: 'bot_token' } as never;
+    store.setAgentPendingAction('a1', step);
+    store.setAgentAttentionAck('a1', 'pending');
+    store.setAgentPendingAction('a1', step);
+    expect(store.getAgent('a1')?.attentionAck, 'the same step, written again').toBe('pending');
+    store.setAgentPendingAction('a1', null);
+    expect(store.getAgent('a1')?.attentionAck).toBeUndefined();
+    store.setAgentAttentionAck('a1', 'pending'); // from before the upgrade
+    store.setAgentPendingAction('a1', step);
+    expect(store.getAgent('a1')?.attentionAck).toBeUndefined();
+    await f.close();
+  });
+
+  it("the keys the store drops are the ones the page's Alerts use", () => {
+    const page = readFileSync('web/index.html', 'utf8');
+    for (const k of ["'state:FAILED'", "key: 'failed'", "key: 'pending'", "key: 'opsDrift'", "key: 'restart:'", "key: 'memory'"]) expect(page, k).toContain(k);
   });
 });
 

@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { beginOperation } from '../src/orchestrator/operations.js';
+import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 const MEMBER = 'user-member';
@@ -30,6 +31,119 @@ async function heldMove(w: World, id: string) {
   });
   return op.id;
 }
+
+describe('a change only a new container picks up, while an operation is not over (HB-0411, HB-0420)', () => {
+  /** The world's channel row, and the agent with its move held. */
+  const held = async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { name: 'Test Agent', accountId: 'testagentbot' });
+    const opId = await heldMove(w, id);
+    return { w, id, opId };
+  };
+  const refused = (r: { statusCode: number; json(): { error: string; operation?: string } }, opId: string) => {
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toMatch(/Choose what to do on its page first/);
+    expect(r.json().operation).toBe(opId);
+  };
+
+  it('giving its bot back is refused: the undo starts the old container, which would still hold it', async () => {
+    const { w, id, opId } = await held();
+    refused(await w.f.inject({ method: 'DELETE', url: `/v1/agents/${id}/telegram`, headers: as() }), opId);
+    expect(w.store.getChannelForAgent(id)?.accountId).toBe('testagentbot');
+    expect(w.store.getAgent(id)!.rebuildOnStart).toBeUndefined();
+  });
+
+  it('a browser switch and an image pin are refused, and nothing else in the request is saved', async () => {
+    const { w, id, opId } = await held();
+    refused(await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { browser: true, group: 'Kitchen' } }), opId);
+    expect(w.store.getAgent(id)!.browser).toBeFalsy();
+    expect(w.store.getAgent(id)!.group).toBeUndefined();
+    refused(await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { image: 'hatchabot/runtime:other' } }), opId);
+    expect(w.store.getAgent(id)!.image).toBeUndefined();
+    expect(w.store.getAgent(id)!.rebuildOnStart).toBeUndefined();
+    // What needs no new container goes on as before.
+    expect((await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { group: 'Kitchen' } })).statusCode).toBe(200);
+  });
+
+  it('a bot added, a chat app added, changed or removed, and a source switch: none is promised for a next start', async () => {
+    const { w, id, opId } = await held();
+    w.store.deleteChannelForAgent(id);
+    refused(await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/telegram`, headers: as(), payload: {} }), opId);
+    for (const kind of ['discord', 'slack']) {
+      refused(await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/channels/${kind}`, headers: as(), payload: {} }), opId);
+    }
+    w.store.insertChannel({ id: 'c1', agentId: id, kind: 'discord', accountId: 'app1', secretRef: 'channel/d', deepLink: 'https://discord.example.org/app1', createdAt: 'now' } as never);
+    refused(await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}/channels/discord`, headers: as(), payload: { rooms: { mode: 'off' } } }), opId);
+    refused(await w.f.inject({ method: 'DELETE', url: `/v1/agents/${id}/channels/discord`, headers: as() }), opId);
+    expect(w.store.getChannelForAgent(id, 'discord')).toBeDefined();
+    w.store.insertAIProfile({ id: 'p2', ownerId: w.owner, name: 'Other', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    const before = w.store.getAgent(id)!.aiProfileId;
+    const sw = await w.f.inject({ method: 'POST', url: '/v1/ai-profiles/p2/adopt-agents', headers: as(), payload: { apply: [id], rebuild: true } });
+    expect(sw.json()).toMatchObject({ switched: 0, atNextStart: 0 });
+    expect(sw.json().skipped[0].reason).toMatch(/busy/);
+    expect(w.store.getAgent(id)!.aiProfileId).toBe(before);
+    expect(w.store.getAgent(id)!.rebuildOnStart).toBeUndefined();
+  });
+
+  it('under a move still running, then once it has failed with its source down: refused, then owed to Start', async () => {
+    const w = await makeWorld();
+    const target = new MockProvider({ failOn: 'provision' });
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Test Runner', settings: {}, createdAt: 'now' });
+    w.providers.set('mock2', target);
+    const id = await seedRunningAgent(w, { name: 'Test Agent' });
+    const start = w.provider.start.bind(w.provider);
+    w.provider.start = async () => { throw new Error('the port is taken'); };
+    let go!: () => void;
+    const held = new Promise<void>((r) => { go = r; });
+    let reached!: () => void;
+    const there = new Promise<void>((r) => { reached = r; });
+    const provision = target.provision.bind(target);
+    target.provision = async (spec) => { reached(); await held; return provision(spec); };
+    const move = moveAgentToHost({ store: w.store, secrets: w.secrets, channel: w.channel, source: w.provider, target, sleep: async () => {} }, id, 'h2').catch(() => {});
+    await there;
+    expect(w.store.getAgent(id)!.state).toBe('STOPPED'); // the move's stop, not its owner's
+    const r = await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { browser: true } });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toMatch(/under way/);
+    expect(w.store.getAgent(id)!.browser).toBeFalsy();
+    go();
+    await move;
+    expect(w.store.getAgent(id)).toMatchObject({ hostId: 'h1', state: 'STOPPED' });
+    expect(w.store.getAgent(id)!.rebuildOnStart).toBeUndefined();
+    // The move is over: a stopped agent like any other. Its next start has the change.
+    w.provider.start = start;
+    const later = await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { browser: true } });
+    expect(later.statusCode).toBe(200);
+    expect(later.json().browserPending).toMatch(/when it next starts/);
+    expect(w.store.getAgent(id)!.rebuildOnStart).toBeTruthy();
+  });
+
+  it('a change that passed its checks before the operation began promises nothing: a next start it would not get', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { name: 'Test Agent' });
+    await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+    w.store.setAgentState(id, 'STOPPED');
+    // The operation begins in the one await between the route's check and its answer.
+    const orig = w.store.setAgentBrowser.bind(w.store);
+    w.store.setAgentBrowser = (...a: Parameters<typeof orig>) => { orig(...a); beginOperation(w.store, 'move-host', id, {}); };
+    const r = await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { browser: true } });
+    expect(r.statusCode).toBe(200);
+    expect(w.store.getAgent(id)!.rebuildOnStart).toBeUndefined();
+    expect(r.json().browserPending ?? '').not.toMatch(/next starts/);
+  });
+
+  it('a mark saved while a move ran survives its undo, where the record would have put back its snapshot', async () => {
+    const w = await makeWorld();
+    const target = new MockProvider({ failOn: 'provision' });
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Test Runner', settings: {}, createdAt: 'now' });
+    const id = await seedRunningAgent(w, { name: 'Test Agent' });
+    const provision = target.provision.bind(target);
+    target.provision = (spec) => { w.store.setRebuildOnStart(id, new Date().toISOString()); return provision(spec); };
+    await moveAgentToHost({ store: w.store, secrets: w.secrets, channel: w.channel, source: w.provider, target, sleep: async () => {} }, id, 'h2').catch(() => {});
+    expect(w.store.getAgent(id)).toMatchObject({ hostId: 'h1', state: 'RUNNING' });
+    expect(w.store.getAgent(id)!.rebuildOnStart).toBeTruthy();
+  });
+});
 
 describe('a held operation keeps the agent busy on disk', () => {
   it('Start, Rebuild, Archive, Move, Rehost, Delete, Wake and Retry refuse with its line', async () => {

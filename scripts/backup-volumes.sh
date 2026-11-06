@@ -57,7 +57,20 @@ BASE="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
 [ -d "$BASE" ] || [ -n "${HATCHABOT_BACKUP_DIR:-}" ] || { [ -d "$HOME/agentclaw-backups" ] && BASE="$HOME/agentclaw-backups"; }   # pre-rename hosts
 DEST="$BASE/$(date +%F)"
 IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
-KEEP_DAYS="${HATCHABOT_BACKUP_KEEP_DAYS:-14}"
+# A whole number of days above 0 (six digits at most), as the app reads it (src/orchestrator/backups.ts,
+# keepDays): anything else is the default, and said. "14d" stopped the run at the
+# retention's find, with every volume taken, so every set read incomplete and
+# nothing was ever pruned; 0 removed all but each agent's newest copy under a
+# panel that said 14 (HB-0432).
+KEEP_DAYS="$(printf '%s' "${HATCHABOT_BACKUP_KEEP_DAYS:-14}" | tr -d '[:space:]')"
+case "$KEEP_DAYS" in
+  *[!0-9]*) KEEP_DAYS="" ;;
+  *) KEEP_DAYS="$(printf '%s' "$KEEP_DAYS" | sed 's/^0*//')"; [ "${#KEEP_DAYS}" -le 6 ] || KEEP_DAYS="" ;;
+esac
+if [ -z "$KEEP_DAYS" ]; then
+  echo "  ⚠ HATCHABOT_BACKUP_KEEP_DAYS=${HATCHABOT_BACKUP_KEEP_DAYS:-} is not a whole number of days above 0: keeping 14 days." >&2
+  KEEP_DAYS=14
+fi
 
 # Tarballs contain openclaw.json — bot tokens and gateway tokens in the clear.
 # A base this run makes is 0700; one that is already there is left as it is
@@ -145,6 +158,28 @@ write_status() {
 # The record starts only once the run can really begin (below): a run that
 # refuses before it starts (no database, no docker) must not replace the
 # verdict of an earlier run of the same day with "incomplete, 0 volumes".
+# A run that does start carries over what an earlier run of the same day wrote
+# whole: an archive is renamed from .part only once it is whole, so the
+# morning's stay good through a noon run cut short, and this run's record alone
+# hid them from a restore (HB-0433). A record from before "captured" has no list:
+# its archives are all whole, by that same rename. Printed one name a line.
+earlier_captured() {
+  [ -f "$STATUS" ] || return 0
+  node -e '
+    const fs = require("node:fs"), path = require("node:path");
+    const dir = process.argv[2];
+    const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const names = Array.isArray(r.captured) ? r.captured
+      : fs.readdirSync(dir).filter((f) => f.endsWith(".tgz")).map((f) => f.slice(0, -4));
+    for (const v of names) if (typeof v === "string" && /^[\w.-]+$/.test(v) && fs.existsSync(path.join(dir, v + ".tgz"))) console.log(v);' \
+    "$STATUS" "$DEST" 2>/dev/null || true
+}
+# Whole this run (and so not asked about again), beside what was already whole.
+this_run=""
+add_captured() {
+  this_run="$this_run $1"
+  case " $captured_list " in *" $1 "*) ;; *) captured_list="$captured_list $1" ;; esac
+}
 # An archive container, while one is running ("<host>|<name>", no host for
 # this machine). Named so it can be removed: a timeout kills only the docker
 # client, and the container went on reading the agent's volume after the
@@ -207,6 +242,7 @@ fi
 [ -z "$owner" ] || printf '%s\n' "$owner" > "$DEST/$OWNER_FILE"
 # Past the refusal: from here on this run writes into the set, so it owns
 # the day's record (a later failure is recorded as incomplete, rightly).
+while IFS= read -r v; do [ -z "$v" ] || captured_list="$captured_list $v"; done < <(earlier_captured)
 write_status running
 trap finish EXIT
 node -e '
@@ -257,6 +293,14 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "  ⚠ $IMAGE not found — falling back to debian:stable-slim for tar." >&2
   IMAGE="debian:stable-slim"
 fi
+
+# Under a rootless daemon, root in the container IS this user, and this user's
+# uid in there is one of the sub-uids. An archive chowned to it came out owned
+# by that sub-uid, mode 0600: this user could rename it but not read or chmod
+# it, and no restore or drill could use it (HB-0406). There, as root it already
+# is this user's: no chown.
+ROOTLESS=0
+case "$(docker info --format '{{.SecurityOptions}}' 2>/dev/null || true)" in *name=rootless*) ROOTLESS=1 ;; esac
 
 # List the volumes FIRST, and distinguish "daemon down" from "no volumes".
 # `docker volume ls` failing (daemon down/permission) must not masquerade as
@@ -397,12 +441,24 @@ while IFS= read -r vol; do
   # docker's bridge, a "<prefix>-…" name was taken by `hatchabot doctor` for
   # an agent left on the shared network.
   oneshot="|${PREFIX}-bk-$$-$RANDOM$RANDOM"
+  hand_over="chown $(id -u):$(id -g) '/out/$vol.tgz.part' 2>/dev/null;"
+  if [ "$ROOTLESS" = 1 ]; then hand_over=""; fi
   docker run --rm --name "${oneshot#|}" --label "hatchabot.oneshot=$PREFIX" --network none --user root -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
-    bash -c "umask 077 && tar czf '/out/$vol.tgz.part' $TAR_EXCLUDES -C /data . ; rc=\$?; chown $(id -u):$(id -g) '/out/$vol.tgz.part' 2>/dev/null; exit \$rc" || rc=$?
+    bash -c "umask 077 && tar czf '/out/$vol.tgz.part' $TAR_EXCLUDES -C /data . ; rc=\$?; $hand_over exit \$rc" || rc=$?
   # A client that failed or was killed may have left its container writing
   # the .part: it is gone before the file is.
   if [ "$rc" -gt 1 ]; then reap_oneshot; fi
   oneshot=""
+  # One this user cannot read back is no backup, whatever docker said: a remapped
+  # daemon this script does not know of, or a chown that went wrong (HB-0406). Asked
+  # before the rename, so it cannot replace an earlier whole archive of the day.
+  if [ "$rc" -le 1 ] && [ -f "$DEST/$vol.tgz.part" ] && [ ! -r "$DEST/$vol.tgz.part" ]; then
+    echo "  ✗ $vol: docker wrote the archive as uid $(LC_ALL=C ls -ln "$DEST/$vol.tgz.part" 2>/dev/null | awk '{print $3}'), and $(id -un) cannot read it (a remapped or rootless Docker?) — not in this set" >&2
+    rm -f "$DEST/$vol.tgz.part" || true
+    failed=$((failed + 1))
+    failed_list="$failed_list $vol"
+    continue
+  fi
   if [ "$rc" -gt 1 ] || [ ! -f "$DEST/$vol.tgz.part" ] || ! mv -f "$DEST/$vol.tgz.part" "$DEST/$vol.tgz"; then
     rm -f "$DEST/$vol.tgz.part"
     echo "  ✗ $vol failed (exit $rc)" >&2
@@ -416,7 +472,7 @@ while IFS= read -r vol; do
   chmod 600 "$DEST/$vol.tgz" 2>/dev/null || true
   echo "  ✓ $vol → $DEST/$vol.tgz"
   count=$((count + 1))
-  captured_list="$captured_list $vol"
+  add_captured "$vol"
 done <<EOF
 $vols
 EOF
@@ -424,15 +480,16 @@ EOF
 # Every agent on this machine must be in the set. One whose volume docker did
 # not list made a set that said complete and pruned that agent's older sets
 # (issue #2): now it is named, counted as failed, and nothing is pruned.
+# This run's own captures: one whole from this morning is no answer to a volume docker no longer has.
 for vol in $expected; do
-  case " $captured_list $failed_list " in *" $vol "*) continue ;; esac
+  case " $this_run $failed_list " in *" $vol "*) continue ;; esac
   echo "  ✗ $vol: an agent on this machine uses it, but docker has no ${PREFIX}-* volume by that name (removed, or HATCHABOT_PREFIX set wrong?) — not in this set" >&2
   missing_list="$missing_list $vol"
   failed=$((failed + 1))
   failed_list="$failed_list $vol"
 done
 for vol in $expected_failed; do
-  case " $captured_list $failed_list " in *" $vol "*) continue ;; esac
+  case " $this_run $failed_list " in *" $vol "*) continue ;; esac
   echo "  • $vol: its agent failed to start and has no volume — nothing to back up"
 done
 
@@ -506,7 +563,7 @@ if [ -n "$remote" ]; then
     chmod 600 "$DEST/$vol.tgz"
     echo "  ✓ $vol (on ${rhost#*://}) → $DEST/$vol.tgz"
     count=$((count + 1))
-    captured_list="$captured_list $vol"
+    add_captured "$vol"
   done <<REMOTE
 $remote
 REMOTE
