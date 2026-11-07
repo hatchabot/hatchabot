@@ -60,7 +60,7 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
 - **Settings → Data has a Test button** (v2.165.0) on every folder and repo,
   so "the key is not on the repo yet" shows up before a rebuild fails to
   clone.
-- **Settings → Telegram → Use only my own bots** (v2.165.0): a tick per
+- **Settings → Messaging → Telegram → Use only my own bots** (v2.165.0): a tick per
   person whose agents never take a shared house bot.
 - **Settings → Advanced** (v2.157.0) holds other Hatchabot servers and
   runtime images, folded away; Hosts holds only your machines.

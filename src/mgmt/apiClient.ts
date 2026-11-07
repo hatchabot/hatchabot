@@ -175,6 +175,8 @@ export class HttpApiClient implements ApiClient {
     persona?: string;
     aiProfileId: string;
     hostId: string;
+    /** false: web only, no Telegram bot (the server's default is a bot). */
+    telegram?: boolean;
   }): Promise<AgentSummary> {
     return (await this.#req('POST', '/v1/agents', body)) as AgentSummary;
   }

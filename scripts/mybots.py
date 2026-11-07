@@ -23,7 +23,7 @@ Get api_id / api_hash once at https://my.telegram.org → API development tools.
 They identify the *app*, not you; the phone login is what authenticates you.
 
 Output is one handle per line — paste it into Hatchabot:
-Settings → Telegram bots → the census → "Compare with BotFather's list",
+Settings → Messaging → Telegram → the census → "Compare with BotFather's list",
 which tells you which of them this server knows nothing about.
 """
 from __future__ import annotations

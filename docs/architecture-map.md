@@ -139,7 +139,7 @@ the step that failed.
 - `src/orchestrator/provision.ts` — `provisionChannelOrGoWebOnly`, `webOnlyIfNoBot`: no pool bot free on an unarchive, clone, derive or template import → the agent goes on web-only instead of waiting for a token (create still asks).
 - `src/orchestrator/timezone.ts` — `agentTimeZone`: the time zone every agent gets (`HATCHABOT_TIMEZONE`, else the machine's): OpenClaw's `userTimezone` at seed (`buildConfigCommands` in `src/openclaw/configWriter.ts`), the container's `TZ` (`buildRuntimeSpec`), and set live on running agents by `retargetCronSweep` in `src/api/routes.ts`.
 - `src/store/store.ts` — `agents`, `agent_classes`, `agent_env`, `data_sources`, `agent_seed`: agent records, classes, per-agent secrets, data sources, and template files to seed at first provision.
-- `web/index.html` — `createAgent`, `rebuild`, `rebuildAll`, `openFleetActions`, `faApply`, `openSetupLog`, `openAdoptDlg`, `archiveAgent`, `confirmArchive`, `archivingHere`, `restoreAgent`: the create dialog, rebuild buttons, bulk actions, archiving (its tile shows "Archiving…" from the click) and the Setup log.
+- `web/index.html` — `createAgent`, `agentTelegramChanged`, `rebuild`, `rebuildAll`, `openFleetActions`, `faApply`, `openSetupLog`, `openAdoptDlg`, `archiveAgent`, `confirmArchive`, `archivingHere`, `restoreAgent`: the create dialog (Telegram off unless ticked; the API's own default is a bot, for the CLI), rebuild buttons, bulk actions, archiving (its tile shows "Archiving…" from the click) and the Setup log.
 
 ## Data sources: git repos and folders
 
@@ -239,7 +239,7 @@ window in which a new person's first message is paired. The bot's settings are
 written into OpenClaw by the seed, so channel changes usually need a rebuild.
 
 - `src/channels/telegramPool.ts` — `TelegramPoolProvisioner`, `PoolExhaustedError`, `retryPendingNames`: leasing bots from the pool and renaming them. `ownBotsOnly` (the request): only the person's own bots are offered or counted.
-- `src/store/store.ts` — `owner_prefs`, `ownerPrefs`, `setOwnerPref`: a person's own choices (own bots only); `src/api/routes.ts` — `'/v1/account/prefs'`: saving one; `web/index.html` — `setPoolOwnOnly`: the tick in Settings → Telegram.
+- `src/store/store.ts` — `owner_prefs`, `ownerPrefs`, `setOwnerPref`: a person's own choices (own bots only); `src/api/routes.ts` — `'/v1/account/prefs'`: saving one; `web/index.html` — `setPoolOwnOnly`: the tick in Settings → Messaging → Telegram.
 - `src/channels/telegramManual.ts` — `TelegramManualProvisioner`, `verifyBotToken`: a bot token pasted by hand.
 - `src/channels/composite.ts` — `CompositeTelegramProvisioner`: pool first, then a manual bot.
 - `src/channels/telegramName.ts` — `setTelegramDisplayName`: the bot's display name.
@@ -256,7 +256,7 @@ written into OpenClaw by the seed, so channel changes usually need a rebuild.
 - `src/store/store.ts` — `channels`, `discord_bots`, `memberships`, `member_identities`, `invites`, `pairing_windows`: where it is stored.
 - `web/join.html` — `postJoin`, `joinWeb`, `joinWebAccount`, `initWebChat`: the page an invite link opens.
 - `src/api/publicAccess.ts` — `factorRefusal`: what `/v1/join` says to a good sign-in refused for want of a second factor.
-- `web/index.html` — `v2LoadChans`, `v2AddTelegram`, `chanConnect`, `openChanSetup`, `loadPool`, `addPoolBot`, `invite`, `renderEditMembers`, `approve`, `denyPair`: the Messaging pane, pool and members.
+- `web/index.html` — `v2LoadChans`, `v2AddTelegram`, `chanConnect`, `openChanSetup`, `loadPool`, `addPoolBot`, `invite`, `renderEditMembers`, `approve`, `denyPair`: the Messaging pane, pool and members. Settings → Messaging (`V2_SETTINGS`, `showTab`) holds the spare bots of Telegram (`loadPool`), Slack and Discord (`loadPoolPane`), in that order, each under its heading (`V2_SETTINGS_HEAD`); a link to `'slack'` or `'discord'` lands scrolled to its part.
 
 ## Web chat and the OpenClaw console
 
@@ -300,6 +300,7 @@ installed source and docs to diagnose problems.
 - `src/ops/opsDrift.ts` — `checkOpsDrift`, `lockdownProblem`: suspends the manager's key if its tool lockdown was loosened.
 - `src/ops/opsWeb.ts` — `makeOpsWeb`, `OPS_WEB_TOOLS`: web search done by Hatchabot for the jailed manager.
 - `src/orchestrator/webSearch.ts` — `createSearchWatch`, `probeBrave`, `probeDuckDuckGo`, `duckDuckGoTurnedAway`, `braveAdvice`, `applySearchScript`, `searchProviderFor`, `readAgentSearchTest`: which search the fleet uses, testing it, and moving agents off Brave when it runs out. `src/api/routes.ts` — `'/v1/web-search'`, `'/v1/web-search/check'`, `'/v1/agents/:id/search-test'`.
+- `src/orchestrator/searchUsage.ts` — `searchUsageReport`, `searchPeriod`, `readSearchPrice`, `saveSearchPrice`: the month's Brave searches, what is left, per day, per agent, and the cost (HB-0532). Counted by `USAGE_READER_SCRIPT` (`src/orchestrator/usage.ts`) from the transcripts and stored by `sampleAgentUsage` (`src/orchestrator/sourceUsage.ts`); `src/store/store.ts` — `setSearchHours`, `addSearch`, `searchHours` (table `search_hours`); `src/api/routes.ts` — `'/v1/web-search/usage'`; `web/index.html` — `loadSearchUsage`, `renderSearchUsage`, `searchUsageHTML`, `saveSearchPrice`.
 - `src/ops/push.ts` — `createOpsPush`: Telegram messages to the owner when a card waits.
 - `src/channels/notify.ts` — `tellOwner`, `ownerChatRoutes`: a budget's, spike's or loop's message to the owner, by Telegram, Discord or Slack; `src/api/routes.ts` — `tellUsageSpike`, `chatNoteOf`.
 - `src/ops/notify.ts` — `createOpsNotifier`: posts outcomes back into the manager's conversation.
@@ -524,7 +525,7 @@ API through one fetch helper.
 - `web/index.html` — `v2LoadFiles`, `v2FilesSortBy`, `v2FilesOrder`, `v2OpenFile`: the Files tab's list, its sorting (folders first; remembered as `hb-files-sort`) and the in-tab viewer with ← Back (text, images, sound, video and PDF — `v2ShownHere`; the rest only downloads).
 - `web/index.html` — `openGateway`, `consoleCoverSay`, `autoApproveConsole`: opening an agent's console: the panel opens at once with the spinner, which stays until the console's frame has loaded.
 - `web/index.html` — `initV2`, `renderV2`, `refresh`, `api`: start-up, the home grid, the periodic reload and the fetch helper.
-- `web/index.html` — `openV2Agent`, `v2Open`, `v2Pane`, `v2RenderSheet`: the agent sheet; v2Pane's tabs are overview, personality, ai, messaging, knowledge, sharing, usage, schedule, files and advanced.
+- `web/index.html` — `openV2Agent`, `v2Open`, `v2Pane`, `v2RenderSheet`, `v2RenderSheetBar`: the agent sheet; v2Pane's tabs are overview, personality, ai, messaging, knowledge, sharing, usage, schedule, files and advanced. On a phone (≤640px) the sheet stops 44px short of the top, so a tap on the home screen above it closes it, and its bar has ‹ Back (`.v2sback`) in place of the ✕ (`.v2sclose`).
 - `src/orchestrator/agentIcons.ts` — `pickIcons`, `suggestIcons`, `keywordIcon`, `validIcon`: agents' icons. The management AI picks one for each agent without one (`src/api/routes.ts` — `'/v1/agents/icons/auto'`) and gives ideas to choose from in the icon dialog, never repeating what it showed (`'/v1/agents/:id/icons/suggest'`; nothing is saved there); the keyword table stands in without an AI, and every answer is cut down to one emoji and a palette colour (`replyArrays` reads a reply's entries one by one; `replyShape` is what the log gets of it, never its text). `web/index.html` — `openV2Icon`, `v2IconIdeas`, `v2MaybeAutoIcons`: the icon dialog with its ✨ Ideas, and the home screen asking for the missing icons.
 - `web/index.html` — `v2SetView`, `v2SetSort`, `v2LoadRecent`, `agentAttention`, `v2LoadMachine`: View by, sorting, Activity, Alerts and the machine line.
 - `web/index.html` — `v2PlannedHTML`, `loadTodos`, `createFromTodo`, `retireMadeTodos`: the Planned group (ghost tiles; the plans are the agent-todos routes).

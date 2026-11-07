@@ -6,7 +6,7 @@ import type { SecretStore } from '../src/secrets/secretStore.js';
 import { makeWorld, as } from './support/world.js';
 
 /**
- * "Own bots only" (Settings → Telegram, 2026-10-23): a person who never wants
+ * "Own bots only" (Settings → Messaging → Telegram, 2026-10-23): a person who never wants
  * one of their agents on a shared house bot. The pool then offers only the
  * bots they parked themselves, and the ready count says so.
  */

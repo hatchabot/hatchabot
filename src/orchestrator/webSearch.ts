@@ -255,6 +255,8 @@ export interface SearchWatchDeps {
   /** Tell the machine's owner. Only when the fleet moved by itself, or nothing works. */
   notify?(headline: string, detail: string): void;
   log?(event: string, detail: Record<string, unknown>): void;
+  /** A check spent one Brave query (it answered): counted with the month's searches (searchUsage.ts). */
+  spentQuery?(): void;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -365,6 +367,8 @@ export function createSearchWatch(deps: SearchWatchDeps): SearchWatch {
     const key = await deps.braveKey();
     const duckduckgo = await probeDuckDuckGo(deps);
     const brave = key ? await probeBrave(key, deps) : undefined;
+    // Brave answered with results: that check was one of the key's queries.
+    if (brave && (brave.status === 'ok' || brave.status === 'low')) deps.spentQuery?.();
     // After the probes, and no await until it is saved: a mode set while they ran is the one that counts.
     const before = readWebSearch(deps.store);
     const keyMark = key ? keyHash(key).slice(0, 16) : undefined;

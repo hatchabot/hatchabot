@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.176.0] — 2026-11-07
+
+From the owner's requests: how much of the Brave key is used, by whom, and at what cost; the chat apps on one Settings tab; new agents without Telegram; and a phone header and agent page that are easier to use.
+
+### Added
+- **Brave searches this month**, under Settings → AI → Fleet search key: what is left (Brave's own count on a plan with a monthly cap; on a metered plan, the month's free credit against the searches counted), where this month's pace ends and when the allowance would run out, a bar per day, the agents ranked by their Brave searches with each one's share and cost, and an estimated cost for the month. The drawer's heading says how much is used. Each agent's searches are counted from its conversations about once an hour (a repeat OpenClaw answered from its cache costs nothing and is shown apart), with the Hatchabot agent's own searches and Hatchabot's checks. The price defaults to Brave's Search plan ($5 per 1,000 searches, $5 of credit a month) and can be changed there. Searches made with the same key outside Hatchabot show only in Brave's dashboard.
+
+### Changed
+- **Settings → Messaging** puts Telegram, Slack and Discord on one tab, in that order, each under its own heading, with every control as it was. Links to the old tabs open Messaging at that part.
+- **A new agent starts without Telegram** unless **Use Telegram** is ticked in the New agent form. A clone, a template, an app from a repo and an agent the Hatchabot agent drafts start without a bot too; a scheduled task's results then arrive in the agent's console conversation (the red dot on its icon), not on the phone. A bot is one click on the agent's Telegram tab. The API and `hatchabot create` still take a bot when a request does not say, and the Hatchabot agent's own bot, which brings its alerts to the phone, is set up as before.
+- **On a phone** the header shows the version, small, under the egg, and an agent's page stops short of the top: ‹ Back at its top left, or a tap on the home screen above it, goes back. The header buttons shrink as meant, so at 420 px the account button is no longer cut off.
+
 ## [2.175.0] — 2026-11-06
 
 Two safety gaps closed, from the owner's decisions on the backlog, and the public repo's code scanning alerts from v2.174.0.

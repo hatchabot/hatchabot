@@ -82,7 +82,9 @@ class FakeApi implements ApiClient {
       { id: 'h2', name: 'MacBook', kind: 'runner' },
     ];
   }
-  async createAgent(body: { name: string; persona?: string; aiProfileId: string; hostId: string }) {
+  lastCreate?: { telegram?: boolean };
+  async createAgent(body: { name: string; persona?: string; aiProfileId: string; hostId: string; telegram?: boolean }) {
+    this.lastCreate = body;
     this.calls.push(`create:${body.name}:${body.aiProfileId}:${body.hostId}`);
     const created: AgentSummary = {
       id: 'new1',
@@ -395,6 +397,8 @@ describe('authoring tools — the full spec rides the confirmation', () => {
       'put:new1:AGENTS.md:8',
       'patch:new1:parameters',
     ]);
+    // Like the New agent form: no Telegram bot unless the owner adds one (HB-0534).
+    expect(api.lastCreate?.telegram).toBe(false);
   });
 
   it('a FAILED provision surfaces as a failure, not silence', async () => {

@@ -178,7 +178,7 @@ export const COVERAGE: Record<string, string> = {
   'PUT /v1/search-key': 'app: secret — the Brave key',
   'DELETE /v1/search-key': 'app: later — remove the Brave key',
   'POST /v1/web-search/check': 'app: later — test the fleet\'s web search',
-  'PUT /v1/web-search': 'app: later — which search the whole fleet uses',
+  'PUT /v1/web-search': 'app: later — which search the whole fleet uses, and the Brave price its usage panel estimates with',
   'POST /v1/agents/:id/search-test': 'app: later — test one agent\'s web search',
 
   // ---- Telegram bots ----
@@ -236,7 +236,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/security/sign-out/:ownerId': 'app: fleet-wide/irreversible — ending every session of another person',
   'DELETE /v1/cli-tokens/:id': 'app: later — revoke an access token',
   'DELETE /v1/account/telegram': 'app: later — unlink your Telegram',
-  'PATCH /v1/account/prefs': 'app: browser — your own preferences (Settings → Telegram: own bots only)',
+  'PATCH /v1/account/prefs': 'app: browser — your own preferences (Settings → Messaging → Telegram: own bots only)',
   'DELETE /v1/account/discord': 'app: later — unlink your Discord',
   'PUT /v1/operator-profile': 'app: later — "about you"',
   'POST /v1/inbox/:id/accept': 'app: later — accept an agent sent to you',

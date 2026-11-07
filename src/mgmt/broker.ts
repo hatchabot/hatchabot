@@ -115,7 +115,7 @@ export interface ApiClient {
   // authoring
   listProfiles(): Promise<ProfileSummary[]>;
   listHosts(): Promise<HostSummary[]>;
-  createAgent(body: { name: string; persona?: string; aiProfileId: string; hostId: string }): Promise<AgentSummary>;
+  createAgent(body: { name: string; persona?: string; aiProfileId: string; hostId: string; telegram?: boolean }): Promise<AgentSummary>;
   getFile(id: string, name: string): Promise<string>;
   putFile(id: string, name: string, content: string): Promise<void>;
   patchAgent(id: string, body: { persona?: string; parameters?: Array<Record<string, unknown>> }): Promise<void>;
@@ -761,9 +761,11 @@ export class Broker {
           persona: s.persona,
           aiProfileId: s.aiProfileId!,
           hostId: s.hostId!,
+          // Like the New agent form: no Telegram bot unless the owner adds one on its Telegram tab (HB-0534).
+          telegram: false,
         });
         // Files land on the agent's volume, which exists only once the agent
-        // is RUNNING — wait for provisioning (bot from the pool, container up).
+        // is RUNNING — wait for provisioning (container up).
         const deadline = this.#now() + this.#pollTimeoutMs;
         let cur = created;
         while (cur.state !== 'RUNNING') {

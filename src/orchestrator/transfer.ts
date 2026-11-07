@@ -766,7 +766,7 @@ async function importAgentInner(
   if (manifest.channel && store.telegramPoolHas(manifest.channel.accountId)) {
     throw new TransferError(
       `Bot @${manifest.channel.accountId} is a spare bot in this machine's pool, where the next new agent could take it. ` +
-        'Remove it from the pool first (⚙ Settings → Telegram), then import again.',
+        'Remove it from the pool first (⚙ Settings → Messaging → Telegram), then import again.',
     );
   }
 

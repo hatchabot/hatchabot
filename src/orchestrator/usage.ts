@@ -56,6 +56,8 @@ export interface AgentUsage extends UsageSplit {
   profile?: ModelProfile;
   /** Token health (tokenHealth.ts): conversation size, cache, cost split, scheduled runs, instruction files, loop signals. */
   health?: TokenHealthRaw;
+  /** Web searches per UTC hour ("2026-11-07T01") by provider, from `since` (ms) on (HB-0532). */
+  searches?: { since: number; hours: Record<string, Record<string, number>> };
 }
 
 /** [input, output, cacheRead, cacheWrite] */
@@ -189,6 +191,26 @@ const n = (x) => (typeof x === "number" && isFinite(x) && x > 0 ? x : 0);
 // ended. Counts only; no text leaves the container but the Purpose excerpt.
 const W30 = Date.now() - 30 * 86400000, W7 = Date.now() - 7 * 86400000;
 const win = {}; const turnOf = {}; let promptErrors = 0;
+// Web searches per UTC hour by the provider that answered (searchUsage.ts,
+// HB-0532): a web_search tool result names it ("brave", "duckduckgo", …), and
+// one OpenClaw answered from its cache is "cached" (no request was made).
+// Failed searches are not counted: a refused request spends nothing.
+const SR = {};
+const srch = (at, msg) => {
+  if (msg.role !== "toolResult" || msg.toolName !== "web_search" || msg.isError === true || !(at >= W30)) return;
+  const d = msg.details && typeof msg.details === "object" ? msg.details : null;
+  if (d && d.error) return;
+  let p = d && typeof d.provider === "string" ? d.provider : "", cached = !!(d && d.cached === true);
+  if (!d && Array.isArray(msg.content)) {
+    const t = msg.content.map((x) => (x && x.type === "text" ? String(x.text || "") : "")).join(" ").slice(0, 4000);
+    if (/^\s*\{\s*"error"/.test(t)) return;
+    const m = /"provider"\s*:\s*"([A-Za-z0-9_-]{1,32})"/.exec(t); if (m) p = m[1];
+    if (/"cached"\s*:\s*true/.test(t)) cached = true;
+  }
+  const k = cached ? "cached" : (String(p).toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32) || "unknown");
+  const b = SR[new Date(at).toISOString().slice(0, 13)] ||= {};
+  b[k] = (b[k] || 0) + 1;
+};
 // Token health (tokenHealth.ts): per conversation, how big it is, how the cache
 // fares on a turn's first call and inside a turn, where the cost goes (chat,
 // follow-ups, scheduled), and the loop signals the transcripts carry. Counts,
@@ -304,12 +326,13 @@ const ev = (sid, at, e) => {
   }
   const msg = e.message; if (!msg || typeof msg !== "object") return;
   if (e.id) { if (seen.has(e.id)) return; seen.add(e.id); }
+  srch(at, msg);
   health(sid, at, msg);
   prof(sid, at, msg);
   add(sid, at, msg);
 };
-// Only these lines are parsed: calls, what people wrote, failed tools, prompt errors, compactions.
-const wanted = (s) => s.indexOf('"usage"') >= 0 || s.indexOf('"role":"user"') >= 0 || s.indexOf('"isError":true') >= 0 || s.indexOf("prompt-error") >= 0 || s.indexOf('"compaction"') >= 0;
+// Only these lines are parsed: calls, what people wrote, failed tools, web searches, prompt errors, compactions.
+const wanted = (s) => s.indexOf('"usage"') >= 0 || s.indexOf('"toolName":"web_search"') >= 0 || s.indexOf('"role":"user"') >= 0 || s.indexOf('"isError":true') >= 0 || s.indexOf("prompt-error") >= 0 || s.indexOf('"compaction"') >= 0;
 const add = (sid, at, msg) => {
   const u = msg && msg.usage; if (!u || typeof u !== "object") return;
   // A copy of a reply sent to a channel ("delivery-mirror") carries no tokens: not a call.
@@ -501,6 +524,7 @@ out.health = { v: 1, since: W30,
   main, top: top.slice(0, 5), cache: HW.cache, split: HW.split, jobTokens: HW.jobTok, thinking: { calls: HW.think[0], of: HW.think[1] },
   cfg, files, compactions: HW.comp, jobs, ingress, big: HW.big, guard: HW.guard, streaks: HW.streaks };
 out.window = { since: W30, models: wm, promptErrors, hourly: true };
+out.searches = { v: 1, since: W30, hours: SR };
 out.purposes = purposes; out.crons = crons;
 process.stdout.write(JSON.stringify(out));
 `;
@@ -528,7 +552,7 @@ export async function agentUsage(
   // marked, so the sampler keeps the profile but writes no total from it.
   let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number; bad?: number;
     window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number; hourly?: boolean }; purposes?: Record<string, string>; crons?: number | null;
-    health?: TokenHealthRaw };
+    health?: TokenHealthRaw; searches?: { v?: number; since?: number; hours?: Record<string, Record<string, number>> } };
   try {
     raw = JSON.parse(res.stdout);
     if (!raw || typeof raw.models !== 'object') throw new Error('no usage object');
@@ -572,5 +596,19 @@ export async function agentUsage(
       },
     } : {}),
     ...(raw.health && raw.health.v === 1 && typeof raw.health.conv === 'object' ? { health: raw.health } : {}),
+    ...(raw.searches?.v === 1 && Number(raw.searches.since) > 0 ? { searches: { since: Number(raw.searches.since), hours: searchHoursOf(raw.searches.hours) } } : {}),
   };
+}
+
+/** The reader's search hours, kept only where the hour and the counts are what they should be. */
+function searchHoursOf(raw: unknown): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [hour, by] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}$/.test(hour) || !by || typeof by !== 'object') continue;
+    for (const [p, n] of Object.entries(by as Record<string, unknown>)) {
+      if (/^[a-z0-9_-]{1,32}$/.test(p) && typeof n === 'number' && Number.isFinite(n) && n > 0) (out[hour] ??= {})[p] = Math.round(n);
+    }
+  }
+  return out;
 }

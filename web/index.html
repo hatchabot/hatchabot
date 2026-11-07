@@ -105,6 +105,35 @@
   .su-chart .peak { stroke:var(--line); stroke-width:1; stroke-dasharray:2 3 }
   .su-cap { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--dim) }
   .su-top { font-size:12px; color:var(--dim); margin-top:4px }
+  /* Brave searches this month, in the Fleet search key drawer (HB-0532). */
+  .sv-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; flex-wrap:wrap; font-size:14px }
+  .sv-big { font-size:14px; margin-top:6px; font-variant-numeric:tabular-nums }
+  .sv-meter { position:relative; height:10px; border-radius:999px; background:var(--panel-2); margin:6px 0 4px }
+  .sv-used { height:100%; max-width:100%; border-radius:999px; background:var(--accent) }
+  .sv-proj { position:absolute; top:-3px; bottom:-3px; width:2px; margin-left:-1px; border-radius:1px; background:var(--text); opacity:.55 }
+  .sv-days { display:flex; align-items:flex-end; gap:2px; height:90px; margin:8px 0 2px; border-bottom:1px solid var(--line) }
+  .sv-day { flex:1 1 0; min-width:0; height:100%; display:flex; flex-direction:column; justify-content:flex-end; gap:2px; cursor:default }
+  .sv-day > i { display:block; min-height:2px }
+  .sv-day > i:first-child { border-radius:2px 2px 0 0 }
+  .sv-day:hover > i { filter:brightness(1.12) }
+  .sv-b { background:var(--accent) }
+  .sv-o { background:var(--off) }
+  .sv-key { display:inline-flex; align-items:center; gap:4px; margin-right:12px }
+  .sv-key i { display:inline-block; width:10px; height:10px; border-radius:2px }
+  /* One grid for every row: the bars share one scale and one track length. */
+  .sv-rows { display:grid; grid-template-columns:minmax(0,10em) minmax(40px,1fr) auto; gap:5px 8px; align-items:center; font-size:13px; margin-top:4px }
+  .sv-row { display:contents }
+  /* Phones: the name and numbers on one line, the bar under them across the width (every row's track the same). */
+  @media (max-width:640px) {
+    .sv-rows { grid-template-columns:minmax(0,1fr); gap:2px }
+    .sv-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:2px 8px; align-items:center; margin-bottom:4px }
+    .sv-row > .sv-bar { grid-column:1 / -1; grid-row:2 }
+  }
+  .sv-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .sv-bar { height:8px; border-radius:999px; background:var(--panel-2); overflow:hidden }
+  .sv-bar i { display:block; height:100%; border-radius:999px; background:var(--accent) }
+  .sv-num { font-variant-numeric:tabular-nums; white-space:nowrap; text-align:right }
+  .sv-sec { font-size:13px; font-weight:600; margin-top:12px }
   /* The OpenClaw console, embedded: most of the viewport, no page chrome. */
   .console-dlg { width:min(1200px, 96vw); height:min(900px, 92vh); max-width:none; padding:0; display:none; flex-direction:column; overflow:hidden }
   .console-dlg[open] { display:flex }
@@ -351,17 +380,25 @@
        the version goes back under the wordmark, at the old size. */
     .v2brandtext { flex-direction:column; align-items:flex-start; gap:1px; font-size:18px; line-height:1.1 }
     .v2top #v2AppVer { font-size:10px; align-self:flex-start }
-  }
-  /* Five header buttons since Usage and Resources replaced Status (2026-10-05): on a
-     phone they and the account button tighten, and the narrowest keep the logo only. */
-  @media (max-width:460px) {
+    /* Six header buttons since Usage and Resources replaced Status (2026-10-05): on a
+       phone they and the account button tighten. Named through .v2top: the plain
+       .v2hubactions .v2btn rule further down set them back to 38px, so a 420px
+       screen ran the account button off its edge (2026-11-07). */
     .v2top { gap:6px }
     .v2top .v2hubactions { gap:5px; width:auto }
-    .v2hubactions .v2btn { width:34px; height:34px }
+    .v2top .v2hubactions .v2btn { width:34px; height:34px }
     .v2top .v2avatar { width:34px; height:34px }
   }
-  @media (max-width:400px) {
-    .v2top .v2brandtext { display:none }
+  /* Too narrow for the wordmark: the egg with the version under it, small and
+     dim. It was hidden with the wordmark, so a phone never said which build it
+     ran (the owner, 2026-11-07). In the flow, without its pill, so it costs
+     the width of its text and no more. */
+  @media (max-width:440px) {
+    .v2top .v2brand { flex-direction:column; align-items:center; gap:2px }
+    .v2top .v2brand img { width:26px; height:26px }
+    .v2top .v2word { display:none }
+    .v2top #v2AppVer { font-size:9.5px; align-self:center; border:0; padding:0; line-height:1 }
+    .v2top .v2hubactions { gap:4px }
   }
   .res-sort { background:none; border:0; padding:0; font:inherit; color:inherit; cursor:pointer }
   .res-sort.on { color:var(--accent-text, var(--accent)) }
@@ -451,6 +488,8 @@
   /* Every section of a settings tab in its own card: a tab should read as a
      few things you can act on, not one column of text (Chris, 2026-09-20). */
   .v2card { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:10px 0; background:var(--panel) }
+  /* A link to a later part of a joined tab (Settings → Messaging → Discord) scrolls it to the top: clear of the panel's sticky bar. */
+  #aiDlg > section[role="tabpanel"] { scroll-margin-top:calc(72px + var(--safe-top)) }
   /* Settings → Security: the posture report's groups and the per-agent rows. */
   .posture-group { margin-top:12px }
   .posture-label { font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--dim); margin-bottom:4px }
@@ -764,6 +803,23 @@
   .v2sbar .v2ttl { min-width:0; flex:1 }
   .v2sbar .v2ttl b { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:16px }
   .v2sbar .v2ttl span { font-size:12.5px; color:var(--dim) }
+  /* ‹ Back is the phone's way home (below); a desktop keeps its ✕. */
+  .v2sbar .v2sback { display:none }
+  /* A phone (2026-11-07): the sheet stops short of the top, so the home screen
+     shows above it and a tap there closes it, and ‹ Back sits at its top left,
+     where every other panel has it. One control: the ✕ gives the name its room.
+     The bar stays put while the tab scrolls. The keyboard's fit (html.kbd, below)
+     still takes the whole visible part. */
+  @media (max-width:640px) {
+    .v2sheet { width:100%; height:calc(100% - var(--safe-top) - 44px); margin:calc(var(--safe-top) + 44px) 0 0;
+               border-left:0; border-top:1px solid var(--line); border-radius:16px 16px 0 0 }
+    .v2sheet::backdrop { background:rgba(0,0,0,.45) }
+    .v2sbar { position:sticky; top:0; z-index:5; background:var(--panel); padding:8px 12px 8px 8px; gap:8px }
+    .v2sbar .v2sback { display:grid }
+    .v2sbar .v2sclose { display:none }
+    /* Its buttons keep their emoji, the word in their label, so the name has room ("Ho…" beside Sleep and Chat). */
+    .v2sbar .v2bw { display:none }
+  }
   .v2tabs { display:flex; gap:2px; padding:0 12px; border-bottom:1px solid var(--line); overflow-x:auto; flex:none }
   .v2tabs button { background:none; border:0; border-bottom:2px solid transparent; border-radius:0; padding:10px 11px; cursor:pointer; color:var(--dim); white-space:nowrap; font:inherit; font-size:13.5px }
   .v2tabs button[aria-selected="true"] { color:var(--text); border-bottom-color:var(--accent); font-weight:600 }
@@ -910,7 +966,7 @@
   <header id="v2Header" class="v2top v2only">
     <a class="v2brand" href="./" onclick="event.preventDefault(); scrollTo({ top: 0, behavior: 'smooth' })">
       <img src="/icons/icon-192.png" alt="" width="30" height="30">
-      <span class="v2brandtext"><span>Hatcha<b>bot</b></span>
+      <span class="v2brandtext"><span class="v2word">Hatcha<b>bot</b></span>
         <span class="appver" id="v2AppVer" title="The build this browser is running. If it lags the server after a reload, something is serving you a cached page."></span></span>
     </a>
     <span class="v2spacer"></span>
@@ -981,7 +1037,7 @@
           <button class="v2btn" id="v2UsageBtn" onclick="openFleetUsage()" aria-label="Usage" title="Usage — requests and tokens across your agents, by hour, day or week"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5v19M17 5.5H9.5a3.25 3.25 0 0 0 0 6.5h5a3.25 3.25 0 0 1 0 6.5H6.5"/></svg></span><span class="lbl">Usage</span></button>
           <button class="v2btn" id="v2ResBtn" onclick="openFleetResources()" aria-label="Resources" title="Resources — CPU, memory and swap of every agent, machine by machine"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M10 10h4v4h-4zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></span><span class="lbl">Resources</span></button>
           <button class="v2btn" id="v2BulkBtn" hidden onclick="openFleetActions()" aria-label="Bulk actions" title="Bulk actions — switch model, rebuild, stop or start a selection of agents, picked by AI source, group, machine or state"><span class="v2glyph em" aria-hidden="true">⚡</span><span class="lbl">Bulk actions</span></button>
-          <button class="v2btn" onclick="openAiDlg()" aria-label="Settings" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
+          <button class="v2btn" onclick="openAiDlg()" aria-label="Settings" title="Settings — AI sources, people, messaging bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
           <button class="v2btn v2new" onclick="$('fabBtn').click()" aria-label="New agent" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16"/></svg></span><span class="lbl">New</span></button>
         </div>
         </div>
@@ -1233,12 +1289,13 @@
     <div class="sub" id="agentHostHint"></div>
   </div>
   <div class="sub" style="margin-top:14px">Its memory is shared: people you invite can get at what it remembers. For something private, give them their own agent.</div>
-  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
-    <input type="checkbox" id="agentNoTelegram" style="width:auto" onchange="$('agentPoolRow').hidden = this.checked">
-    <span>No Telegram — talk to it here in Hatchabot only
-      <div class="sub" style="margin-top:2px">Uses no bot. You can add one later from its settings, e.g. to reach it
-        from your phone or to invite other people.</div>
-      <div class="sub" id="agentPoolEmptyNote" hidden style="margin-top:4px;color:var(--warn)">Your bot pool is empty, so a Telegram agent would wait for a token from @BotFather before it can start. Ticked so this one starts right away; untick it if you have a token to paste.</div></span>
+  <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin-top:10px">
+    <input type="checkbox" id="agentTelegram" style="width:auto;margin-top:3px;flex:none" onchange="agentTelegramChanged()">
+    <span>Use Telegram — reach it from your phone, and invite people
+      <div class="sub" style="margin-top:2px">Left off, you talk to it here in Hatchabot and it uses no bot; you can add one
+        later from its Telegram tab. Without a chat app, its scheduled tasks' results arrive in its console conversation
+        (the red dot on its icon), not on your phone.</div>
+      <div class="sub" id="agentPoolEmptyNote" hidden style="margin-top:4px;color:var(--warn)">Your bot pool is empty, so it waits for a token from @BotFather before it can start.</div></span>
   </label>
   <label id="agentPoolRow" style="display:none;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
     <input type="checkbox" id="agentUsePool" checked style="width:auto">
@@ -1691,7 +1748,7 @@
     </details>
 
     <details class="sec-drawer" id="searchKeyDrawer">
-      <summary><b>🔎 Fleet search key</b> <span class="sub">— a Brave key upgrades every agent from DuckDuckGo</span></summary>
+      <summary><b>🔎 Fleet search key</b> <span class="sub">— a Brave key upgrades every agent from DuckDuckGo</span><span class="sub" id="searchUsageSum"></span></summary>
       <div class="sub" style="margin-top:8px">
         Every agent has web search built in (keyless DuckDuckGo). Paste one
         <a href="https://brave.com/search/api/" target="_blank" rel="noopener">Brave Search API key</a>
@@ -1719,6 +1776,7 @@
           </select>
         </label>
       </div>
+      <div id="searchUsage" style="margin-top:14px"></div>
     </details>
 
   </section>
@@ -1857,35 +1915,6 @@
 
   </section>
 
-  <section id="paneDiscord" role="tabpanel" hidden>
-    <div class="sub">
-      Spare Discord bots. With bots parked here an agent gets Discord
-      <b>instantly</b>, and removing Discord from an agent (or deleting it) parks its bot back, name and servers kept.
-      <details style="margin-top:4px"><summary style="cursor:pointer">Whose bots are whose</summary>
-      <div style="margin-top:4px">A bot belongs to whoever made it in the developer portal, so each account takes only
-      its own parked bots — plus <b>shared</b> house bots donated to everyone on this server.</div></details>
-    </div>
-    <div class="pool-status" id="dpoolStatus"></div>
-    <h4 style="margin:0 0 4px">Add a bot</h4>
-    <div class="sub">
-      Make one in the <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">developer portal</a>
-      (New Application → Bot → Reset Token; turn on <b>Message Content Intent</b>, ~2 minutes), then paste its token — it's verified
-      with Discord before it's stored. Its name follows the agent it serves.
-    </div>
-    <input type="password" id="dpoolToken" placeholder="Discord bot token" autocomplete="off" style="font-family:ui-monospace,monospace">
-    <label id="dpoolSharedRow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
-      <input type="checkbox" id="dpoolShared" style="width:auto">
-      <span>Share with everyone on this server <span class="sub">— otherwise only your agents can take it</span></span>
-    </label>
-    <div class="err" id="dpoolErr"></div>
-    <div class="actions" style="justify-content:flex-start">
-      <button class="primary" id="dpoolAddBtn" onclick="addChannelPoolBot('discord')">Add to pool</button>
-    </div>
-
-    <h4 style="margin:18px 0 6px">Bot pool</h4>
-    <div id="dpoolList">Loading…</div>
-  </section>
-
   <section id="paneSlack" role="tabpanel" hidden>
     <div class="sub">
       Spare Slack apps. With apps parked here an agent gets Slack
@@ -1914,6 +1943,35 @@
 
     <h4 style="margin:18px 0 6px">App pool</h4>
     <div id="spoolList">Loading…</div>
+  </section>
+
+  <section id="paneDiscord" role="tabpanel" hidden>
+    <div class="sub">
+      Spare Discord bots. With bots parked here an agent gets Discord
+      <b>instantly</b>, and removing Discord from an agent (or deleting it) parks its bot back, name and servers kept.
+      <details style="margin-top:4px"><summary style="cursor:pointer">Whose bots are whose</summary>
+      <div style="margin-top:4px">A bot belongs to whoever made it in the developer portal, so each account takes only
+      its own parked bots — plus <b>shared</b> house bots donated to everyone on this server.</div></details>
+    </div>
+    <div class="pool-status" id="dpoolStatus"></div>
+    <h4 style="margin:0 0 4px">Add a bot</h4>
+    <div class="sub">
+      Make one in the <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">developer portal</a>
+      (New Application → Bot → Reset Token; turn on <b>Message Content Intent</b>, ~2 minutes), then paste its token — it's verified
+      with Discord before it's stored. Its name follows the agent it serves.
+    </div>
+    <input type="password" id="dpoolToken" placeholder="Discord bot token" autocomplete="off" style="font-family:ui-monospace,monospace">
+    <label id="dpoolSharedRow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
+      <input type="checkbox" id="dpoolShared" style="width:auto">
+      <span>Share with everyone on this server <span class="sub">— otherwise only your agents can take it</span></span>
+    </label>
+    <div class="err" id="dpoolErr"></div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="primary" id="dpoolAddBtn" onclick="addChannelPoolBot('discord')">Add to pool</button>
+    </div>
+
+    <h4 style="margin:18px 0 6px">Bot pool</h4>
+    <div id="dpoolList">Loading…</div>
   </section>
 
   <section id="paneServers" role="tabpanel" hidden>
@@ -2818,8 +2876,8 @@ if (DEMO) document.documentElement.classList.add('demo');
 const DEV = new URLSearchParams(location.search).has('dev');
 const previewing = () => DEV;
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
-let discordPoolAvail = 0; // parked Discord bots (Settings → Discord), for the spare-bots tile
-let slackPoolAvail = 0; // parked Slack apps (Settings → Slack)
+let discordPoolAvail = 0; // parked Discord bots (Settings → Messaging), for the spare-bots tile
+let slackPoolAvail = 0; // parked Slack apps (Settings → Messaging)
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
 let availableSource = {}; // profile id -> 'runtime' | 'curated' — was the list PROBED live, or the offline fallback
@@ -4279,17 +4337,18 @@ const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: '
 
 /**
  * The Settings panel's tabs, grouped by what people come to do:
- * "You" joins the account and the operator profile; Hosts joins runners and
- * other servers; Images joins base and derived. Old deep links
- * (openAiDlg('hosts')) land on their group.
+ * "You" joins the account and the operator profile; Messaging joins the spare
+ * bots of Telegram, Slack and Discord; Hosts joins runners and other servers.
+ * Old deep links (openAiDlg('hosts'), openAiDlg('discord')) land on their
+ * group, scrolled to their part.
  */
 const V2_SETTINGS = [
   ['people', 'You', ['access', 'operator']],
   ['ai', 'AI', ['ai']],
   ['classes', 'Classes', ['classes']],
-  ['pool', 'Telegram', ['pool']],
-  ['discord', 'Discord', ['discord']],
-  ['slack', 'Slack', ['slack']],
+  // One tab for the three chat apps (the owner, 2026-11-07), Telegram first:
+  // each is a pool of spare bots drawn the same way, so they read as one place.
+  ['messaging', 'Messaging', ['pool', 'slack', 'discord']],
   ['conn', 'Connections', ['conn']],
   // Runners only: the household's way to add a machine. Other servers moved to Advanced (v2.157.0).
   ['machines', 'Hosts', ['hosts']],
@@ -4300,8 +4359,8 @@ const V2_SETTINGS = [
   ['advanced', 'Advanced', ['advanced', 'servers', 'runtime', 'derived']],
 ];
 /** Tab names that are gone, and the pane they open now: old links keep working. */
-const V2_SETTINGS_ALIAS = { images: 'runtime' };
-const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you' };
+const V2_SETTINGS_ALIAS = { images: 'runtime', telegram: 'pool' };
+const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you', pool: 'Telegram', slack: 'Slack', discord: 'Discord' };
 let v2SettingsGroup = 'ai';
 /**
  * Wrap each heading-delimited run of a settings pane in a card, so a tab reads
@@ -4336,12 +4395,15 @@ function showTab(name) {
   for (const pane of g[2]) { if (!settingsAdvFolded(pane)) loadSettingsPane(pane); v2Sectionise($(TABS[pane])); }
   for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !g[2].includes(key);
   for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = g[2].length < 2;
-  $('v2SettingsTabs').innerHTML = V2_SETTINGS.filter(([k]) => k !== 'slack' || slackVisible()).map(([k, label]) =>
+  $('v2SettingsTabs').innerHTML = V2_SETTINGS.map(([k, label]) =>
     `<button class="tab" role="tab" aria-selected="${k === g[0]}" onclick="showTab('${k}')">${label}</button>`).join('');
   settingsAdvUnfold(name);
   // On a phone the row scrolls: keep the open tab (Advanced is last) in sight —
   // after the dialog has opened (openAiDlg shows the tab first).
   setTimeout(() => $('v2SettingsTabs').querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }), 0);
+  // A link to a later part of a joined tab (openAiDlg('discord')) lands on that part, not on the tab's top.
+  // After the row's: its "nearest" would scroll the panel back up to the tabs.
+  if (g[2].indexOf(name) > 0) setTimeout(() => $(TABS[name])?.scrollIntoView?.({ block: 'start' }), 0);
 }
 function loadSettingsPane(name) {
   if (name === 'access') { void loadAccounts(); void loadSecondFactor(); void loadReach(true); }
@@ -4639,6 +4701,7 @@ async function loadSearchKey() {
     $('searchKeyDelBtn').style.display = r.set ? '' : 'none';
     if (r.set) $('searchKeyDrawer')?.setAttribute('open', ''); // don't hide a live key
     loadSearchHealth();
+    loadSearchUsage();
   } catch { /* not the host owner — leave inert */ }
 }
 let searchHealthTimer;
@@ -4671,9 +4734,86 @@ async function loadSearchHealth() {
 async function testFleetSearch() {
   const btn = $('searchTestBtn');
   btn.disabled = true;
-  try { renderSearchHealth(await api('/v1/web-search/check', { method: 'POST' })); }
+  try { renderSearchHealth(await api('/v1/web-search/check', { method: 'POST' })); loadSearchUsage(); }
   catch (e) { toast(e.message, 10000); }
   finally { btn.disabled = false; }
+}
+/** The month's Brave searches: what is left, a bar per day, who searches most, and the cost (HB-0532). */
+async function loadSearchUsage() {
+  if (!$('searchUsage')) return;
+  try { renderSearchUsage(await api('/v1/web-search/usage')); } catch { /* not the host owner */ }
+}
+function renderSearchUsage(u) {
+  $('searchUsage').innerHTML = searchUsageHTML(u);
+  const a = u?.allowance;
+  $('searchUsageSum').textContent = !u?.keySet || !u.period ? ''
+    : a?.kind === 'credit' ? ` · ${a.used.toLocaleString()} of ${a.free.toLocaleString()} free searches used this month`
+    : a?.kind === 'quota' ? ` · ${a.remaining.toLocaleString()} of ${a.limit.toLocaleString()} searches left`
+    : u.brave ? ` · ${u.brave.toLocaleString()} Brave searches this month` : '';
+}
+function searchUsageHTML(u) {
+  if (!u?.period || !Array.isArray(u.byDay) || !Array.isArray(u.byAgent)) return '';
+  const n = (x) => Number(x || 0).toLocaleString();
+  const day = (d) => new Date(`${d.slice(0, 10)}T12:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  const lastDay = new Date(Date.parse(u.period.end) - 1).toISOString().slice(0, 10);
+  const total = u.brave + u.other;
+  if (!u.keySet && !total) return '';
+  const a = u.allowance, p = u.price;
+  const head = `<div class="sv-head"><b>Brave searches this month</b><span class="sub">${esc(day(u.period.start))} – ${esc(day(lastDay))}</span></div>`;
+  // What is left: Brave's own count on a capped plan, else the month's free credit against the counted searches.
+  let left = '';
+  if (a) {
+    const cap = a.kind === 'quota' ? a.limit : a.free;
+    const used = a.used;
+    const pct = (x) => Math.max(0, Math.min(100, cap ? (x / cap) * 100 : 0));
+    const over = a.kind === 'credit' && a.used > a.free;
+    const words = a.kind === 'quota'
+      ? `<b>${n(a.remaining)}</b> of ${n(a.limit)} searches left <span class="sub">— Brave's count${a.checkedAt ? ` at the last check, ${esc(new Date(a.checkedAt).toLocaleString())}` : ''}${a.resetsAt ? `; it resets ${esc(day(a.resetsAt))}` : ''}</span>`
+      : over ? `⚠ <b>Over the free credit</b> by ${n(a.used - a.free)} searches <span class="sub">— ${n(a.free)} free a month</span>`
+      : `<b>${n(a.left)}</b> of ${n(a.free)} free searches left <span class="sub">— ${esc(v2Money(p.monthlyCredit))} of credit a month</span>`;
+    const proj = u.projected > used ? `<div class="sv-proj" style="left:${pct(u.projected).toFixed(1)}%" title="At this pace: about ${n(u.projected)} by ${esc(day(lastDay))}"></div>` : '';
+    left = `<div class="sv-big">${words}</div>
+      <div class="sv-meter" role="img" aria-label="${n(used)} of ${n(cap)} used"><div class="sv-used" style="width:${pct(used).toFixed(1)}%"></div>${proj}</div>`;
+  }
+  const pace = u.brave ? `<div class="sub">At this pace: about ${n(u.projected)} Brave searches by ${esc(day(lastDay))}${u.runsOut ? ` — ⚠ the ${a?.kind === 'quota' ? 'quota' : 'free credit'} runs out about <b>${esc(day(u.runsOut))}</b>` : ''}.</div>` : '';
+  const cost = u.keySet || u.brave ? `<div style="font-size:14px;margin-top:6px">Estimated cost: <b>${esc(v2Money(u.cost.net))}</b> so far${u.cost.gross > u.cost.net ? ` <span class="sub">(${esc(v2Money(u.cost.gross))} of searches, less the ${esc(v2Money(p.monthlyCredit))} credit)</span>` : ''}${u.brave ? ` · about <b>${esc(v2Money(u.cost.projectedNet))}</b> by month end` : ''}</div>` : '';
+  // A bar per day: Brave at the base, other providers above it; each bar's title says the numbers.
+  const top = niceTop(Math.max(1, ...u.byDay.map((d) => d.brave + d.other)));
+  const today = new Date().toISOString().slice(0, 10);
+  const bars = u.byDay.map((d) => {
+    const tip = `${day(d.day)}${d.day === today ? ' (today)' : ''}: ${n(d.brave)} Brave${d.other ? `, ${n(d.other)} other` : ''}`;
+    const seg = (cls, x) => x ? `<i class="${cls}" style="height:${((x / top) * 100).toFixed(2)}%"></i>` : '';
+    return `<div class="sv-day" title="${esc(tip)}" aria-label="${esc(tip)}">${seg('sv-o', d.other)}${seg('sv-b', d.brave)}</div>`;
+  }).join('');
+  const legend = u.other ? `<div class="sub" style="margin-top:2px"><span class="sv-key"><i class="sv-b"></i>Brave</span><span class="sv-key"><i class="sv-o"></i>DuckDuckGo and others</span></div>` : '';
+  const chart = total ? `<div class="sv-sec">${u.other ? 'Searches per day' : 'Brave searches per day'} <span class="sub" style="font-weight:400">· up to ${n(top)} a day</span></div>
+    <div class="sv-days">${bars}</div>
+    <div class="su-cap"><span>${esc(day(u.byDay[0]?.day || u.period.start))}</span><span>${esc(day(lastDay))}</span></div>${legend}` : '<div class="sub" style="margin-top:8px">No searches counted yet this month.</div>';
+  // Who searches most: Brave searches first, their share and cost.
+  const rows = u.byAgent.filter((r) => r.brave || r.other);
+  const shown = rows.slice(0, 12);
+  const amax = Math.max(1, ...shown.map((r) => r.brave));
+  const who = shown.length ? `<div class="sv-sec">Who searches most</div><div class="sv-rows">${shown.map((r) => `<div class="sv-row">
+      <span class="sv-name" title="${esc(r.name)}">${esc(r.name)}</span>
+      <span class="sv-bar" title="${n(r.brave)} Brave searches"><i style="width:${((r.brave / amax) * 100).toFixed(1)}%"></i></span>
+      <span class="sv-num">${n(r.brave)}${u.brave && r.brave ? ` · ${Math.round((r.brave / u.brave) * 100)}%` : ''}${r.cost ? ` · ${esc(v2Money(r.cost))}` : ''}${r.other ? ` <span class="sub">+${n(r.other)} other</span>` : ''}</span></div>`).join('')}</div>
+    ${rows.length > shown.length ? `<div class="sub">and ${rows.length - shown.length} more</div>` : ''}` : '';
+  const cached = u.cached ? `<div class="sub" style="margin-top:4px">${n(u.cached)} more were answered from OpenClaw's cache, at no cost.</div>` : '';
+  const price = `<details style="margin-top:10px"><summary class="sub">Price: ${esc(v2Money(p.per1000))} per 1,000 searches, ${esc(v2Money(p.monthlyCredit))} of free credit a month — change</summary>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+        <label class="sub">$ <input id="searchPricePer" type="number" min="0" max="1000" step="0.01" value="${esc(String(p.per1000))}" style="width:6em"> per 1,000 searches</label>
+        <label class="sub">$ <input id="searchPriceCredit" type="number" min="0" step="0.01" value="${esc(String(p.monthlyCredit))}" style="width:6em"> of credit a month</label>
+        <button class="hbtn" id="searchPriceSaveBtn" onclick="saveSearchPrice()">Save</button>
+      </div>
+      <div class="sub" style="margin-top:4px">Brave's Search plan in November 2026: $5 per 1,000 searches, with $5 of credit each month. Yours is on <a href="https://api-dashboard.search.brave.com/" target="_blank" rel="noopener">Brave's dashboard</a>.</div></details>`;
+  const note = '<div class="sub" style="margin-top:6px">Counted from the agents\' conversations about once an hour, with the Hatchabot agent\'s searches and Hatchabot\'s own checks. Searches made with this key outside Hatchabot show only in Brave\'s dashboard, which has the real bill.</div>';
+  return `${head}${left}${pace}${cost}${chart}${who}${cached}${note}${price}`;
+}
+async function saveSearchPrice() {
+  const per1000 = Number($('searchPricePer').value), monthlyCredit = Number($('searchPriceCredit').value);
+  if (!(per1000 >= 0 && per1000 <= 1000) || !(monthlyCredit >= 0)) return toast('A price is dollars: 0 to 1,000 per 1,000 searches, and 0 or more of credit.', 8000);
+  try { renderSearchUsage(await api('/v1/web-search', { method: 'PUT', body: { price: { per1000, monthlyCredit } } })); toast('Price saved.'); }
+  catch (e) { toast(e.message, 10000); }
 }
 async function setSearchMode(mode) {
   try { renderSearchHealth(await api('/v1/web-search', { method: 'PUT', body: { mode } })); }
@@ -4827,7 +4967,7 @@ async function loadPool() {
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
-/** Settings → Telegram: my agents take only my own bots. Saved at once; the ready count follows. */
+/** Settings → Messaging → Telegram: my agents take only my own bots. Saved at once; the ready count follows. */
 async function setPoolOwnOnly(on) {
   try {
     const r = await api('/v1/account/prefs', { method: 'PATCH', body: { ownBotsOnly: !!on } });
@@ -4837,9 +4977,7 @@ async function setPoolOwnOnly(on) {
   } catch (e) { toast(e.message, 8000); if ($('poolOwnOnly')) $('poolOwnOnly').checked = !!myAccount.prefs?.ownBotsOnly; }
 }
 
-// ---- spare Discord bots and Slack apps (Settings → Discord / Slack) ------------------
-/** Slack is offered to everyone (v2.75.1). */
-function slackVisible() { return true; }
+// ---- spare Discord bots and Slack apps (Settings → Messaging) ------------------
 const POOL_UI = {
   discord: { path: '/v1/discord-bots', pfx: 'dpool', label: 'Discord', room: 'server', rooms: 'servers', mark: 'discord', bg: '#5865f2' },
   slack: { path: '/v1/slack-apps', pfx: 'spool', label: 'Slack', room: 'channel', rooms: 'channels', mark: 'slack', bg: '#4a154b' },
@@ -4860,7 +4998,7 @@ async function loadPoolPane(kind) {
     if (st) st.innerHTML = `<span class="pool-dot"${ready > 0 ? '' : ' style="color:var(--off)"'}>●</span>
       <b>${ready}</b> spare ${kind === 'slack' ? 'app' : 'bot'}${ready === 1 ? '' : 's'} ready${inUse.length ? ` <span class="sub">· ${inUse.length} in use by agents</span>` : ''}
       ${ready ? '' : `<span class="sub">· an agent’s Set up… will ask for ${kind === 'slack' ? 'the app’s tokens' : 'a bot token'}</span>`}`;
-    // The same four questions Settings → Telegram answers, in the same order.
+    // The same four questions Settings → Messaging → Telegram answers, in the same order.
     const rows = [
       ...spare.map(b => ({ ...b, free: true })),
       ...pool.filter(b => b.archivedFor).map(b => ({ ...b, free: true, kept: true })),
@@ -5697,7 +5835,7 @@ async function pollDerivedBuild(name) {
   finally { derivedBuilding.delete(name); loadDerivedImages(); }
 }
 
-// Status for Settings → Telegram. Prefer the bot's own heartbeat (it says alive
+// Status for Settings → Messaging → Telegram. Prefer the bot's own heartbeat (it says alive
 // vs offline, mode, LLM); fall back to the cli-token heuristic for a bot that
 // predates heartbeats and hasn't been restarted yet.
 async function openAiDlg(tab) {
@@ -7393,26 +7531,31 @@ $('fabBtn').onclick = () => {
       runners.map(h => `<option value="${h.id}">☁️ ${esc(h.name)} (${h.agentCount})</option>`).join('');
     onHostPicked();
   }
-  // Pool choice: shown only when the pool actually has bots; default = use
-  // one (instant). With an empty pool there is no choice — BotFather it is.
-  $('agentPoolRow').style.display = poolAvail > 0 ? 'flex' : 'none';
+  // Telegram is off until it is asked for (the owner, 2026-11-07: the web
+  // console made it the exception, and "No Telegram" was ticked on most new
+  // agents). Decided afresh on every open, so one agent's choice is not the next one's.
+  $('agentTelegram').checked = false;
   $('agentUsePool').checked = true;
   $('agentPoolCount').textContent = poolAvail > 0 ? `(${poolAvail} ready${myAccount.prefs?.ownBotsOnly ? ', yours only' : ''})` : '';
-  // An empty pool used to mean "BotFather it is" — and an agent parked on a
-  // token nobody had (2026-09-23). Say so, and start it web-only unless a
-  // token is coming; a bot can be attached later.
-  $('agentPoolEmptyNote').hidden = poolAvail > 0;
-  // Decided afresh on every open: an empty pool once (then Cancel) used to
-  // leave "No Telegram" ticked after a bot was parked, so the next agent was
-  // made web-only with a spare bot ready.
-  $('agentNoTelegram').checked = poolAvail === 0;
-  $('agentPoolRow').hidden = poolAvail === 0;
+  agentTelegramChanged();
   // An app from a repo reads this machine's folders and git login: its owner only.
   $('createFromRepo').hidden = !myAccount?.hostOwner;
   createDlg.showModal();
   if (pendingTodoName) { $('agentName').value = pendingTodoName; pendingTodoName = null; }
   $('agentName').focus();
 };
+
+/**
+ * The New agent form's Telegram tick. Ticked: the pool choice, when the pool
+ * has bots (default: use one, instant), or else the warning that it waits for
+ * a BotFather token — an empty pool once parked an agent on a token nobody had
+ * (2026-09-23).
+ */
+function agentTelegramChanged() {
+  const on = $('agentTelegram').checked;
+  $('agentPoolRow').style.display = on && poolAvail > 0 ? 'flex' : 'none';
+  $('agentPoolEmptyNote').hidden = !on || poolAvail > 0;
+}
 
 // Resolve the picker to a concrete host id ("auto" → least-loaded runner).
 function pickedHostId() {
@@ -7456,10 +7599,11 @@ async function createAgent() {
       hostId,
       // Only meaningful when the pool row was offered and declined.
       skipPool: ($('agentPoolRow').style.display !== 'none' && !$('agentUsePool').checked) || undefined,
-      telegram: $('agentNoTelegram').checked ? false : undefined,
+      // Said either way: the API's own default (a bot) is for the CLI and scripts.
+      telegram: $('agentTelegram').checked,
     }});
     createDlg.close(); $('agentName').value = ''; $('agentPersona').value = '';
-    $('agentNoTelegram').checked = false; $('agentPoolRow').hidden = false;
+    $('agentTelegram').checked = false; agentTelegramChanged();
     await refresh(false);
   } catch (e) { $('createErr').textContent = e.message; }
   finally { $('createBtn').disabled = false; }
@@ -10564,7 +10708,7 @@ async function del(id, name) {
   const copyElsewhere = !!a?.exportedAt && a.state !== 'RUNNING';
   const botNote = a?.botUsername
     ? copyElsewhere
-      ? `\n\nA copy of it was downloaded, so its Telegram bot @${a.botUsername} is NOT parked for reuse here — the copy may be talking on it. (Settings → Telegram → Add to pool parks it by hand if you want that.)`
+      ? `\n\nA copy of it was downloaded, so its Telegram bot @${a.botUsername} is NOT parked for reuse here — the copy may be talking on it. (Settings → Messaging → Telegram → Add to pool parks it by hand if you want that.)`
       : `\n\nIts Telegram bot @${a.botUsername} is kept in the Bot pool for the next agent (remove it there if you don't want that). "Delete chat" on it in Telegram clears your old conversation view.`
     : '';
   // Its volume stays in the nightly backup sets until they age out
@@ -11204,8 +11348,12 @@ async function importAgentFile(file) {
       body = new Blob([JSON.stringify({ values }) + '\n', file]);
       type = IMPORT_WITH_VALUES;
     }
+    // A template is a new agent, so it starts without Telegram (2026-11-07); a full copy
+    // brings its own bot back, and the server refuses "no Telegram" for one.
+    const noBot = ['hatchabot-template', 'agentclaw-template'].includes(tpl?.format) ? 'telegram=0' : '';
     const send = async (q) => {
-      const res = await sfFetch(`/v1/agents/import${q}`, {
+      const qs = [noBot, q].filter(Boolean).join('&');
+      const res = await sfFetch(`/v1/agents/import${qs ? '?' + qs : ''}`, {
         method: 'POST',
         headers: { 'content-type': type },
         body,
@@ -11217,7 +11365,7 @@ async function importAgentFile(file) {
       const choice = imageDecision(data);
       if (!choice) return;
       if (choice === 'build') toast(`Building ${data.image}… this takes a few minutes`, 20000);
-      [res, data] = await send(`?image=${choice}`);
+      [res, data] = await send(`image=${choice}`);
     }
     if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
     if (data.kind === 'template') {
@@ -11225,7 +11373,7 @@ async function importAgentFile(file) {
       for (const d of (data.needs?.dataSources ?? [])) needs.push(`${d.kind} “${d.mountName}”`);
       for (const n of (data.needs?.envVars ?? [])) needs.push(`env ${n}`);
       const tail = needs.length ? ` — set up in ⚙ Configuration: ${needs.join(', ')}` : '';
-      toast(`Imported “${data.name}” — connect its Telegram bot, then it's yours${tail}`, 45000);
+      toast(`Imported “${data.name}” — ${noBot ? 'it runs here in Hatchabot; give it a Telegram bot from its Telegram tab if you want one' : "connect its Telegram bot, then it's yours"}${tail}`, 45000);
     } else if (data.operation?.id) {
       // A full copy goes on on the server (202, v2.156.0): its tile shows each step, a toast the end.
       v2FollowOp(data.operation);
@@ -11427,7 +11575,8 @@ async function saveFromServer(url, fallbackName, check) {
 }
 
 // Clone = a faithful local copy (MEMORY.md, its daily notes and USER.md — you own both), with its own
-// bot and name; only you as owner.
+// name; only you as owner. Without Telegram, as every new agent starts (2026-11-07): a bot is one
+// click on its Telegram tab.
 // ---- template gallery (discovery over clone) --------------------------------
 
 function openGallery() { galleryDlg.showModal(); renderGallery(); }
@@ -11460,14 +11609,14 @@ async function cloneAgent(id, name) {
   const cn = prompt(`Name for the clone of "${name}":`, `${name} (copy)`);
   if (cn === null) return;
   try {
-    const res = await api(`/v1/agents/${id}/clone`, { method: 'POST', body: { name: cn } });
+    const res = await api(`/v1/agents/${id}/clone`, { method: 'POST', body: { name: cn, telegram: false } });
     let left = (res.notCopied || []).length ? ` Its data sources (${res.notCopied.join(', ')}) did not come along: add them under Data.` : '';
     // A variable whose value could not be read stayed behind (review, 2026-10-22).
     if ((res.envNotCopied || []).length) left += ` Its variables ${res.envNotCopied.join(', ')} could not be read, so the copy does not have them: add them under Advanced → Extra credentials.`;
     // Its daily notes come too (2026-09-30); say when some could not.
     if (res.memoryCopyFailed) left += " Its daily notes (memory/) and USER.md couldn't be read, so only MEMORY.md came along.";
     else if ((res.memoryNotCopied || []).length) left += ` Some memory files were too big, not text or unreadable and stayed behind: ${res.memoryNotCopied.slice(0, 5).join(', ')}${res.memoryNotCopied.length > 5 ? '…' : ''}.`;
-    toast(`Cloned as "${res.name}" — it takes a spare bot from your pool; with none free it starts in the web app and you attach one later.${left}`, 30000);
+    toast(`Cloned as "${res.name}" — it runs here in Hatchabot, without a Telegram bot; give it one from its Telegram tab when you want it.${left}`, 30000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
 }
@@ -13764,18 +13913,19 @@ function v2RenderSheetBar() {
   const chat = v2CanChat(a) && window.isSecureContext;
   $('v2AgentBar').className = `v2sbar v2st-${st.cls}`;
   // The icon is a real button (Enter and Space both work; it was a span, 2026-10-09).
-  $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<button type="button" class="v2iconbtn" title="Change its icon" aria-label="Change its icon" onclick="openV2Icon('${jsq(a.id)}')">${v2IconHTML(a, st)}</button>` : v2IconHTML(a, st)}
+  // ‹ Back first: a phone's way home (CSS shows it there and hides the ✕).
+  $('v2AgentBar').innerHTML = `<button type="button" class="v2pback v2sback" onclick="v2Close()" aria-label="Back to all agents" title="Back to all agents">${V2_BACK_SVG}</button>${v2Mine(a) ? `<button type="button" class="v2iconbtn" title="Change its icon" aria-label="Change its icon" onclick="openV2Icon('${jsq(a.id)}')">${v2IconHTML(a, st)}</button>` : v2IconHTML(a, st)}
     <div class="v2ttl"><b id="v2AgentName">${esc(a.name)}</b>${!v2Mine(a) ? '<span>shared with you</span>' : ''}</div>
     <span class="v2pill ${v2PillCls(st)}"${st.why.length ? ` title="${esc(st.why.join(' · '))}"` : ''}>${st.glyph || '●'} ${esc(st.label)}</span>
     ${/* Lifecycle buttons are the owner's: the server answers a member 404 (review, 2026-10-09). */ ''}
-    ${v2Mine(a) && a.state === 'STOPPED' && a.hibernatedAt ? `<button class="primary" onclick="act('${jsq(a.id)}','wake')" title="Start it now — a Telegram message, opening its console or an ask would too">💤 Wake</button>` : ''}
+    ${v2Mine(a) && a.state === 'STOPPED' && a.hibernatedAt ? `<button class="primary" onclick="act('${jsq(a.id)}','wake')" aria-label="Wake" title="Start it now — a Telegram message, opening its console or an ask would too">💤<span class="v2bw"> Wake</span></button>` : ''}
     ${v2Mine(a) && a.state === 'STOPPED' && !a.hibernatedAt ? `<button onclick="act('${jsq(a.id)}','start')">Start</button>` : ''}
-    ${a.state === 'RUNNING' && v2Mine(a) && !a.ops && !v2ChannelKinds(a).some(k => k !== 'telegram') ? `<button onclick="act('${jsq(a.id)}','hibernate')" title="Stop it with its volume kept; it wakes on a Telegram message, its console or an ask">💤 Sleep</button>` : ''}
+    ${a.state === 'RUNNING' && v2Mine(a) && !a.ops && !v2ChannelKinds(a).some(k => k !== 'telegram') ? `<button onclick="act('${jsq(a.id)}','hibernate')" aria-label="Sleep" title="Stop it with its volume kept; it wakes on a Telegram message, its console or an ask">💤<span class="v2bw"> Sleep</span></button>` : ''}
     ${v2Mine(a) && a.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(a.id)}','provision')">Retry</button>` : ''}
-    ${v2Mine(a) && a.state === 'ARCHIVED' ? `<button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button><button onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')" title="Bring it back from the archive">📤 Restore…</button>` : ''}
-    ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
-    ${!v2Mine(a) && a.webChat && a.state !== 'ARCHIVED' ? `<button class="primary" onclick="v2Close();openWebChat('${jsq(a.id)}')" title="Talk to it here — no chat app needed">💬 Chat</button>` : ''}
-    <button onclick="v2Close()" aria-label="Close">✕</button>`;
+    ${v2Mine(a) && a.state === 'ARCHIVED' ? `<button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')" aria-label="Inspect">🔍<span class="v2bw"> Inspect</span></button><button onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')" aria-label="Restore…" title="Bring it back from the archive">📤<span class="v2bw"> Restore…</span></button>` : ''}
+    ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" aria-label="Chat" title="Talk to it here">💬<span class="v2bw"> Chat</span></button>` : ''}
+    ${!v2Mine(a) && a.webChat && a.state !== 'ARCHIVED' ? `<button class="primary" onclick="v2Close();openWebChat('${jsq(a.id)}')" aria-label="Chat" title="Talk to it here — no chat app needed">💬<span class="v2bw"> Chat</span></button>` : ''}
+    <button class="v2sclose" onclick="v2Close()" aria-label="Close">✕</button>`;
 }
 function v2RenderSheet() {
   const a = v2Find(v2AgentId); if (!a) return v2Close();
@@ -13991,7 +14141,7 @@ async function appRead() {
       <div id="appConnWarn" class="sub" hidden></div>` : '';
     $('appForm').innerHTML = connPicker + (appDlgMode === 'create' ? `<label for="appName">Name</label><input type="text" id="appName" maxlength="64" value="${esc(m.name)}">
       ${profiles.length > 1 ? `<label for="appProfile">AI source</label><select id="appProfile">${profiles.map(p => `<option value="${p.id}"${p.defaultSource ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('')}</select>` : ''}
-      <label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="appNoTelegram" style="width:auto"> No Telegram — reach it here in Hatchabot only</label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="appTelegram" style="width:auto"> Use Telegram — reach it from your phone too, not only here in Hatchabot</label>
       ${local ? '' : '<div class="err">No host is configured.</div>'}` : '') + (r.ask || []).map(field).join('');
     $('appGoBtn').disabled = false;
     // A field that names the account (e.g. the mailbox) picks it, and the other way round.
@@ -14078,7 +14228,7 @@ async function appGo() {
   const shared = appSharedOk(); if (!shared.ok) return;
   const connId = $('appConn')?.value || '';
   const connEmail = appConns.find(c => c.id === connId)?.email;
-  const form = mode === 'create' ? { name: $('appName').value.trim() || m.name, profile: ($('appProfile') && $('appProfile').value) || profiles[0]?.id, noTelegram: $('appNoTelegram').checked } : null;
+  const form = mode === 'create' ? { name: $('appName').value.trim() || m.name, profile: ($('appProfile') && $('appProfile').value) || profiles[0]?.id, telegram: $('appTelegram').checked } : null;
   $('appGoBtn').disabled = true; $('appErr').textContent = ''; $('appOut').hidden = true;
   let created = null;
   try {
@@ -14090,7 +14240,7 @@ async function appGo() {
       if (chat && /\{(app_dir|data_dir|agent|name|env)\}/.test(chat)) chat = (await api('/v1/apps/inspect', { method: 'POST', body: { source: insp.source, name } })).chat ?? chat;
       const a = created = await api('/v1/agents', { method: 'POST', body: { name, persona: chat || m.description || undefined,
         aiProfileId: form.profile, hostId: local?.id,
-        telegram: form.noTelegram ? false : undefined } });
+        telegram: form.telegram } });
       if (m.model) { try { await api(`/v1/agents/${a.id}/model`, { method: 'POST', body: { model: m.model } }); } catch { /* the source's default stays */ } }
       // Its account goes on before it first runs (it is materialized as the agent comes up).
       if (connId) { const problem = appAttachProblem(await api(`/v1/agents/${a.id}/connections/attach`, { method: 'POST', body: { connectionId: connId } }), false, connEmail); if (problem) throw new Error(problem); }
@@ -14713,7 +14863,7 @@ async function v2LoadChans(id) {
       const blurb = {
         telegram: `Reach it from your phone, and let other people reach it. ${spares ? `${spares} spare bot${spares === 1 ? '' : 's'} in your pool, so it's instant.` : 'No spare bot in your pool: you paste a token from @BotFather.'}`,
         slack: 'Talk to it in your Slack workspace. You make a small Slack app for it; this takes about five minutes.',
-        discord: `Talk to it on Discord. ${spares ? `${spares} spare bot${spares === 1 ? '' : 's'} parked, so it's instant.` : 'You make a bot in the Discord developer portal (about five minutes), or park one under Settings → Discord.'}`,
+        discord: `Talk to it on Discord. ${spares ? `${spares} spare bot${spares === 1 ? '' : 's'} parked, so it's instant.` : 'You make a bot in the Discord developer portal (about five minutes), or park one under Settings → Messaging.'}`,
       }[kind];
       return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b>
         ${can && canChange ? `<button onclick="${setup}">Set up…</button>` : ''}</div>
@@ -14820,7 +14970,7 @@ async function chanSwap(id, kind) {
   if (!confirm(`Move "${a?.name ?? 'this agent'}" to a different ${label} bot?\n\n`
     + `• It keeps its memory, files, settings and members — nobody has to pair again.\n`
     + `• Everyone must open the NEW bot and say hi; ${label} will not move the old chat.\n`
-    + `• The old ${kind === 'slack' ? 'app' : 'bot'} ${kind === 'telegram' ? 'goes back to the pool' : `is parked under Settings → ${label}`}, and its chat stops answering.\n\n`
+    + `• The old ${kind === 'slack' ? 'app' : 'bot'} ${kind === 'telegram' ? 'goes back to the pool' : 'is parked under Settings → Messaging'}, and its chat stops answering.\n\n`
     + (a && a.state !== 'RUNNING' ? chanApplyNote(id) : `The agent rebuilds afterwards — about a minute; anything it is doing stops.`))) return;
   try {
     const r = kind === 'telegram'
@@ -14913,7 +15063,7 @@ async function openChanSetup(id, kind) {
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
         <select id="chanPooled" style="flex:1;min-width:200px"><option value="">— make a new ${kind === 'slack' ? 'app' : 'bot'} instead (steps below) —</option>
           ${pool.map(b => `<option value="${esc(b.applicationId)}">${esc(b.botName || b.applicationId)}${b.servers?.length ? ` — in ${esc(b.servers.map(g => g.name || g.id).join(', '))}` : ' — not in any server yet'}</option>`).join('')}</select>
-      </div><div class="sub" style="margin-top:4px">Parked when ${V2_CHAN_LABEL[kind]} was removed from an agent, or parked ahead under Settings → ${V2_CHAN_LABEL[kind]}. It keeps its name and ${kind === 'slack' ? 'channels' : 'servers'}.</div></div>`;
+      </div><div class="sub" style="margin-top:4px">Parked when ${V2_CHAN_LABEL[kind]} was removed from an agent, or parked ahead under Settings → Messaging. It keeps its name and ${kind === 'slack' ? 'channels' : 'servers'}.</div></div>`;
   }
   // Slack: one box takes both tokens at once, pasted from either page; the two boxes below fill themselves.
   const pasteBox = kind === 'slack' ? `<label for="chanPaste">Paste both tokens here — or fill the two boxes below</label>
@@ -15088,12 +15238,12 @@ async function chanSaveRooms(id, kind, btn) {
   finally { btn.disabled = false; }
 }
 async function chanRemove(id, kind) {
-  // (Discord: the bot is parked under Settings → Discord, name and servers kept.)
+  // (Discord: the bot is parked under Settings → Messaging, name and servers kept.)
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
   if (kind === 'telegram') return v2RemoveTelegram(id, a?.name || '', a?.botUsername || '');
   if (kind !== 'slack'
-    ? !confirm(`Detach Discord from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Discord, with its name and servers, ready for another agent. ${chanApplyNote(id)}`)
-    : !confirm(`Detach ${label} from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. ${chanApplyNote(id)}`)) return;
+    ? !confirm(`Detach Discord from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Messaging, with its name and servers, ready for another agent. ${chanApplyNote(id)}`)
+    : !confirm(`Detach ${label} from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Messaging, with its workspace and channels, ready for another agent. ${chanApplyNote(id)}`)) return;
   try {
     const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
     toast((r.parked ? `${label} detached — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} detached.`) + (r.atNextStart ? ' It stays down; this applies when it next starts.' : ''), 5000);

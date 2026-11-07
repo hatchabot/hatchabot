@@ -85,7 +85,7 @@ AI sources is where you add an API key or a local Ollama server later.)
 ## 5. Create the agent (1 min)
 
 1. Tap **+**. Give it a **name** and a one-paragraph **description** of who it is and what it's for — this becomes its personality file, which you can edit any time.
-2. Paste the **BotFather token** from step 1 when asked (or, if you've stocked the bot pool, it just takes one).
+2. Tick **Use Telegram** (it is off by default), then paste the **BotFather token** from step 1 when asked (or, if you've stocked the bot pool, it just takes one).
 3. Tap **Create**. Hatchabot builds its container, wires the bot, and its icon appears on the home screen; its Telegram tab has the link.
 
 ## 6. Say hi (30 s)

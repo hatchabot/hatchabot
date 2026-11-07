@@ -76,6 +76,8 @@ export /** How many agents to sample at once, and how long one whole pass may ta
 const PASS_CONCURRENCY = Math.max(1, Number(process.env.HATCHABOT_USAGE_CONCURRENCY) || 6);
 const PASS_BUDGET_MS = Math.max(10_000, Number(process.env.HATCHABOT_USAGE_PASS_MS) || 5 * 60_000);
 const RETAIN_MS = 8 * DAY;
+/** Web search counts are kept longer: a month's chart, and last year's for comparison (HB-0532). */
+const SEARCH_RETAIN_MS = 400 * DAY;
 
 export interface SampleDeps {
   store: Store;
@@ -191,6 +193,9 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     }
     // Token health from the same read (tokenHealth.ts): a review then wakes nothing.
     if (u.health) store.setTokenHealth(a.id, u.health, nowIso);
+    // Its web searches from the same read: the whole window is replaced, so a re-read counts nothing twice (HB-0532).
+    // The window's first hour is only partly read, so it starts at the next whole one.
+    if (u.searches) store.setSearchHours(a.id, new Date(Math.ceil(u.searches.since / 3_600_000) * 3_600_000).toISOString().slice(0, 13), u.searches.hours);
     // Successful calls per slot, from the transcripts: the whole 8 days the
     // first time (replacing the log's partial counts), then from an hour
     // before the last slot written, so late-arriving calls land.
@@ -267,6 +272,7 @@ export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Pro
   await Promise.all(Array.from({ length: Math.min(PASS_CONCURRENCY, queue.length) }, worker));
   if (queue.length) deps.log?.('usage.sample_incomplete', { remaining: queue.length });
   store.pruneSourceUsage(new Date(now - RETAIN_MS).toISOString());
+  store.pruneSearchHours(new Date(now - SEARCH_RETAIN_MS).toISOString());
   store.pruneLoopMarks(new Date(now - RETAIN_MS).toISOString());
   return { agents, calls, limited };
 }

@@ -243,7 +243,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // agent's name — and a bot serving "Budget Tracker" while Telegram still calls
     // it "HOA Helper" is worse than a bot with a plain name. When every free
     // bot is rate-limited this changes nothing; there is simply no better pick.
-    // ownBotsOnly (Settings → Telegram): the person asked never to put one of
+    // ownBotsOnly (Settings → Messaging → Telegram): the person asked never to put one of
     // their agents on a shared house bot, so only their own are offered.
     const free = (
       this.db
@@ -343,7 +343,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // deleted or its token revoked at BotFather, and no amount of waiting
     // fixes it. Stop parking the name — one dead pool bot was renaming itself
     // every five minutes, forever (seen live 2026-09-19). The live census
-    // (Settings → Telegram) is where a dead token gets dealt with.
+    // (Settings → Messaging → Telegram) is where a dead token gets dealt with.
     if (permanentTelegramFailure(res.error)) {
       this.opts.log?.('channel.name_abandoned', { username, name, error: String(res.error).slice(0, 120) });
       this.#clearParked(username, fromSweep ? name : undefined);

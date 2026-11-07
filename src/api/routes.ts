@@ -131,6 +131,7 @@ import type { PendingConfirm } from '../mgmt/pendingStore.js';
 import { LOCAL_MODEL, modelOption, modelOptionsFor, openclawAtLeast, SUBSCRIPTION_MIN_OPENCLAW, subscriptionModelProblem } from '../orchestrator/modelOptions.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
+import { OPS_AGENT_SEARCHES, readSearchPrice, saveSearchPrice, SEARCH_CHECKS, searchUsageReport } from '../orchestrator/searchUsage.js';
 import { AGENT_SEARCH_TEST_ARGV, createSearchWatch, readAgentSearchTest } from '../orchestrator/webSearch.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, suggestIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
@@ -4675,6 +4676,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (owner) void opsPush.waiting(owner, headline, detail, { note: true });
     },
     log: (event, detail) => app.log.info(detail, event),
+    spentQuery: () => store.addSearch(SEARCH_CHECKS, 'brave', new Date().toISOString()),
     ...(deps.searchFetch ? { fetchImpl: deps.searchFetch, sleep: async () => {} } : {}),
     ...(Number(process.env.HATCHABOT_SEARCH_CHECK_MS) > 0 ? { checkEveryMs: Number(process.env.HATCHABOT_SEARCH_CHECK_MS) } : {}),
   });
@@ -4700,12 +4702,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     await searchWatch.check();
     return searchView();
   });
-  app.put<{ Body: { mode?: string } }>('/v1/web-search', async (req, reply) => {
+  // The month's searches: Brave's against what the key allows, per day, per agent, and the cost (HB-0532).
+  const searchUsageView = async () => searchUsageReport({
+    hours: (from, to) => store.searchHours(from, to),
+    state: searchWatch.state(),
+    keySet: await secrets.get(SEARCH_KEY_REF).then(() => true, () => false),
+    price: readSearchPrice(store),
+    nameOf: (id) => store.getAgent(id)?.name,
+    now: Date.now(),
+  });
+  app.get('/v1/web-search/usage', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
-    const parsed = z.object({ mode: z.enum(['auto', 'duckduckgo']) }).safeParse(req.body ?? {});
-    if (!parsed.success) return reply.code(400).send({ error: 'Choose auto or duckduckgo.' });
-    await searchWatch.setMode(parsed.data.mode);
-    return searchView();
+    return searchUsageView();
+  });
+  // `mode`: which search the fleet uses. `price`: what a Brave search costs, for the usage panel's estimate.
+  app.put<{ Body: { mode?: string; price?: { per1000?: number; monthlyCredit?: number } } }>('/v1/web-search', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const parsed = z.object({
+      mode: z.enum(['auto', 'duckduckgo']).optional(),
+      price: z.object({ per1000: z.number().finite().min(0).max(1000), monthlyCredit: z.number().finite().min(0).max(100_000) }).strict().optional(),
+    }).strict().safeParse(req.body ?? {});
+    if (!parsed.success || (!parsed.data.mode && !parsed.data.price)) {
+      return reply.code(400).send({ error: parsed.success || !parsed.error.issues.some((i) => i.path[0] === 'price') ? 'Choose auto or duckduckgo.' : 'A price is dollars per 1,000 searches (0 to 1,000) and dollars of monthly credit (0 or more).' });
+    }
+    if (parsed.data.price) saveSearchPrice(store, parsed.data.price);
+    if (parsed.data.mode) await searchWatch.setMode(parsed.data.mode);
+    return parsed.data.mode ? searchView() : searchUsageView();
   });
   // A real search in the agent, through its own settings and keys.
   app.post<{ Params: { id: string } }>('/v1/agents/:id/search-test', async (req, reply) => {
@@ -4716,6 +4738,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'Start the agent first: this runs a real search inside it.' });
     const res = await providerFor(agent.hostId).exec(agent.runtimeRef, AGENT_SEARCH_TEST_ARGV, { timeoutMs: 120_000 });
     const out = readAgentSearchTest(res.stdout, res.stderr);
+    // A test is a real search: counted with Hatchabot's checks, under the provider that answered (HB-0532).
+    if (out.ok) store.addSearch(SEARCH_CHECKS, out.provider.toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 32) || 'unknown', new Date().toISOString());
     if (!out.ok) {
       trace(agent.id)('search.test_failed', { why: out.why, stderr: (res.stderr || res.stdout).slice(-300) });
       if (out.why === 'quota' || out.why === 'key') searchWatch.nudge();
@@ -5689,6 +5713,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     opsWeb: {
       braveKey: async () => (searchWatch.state().active === 'brave' ? secrets.get(SEARCH_KEY_REF).catch(() => undefined) : undefined),
       onBraveFailed: () => searchWatch.nudge(),
+      onSearched: (provider) => store.addSearch(OPS_AGENT_SEARCHES, provider, new Date().toISOString()),
     },
   });
 
@@ -11123,7 +11148,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
     }
     let body = (req.body ?? {}) as Record<string, string>;
-    // A parked bot (Settings → Discord bots): its token comes from the pool, nothing is pasted.
+    // A parked bot (Settings → Messaging → Discord): its token comes from the pool, nothing is pasted.
     let pooled: DiscordBotRow | undefined;
     if (typeof body.pooled === 'string' && body.pooled) {
       pooled = parkedBotToTake(ownerIdOf(req), body.pooled, kind);
@@ -11275,7 +11300,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const me = ownerIdOf(req);
     const wanted = parkedBotToTake(me, typeof req.body?.pooled === 'string' && req.body.pooled ? req.body.pooled : 'first', kind);
     if (!wanted) {
-      return reply.code(409).send({ error: `No spare bot to move to. Park one under ⚙ Settings → ${conn.label}, then try again.` });
+      return reply.code(409).send({ error: `No spare bot to move to. Park one under ⚙ Settings → Messaging, then try again.` });
     }
     let token: string;
     try { token = await secrets.get(wanted.secretRef); } catch { return reply.code(409).send({ error: 'That parked bot has lost its token — delete it from the pool and park it again.' }); }
@@ -13295,7 +13320,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store.setAccountTelegram(ownerIdOf(req), null);
     return { unlinked: true };
   });
-  /** A person's own preferences (Settings → Telegram: own bots only). Each key optional; the answer is the whole set. */
+  /** A person's own preferences (Settings → Messaging → Telegram: own bots only). Each key optional; the answer is the whole set. */
   app.patch<{ Body: { ownBotsOnly?: boolean } }>('/v1/account/prefs', async (req, reply) => {
     const parsed = z.object({ ownBotsOnly: z.boolean().optional() }).strict().safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -15013,7 +15038,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!old) return reply.code(409).send({ error: 'This agent has no Telegram bot to change.' });
     if (!deps.channel.pool.availableCount(agent.ownerId, store.ownerPrefs(agent.ownerId).ownBotsOnly)) {
       return reply.code(409).send({
-        error: 'No spare bot to move to. Add one under ⚙ Settings → Telegram → Add a bot, then try again.',
+        error: 'No spare bot to move to. Add one under ⚙ Settings → Messaging → Telegram → Add a bot, then try again.',
       });
     }
 
@@ -15046,7 +15071,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return { code: 409, error: `Could not take a spare bot: ${String((err as Error)?.message ?? err).slice(0, 160)}` };
         }
         if (fresh.accountId.toLowerCase() === old.accountId.toLowerCase()) {
-          return { code: 409, error: 'No other spare bot to move to. Add one under ⚙ Settings → Telegram → Add a bot, then try again.' };
+          return { code: 409, error: 'No other spare bot to move to. Add one under ⚙ Settings → Messaging → Telegram → Add a bot, then try again.' };
         }
         const clash = store.findAgentUsingAccount(fresh.accountId);
         if (clash && clash.id !== agent.id) {

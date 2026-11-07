@@ -112,7 +112,7 @@ export interface AgentApp {
 }
 
 /** The person-level preferences the app keeps (owner_prefs). */
-export type OwnerPrefKey = 'ownBotsOnly' | 'webSearch';
+export type OwnerPrefKey = 'ownBotsOnly' | 'webSearch' | 'webSearchPrice';
 export interface OwnerPrefs {
   /** Telegram: my agents take only bots I parked myself, never a shared house bot. */
   ownBotsOnly: boolean;
@@ -309,6 +309,17 @@ export class Store {
         PRIMARY KEY (agent_id, profile_id, slot)
       );
       CREATE INDEX IF NOT EXISTS model_call_slots_profile ON model_call_slots (profile_id, slot);
+      -- Web searches per agent per UTC hour, by the provider that answered
+      -- (searchUsage.ts, HB-0532): "brave", "duckduckgo", …, "cached" for an
+      -- answer from OpenClaw's cache (no request made). From the transcripts,
+      -- re-read whole for the reader's 30 days; the Hatchabot agent's own
+      -- searches and Hatchabot's checks under fixed ids. Counts only; kept
+      -- 400 days, and a deleted agent's stay: they spent the key's quota.
+      CREATE TABLE IF NOT EXISTS search_hours (
+        agent_id TEXT NOT NULL, hour TEXT NOT NULL, provider TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (agent_id, hour, provider)
+      );
+      CREATE INDEX IF NOT EXISTS search_hours_hour ON search_hours (hour);
       -- Spare Discord bots (discordPool.ts): a parked token, its servers and
       -- warnings, owned by an account or shared (owner_id NULL).
       CREATE TABLE IF NOT EXISTS discord_bots (
@@ -4531,6 +4542,35 @@ export class Store {
       this.db.prepare(`DELETE FROM token_samples WHERE at < ?`).run(beforeIso);
       this.db.prepare(`DELETE FROM applied_source_changes WHERE at < ?`).run(beforeIso);
     })();
+  }
+
+  /**
+   * An agent's searches as its transcripts tell them, from `sinceHour` on:
+   * those hours are replaced whole (a re-read counts nothing twice), and the
+   * hours before stay as the last read left them.
+   */
+  setSearchHours(agentId: string, sinceHour: string, hours: Record<string, Record<string, number>>): void {
+    const up = this.db.prepare(`INSERT INTO search_hours (agent_id, hour, provider, n) VALUES (?, ?, ?, ?)`);
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM search_hours WHERE agent_id = ? AND hour >= ?`).run(agentId, sinceHour);
+      for (const [hour, by] of Object.entries(hours)) {
+        if (hour < sinceHour) continue;
+        for (const [provider, n] of Object.entries(by)) if (n > 0) up.run(agentId, hour, provider, Math.round(n));
+      }
+    })();
+  }
+  /** One search made by Hatchabot itself (the Hatchabot agent's, a check), added to its hour. */
+  addSearch(agentId: string, provider: string, at: string, n = 1): void {
+    this.db.prepare(`INSERT INTO search_hours (agent_id, hour, provider, n) VALUES (?, ?, ?, ?)
+      ON CONFLICT(agent_id, hour, provider) DO UPDATE SET n = n + excluded.n`).run(agentId, at.slice(0, 13), provider, n);
+  }
+  /** Searches per agent, hour and provider, from `fromHour` up to (not including) `toHour`. */
+  searchHours(fromHour: string, toHour: string): Array<{ agentId: string; hour: string; provider: string; n: number }> {
+    return (this.db.prepare(`SELECT agent_id, hour, provider, n FROM search_hours WHERE hour >= ? AND hour < ?`).all(fromHour, toHour) as
+      Array<{ agent_id: string; hour: string; provider: string; n: number }>).map((r) => ({ agentId: r.agent_id, hour: r.hour, provider: r.provider, n: r.n }));
+  }
+  pruneSearchHours(beforeIso: string): void {
+    this.db.prepare(`DELETE FROM search_hours WHERE hour < ?`).run(beforeIso.slice(0, 13));
   }
 
   /** Record a day's own use (never lowered: a later, fuller count of the same day wins). */

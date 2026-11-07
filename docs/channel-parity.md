@@ -4,7 +4,7 @@ Asked for on 2026-09-25: "make them equal as much as possible, flag where one
 doesn't have the feature the other has, and align Settings → Telegram with
 Settings → Discord and the two tabs on the agent". Since v2.74.0 every
 control below is drawn from the same card on the agent and the same layout
-under Settings; this page is the ledger of what is equal, what was made
+under Settings (one Messaging tab for all three apps since 2026-11-07); this page is the ledger of what is equal, what was made
 equal, and what the platforms keep different.
 
 ## On the agent (the Telegram tab and the Discord tab)
@@ -20,8 +20,8 @@ Both tabs draw one card per app with the same rows, in the same order:
 | Warnings from the last check | groups off / privacy on at BotFather | intent off, no server yet | scopes |
 | Open in the app | ✓ | ✓ | ✓ |
 | Add to a server | — | ✓ | — (invite it to a channel with /invite) |
-| 🔁 Change bot… (a spare from the pool) | ✓ | ✓ | ✓ (Settings → Slack) |
-| Detach… (parks the bot) | ✓ (back to the pool) | ✓ (parked under Settings → Discord) | ✓ (parked with both tokens under Settings → Slack) |
+| 🔁 Change bot… (a spare from the pool) | ✓ | ✓ | ✓ (Settings → Messaging) |
+| Detach… (parks the bot) | ✓ (back to the pool) | ✓ (parked under Settings → Messaging) | ✓ (parked with both tokens under Settings → Messaging) |
 | People on the app + knocks (Not now / That's me / Let them in) | ✓ | ✓ | ✓ |
 | Group chats | any group (members, @mention) · off · one group (members, @mention) | every server it is in (members, @mention) · off · one server | every channel it is in (members, @mention) · off · one channel |
 | Who can reach it (invite only / anyone can knock) | one setting for every app | same | same |

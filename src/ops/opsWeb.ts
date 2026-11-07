@@ -38,6 +38,8 @@ export interface OpsWebDeps {
   braveKey: () => Promise<string | undefined>;
   /** Brave failed a search just now, so the fleet's search is worth checking. */
   onBraveFailed?: () => void;
+  /** A search was answered (Brave's is a request on the key): counted with the month's searches (searchUsage.ts). */
+  onSearched?: (provider: 'brave' | 'duckduckgo') => void;
   fetchImpl?: typeof fetch;
   lookup?: (host: string) => Promise<string[]>;
   now?: () => number;
@@ -210,6 +212,7 @@ export function makeOpsWeb(deps: OpsWebDeps) {
         braveAnswered = r.status;
         if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
         const j = (await r.json()) as { web?: { results?: Array<{ title?: string; url?: string; description?: string }> } };
+        deps.onSearched?.('brave');
         return (j.web?.results ?? []).filter((x) => x.url).slice(0, 8)
           .map((x) => ({ title: strip(x.title ?? ''), url: x.url!, snippet: strip(x.description ?? '').slice(0, 300) }));
       } catch { deps.onBraveFailed?.(); }
@@ -222,6 +225,7 @@ export function makeOpsWeb(deps: OpsWebDeps) {
     // What to do about Brave depends on whether a key is set and what it answered just now.
     if (duckDuckGoTurnedAway(r.status, html)) throw new Error(`${DDG_TURNED_AWAY} ${braveAdvice({ keySet: !!key, ...(key ? { brave: braveFailure(braveAnswered) } : {}) })}`);
     if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
+    deps.onSearched?.('duckduckgo');
     const out: Result[] = [];
     // One result per title link; its snippet is looked for only up to the next
     // result. (A lazy match with an optional snippet group ended right after

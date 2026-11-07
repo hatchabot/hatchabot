@@ -218,3 +218,7 @@ tests that run on their own.
 | 2026-11-07 | candidate-gate | pass | v2.174.0 | 2 | OpenClaw 2026.9.8 |
 | 2026-11-07 | regress-autonomous | pass | v2.174.0 | 6 | OpenClaw 2026.9.8 |
 | 2026-11-07 | restore-drill | pass | v2.174.0 | 4 | OpenClaw 2026.9.8 |
+| 2026-11-07 | privacy | pass | v2.175.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-07 | google-plain-request | pass | v2.175.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-07 | candidate-gate | pass | v2.175.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-11-07 | regress-autonomous | pass | v2.175.0 | 7 | OpenClaw 2026.9.8 |

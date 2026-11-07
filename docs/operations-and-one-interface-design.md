@@ -285,7 +285,7 @@ gone, and the knowledge-pack test if the map does.
 | Import, 📋 Templates | New agent → open a .hatchabot file / start from a template |
 | 📊 Usage, 📊 Sources (all agents) | Usage; View by → Source / Model |
 | Setup guide, Help, Install app, theme, sign out | the header and the account menu |
-| Rate-limit banner, bot pool count | the tile's status and Alerts; Settings → Telegram |
+| Rate-limit banner, bot pool count | the tile's status and Alerts; Settings → Messaging |
 | Recent activity | Activity |
 | 📑 Jump legend | not needed with icons; View by → Alerts |
 | Planned agents; manual order; Run health checks (all); Setup-values notice; Telegram Web | **missing** — see "What only classic has" |

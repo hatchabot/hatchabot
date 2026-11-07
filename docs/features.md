@@ -1011,9 +1011,13 @@ bottom from the right), so the star stays clear with all of them present.
 
 ## Creating & talking to agents
 
-**Telegram is optional.** Tick **No Telegram** when creating an agent (or
-`hatchabot create <name> --no-telegram`) and it uses no bot at all: you talk to
-it by clicking its icon, which opens its OpenClaw console. Add a bot later from
+**Telegram is optional, and off unless you ask for it.** A new agent made in the
+app uses no bot unless you tick **Use Telegram** in the New agent form (a clone, a template and an
+app from a repo start the same way). You
+talk to it by clicking its icon, which opens its OpenClaw console, and the
+results of its scheduled tasks arrive there (the red dot on its icon), not on
+your phone. The command line keeps its old default: `hatchabot create <name>`
+takes a bot, and `--no-telegram` goes without. Add a bot later from
 its Telegram tab (**Connect**: instant from your pool, or paste a
 BotFather token) when you want to reach it from your phone or invite people.
 **Remove…** on the same row does the reverse. The bot goes back to your pool,
@@ -1039,7 +1043,7 @@ token isn't lost: delete parks it in the Bot pool by default (API callers can
 opt out with `?recycleBot=0`), ready for a future agent.
 
 Bots outlive agents by default: **deleting an agent parks its bot in the
-Bot pool** (⚙ Settings → Telegram) — pool-leased and hand-pasted alike — and
+Bot pool** (⚙ Settings → Messaging → Telegram) — pool-leased and hand-pasted alike — and
 when the pool leases it to the next agent, the bot's display name updates to
 that agent's name automatically. **Bots are personal**: a token belongs to
 whoever minted it at BotFather (they can rename or revoke it any time), so
@@ -1052,7 +1056,7 @@ instantly — the header shows "N instant bots ready" and the create dialog
 lets you opt out per agent for a bespoke @handle. (Server-side stocking:
 `HATCHABOT_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
 
-**Use only my own bots** (⚙ Settings → Telegram, v2.165.0): a tick per person.
+**Use only my own bots** (⚙ Settings → Messaging → Telegram, v2.165.0): a tick per person.
 Your agents then never take a **shared** house bot, even when it is the only
 one free — they ask for a BotFather token (or go without Telegram) instead.
 The "ready" counts you see (the create form, the pool page) follow the choice.
@@ -1286,6 +1290,19 @@ A key you replace reaches agents at their next Rebuild, since each holds it in
 its environment: until then they use DuckDuckGo, even if the old key still works,
 and Settings says how many.
 **Use** can be set to DuckDuckGo only.
+
+**How much of Brave is used, and by whom.** Under the Fleet search key, **Brave
+searches this month** shows what is left (Brave's own count on a plan with a
+monthly cap; on a metered plan, the month's free credit against the searches
+counted), where this month's pace ends, a bar per day, the agents ranked by
+their Brave searches with each one's share and cost, and an estimated cost
+for the month. The drawer's heading says how much is used, so it reads closed
+too. Counts come from each agent's conversations about once an hour (OpenClaw
+records which provider answered each search, and a repeat it answered from its
+cache costs nothing), plus the Hatchabot agent's own searches and Hatchabot's
+checks. The price is Brave's Search plan (November 2026: $5 per 1,000 searches,
+with $5 of credit each month) until you change it there. Searches made with the
+same key outside Hatchabot show only in Brave's dashboard, which has the bill.
 
 Environment variables travel with a full copy: Download/Restore and
 cross-cluster moves carry each var's name **and** value (the archive already
@@ -1524,7 +1541,7 @@ was last heard from, and on which agent; someone invited who never messaged
 shows as not linked. `--all` (the machine owner) widens it to every
 account's agents.
 
-**Getting a token back out.** Every row of **⚙ Settings → Telegram → Every bot
+**Getting a token back out.** Every row of **⚙ Settings → Messaging → Telegram → Every bot
 this server has a token for** has **🔑 Show** — the second press copies. It is
 the only place that can reveal the token of a *spare* in the pool, an
 *orphaned* token, or a bot whose agent is archived, which is what you need
@@ -1576,8 +1593,8 @@ in · off · one server), and **Who can reach it** — one setting for every app
 Telegram adds **Rich messages**; the token stays under the Telegram tab.
 Members, invites and people you already know are under **Sharing** for every
 app, and adding a known person admits them on every app the agent has that
-they are known on. Settings → **Telegram** and Settings → **Discord** share
-one layout too: a status line, *Add a bot*, and the pool in the same groups
+they are known on. Under Settings → **Messaging**, Telegram, Slack and Discord
+share one layout too: a status line, *Add a bot*, and the pool in the same groups
 (free / in use, yours / shared), with a re-check on every spare. What the
 platforms keep different, and why, is the ledger in `docs/channel-parity.md`.
 
@@ -1605,7 +1622,7 @@ minutes.
 
 **Spare Discord bots, spare Slack apps.** Removing Discord or Slack from an
 agent, deleting or archiving the agent, parks its bot (or app, with both
-tokens) under ⚙ Settings → **Discord** or **Slack** with its name and
+tokens) under ⚙ Settings → **Messaging** with its name and
 servers (channels), instead of throwing the tokens away. A parked bot can
 be parked ahead of time too (paste its token there; the machine owner can
 share one with everyone), re-checked with Discord, or deleted. An agent's

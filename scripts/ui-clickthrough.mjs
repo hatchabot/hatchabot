@@ -1692,6 +1692,114 @@ const SCENARIOS = String.raw`(() => {
         if (aiDlg.open) aiDlg.close();
       }
     },
+    settingsMessagingTab: async () => {
+      // The owner (2026-11-07): Settings → Telegram, Slack and Discord on one tab, Messaging; every control kept.
+      const el = (id) => document.getElementById(id);
+      const seen = (e) => (e.checkVisibility ? e.checkVisibility() : e.offsetParent !== null);
+      const selected = () => document.querySelector('#v2SettingsTabs .tab[aria-selected="true"]')?.textContent;
+      try {
+        await openAiDlg();
+        const tabs = [...document.querySelectorAll('#v2SettingsTabs .tab')].map((b) => b.textContent);
+        ok('one Messaging tab, none for Telegram, Slack or Discord: ' + tabs.join(' | '), tabs.includes('Messaging') && !tabs.some((x) => /^(Telegram|Slack|Discord)$/.test(x)));
+        eq('between Classes and Connections', tabs.slice(tabs.indexOf('Classes'), tabs.indexOf('Classes') + 3), ['Classes', 'Messaging', 'Connections']);
+        const n = (re) => calls('GET', re).length;
+        const before = [n(/\/v1\/pool$/), n(/\/v1\/slack-apps$/), n(/\/v1\/discord-bots$/)];
+        byText('#v2SettingsTabs .tab', 'Messaging').click();
+        const panes = ['panePool', 'paneSlack', 'paneDiscord'].map(el);
+        ok('all three show', panes.every((x) => !x.hidden && seen(x)));
+        ok('Telegram, then Slack, then Discord', (panes[0].compareDocumentPosition(panes[1]) & Node.DOCUMENT_POSITION_FOLLOWING) && (panes[1].compareDocumentPosition(panes[2]) & Node.DOCUMENT_POSITION_FOLLOWING));
+        eq('each under its heading', panes.map((x) => x.querySelector('.v2settingshead')?.textContent), ['Telegram', 'Slack', 'Discord']);
+        ok('the headings show', panes.every((x) => seen(x.querySelector('.v2settingshead'))));
+        const ids = ['poolStatus', 'poolOwnOnly', 'poolToken', 'poolAddBtn', 'poolList', 'botInvDrawer', 'spoolBot', 'spoolApp', 'spoolAddBtn', 'spoolList', 'dpoolToken', 'dpoolAddBtn', 'dpoolList'];
+        ok('every control is there: ' + ids.filter((id) => !panes.some((x) => x.contains(el(id)))).join(', '), ids.every((id) => panes.some((x) => x.contains(el(id)))));
+        await until(() => n(/\/v1\/pool$/) > before[0] && n(/\/v1\/slack-apps$/) > before[1] && n(/\/v1\/discord-bots$/) > before[2]);
+        // Their handlers still answer: an empty Add says what is missing.
+        el('spoolBot').value = ''; el('spoolApp').value = ''; el('spoolAddBtn').click();
+        await until(() => el('spoolErr').textContent.includes('Paste both tokens'));
+        el('dpoolToken').value = ''; el('dpoolAddBtn').click();
+        await until(() => el('dpoolErr').textContent.includes('Paste the bot token'));
+        el('spoolErr').textContent = ''; el('dpoolErr').textContent = '';
+        byText('#v2SettingsTabs .tab', 'AI').click();
+        ok('another tab hides all three', panes.every((x) => x.hidden));
+        aiDlg.close();
+        // Every way in that named one of the three lands on Messaging; one to a later part lands on it.
+        for (const link of ['pool', 'telegram', 'slack', 'discord', 'messaging']) {
+          await openAiDlg(link);
+          eq(link + ' opens', selected(), 'Messaging');
+          aiDlg.close();
+        }
+        await openAiDlg('discord');
+        await sleep(50);
+        // Scrolled to it: its heading below the panel's sticky bar and on screen (Discord is last, so it may stop short of the top).
+        const bar = aiDlg.querySelector('.v2pbar').getBoundingClientRect(), box = aiDlg.getBoundingClientRect();
+        const head = el('paneDiscord').querySelector('.v2settingshead').getBoundingClientRect();
+        ok('openAiDlg(discord) shows Discord: its heading at ' + Math.round(head.top) + ', the bar ends at ' + Math.round(bar.bottom) + ', scrolled ' + aiDlg.scrollTop, aiDlg.scrollTop > 0 && head.top >= bar.bottom && head.bottom <= box.bottom);
+        aiDlg.close();
+      } finally {
+        if (aiDlg.open) aiDlg.close();
+      }
+    },
+    newAgentTelegramOff: async () => {
+      // The owner (2026-11-07): "I found myself unclicking the use telegram selection box a lot" — off until ticked.
+      const el = (id) => document.getElementById(id);
+      const shown = (id) => getComputedStyle(el(id)).display !== 'none';
+      const creates = () => calls('POST', /\/v1\/agents$/);
+      const open = async () => { el('fabBtn').click(); await until(() => createDlg.open); };
+      const was = poolAvail;
+      try {
+        poolAvail = 3;
+        await open();
+        ok('Telegram starts unticked', !el('agentTelegram').checked);
+        ok('the pool choice waits for it', !shown('agentPoolRow') && el('agentPoolEmptyNote').hidden);
+        const said = createDlg.textContent.replace(/\s+/g, ' ');
+        ok('it says where task results go without a chat app: ' + said.slice(said.indexOf('Use Telegram'), said.indexOf('Use Telegram') + 260), said.includes("its scheduled tasks' results arrive in its console conversation (the red dot on its icon), not on your phone"));
+        el('agentTelegram').click();
+        ok('ticked: the pool choice, on', shown('agentPoolRow') && el('agentUsePool').checked && el('agentPoolEmptyNote').hidden);
+        el('agentTelegram').click();
+        ok('unticked: gone again', !shown('agentPoolRow'));
+        el('agentName').value = 'Pantry Notes';
+        const n0 = creates().length;
+        await createAgent();
+        const made = creates().slice(n0);
+        eq('one create', made.length, 1);
+        eq('it asks for no bot, and says so', [made[0].body.telegram, made[0].body.skipPool], [false, undefined]);
+        ok('the form closed', !createDlg.open);
+        // Ticked, then cancelled: the next agent starts unticked again.
+        await open(); el('agentTelegram').click(); createDlg.close();
+        await open();
+        ok('each open starts unticked', !el('agentTelegram').checked && !shown('agentPoolRow'));
+        // Asked for: a bot; declining the pool asks for a bespoke one.
+        el('agentTelegram').click(); el('agentUsePool').click();
+        el('agentName').value = 'Pantry Notes Two';
+        await createAgent();
+        eq('ticked: Telegram, and a bespoke bot', [creates().at(-1).body.telegram, creates().at(-1).body.skipPool], [true, true]);
+        // An empty pool: the BotFather warning comes only with Telegram.
+        poolAvail = 0;
+        await open();
+        ok('no warning while it is off', el('agentPoolEmptyNote').hidden);
+        el('agentTelegram').click();
+        ok('ticked with an empty pool: the warning, no pool choice', !el('agentPoolEmptyNote').hidden && !shown('agentPoolRow'));
+      } finally {
+        poolAvail = was;
+        if (createDlg.open) createDlg.close();
+        el('agentName').value = ''; el('agentTelegram').checked = false; agentTelegramChanged();
+      }
+    },
+    sheetDesktopKeepsItsClose: async () => {
+      // The phone's ‹ Back (2026-11-07) is the phone's: a desktop keeps the ✕ and the full-height sheet.
+      try {
+        openV2Agent('a1');
+        const bar = document.getElementById('v2AgentBar');
+        const x = bar.querySelector('.v2sclose'), back = bar.querySelector('.v2sback');
+        ok('the ✕ shows', !!x && getComputedStyle(x).display !== 'none' && x.getAttribute('aria-label') === 'Close');
+        ok('no ‹ Back', !!back && getComputedStyle(back).display === 'none');
+        eq('the sheet runs from the top', Math.round(v2AgentDlg.getBoundingClientRect().top), 0);
+        x.click();
+        ok('✕ closes it', !v2AgentDlg.open);
+        // The check's Chrome does not always deliver a dialog's close event: sent as a browser would, so the next check starts clean.
+        v2AgentDlg.dispatchEvent(new Event('close'));
+      } finally { try { v2Close(); } catch {} }
+    },
     usageContextNow: async () => {
       window.__override['/v1/token-health'] = { rows: [
         { agent: 'Kitchen', id: 'a1', state: 'running', model: 'anthropic/claude-opus-4-8', conversation: { calls: 12, ctxK: { p50: 40, p90: 90, max: 120 }, mainNowK: 180, mainAt: new Date().toISOString(), windowK: 200 } },
@@ -3258,6 +3366,8 @@ const SCENARIOS = String.raw`(() => {
         const sent = calls('POST', /\/v1\/agents\/import$/).slice(before);
         eq('the copy was uploaded, once', sent.length, 1);
         ok('uploaded as the file itself, no setup values: ' + sent[0].url, sent[0].body instanceof File && !/values=/.test(sent[0].url));
+        // A full copy comes back with its own bot, so it never asks for none (the server refuses that).
+        ok('a copy keeps its bot: ' + sent[0].url, !/telegram=/.test(sent[0].url));
         ok('only the start of it was decompressed in the tab: ' + out + ' bytes', out > 0 && out < 4 * 1048576);
         // A template with setup fields still opens the form, and its answers ride the request.
         out = 0;
@@ -3273,6 +3383,7 @@ const SCENARIOS = String.raw`(() => {
         eq('the template was uploaded, once', t.length, 1);
         eq('with the answer in the body, ahead of the file', (await t[0].body.text()).split('\n')[0], JSON.stringify({ values: { subject: 'Algebra' } }));
         ok('the small template was read whole: ' + out, out > 100);
+        eq('a template stands up an agent without a bot (Telegram off by default)', new URL(t[0].url, location.href).search, '?telegram=0');
         ok('said what was imported: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('Imported “Homework Helper”'));
         // A file that is not gzip at all is uploaded as it is, as before.
         window.__answer = { 'POST /v1/agents/import': [{ status: 400, body: { error: 'That is not a .hatchabot file.' } }] };
@@ -3306,7 +3417,8 @@ const SCENARIOS = String.raw`(() => {
         await imp;
         const sent = calls('POST', /\/v1\/agents\/import$/).slice(before);
         eq('one request went', sent.length, 1);
-        ok('nothing in the address: ' + sent[0].url, !sent[0].url.includes('?'));
+        // No answers in the address: only the template's no-bot flag (Telegram off by default, 2026-11-07).
+        eq('only the no-bot flag in the address', new URL(sent[0].url, location.href).search, '?telegram=0');
         eq('sent as an import with answers', sent[0].headers['content-type'], 'application/vnd.hatchabot.import');
         const bytes = new Uint8Array(await sent[0].body.arrayBuffer());
         const nl = bytes.indexOf(10);
@@ -8539,6 +8651,54 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = {};
       }
     },
+    braveUsagePanel: async () => {
+      // HB-0532: the month's Brave searches — what is left, a bar per day, who searches most, the cost, and the price.
+      const days = Array.from({ length: 30 }, (_, i) => ({ day: '2026-11-' + String(i + 1).padStart(2, '0'), brave: i < 10 ? 40 : 0, other: i === 2 ? 7 : 0 }));
+      const usage = { period: { start: '2026-11-01T00:00:00.000Z', end: '2026-12-01T00:00:00.000Z', basis: 'calendar', elapsedDays: 10.5, days: 30 },
+        brave: 400, other: 7, cached: 4, byDay: days,
+        byAgent: [
+          { id: 'a1', name: 'Market Watch', kind: 'agent', brave: 300, other: 0, cached: 0, cost: 1.5 },
+          { id: 'a2', name: 'Trip Planner', kind: 'agent', brave: 50, other: 7, cached: 4, cost: 0.25 },
+          { id: '__checks__', name: "Hatchabot's checks", kind: 'checks', brave: 50, other: 0, cached: 0, cost: 0.25 },
+        ],
+        allowance: { kind: 'credit', free: 1000, used: 400, left: 600 }, price: { per1000: 5, monthlyCredit: 5 },
+        cost: { gross: 2, net: 0, projectedNet: 0.71 }, projected: 1143, runsOut: '2026-11-27', keySet: true, active: 'brave' };
+      try {
+        window.__override['/v1/web-search/usage'] = usage;
+        await loadSearchUsage();
+        const el = document.getElementById('searchUsage');
+        const text = () => el.textContent.replace(/\s+/g, ' ');
+        ok('says what is left: ' + text().slice(0, 160), text().includes('600 of 1,000 free searches left'));
+        ok('the drawer heading says it too', document.getElementById('searchUsageSum').textContent.includes('400 of 1,000 free searches used this month'));
+        const used = el.querySelector('.sv-used');
+        ok('the meter is 40% full: ' + used?.style.width, parseFloat(used?.style.width) === 40);
+        ok('a mark where this pace ends the month', !!el.querySelector('.sv-proj'));
+        ok('says when the free credit runs out', text().includes('free credit runs out about') && /Nov 27|27 Nov/.test(text()));
+        ok('the cost so far and by month end', text().includes('Estimated cost: $0.00 so far') && text().includes('$0.71 by month end'));
+        const bars = el.querySelectorAll('.sv-day');
+        eq('a bar per day', bars.length, 30);
+        ok('a bar says its numbers: ' + bars[2].title, bars[2].title.includes('40 Brave') && bars[2].title.includes('7 other'));
+        ok('two kinds of search: a legend', text().includes('DuckDuckGo and others'));
+        const names = [...el.querySelectorAll('.sv-name')].map((x) => x.textContent);
+        eq('who searches most, most first', names, ['Market Watch', 'Trip Planner', "Hatchabot's checks"]);
+        ok('their share and cost', text().includes('300 · 75% · $1.50'));
+        ok('cached answers are said apart', text().includes("4 more were answered from OpenClaw's cache"));
+        // The price: saved, and the panel shows the answer.
+        window.__answer = { 'PUT /v1/web-search': [{ body: { ...usage, price: { per1000: 4, monthlyCredit: 0 }, cost: { gross: 1.6, net: 1.6, projectedNet: 4.57 } } }] };
+        document.getElementById('searchPricePer').value = '4';
+        document.getElementById('searchPriceCredit').value = '0';
+        document.getElementById('searchPriceSaveBtn').click();
+        const put = await until(() => calls('PUT', /\/v1\/web-search$/).find((c) => c.body?.price));
+        eq('the price sent', put.body, { price: { per1000: 4, monthlyCredit: 0 } });
+        await until(() => text().includes('Estimated cost: $1.60 so far'));
+        // No key and no searches: nothing to show.
+        renderSearchUsage({ ...usage, keySet: false, brave: 0, other: 0, byAgent: [], allowance: undefined });
+        ok('no key, no searches: empty', el.textContent.trim() === '' && document.getElementById('searchUsageSum').textContent === '');
+      } finally {
+        delete window.__override['/v1/web-search/usage'];
+        window.__answer = {};
+      }
+    },
     agentGmailTest: async () => {
       // The owner's request (2026-11-03): a button per account that has Gmail; it says what the test said.
       window.__override['/v1/agents/a1/connections'] = { accounts: [
@@ -8570,6 +8730,66 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/connections'];
         window.__answer = {};
       }
+    },
+    phoneHeaderShowsTheVersion: async () => {
+      // The owner (2026-11-07): "i can't see the version of hatchabot in the header" on a phone.
+      const ver = document.getElementById('v2AppVer'), header = document.getElementById('v2Header');
+      const dim = getComputedStyle(document.querySelector('.sub')).color;
+      const check = (what) => {
+        const r = ver.getBoundingClientRect(), h = header.getBoundingClientRect();
+        ok(what + ': the version shows: ' + JSON.stringify(r), r.width > 20 && r.height >= 8 && getComputedStyle(ver).visibility !== 'hidden');
+        eq(what + ': it names the build', ver.textContent, 'v' + window.HATCHABOT_VERSION);
+        ok(what + ': inside the header', r.top >= h.top && r.bottom <= h.bottom && r.left >= 0);
+        ok(what + ': dim, not a colour of its own', getComputedStyle(ver).color === dim);
+        const parts = [...header.querySelectorAll('.v2brand img, .v2hubactions button:not([hidden]), .v2avatar, #v2AppVer')].filter((e) => e.getBoundingClientRect().width > 0);
+        const out = parts.filter((e) => { const b = e.getBoundingClientRect(); return b.left < 0 || b.right > innerWidth; });
+        ok(what + ': nothing past the edge: ' + out.map((e) => e.getAttribute('aria-label') || e.id || e.tagName).join(', '), !out.length);
+        const hit = [...header.querySelectorAll('.v2hubactions button:not([hidden]), #v2AvatarBtn')].filter((b) => { const q = b.getBoundingClientRect(); return q.width > 0 && q.left < r.right && q.right > r.left && q.top < r.bottom && q.bottom > r.top; });
+        ok(what + ': clear of the buttons: ' + hit.map((b) => b.getAttribute('aria-label') || b.id).join(', '), !hit.length);
+        ok(what + ': no sideways scroll: ' + document.documentElement.scrollWidth, document.documentElement.scrollWidth <= innerWidth);
+      };
+      scrollTo(0, 0);
+      check('a 390 px phone');
+      const inbox = document.getElementById('v2InboxBtn'), was = inbox.hidden;
+      try { inbox.hidden = false; check('with Inbox showing too'); } finally { inbox.hidden = was; }
+    },
+    phoneSheetHasAWayBack: async () => {
+      // The owner (2026-11-07): "it feels awkward to click away to return from an agent to the main screen".
+      try {
+        openV2Agent('a1');
+        const bar = document.getElementById('v2AgentBar');
+        const back = bar.querySelector('.v2sback');
+        const r = back.getBoundingClientRect();
+        ok('‹ Back is at the top left: ' + JSON.stringify(r), r.width >= 32 && r.height >= 32 && r.left >= 0 && r.left < 30 && r.top >= 0 && r.bottom <= 120);
+        eq('it says where it goes', back.getAttribute('aria-label'), 'Back to all agents');
+        ok('one control: the ✕ gives way', getComputedStyle(bar.querySelector('.v2sclose')).display === 'none');
+        const box = v2AgentDlg.getBoundingClientRect();
+        ok('the home screen shows above the sheet: ' + Math.round(box.top), box.top >= 40 && box.top <= 60);
+        ok('the sheet fits the screen: ' + JSON.stringify(box), box.left >= 0 && Math.round(box.right) <= innerWidth && Math.round(box.bottom) <= innerHeight);
+        ok('the name keeps room: ' + Math.round(document.getElementById('v2AgentName').getBoundingClientRect().width), document.getElementById('v2AgentName').getBoundingClientRect().width >= 60);
+        const named = [...bar.querySelectorAll('button')].filter((b) => getComputedStyle(b).display !== 'none').map((b) => b.getAttribute('aria-label') || b.innerText.trim());
+        ok('its buttons, down to their emoji, keep their names: ' + named.join(' | '), named.includes('Back to all agents') && named.includes('Chat') && named.every((x) => /[A-Za-z]{3}/.test(x)));
+        // At the foot of a long tab, Back is where it was.
+        const pane = document.getElementById('v2Pane');
+        pane.scrollTop = pane.scrollHeight;
+        await sleep(30);
+        ok('the tab scrolled: ' + pane.scrollTop, pane.scrollTop > 100);
+        const r2 = back.getBoundingClientRect();
+        ok('‹ Back stays put: ' + Math.round(r2.top) + ' (was ' + Math.round(r.top) + ')', Math.abs(r2.top - r.top) < 1);
+        back.click();
+        ok('‹ Back goes home', !v2AgentDlg.open);
+        // The check's Chrome does not always deliver a dialog's close event, so it is sent here as a browser would.
+        v2AgentDlg.dispatchEvent(new Event('close'));
+        eq('the sheet let go of its agent', v2AgentId, null);
+        // A tap on the strip of home screen above it goes home too; a tap on the sheet does not.
+        openV2Agent('a1');
+        document.getElementById('v2AgentName').click();
+        ok('a tap on the sheet keeps it', v2AgentDlg.open);
+        v2AgentDlg.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: Math.round(innerWidth / 2), clientY: Math.round(box.top / 2) }));
+        ok('a tap above it closes it', !v2AgentDlg.open);
+        v2AgentDlg.dispatchEvent(new Event('close'));
+        eq('and let go of its agent', v2AgentId, null);
+      } finally { try { v2Close(); } catch {} }
     },
     phoneAccessAndSpendingFit: async () => {
       // Sharing → Access and Usage → Spending on a phone (2026-10-25): nothing past the edge, and an

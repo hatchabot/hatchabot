@@ -116,6 +116,29 @@ describe('create, add and remove Telegram', () => {
     expect(a.webOnly).toBe(true);
   });
 
+  it('a create that does not say keeps the API default, a bot: the CLI, the manager and scripts rely on it (the app says either way)', async () => {
+    // Since 2026-11-07 the app's New agent form sends telegram: false unless "Use Telegram" is ticked;
+    // the API itself is unchanged, so `hatchabot create` and the manager's create_agent still take a bot.
+    const { store, f } = await api();
+    for (const [name, telegram] of [['Bot Pal', undefined], ['Ticked Pal', true]] as const) {
+      const r = await f.inject({ method: 'POST', url: '/v1/agents', headers: H, payload: { name, aiProfileId: 'p1', hostId: 'h1', ...(telegram === undefined ? {} : { telegram }) } });
+      expect(r.statusCode).toBeLessThan(300);
+      expect(store.listAgents(OWNER).find((x) => x.name === name)!.webOnly).toBeFalsy();
+    }
+  });
+
+  it("the Hatchabot agent's own bot (its alerts to your phone) is still added from its Telegram tab", async () => {
+    // Telegram off by default (2026-11-07) is the New agent form's; the Hatchabot agent is made by its
+    // own route, web-only as always, and takes its bot the way any agent's Telegram tab gives one.
+    const { store, f, add } = await api();
+    add('ops1', true);
+    store.setAgentOps('ops1', true);
+    const r = await f.inject({ method: 'POST', url: '/v1/agents/ops1/telegram', headers: H, payload: {} });
+    expect(r.statusCode).toBe(202);
+    expect(store.getChannelForAgent('ops1')?.accountId).toBe('poolbot');
+    expect(store.getAgent('ops1')).toMatchObject({ ops: true, webOnly: false });
+  });
+
   it('adds a pool bot to a web-only agent', async () => {
     const { store, f, add } = await api();
     add('a1', true);

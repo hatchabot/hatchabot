@@ -225,8 +225,10 @@ Then open **http://localhost:8080** on that machine — with accounts you create
    injected into each agent, and nothing is mounted (see
    [docs/ai-profiles.md](docs/ai-profiles.md)). Otherwise paste an API key —
    or pick **Local model server** and point it at your own Ollama.
-2. **Tap +** to create an agent. If the bot pool is empty you'll be asked for a
-   BotFather token — the app walks you through it.
+2. **Tap +** to create an agent, and tick **Use Telegram** to reach it from your
+   phone (it is off by default: without it you talk to the agent in the app).
+   If the bot pool is empty you'll be asked for a BotFather token — the app
+   walks you through it.
 3. **Tap the Telegram link and say hi.** That first message claims the agent as
    yours. Then just chat. (Only your first-ever agent needs this claim — later
    agents recognize your Telegram account from birth and answer immediately.)

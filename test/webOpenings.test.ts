@@ -200,13 +200,13 @@ describe('the app dialog: Install (HB-0283)', () => {
     const { c, $, calls } = appPage({ profiles: [{ id: 'p1', name: 'Household plan' }, { id: 'p2', name: 'Second source' }] });
     c.openAppDlg('create');
     c.appInspected = { source: '~/demoapp', manifest: { ...MAN('Demo App'), chat: 'Run in {app_dir}.' }, ask: [] };
-    $('appName').value = 'Garden Helper'; $('appProfile').value = 'p2'; $('appNoTelegram').checked = true;
+    $('appName').value = 'Garden Helper'; $('appProfile').value = 'p2'; $('appTelegram').checked = false;
     const chat = gate<unknown>();
     c.api = async (url: string, init: { method?: string; body?: unknown } = {}) => { calls.push({ url, ...init }); return calls.length === 1 ? chat.p : url === '/v1/agents' ? { id: 'new1' } : {}; };
     const going = c.appGo();
     c.appDlg.close();
     c.openAppDlg('create');
-    $('appName').value = 'Something Else'; $('appProfile').value = 'p1'; $('appNoTelegram').checked = false;
+    $('appName').value = 'Something Else'; $('appProfile').value = 'p1'; $('appTelegram').checked = true;
     chat.open({ chat: 'Run in the app folder.' });
     await going;
     const made = calls.find((x) => x.url === '/v1/agents');

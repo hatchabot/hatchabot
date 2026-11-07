@@ -1162,6 +1162,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ## Telegram, Discord and Slack
 
+### A new agent has no Telegram bot, and no Telegram link to tap
+- **Check:** the agent was made in the app (New agent, a clone, a template, an app from a repo) or drafted by the Hatchabot agent, on v2.176.0 or later, and **Use Telegram** was not ticked; its Telegram tab offers **Connect** and its tile has no Telegram mark. Its results, a scheduled task's among them, arrive in its console conversation (the red dot on its icon).
+- **Cause:** a setting, not a fault. Telegram is off unless it is asked for: the web console is how most agents are talked to, and a new agent no longer takes a bot from the pool unless you tick it; one the Hatchabot agent drafts for you starts without one too. The command line keeps its old default (`hatchabot create` takes a bot; `--no-telegram` goes without), and so does the API when a request does not say. The Hatchabot agent was always made without a bot; its own Telegram (for alerts on your phone) is still attached from its Telegram tab.
+- **Fix:** on the agent's Telegram tab, **Connect** (instant from a spare bot in Settings → Messaging, or paste a BotFather token). For the next agent, tick **Use Telegram** in the New agent form.
+- **Fixed in:** `v2.176.0`
+- **Code:** `web/index.html` — `agentTelegramChanged`, `createAgent`, `cloneAgent`, `importAgentFile`, `appGo`; `src/mgmt/broker.ts` — `create_agent` (sends `telegram: false`)
+
+### Settings has no Telegram, Discord or Slack tab
+- **Check:** ⚙ Settings shows a **Messaging** tab between Classes and Connections, and no tab named Telegram, Discord or Slack.
+- **Cause:** on a release after v2.175.0 the three are one tab, Messaging: Telegram's spare bots first, then Slack's apps, then Discord's bots, each under its heading, with every control as it was. Older notes and messages that say Settings → Telegram (or Discord, Slack) mean that part of it.
+- **Fix:** open Settings → Messaging and scroll to the app. A link to the old tab opens Messaging at that part.
+- **Fixed in:** `v2.176.0`
+- **Code:** `web/index.html` — `V2_SETTINGS`, `V2_SETTINGS_HEAD`, `showTab`
+
 ### Discord or Slack ended up connected to a different agent than the one the sheet named
 - **Check:** the agent named in the Connect sheet has no Discord or Slack row, while another agent you had just clicked does; Activity shows the connect on that other agent.
 - **Cause:** opening Connect for one agent, then for another before the first had loaded, could paint the first agent's sheet while Connect sent the tokens to the second.
@@ -1247,7 +1261,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `web/index.html` — `openChanSetup`, `chanFields`
 
 ### A new agent sits on "Waiting on you"
-- **Check:** the agent's sheet asks for a Telegram bot token; Settings → Telegram shows no spare bot.
+- **Check:** the agent's sheet asks for a Telegram bot token; Settings → Messaging → Telegram shows no spare bot.
 - **Cause:** the agent needs a bot and none is available in the pool. Only a new agent made with Telegram on asks this (the create form ticks "No Telegram" by itself when the pool is empty); an unarchived, cloned or imported one goes on web-only (next entry).
 - **Fix:** paste a token from @BotFather, or choose **Continue without Telegram** (`hatchabot skip-telegram <agent>`); a bot can be attached later.
 - **Fixed in:** `v2.44.1`
@@ -1527,14 +1541,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `web/index.html` — `confirmArchive`, `restoreAgent`
 
 ### An unarchived agent hangs in PROVISIONING: "waiting for a bot token"
-- **Check:** after Restore (`hatchabot unarchive`), the Setup log ends with "waiting for a bot token" and Settings → Telegram shows no spare bot. From 2.142.0 the same situation shows instead as an Alerts line on a running agent: "No Telegram bot was free — it is running in the web app; attach a bot later".
+- **Check:** after Restore (`hatchabot unarchive`), the Setup log ends with "waiting for a bot token" and Settings → Messaging → Telegram shows no spare bot. From 2.142.0 the same situation shows instead as an Alerts line on a running agent: "No Telegram bot was free — it is running in the web app; attach a bot later".
 - **Cause:** coming back means leasing a new bot, and none was free. Before 2.142.0 unarchive, clone, derive and template import then parked on the paste-a-token step, though nobody had been asked about Telegram.
 - **Fix:** on an older install, `hatchabot skip-telegram <agent>` (or **Continue without Telegram** on its sheet) finishes it web-only, or paste a @BotFather token. From 2.142.0 it goes on web-only by itself; attach a bot when one is free under its settings → Messaging → Telegram (archive or detach another agent to free one, or paste a token).
 - **Fixed in:** `v2.142.0`
 - **Code:** `src/orchestrator/provision.ts` — `provisionChannelOrGoWebOnly`, `webOnlyIfNoBot`; `src/store/store.ts` — `telegramSkippedForNoBot`; `src/api/routes.ts` — `telegramSkipped`
 
 ### @BotFather will not create another bot
-- **Check:** count the bots on that Telegram account (@BotFather `/mybots`; Settings → Telegram lists the spares).
+- **Check:** count the bots on that Telegram account (@BotFather `/mybots`; Settings → Messaging → Telegram lists the spares).
 - **Cause:** Telegram allows about 20 bots per account, one per agent.
 - **Fix:** reuse bots: Detach/Remove parks a bot in the pool for the next agent; `hatchabot adopt <dir> <name> --reuse-bot` keeps an existing OpenClaw bot. Or use a second Telegram account, or put the agent in no chat app.
 - **Fixed in:** —
@@ -1590,7 +1604,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/orchestrator/members.ts` — `allowlistScrubScript`, `revokeMember`
 
 ### A pool bot serving an agent is renamed "Hatchabot (unassigned)"
-- **Check:** in Settings → Telegram, the bot is leased but its pending name is "Hatchabot (unassigned)".
+- **Check:** in Settings → Messaging → Telegram, the bot is leased but its pending name is "Hatchabot (unassigned)".
 - **Cause:** the release parked the idle name after another agent had already leased the bot.
 - **Fix:** upgrade, then Sync name on the agent.
 - **Fixed in:** `v2.153.0`
@@ -1702,7 +1716,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/api/routes.ts` — the `'/v1/agents/:id/telegram'` delete route, `stopAndConfirm`; `src/orchestrator/quiesce.ts` — `stopAndConfirm`
 
 ### The Bot pool lists a bot in use by an agent that was deleted while its Telegram was being added
-- **Check:** Settings → Telegram → Bot pool shows a bot leased to an agent that no longer exists; that agent was deleted while Add Telegram was still finding it a bot.
+- **Check:** Settings → Messaging → Telegram → Bot pool shows a bot leased to an agent that no longer exists; that agent was deleted while Add Telegram was still finding it a bot.
 - **Cause:** the attach checked the agent before it went looking for a bot and not after, so it saved the bot (row and token) on the deleted agent.
 - **Fix:** upgrade; remove the bot from the pool and park it again to free it. Since the fix an attach that finds its agent gone (or no longer running or stopped) connects nothing and sends the bot back, and says so.
 - **Fixed in:** `v2.171.0`
@@ -2921,9 +2935,9 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/store/store.ts` — `dropAttentionAckKeys`; `src/orchestrator/provision.ts` — `recordApplied`; `web/index.html` — `attentionCleared`, `attentionFingerprint`
 
 ### Archive said "its bot is back in the pool", and the pool does not have it
-- **Check:** the agent had a copy downloaded and stood stopped since (Settings → Telegram → Bot pool does not list its bot). Or it never had a bot: it was web-only.
+- **Check:** the agent had a copy downloaded and stood stopped since (Settings → Messaging → Telegram → Bot pool does not list its bot). Or it never had a bot: it was web-only.
 - **Cause:** the dialog and the message after were fixed words. A bot is left to a downloaded copy, which may be talking on it, instead of being parked.
-- **Fix:** nothing to repair: the bot was not lost, it is the copy's. To use it here anyway, **Add to pool** with its token (Settings → Telegram). Upgrade for words that say which happened.
+- **Fix:** nothing to repair: the bot was not lost, it is the copy's. To use it here anyway, **Add to pool** with its token (Settings → Messaging → Telegram). Upgrade for words that say which happened.
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/index.html` — `archiveBotWords`, `confirmArchive`; `src/orchestrator/archive.ts` — `copyElsewhere`, `leaveBotToCopy`
 
@@ -3264,6 +3278,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: the header is pinned at the very top with the status bar inside its own padding, so everything after it starts below it. The click-through gate's phone run sets a 59 px status bar and checks it.
 - **Fixed in:** `v2.167.0`
 - **Code:** `web/index.html` — `.v2top`, `--safe-top`; `scripts/ui-clickthrough.mjs` — `phoneChipsBelowTheStatusBar`
+
+### On a phone, the header cuts off the account button, or never shows the version
+- **Check:** on a phone about 400 to 460 px wide the round account button at the top right is cut off and the page scrolls sideways a little; on a narrower one (390 px) the header shows the egg but no version, so you cannot tell which build the phone runs.
+- **Cause:** the header buttons were meant to shrink to 34 px on a phone, but a later rule set them back to 38 px, so six of them, the account button and the wordmark did not fit at 420 px. Below 400 px the wordmark was hidden to make room, and the version went with it.
+- **Fix:** upgrade: the buttons shrink as meant, and below 440 px the wordmark gives way to the version, small and dim, under the egg. Until then the version is at the foot of the account menu.
+- **Fixed in:** `v2.176.0`
+- **Code:** `web/index.html` — `.v2top`, `.v2word`, `#v2AppVer`; `scripts/ui-clickthrough.mjs` — `phoneHeaderShowsTheVersion`
+
+### On a phone, an agent's page covers the whole screen, and getting back home is awkward
+- **Check:** on a phone, an agent's page (its settings sheet) fills the screen; the only way back is the ✕ at the top right.
+- **Cause:** the sheet was drawn as on a desktop, the full height of the screen.
+- **Fix:** upgrade: on a phone (640 px wide or less) the sheet stops short of the top, so a strip of the home screen shows above it and a tap there goes back, and ‹ Back sits at the sheet's top left, where every other panel has it, staying there while the tab scrolls. Esc still closes it; a desktop keeps its ✕.
+- **Fixed in:** `v2.176.0`
+- **Code:** `web/index.html` — `v2RenderSheetBar`, `.v2sback`, `.v2sheet`; `scripts/ui-clickthrough.mjs` — `phoneSheetHasAWayBack`
 
 ### A file opened from Files on a phone has no way back
 - **Check:** the app was opened from the phone's home screen (installed), a sound, video or PDF file was tapped in an agent's Files tab, and it filled the screen with no Back: the installed app has no browser bar.
@@ -4853,7 +4881,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/api/routes.ts` — the `/v1/agents/:id/telegram` route, `whileBusy`
 
 ### A new agent fails with "@bot already belongs to …" after a token was pasted for an earlier one
-- **Check:** the token pasted for the earlier agent (while it waited for a bot) was a spare bot's, listed under Settings → Telegram → Bot pool; that bot now shows in use by the earlier agent, and the later agent failed to start on it.
+- **Check:** the token pasted for the earlier agent (while it waited for a bot) was a spare bot's, listed under Settings → Messaging → Telegram → Bot pool; that bot now shows in use by the earlier agent, and the later agent failed to start on it.
 - **Cause:** the create-flow token paste did not refuse a pool bot's token; the pool row stayed unleased, so the pool leased the same bot to the next agent.
 - **Fix:** delete the failed agent (its lease goes back) and make it again; the earlier agent keeps the bot. Since the fix the paste is refused: "a spare bot in the pool".
 - **Fixed in:** `v2.165.0`
@@ -4876,7 +4904,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### After Download copy, the deleted source's bot answered for a new agent here
 - **Check:** the agent was downloaded (or moved by file), the copy runs elsewhere, the stopped source was deleted here, and a new agent made here took the same @bot from the pool; messages flip-flop between the two.
 - **Cause:** deleting the source parked its bot in this machine's pool by default, as any delete does; the copy was still talking on it.
-- **Fix:** on the new agent here, Settings → Telegram → Change bot; then remove the parked bot from the pool. Since the fix, deleting a stopped agent whose copy was downloaded leaves the bot alone (`?recycleBot=1` on the delete parks it on purpose).
+- **Fix:** on the new agent here, its Telegram tab → Change bot; then remove the parked bot from the pool. Since the fix, deleting a stopped agent whose copy was downloaded leaves the bot alone (`?recycleBot=1` on the delete parks it on purpose).
 - **Fixed in:** `v2.165.0`
 - **Code:** `src/api/routes.ts` — the `'/v1/agents/:id'` delete route, `bot.not_parked`; `src/store/store.ts` — `setAgentExportedAt`
 
@@ -5134,6 +5162,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade, then press **Test search** to move the fleet back to Brave at once. Otherwise it goes back at the next check, within a day. There is no way to force Brave on an older version.
 - **Fixed in:** `v2.172.2`
 - **Code:** `src/orchestrator/webSearch.ts` — `probeBrave`
+
+### Brave searches this month shows fewer searches, or a different cost, than Brave's dashboard
+- **Check:** Settings → AI → Fleet search key → **Brave searches this month**, against Brave's dashboard for the same days. The panel's month is the UTC calendar month, or, on a plan with a monthly cap, the month that ends at the reset Brave gave the last check.
+- **Cause:** the panel counts what Hatchabot sees: each agent's searches as its transcripts record them (read about once an hour, so the last hour may be missing), the Hatchabot agent's own and Hatchabot's checks. It cannot see searches made with the same key outside Hatchabot, and an agent stopped since its last read adds its searches only once it runs again. The cost is an estimate from the price set under **Price**, less the monthly credit; Brave bills by its own account and month.
+- **Fix:** nothing is wrong when the gap is searches made elsewhere or the last hour. Set **Price** to your plan's numbers. A key used outside Hatchabot is better replaced by one of its own, so the quota and the panel agree.
+- **Fixed in:** `v2.176.0` (the panel is new)
+- **Code:** `src/orchestrator/searchUsage.ts` — `searchUsageReport`, `searchPeriod`, `readSearchPrice`; `src/orchestrator/usage.ts` — `USAGE_READER_SCRIPT`; `src/orchestrator/sourceUsage.ts` — `sampleAgentUsage`; `web/index.html` — `searchUsageHTML`
 
 ### An agent says Brave's quota is used up, or web search does not work
 - **Check:** Settings → AI → Fleet search key → **Test search** says what Brave and DuckDuckGo answer from this machine, and which is in use. An agent's **Test web search** (Advanced tab) runs a real search in it and names who answered.
