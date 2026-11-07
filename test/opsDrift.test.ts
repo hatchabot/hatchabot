@@ -62,7 +62,23 @@ describe('the lockdown read from the config file (HB-0058)', () => {
     expect(read(JSON.stringify({ tools: good, $include: './more.json' }))).toBe('cli');
     expect(read(JSON.stringify({ tools: { ...good, allow: ['${EXTRA}'] } }))).toBe('cli');
     expect(read('{ tools: { allow: [] }, // json5\n }')).toBe('cli');
-    expect(read(JSON.stringify({ agents: {} }))).toBe('cli');
+    expect(read('[]')).toBe('cli');
+  });
+
+  it('a config read whole with no tools block is drift, not a hiccup (HB-0242)', async () => {
+    expect(JSON.parse(read(JSON.stringify({ agents: {} })))).toEqual({ tools: null, mcp: {} });
+    expect(lockdownProblem(null, {})).toBe('its whole tools block was removed');
+    const asked: string[][] = [];
+    const providerFor = () => ({
+      execShell: async () => ({ code: 0, stdout: read(JSON.stringify({ agents: {}, mcp: { servers } })) }),
+      exec: async (_r: string, argv: string[]) => { asked.push(argv); return { code: 1, stdout: '' }; },
+    }) as any;
+    const st = store();
+    await checkOpsDrift({ store: st, providerFor });
+    expect(asked).toEqual([]);
+    expect(opsDriftOf('m2')).toBe('its whole tools block was removed');
+    expect(st.opsAgentForToken('key2')).toBeUndefined();
+    clearOpsDrift('m2');
   });
 
   it('judges from the file when it can, and asks the CLI when the file says so', async () => {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import { _resetLoginThrottle, authIsEnabled, authModeFromEnv, bindHostFor, registerAuth } from '../src/api/auth.js';
+import { _resetLoginThrottle, authIsEnabled, authModeFromEnv, bindHostFor, noSignInRefusal, registerAuth } from '../src/api/auth.js';
 import { hashPassword, verifyPassword } from '../src/api/accountsAuth.js';
 import { principalOf } from '../src/api/principal.js';
 import { Store } from '../src/store/store.js';
@@ -785,6 +785,21 @@ describe('the 30th audit: containers on loopback', () => {
     const { setupCode } = await import('../src/api/accountsAuth.js');
     const ok = await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'correct-horse', setupCode: setupCode() } });
     expect(ok.statusCode).toBe(201);
+  });
+});
+
+describe('sign-in off where agents arrive on loopback (HB-0238)', () => {
+  afterEach(() => { delete process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK; delete process.env.HATCHABOT_DOCKER_DESKTOP; });
+  it('refuses to start on Docker Desktop as under rootless Docker, and only with sign-in off', () => {
+    process.env.HATCHABOT_DOCKER_DESKTOP = '0'; // an ordinary Linux machine, wherever the tests run
+    expect(noSignInRefusal('password', undefined)).toBeUndefined();
+    process.env.HATCHABOT_DOCKER_DESKTOP = '1';
+    expect(noSignInRefusal('password', undefined)).toMatch(/sign-in is off, and under Docker Desktop every agent/);
+    expect(noSignInRefusal('password', 'made-up-pass')).toBeUndefined();
+    expect(noSignInRefusal('accounts', undefined)).toBeUndefined();
+    delete process.env.HATCHABOT_DOCKER_DESKTOP;
+    process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK = '1';
+    expect(noSignInRefusal('password', undefined)).toMatch(/under rootless Docker/);
   });
 });
 

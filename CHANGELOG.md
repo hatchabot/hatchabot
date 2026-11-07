@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.175.0] — 2026-11-06
+
+Two safety gaps closed, from the owner's decisions on the backlog, and the public repo's code scanning alerts from v2.174.0.
+
+### Upgrading
+- **With sign-in off, Hatchabot no longer starts on Docker Desktop** (a Mac, or Docker Desktop on Linux), as it already refused under rootless Docker: agents there reach it from this machine's loopback, so with no sign-in each one had the owner's powers. Turn on accounts (`HATCHABOT_AUTH=accounts`, the installer's default) or set a password. Installs with sign-in on are not affected.
+
+### Fixed
+- **The Hatchabot agent's safety check** now flags a config with its whole `tools` section removed, and pauses its access until it is rebuilt. Before, that went unflagged.
+- **Report a problem** finds a PuTTY key file's lines after a log prefix without building a pattern from the report's text: the same lines are masked, and no report can make the match slow.
+
+### Tests
+- Fetch doubles route requests by the URL's parsed host, not a piece of its text, and the public repo's code scanning no longer counts test hostnames as patterns.
+
 ## [2.174.0] — 2026-11-06
 
 Sign-in on a shared browser, the public address, search that tells you when it cannot work, install notes agents actually read, restores that leave an agent as it was when Docker refuses them, and Report a problem masking more credential shapes.

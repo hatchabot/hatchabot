@@ -294,6 +294,18 @@ export function authIsEnabled(mode: AuthMode, password: string | undefined): boo
 }
 
 /**
+ * Why this process must not start, or undefined. With no sign-in every request
+ * is the owner, and binding to loopback does not keep agents out where they
+ * reach this process from loopback: under a rootless daemon, and on Docker
+ * Desktop, where `host.docker.internal` is this machine's loopback (HB-0238).
+ */
+export function noSignInRefusal(mode: AuthMode, password: string | undefined): string | undefined {
+  if (authIsEnabled(mode, password) || !loopbackIsRemote()) return undefined;
+  const where = process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1' ? 'rootless Docker' : 'Docker Desktop';
+  return `Refusing to start: sign-in is off, and under ${where} every agent can reach this process as if it were on the machine. Set HATCHABOT_AUTH=accounts (or a HATCHABOT_PASSWORD) in .env.`;
+}
+
+/**
  * Where to listen. With auth OFF every request is the owner, and agent
  * containers can reach this process over the docker bridge — so binding
  * 0.0.0.0 there would hand the fleet to any prompt-injected agent. With auth

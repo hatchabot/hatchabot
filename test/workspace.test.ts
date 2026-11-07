@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, buildWorkspaceSeed, dataSourcePath, dataSourcesSection, memoryPolicySection, replaceMemoryPolicy, replaceSection, DATA_SOURCES_HEADING, installConventionsSection, INSTALL_HEADING, toolsMdWithoutInstallSection, withInstallSection, removeSection, peerToolsSection, peerOneLine, PEERS_HEADING } from '../src/openclaw/workspace.js';
+import { GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, buildWorkspaceSeed, dataSourcePath, dataSourcesSection, memoryPolicySection, replaceSection, DATA_SOURCES_HEADING, installConventionsSection, INSTALL_HEADING, toolsMdWithoutInstallSection, withInstallSection, removeSection, peerToolsSection, peerOneLine, PEERS_HEADING } from '../src/openclaw/workspace.js';
 import { GOG_SKILL_MD } from '../src/openclaw/skills.js';
 
-describe('replaceMemoryPolicy', () => {
+// The memory policy is a managed section like the others (provision.ts):
+// replaceMemoryPolicy, used only here, went with HB-0271.
+const replaceMemoryPolicy = (content: string, section: string) => replaceSection(content, '## Memory policy', section);
+
+describe('the memory policy section', () => {
   it('swaps the seeded policy for the other mode, round-trip', () => {
     const seeded = buildWorkspaceSeed({
       agentName: 'A', slug: 'a', persona: 'p', sharedMemory: true,

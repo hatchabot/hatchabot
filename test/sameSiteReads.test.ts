@@ -13,6 +13,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { MemSecrets, seedRunningAgent, type World } from './support/world.js';
+import { urlIs } from './helpers/urlHost.js';
 
 /**
  * GETs from a neighbouring tenant's page (2026-10-01).
@@ -235,7 +236,7 @@ describe('the sign-in link and the password form do not share a lock-out', () =>
 describe('the Google consent\'s browser binding cannot be planted by a neighbour', () => {
   const google = (async (url: any) => {
     const u = String(url);
-    if (u.includes('oauth2.googleapis.com/token')) return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-fixture-1' }), { headers: { 'content-type': 'application/json' } });
+    if (urlIs(u, 'oauth2.googleapis.com', '/token')) return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-fixture-1' }), { headers: { 'content-type': 'application/json' } });
     if (u.includes('userinfo')) return new Response(JSON.stringify({ email: 'victim@example.com' }), { headers: { 'content-type': 'application/json' } });
     return new Response('{"ok":true,"result":[]}', { headers: { 'content-type': 'application/json' } });
   }) as unknown as typeof fetch;

@@ -210,3 +210,11 @@ tests that run on their own.
 | 2026-11-06 | clean-install | pass | v2.173.1 | 11 |  |
 | 2026-11-06 | clean-install-ubuntu-2204 | pass | v2.173.1 | 10 |  |
 | 2026-11-06 | clean-install-debian-12 | pass | v2.173.1 | 10 |  |
+| 2026-11-07 | privacy | pass | v2.174.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-07 | runner-scenarios | pass | v2.174.0 | 12 | OpenClaw 2026.9.8 |
+| 2026-11-07 | transfer | pass | v2.174.0 | 7 | OpenClaw 2026.9.8 |
+| 2026-11-07 | browser | pass | v2.174.0 | 4 | OpenClaw 2026.9.8 |
+| 2026-11-07 | google-plain-request | pass | v2.174.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-11-07 | candidate-gate | pass | v2.174.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-11-07 | regress-autonomous | pass | v2.174.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-11-07 | restore-drill | pass | v2.174.0 | 4 | OpenClaw 2026.9.8 |

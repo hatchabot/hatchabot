@@ -21,7 +21,7 @@ import { TelegramPoolProvisioner } from './channels/telegramPool.js';
 import { TelegramManualProvisioner, verifyBotToken } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
-import { authIsEnabled, authModeFromEnv, bindHostFor, registerAuth } from './api/auth.js';
+import { authIsEnabled, authModeFromEnv, bindHostFor, noSignInRefusal, registerAuth } from './api/auth.js';
 import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
 import { reconcileAgents, reconcileEventLog, startReconcileLoop } from './orchestrator/reconcile.js';
 import { markInterrupted, setOperationJournal } from './orchestrator/operations.js';
@@ -371,8 +371,9 @@ postureDaily.unref();
   }
   // With no sign-in every request is the owner, and loopback-only binding does
   // not keep agents out here: they reach this process from 127.0.0.1.
-  if (process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1' && !authIsEnabled(authModeFromEnv(), process.env.HATCHABOT_PASSWORD)) {
-    app.log.error('Refusing to start: sign-in is off, and under rootless Docker every agent can reach this process as if it were on the machine. Set HATCHABOT_AUTH=accounts (or a HATCHABOT_PASSWORD) in .env.');
+  const refusal = noSignInRefusal(authModeFromEnv(), process.env.HATCHABOT_PASSWORD);
+  if (refusal) {
+    app.log.error(refusal);
     process.exit(1);
   }
 }

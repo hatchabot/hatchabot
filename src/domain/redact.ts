@@ -317,21 +317,53 @@ const PPK_BODY = /^[A-Za-z0-9+/]{1,128}={0,2}(?=["'\x60]|$)/;
  * (`cat -n`'s counts, a journal's or `docker logs --timestamps`' times, `grep -n`'s `12:` or `12-`), or after the
  * journal's tag (its last word); otherwise at the line's start.
  */
-function ppkContentAt(line: string, shape: RegExp | undefined, tag: string): number {
-  const m = shape?.exec(line);
-  if (m) return m[0].length;
+function ppkContentAt(line: string, shape: PrefixShape | undefined, tag: string): number {
+  const n = shape?.(line);
+  if (n !== undefined) return n;
   if (tag) {
     const i = line.indexOf(`${tag} `);
     if (i >= 0 && (i === 0 || /\s/.test(line[i - 1]!))) return i + tag.length;
   }
   return 0;
 }
-const prefixShape = (prefix: string) => {
+/** The length of a line's prefix shaped like the first line's, or undefined when it has none. */
+type PrefixShape = (line: string) => number | undefined;
+type ShapePiece = { k: 'digits' } | { k: 'spaces'; min: number } | { k: 'sep' } | { k: 'char'; c: string };
+const isDigit = (c: string | undefined) => c !== undefined && c >= '0' && c <= '9';
+const isBlank = (c: string | undefined) => c === ' ' || c === '\t';
+/**
+ * The first line's prefix as pieces, matched by hand: each run of digits matches any number, each run of spaces
+ * any run (the indent may be none), a `:` or `-` right after a number either one, every other character itself.
+ * Not a RegExp built from the report's text: no pattern from untrusted text to escape or to backtrack on (a
+ * `[ \t]*` between two numbers was exponential, HB-0501), and CodeQL counted every hostname reaching it as a
+ * hostname pattern (HB-0531). Each piece takes all it can, as the pattern did: no piece can start what the
+ * one before it takes, so nothing is given back.
+ */
+const prefixShape = (prefix: string): PrefixShape | undefined => {
   const exact = prefix.trimEnd();
-  // Spaces as [ \t]+ between pieces (only the indent may be none): `[ \t]*` between two \d+ let a line of digits be split
-  // every way, exponential in the numbers of a prefix like `1 1 1 1 …` (HB-0501, final review). One replace, so the
-  // space inside an inserted class is not rewritten.
-  return exact ? new RegExp(`^${exact.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\d+/g, '\\d+').replace(/[ \t]+/g, (_m: string, i: number) => (i === 0 ? '[ \\t]*' : '[ \\t]+')).replace(/\\d\+[:-]/g, '\\d+[:-]')}`) : undefined;
+  if (!exact) return undefined;
+  const pieces: ShapePiece[] = [];
+  for (let i = 0; i < exact.length;) {
+    if (isDigit(exact[i])) {
+      while (isDigit(exact[i])) i++;
+      pieces.push({ k: 'digits' });
+      if (exact[i] === ':' || exact[i] === '-') { pieces.push({ k: 'sep' }); i++; }
+    } else if (isBlank(exact[i])) {
+      pieces.push({ k: 'spaces', min: i === 0 ? 0 : 1 });
+      while (isBlank(exact[i])) i++;
+    } else pieces.push({ k: 'char', c: exact[i++]! });
+  }
+  return (line) => {
+    let at = 0;
+    for (const p of pieces) {
+      const from = at;
+      if (p.k === 'digits') { while (isDigit(line[at])) at++; if (at === from) return undefined; }
+      else if (p.k === 'spaces') { while (isBlank(line[at])) at++; if (at - from < p.min) return undefined; }
+      else if (p.k === 'sep') { if (line[at] !== ':' && line[at] !== '-') return undefined; at++; }
+      else { if (line[at] !== p.c) return undefined; at++; }
+    }
+    return at;
+  };
 };
 interface PpkLine { content: string; at: number; end: number }
 function ppkBlock(text: string, start: number, firstEnd: number, count: number): { end?: number; read: number } {

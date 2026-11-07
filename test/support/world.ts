@@ -18,6 +18,7 @@ import { Store } from '../../src/store/store.js';
 import { MockProvider } from '../../src/providers/mockProvider.js';
 import { registerRoutes } from '../../src/api/routes.js';
 import type { SecretStore } from '../../src/secrets/secretStore.js';
+import { urlHost } from '../helpers/urlHost.js';
 
 export class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -97,7 +98,7 @@ export async function makeWorld(owner: string = OWNER, availableBots = 0): Promi
   const channel = channelStub(availableBots);
   const providers = new Map<string, MockProvider>([['mock', provider]]);
   // No test talks to Telegram: the wake poll (hibernate.ts) and getMe get an empty, well-formed answer.
-  const oauthFetch = (async (u: string | URL | Request) => new Response(JSON.stringify(String(u).includes('api.telegram.org') ? { ok: true, result: [] } : { error: 'stubbed' }), { status: String(u).includes('api.telegram.org') ? 200 : 404, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  const oauthFetch = (async (u: string | URL | Request) => new Response(JSON.stringify(urlHost(u) === 'api.telegram.org' ? { ok: true, result: [] } : { error: 'stubbed' }), { status: urlHost(u) === 'api.telegram.org' ? 200 : 404, headers: { 'content-type': 'application/json' } })) as typeof fetch;
   // Peer calls go through the global fetch, so a test can stand in for the other server with a spy.
   const routes = await registerRoutes(f, { store, secrets, providers, channel, oauthFetch, peerFetch: viaGlobalFetch });
   return { store, secrets, provider, providers, f, owner, channel, routes };

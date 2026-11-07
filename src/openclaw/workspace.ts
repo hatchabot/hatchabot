@@ -140,10 +140,6 @@ export function replaceSection(content: string, heading: string, section: string
   return content.endsWith('\n') && !out.endsWith('\n') ? `${out}\n` : out;
 }
 
-export function replaceMemoryPolicy(content: string, section: string): string {
-  return replaceSection(content, '## Memory policy', section);
-}
-
 /**
  * The counterpart read: a managed section's current text (heading included),
  * with the same fence-aware boundaries as replaceSection — so a caller can

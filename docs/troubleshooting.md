@@ -717,6 +717,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ## Sign-in and accounts
 
+### Hatchabot will not start: "Refusing to start: sign-in is off, and under Docker Desktop every agent can reach this process"
+- **Check:** the install's `.env` has no `HATCHABOT_PASSWORD` and `HATCHABOT_AUTH` is `password` or unset, and the machine is a Mac (or runs Docker Desktop on Linux). `hatchabot logs` shows the line at start.
+- **Cause:** with sign-in off every request is treated as the owner. On Docker Desktop, agents reach Hatchabot at `host.docker.internal`, which is this machine's loopback, so any agent could call its API with the owner's powers. Rootless Docker was refused already; Docker Desktop was not (HB-0238).
+- **Fix:** turn sign-in on: `HATCHABOT_AUTH=accounts` in `.env` (the installer's default), or set a `HATCHABOT_PASSWORD`, then restart. A machine that is truly not Docker Desktop can say so with `HATCHABOT_DOCKER_DESKTOP=0`.
+- **Fixed in:** `v2.175.0`
+- **Code:** `src/api/auth.ts` — `noSignInRefusal`, `loopbackIsRemote`; `src/index.ts`
+
 ### Password mode: requests to the app's address were served without the password
 - **Check:** the install signs in with one shared password (`HATCHABOT_AUTH=password`) and runs a version before v2.152.1; the log shows requests whose path ends in `#/message` with no sign-in.
 - **Cause:** the sign-in hooks exempted the agent-to-agent call by testing the raw URL, while the router stops at `#`: a hand-made request for `/v1/agents/<id>#/message` skipped the sign-in check and was served as `/v1/agents/<id>`, as the local owner, which in password mode is the owner. With accounts or Google sign-in the local owner owns nothing, so the same request found nothing.
@@ -4481,6 +4488,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `web/index.html` — `reachTurnOn`, `reachRender`; `src/api/reachRoutes.ts` — `funnelLeft`
 
 ## The Hatchabot agent
+
+### The Hatchabot agent shows 🔒 "its safety settings were changed (its whole tools block was removed)"
+- **Check:** its card or Alerts says so, and its OpenClaw config (`openclaw.json` in its volume) has no `tools` section.
+- **Cause:** someone removed the management agent's whole `tools` section, which holds every restriction on what it may run. Before the fix this went unflagged: the config read fell back to OpenClaw's CLI, which fails on a missing section, and a failed read is taken as a passing glitch (HB-0242). Its access to Hatchabot is paused until it is rebuilt.
+- **Fix:** Rebuild the Hatchabot agent: the rebuild writes its restrictions back and clears the flag.
+- **Fixed in:** `v2.175.0`
+- **Code:** `src/ops/opsDrift.ts` — `LOCKDOWN_READ`, `lockdownProblem`, `checkOpsDrift`
 
 ### The Hatchabot agent reports "LLM request failed: network connection error" right after it starts
 - **Check:** the server log shows `ops.peer_refused` for its own doorman; common on Docker Desktop (Mac).

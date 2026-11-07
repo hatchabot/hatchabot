@@ -16,6 +16,8 @@ export const clearOpsDrift = (agentId: string): void => { drifted.delete(agentId
 
 /** What is wrong with this tools/mcp config, or undefined when it is as we set it. */
 export function lockdownProblem(tools: unknown, mcpServers: unknown): string | undefined {
+  // A config read whole with no `tools` block at all: every restriction is gone (HB-0242).
+  if (tools === null) return 'its whole tools block was removed';
   const t = (tools ?? {}) as { allow?: unknown; deny?: unknown; profile?: unknown; elevated?: { enabled?: unknown } };
   const allow = Array.isArray(t.allow) ? t.allow.map(String) : [];
   const deny = Array.isArray(t.deny) ? t.deny.map(String) : [];
@@ -35,15 +37,17 @@ export function lockdownProblem(tools: unknown, mcpServers: unknown): string | u
  * The two settings read straight from the manager's config file: one `node -e`
  * instead of two OpenClaw CLI starts (4–8 s each on 2026.9) every ten minutes
  * (HB-0058). Prints `cli` for anything the file alone cannot settle — an
- * `$include`, a `${VAR}`, JSON5 syntax, no `tools` block — which the CLI is
- * then asked, as before: it resolves them as the gateway does.
+ * `$include`, a `${VAR}`, JSON5 syntax — which the CLI is then asked, as
+ * before: it resolves them as the gateway does. A plain JSON file with no
+ * `tools` block is settled here as `tools: null`, drift: asked, the CLI fails
+ * on it, and a failed read is taken as a hiccup, so it was never flagged (HB-0242).
  */
 export const LOCKDOWN_READ = `node -e '
   let t = ""; try { t = require("fs").readFileSync(process.env.OPENCLAW_CONFIG_PATH || "/home/node/.openclaw/openclaw.json", "utf8"); } catch { process.stdout.write("cli"); process.exit(0); }
   if (t.includes("$include") || t.includes("\${")) { process.stdout.write("cli"); process.exit(0); }
   let c; try { c = JSON.parse(t); } catch { process.stdout.write("cli"); process.exit(0); }
-  if (!c || typeof c !== "object" || !c.tools) { process.stdout.write("cli"); process.exit(0); }
-  process.stdout.write(JSON.stringify({ tools: c.tools, mcp: (c.mcp && c.mcp.servers) || {} }));'`;
+  if (!c || typeof c !== "object" || Array.isArray(c)) { process.stdout.write("cli"); process.exit(0); }
+  process.stdout.write(JSON.stringify({ tools: c.tools || null, mcp: (c.mcp && c.mcp.servers) || {} }));'`;
 
 export async function checkOpsDrift(
   deps: { store: Store; providerFor: (hostId: string) => RuntimeProvider; log?: (event: string, detail: Record<string, unknown>) => void },

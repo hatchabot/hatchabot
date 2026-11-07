@@ -9,6 +9,7 @@ import type { ExecResult, RuntimeProvider } from '../src/providers/provider.js';
 import { OAuthStateJar, gogAccounts, googleAuthUrl, materializeConnection, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
 import { stripManagedSections } from '../src/orchestrator/template.js';
 import { syncDataSourceDocs } from '../src/orchestrator/provision.js';
+import { urlIs } from './helpers/urlHost.js';
 
 /** The browser-binding cookie the start route set (night review, 2026-09-28). */
 const nonceOf = (res: { cookies: Array<{ name: string; value: string }> }) => res.cookies.find((c) => c.name === 'hb_oauth')?.value ?? '';
@@ -34,7 +35,7 @@ const googleMock = (opts: { email?: string; refresh?: string; scope?: string } =
   const fetchImpl = (async (url: any, init?: any) => {
     const u = String(url);
     calls.push({ url: u, body: init?.body ? String(init.body) : undefined });
-    if (u.includes('oauth2.googleapis.com/token')) {
+    if (urlIs(u, 'oauth2.googleapis.com', '/token')) {
       return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: opts.refresh ?? 'rt-secret-1', ...(opts.scope !== undefined ? { scope: opts.scope } : {}) }), { headers: { 'content-type': 'application/json' } });
     }
     if (u.includes('userinfo')) {

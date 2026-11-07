@@ -13,6 +13,7 @@ import { Store } from '../src/store/store.js';
 import {
   applySearchScript, createSearchWatch, DDG_TURNED_AWAY, duckDuckGoTurnedAway, ownSearchKeys, probeBrave, probeDuckDuckGo, readAgentSearchTest, readWebSearch, searchProviderFor,
 } from '../src/orchestrator/webSearch.js';
+import { urlHost } from './helpers/urlHost.js';
 
 const T0 = Date.parse('2026-11-03T12:00:00Z');
 const HOUR = 3_600_000;
@@ -22,7 +23,7 @@ const DDG_OK = '<a class="result__a" href="https://x.example">x</a>';
 function net(brave: Array<{ status: number; headers?: Record<string, string> } | 'down'>, ddg: { status?: number; body?: string } | 'down' = { body: DDG_OK }) {
   const seen = { brave: 0, ddg: 0 };
   const fetchImpl = (async (url: string) => {
-    if (String(url).includes('brave.com')) {
+    if (urlHost(url) === 'api.search.brave.com') {
       const a = brave[Math.min(seen.brave++, brave.length - 1)]!;
       if (a === 'down') throw new TypeError('fetch failed');
       return new Response('{}', { status: a.status, ...(a.headers ? { headers: a.headers } : {}) });
@@ -221,7 +222,7 @@ describe('asking DuckDuckGo', () => {
   const flapping = (ddg: Array<'away' | 'ok' | 'down' | 'empty'>, brave?: () => { status: number; headers?: Record<string, string> }) => {
     let i = 0;
     const fetchImpl = (async (url: string) => {
-      if (String(url).includes('brave.com')) { const b = brave!(); return new Response('{}', { status: b.status, headers: b.headers ?? {} }); }
+      if (urlHost(url) === 'api.search.brave.com') { const b = brave!(); return new Response('{}', { status: b.status, headers: b.headers ?? {} }); }
       const d = ddg[Math.min(i, ddg.length - 1)];
       if (d === 'down') throw new TypeError('fetch failed');
       return d === 'away' ? new Response(DDG_CHALLENGE, { status: 202 }) : new Response(d === 'ok' ? DDG_OK : '<html></html>', { status: 200 });
@@ -276,7 +277,7 @@ describe('asking DuckDuckGo', () => {
   it('Brave nearly out and DuckDuckGo turning this machine away: the fleet stays on Brave, and moves only once it runs out (review of HB-0455)', async () => {
     const w = world({ key: 'made-up' });
     let brave: { status: number; headers?: Record<string, string> } = { status: 200, headers: QUOTA(5) };
-    const fetchImpl = (async (url: string) => String(url).includes('brave.com')
+    const fetchImpl = (async (url: string) => urlHost(url) === 'api.search.brave.com'
       ? new Response('{}', { status: brave.status, headers: brave.headers ?? {} })
       : new Response(DDG_CHALLENGE, { status: 202 })) as unknown as typeof fetch;
     const { watch, said } = watchOf(w, fetchImpl);
@@ -451,7 +452,7 @@ describe('watching the quota', () => {
     const gate = new Promise<void>((r) => { release = r; });
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       await gate;
-      if (String(url).includes('brave.com')) { asked.push((init?.headers as Record<string, string>)['x-subscription-token']!); return new Response('{}', { status: 200, headers: QUOTA(1500) }); }
+      if (urlHost(url) === 'api.search.brave.com') { asked.push((init?.headers as Record<string, string>)['x-subscription-token']!); return new Response('{}', { status: 200, headers: QUOTA(1500) }); }
       return new Response(DDG_OK);
     }) as unknown as typeof fetch;
     const w = world();
