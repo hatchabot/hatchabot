@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { buildRuntimeSpec, createAgentRecord, runProvisionSteps } from '../src/orchestrator/provision.js';
@@ -23,6 +23,7 @@ class MemSecrets implements SecretStore {
 
 const OWNER = 'o';
 const H = { 'x-hatchabot-owner': OWNER };
+afterEach(() => { vi.restoreAllMocks(); });
 
 function channel(opts: { empty?: boolean } = {}) {
   const released: Array<{ id: string; reason?: string }> = [];
@@ -158,6 +159,8 @@ describe('create, add and remove Telegram', () => {
     expect(store.getChannelForAgent('b1')).toBeUndefined();
     r = await f.inject({ method: 'POST', url: '/v1/agents/b1/telegram', headers: H, payload: { token: 'nope' } });
     expect(r.statusCode).toBe(400);
+    // The route asks Telegram itself before the token is held (twelfth review of fix/r3-cli).
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ ok: true, result: { username: 'mybot' } })));
     r = await f.inject({ method: 'POST', url: '/v1/agents/b1/telegram', headers: H, payload: { token: '123:abc' } });
     expect(r.statusCode).toBe(202);
     expect(store.getChannelForAgent('b1')?.accountId).toBe('mybot');

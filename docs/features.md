@@ -186,6 +186,10 @@ The header holds:
   you closed it, or a scheduled task's result on an agent with no chat app.
   Opening the console clears it. Messages that went to Telegram, Slack or
   Discord are not flagged; those apps show their own unread marks.
+  To hear of a task's result away from the app, tick **📱 Tell me on
+  Telegram when it runs** on the task (the agent's Schedule tab): each time
+  it has run, your Hatchabot agent's bot sends you the task's name and a link
+  that opens the agent — the result itself stays in Hatchabot.
 - **A small mark on the icon** shows which chat apps reach the agent: a
   blue paper plane for Telegram, a purple hash for Slack, a blurple pad for
   Discord. An agent on two apps wears both marks, overlapped, rather than one
@@ -583,7 +587,10 @@ the Alerts line and the tile's tooltip are what you have.
   its bot (direct chats; at most once a chat every 12 hours): "⏸ Trip Planner
   is paused: it has used its budget for October. It is back on November 1, or
   sooner if its owner raises the budget. …". Nothing is confirmed to Telegram,
-  so the agent still gets the messages when it is back within the day.
+  so the agent still gets the messages when it is back within the day. Telegram
+  shows only the first 100 waiting messages without confirming them, so with
+  100 waiting, whoever writes after them gets no reply; the agent's Activity
+  says so.
 - **New agents** can start with a budget: Settings → Hosts → Defaults for this
   machine → *Monthly budget for new agents* — "50", "50 pause" or "50 cheaper"
   (`HATCHABOT_NEW_AGENT_BUDGET`). The Hatchabot agent's only warns.
@@ -876,7 +883,9 @@ is woken for it.
   watcher found, open first, then those that stopped in the last week.
 
 Everything is read on the usage pass Hatchabot already makes every 10 minutes:
-the same transcript read, plus the instruction files' sizes, openclaw.json,
+the same transcript read, plus the instruction files' sizes (in characters, as
+OpenClaw's limits count them; `TOOLS.md` only on an OpenClaw that still puts it
+in the prompt: it is left out from 2026.9.6 on), openclaw.json,
 OpenClaw's scheduled-run receipts and its chat-app ingress queue (counts and
 times only — never message text, payloads or chat ids), plus the loop lines
 of the gateway log that pass already reads. Stored, so a review **runs nothing
@@ -1303,6 +1312,9 @@ cache costs nothing), plus the Hatchabot agent's own searches and Hatchabot's
 checks. The price is Brave's Search plan (November 2026: $5 per 1,000 searches,
 with $5 of credit each month) until you change it there. Searches made with the
 same key outside Hatchabot show only in Brave's dashboard, which has the bill.
+An agent with a `BRAVE_API_KEY` of its own (its Environment tab) searches on its
+own bill: its searches are listed as its other searches, and use none of the
+fleet key's credit or cost.
 
 Environment variables travel with a full copy: Download/Restore and
 cross-cluster moves carry each var's name **and** value (the archive already
@@ -1482,7 +1494,12 @@ than to leave it ajar all day: their row under **Members** says *"hasn't
 messaged yet"* with **Let them in again**, which opens a fresh 30 minutes (and
 keeps the named @handle, if the invite had one). Hatchabot also tells you when
 a window closes unused, so you find out while the invite is still fresh instead
-of when they complain the bot ignores them.
+of when they complain the bot ignores them. The 30 minutes count only while the
+agent is up, but how long a window waits for a stopped or rebuilding agent
+depends on whom it is for. One that names its person waits for the agent, up
+to a week. One that names nobody (the first person to message gets in) ends at
+most an hour after it opened, time down included, so a stranger writing days
+later is never let in; open a new one once the agent is up.
 
 **An invite can name who it is for.** Invite… asks for their Telegram
 @handle; give it, and the 30-minute window that opens admits **only** that
@@ -2289,7 +2306,11 @@ Operations section.
 - **API key** — Anthropic, OpenAI or Google Gemini; stored encrypted, injected at
   boot, runs on any host including cloud.
 - **Claude Pro/Max subscription** — a **setup-token** (`claude setup-token`,
-  stored encrypted and injected as an OAuth token — runs on runners too). The
+  stored encrypted and injected as an OAuth token — runs on runners too).
+  Anthropic's terms for Claude Code keep a plan's sign-in for ordinary use of
+  its own apps and ask other software to use an API key, so an API key is the
+  dependable choice; a Max or Ultra plan's monthly API credits come as one
+  (docs/why-hatchabot.md). The
   older **machine login** flavour (this box's `~/.claude` mounted in place) can
   no longer be created since v2.39.0 unless `HATCHABOT_ALLOW_MACHINE_LOGIN=1`;
   existing ones keep working.

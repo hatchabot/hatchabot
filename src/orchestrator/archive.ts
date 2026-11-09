@@ -72,12 +72,22 @@ export async function leaveBotToCopy(channel: ArchiveDeps['channel'], accountId:
 /** A copy was downloaded while it stood stopped: its bot may be answering there. */
 export const copyElsewhere = (agent: { exportedAt?: string; state: string }): boolean => !!agent.exportedAt && agent.state !== 'RUNNING';
 
-export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<void> {
+/**
+ * Where the agent's Telegram bot went, so the page says what happened rather
+ * than what should have (HB-0476): back in the pool; left to a downloaded copy;
+ * or, a pasted one, not parked (its token could not be stored), so the bot is
+ * free but not reusable from the pool.
+ */
+export interface ArchiveOutcome {
+  bot?: { username: string; outcome: 'pool' | 'left-to-copy' | 'not-parked' };
+}
+
+export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<ArchiveOutcome> {
   return whileBusy(agentId, async () => {
     const { store, secrets, provider, channel, log } = deps;
     const agent = store.getAgent(agentId);
     if (!agent) throw new ArchiveError('No such agent.');
-    if (agent.state === 'ARCHIVED') return; // idempotent: a double tap is not an error
+    if (agent.state === 'ARCHIVED') return {}; // idempotent: a double tap is not an error
     // Judged now, inside the busy flag: the route's check came before it
     // waited out a Retry, and giving up the bot first then failing to flip
     // the state left the agent neither archived nor whole (night review).
@@ -89,6 +99,7 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
     const row = store.getChannelForAgent(agentId);
     const wasRunning = agent.state === 'RUNNING';
     const op = beginOperation(store, 'archive', agentId, { wasRunning, accountId: row?.accountId ?? null }, { requestedBy: deps.requestedBy });
+    let bot: ArchiveOutcome['bot'];
     try {
       // Stop first, and only release the bot once the runtime is actually down.
       // A container left polling a token that has gone back in the pool is the
@@ -112,7 +123,9 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
       if (row && toCopy) {
         log('bot.not_parked', { agentId, why: 'a copy was downloaded', exportedAt: agent.exportedAt });
         await leaveBotToCopy(channel, row.accountId, agentId, log);
+        bot = { username: row.accountId, outcome: 'left-to-copy' };
       } else if (row && !agent.migratedTo) {
+        bot = { username: row.accountId, outcome: 'pool' };
         // A PASTED bot is parked in the pool first, exactly as delete does it —
         // the token stays usable, which is the entire point of archiving. Under
         // the agent's OWNER: their token, their pool slot, never another user's
@@ -125,6 +138,7 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
             // Recycling is the bonus, not the job. An agent that can't be parked
             // in the pool is still archived; the token just isn't reusable.
             log('archive.recycle_failed', { agentId, error: String(err) });
+            bot = { username: row.accountId, outcome: 'not-parked' };
           }
         }
         // agentId explicitly: a token parked a line ago has no lease to read, and
@@ -133,6 +147,7 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
       }
       op.step('bot-released');
       await finishArchive(deps, op, agentId);
+      return bot ? { bot } : {};
     } catch (err) {
       rethrowIfCrash(err);
       // The stop or the release failed in this process: the route says so, as
@@ -167,6 +182,8 @@ async function finishArchive(deps: ArchiveDeps, op: OpHandle, agentId: string): 
   // go rather than mint a membership with nowhere to talk.
   // An archived management agent keeps nothing running: its doorman goes too.
   if (agent.ops) await provider.removeOpsJail?.(agentId).catch(() => {});
+  // What this process kept about its volume's writers: not kept for an archive (seventh review).
+  if (agent.runtimeRef) provider.forgetVolumeWriters?.(agent.runtimeRef);
   store.expireInvitesFor(agentId, 'agent-archived');
   // A parked human step ("paste a bot token") is meaningless now and would
   // otherwise follow the agent into the archive — the card would sit there

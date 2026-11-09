@@ -64,25 +64,91 @@ user's.
  * which would hide a managed heading below it and make replaceSection append a
  * duplicate section on every rebuild (audit 2026-09-08).
  */
-function fenceMask(lines: string[]): boolean[] {
+function fenceMask(lines: string[], exact = false, indented = false): boolean[] {
   // As CommonMark and OpenClaw's own section finder (findToolsSection) read
   // them: a fence closes only on a run of the SAME character at least as long
   // as the one that opened it, with nothing else on the line. A ```` block
-  // quoting ``` is one block (review of HB-0397).
+  // quoting ``` is one block (review of HB-0397). `exact`: the stricter
+  // reading, where only a run as long as the opener closes it (HB-0520).
+  // `indented`: a reading where a fence may be indented any amount, as one in
+  // a list item is (`10. Example:` then 4 spaces in); one only that makes,
+  // never closed, is text, as at the top level (ninth review).
+  scansForTests++;
+  const re = indented ? ANY_FENCE_LINE : FENCE_LINE;
   const inFence: boolean[] = [];
-  let open: { ch: string; len: number } | null = null;
-  for (const l of lines) {
+  const text = new Set<number>();
+  let open: { ch: string; len: number; at: number; deep: boolean } | null = null;
+  for (let i = 0; i < lines.length; i++) {
     // Without a CRLF file's \r, which `.` does not match.
-    const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(l.replace(/\r$/, ''));
+    const l = lines[i]!.replace(/\r$/, '');
+    const m = re.exec(l);
     if (open === null) {
-      inFence.push(false);
-      if (m) open = { ch: m[1]![0]!, len: m[1]!.length };
+      inFence[i] = false;
+      if (m && !text.has(i)) open = { ch: m[1]![0]!, len: m[1]!.length, at: i, deep: !FENCE_LINE.test(l) };
     } else {
-      inFence.push(true);
-      if (m && m[1]![0] === open.ch && m[1]!.length >= open.len && m[2]!.trim() === '') open = null;
+      inFence[i] = true;
+      if (m && m[1]![0] === open.ch && (exact ? m[1]!.length === open.len : m[1]!.length >= open.len) && m[2]!.trim() === '') open = null;
     }
+    if (i === lines.length - 1 && open?.deep) { text.add(open.at); i = open.at; open = null; }
   }
   return inFence;
+}
+
+/**
+ * A line that opens or closes a code fence. Anchored, one pass a line. At
+ * most 3 spaces in, as CommonMark has it: 4 or more (or a tab) is an indented
+ * code block, and a ``` there is text, not a fence (fourth review of HB-0520).
+ */
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+/** One indented any amount, by spaces or tabs: a fence in a list item may be (ninth review). */
+const ANY_FENCE_LINE = /^[ \t]*(`{3,}|~{3,})(.*)$/;
+/** Where a managed section ends: a fence line at any indent (no managed section holds one). */
+const isFenceLine = (l: string): boolean => ANY_FENCE_LINE.test(l.replace(/\r$/, ''));
+
+/** A file's lines and both readings of its fences (fenceMask). */
+export interface FenceRead { lines: string[]; loose: boolean[]; exact: boolean[]; indented: boolean[] }
+type Read = FenceRead;
+let scansForTests = 0;
+/**
+ * A text's lines and both readings of its fences. A sync asks a dozen
+ * questions of the same text, and each read every line twice (third review
+ * of HB-0520): it works this out once per text and passes it to each one
+ * (the functions below take it as their last argument), rather than a module
+ * cache of the last text (seventh review). Its `lines` are shared: callers
+ * slice them, never change them. It must be of the very text it is passed
+ * with.
+ */
+export function readFences(content: string): FenceRead {
+  const lines = content.split('\n');
+  return { lines, loose: fenceMask(lines), exact: fenceMask(lines, true), indented: fenceMask(lines, false, true) };
+}
+/** Tests: how many times a text's lines were scanned for fences (fenceMask). */
+export function fenceScansForTests(): number {
+  return scansForTests;
+}
+
+/**
+ * Where a managed section is: its heading line and the line it ends before.
+ *
+ * Fences that do not balance (an unclosed ```bash, then a ```` example) are
+ * read differently by different Markdown readers, and a heading quoted in the
+ * example can look real to one of them. Taken as real, the section ran on to
+ * the next heading, which could be the end of the file, and the agent's text
+ * after it was lost (HB-0520). So the heading is looked for under both
+ * readings: where they disagree about the first one, it is `unsure`, and the
+ * file is left as it is. A section also ends at the first fence line after
+ * its heading (no managed section holds one), so it never runs on into a code
+ * block of the agent's, and up to there both readings agree.
+ */
+function managedSection({ lines, loose, exact, indented }: Read, heading: string): { start: number; end: number } | 'absent' | 'unsure' {
+  const start = lines.findIndex((l, i) => (!loose[i] || !exact[i] || !indented[i]) && l.trimEnd() === heading);
+  if (start === -1) return 'absent';
+  if (loose[start] !== exact[start] || loose[start] !== indented[start]) return 'unsure';
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^#{1,6} /.test(lines[i]!) || isFenceLine(lines[i]!)) { end = i; break; }
+  }
+  return { start, end };
 }
 
 /**
@@ -93,7 +159,7 @@ function fenceMask(lines: string[]): boolean[] {
 function unclosedFence(lines: string[]): string | undefined {
   let open: string | undefined;
   for (const l of lines) {
-    const m = /^\s*(`{3,}|~{3,})(.*)$/.exec(l.replace(/\r$/, ''));
+    const m = FENCE_LINE.exec(l.replace(/\r$/, ''));
     if (!m) continue;
     if (open === undefined) open = m[1]!;
     else if (m[1]![0] === open[0] && m[1]!.length >= open.length && m[2]!.trim() === '') open = undefined;
@@ -101,40 +167,95 @@ function unclosedFence(lines: string[]): string | undefined {
   return open;
 }
 
-/** Drop a managed section (heading through the line before the next heading). No-op if absent. */
-export function removeSection(content: string, heading: string): string {
-  const lines = content.split('\n');
-  const inFence = fenceMask(lines);
-  const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
-  if (start === -1) return content;
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (!inFence[i] && /^#{1,6} /.test(lines[i]!)) { end = i; break; }
-  }
-  // Cutting the block leaves the blank line before it AND the one that ended
-  // it back-to-back; collapse that to one separator.
-  return [...lines.slice(0, start), ...lines.slice(end)].join('\n').replace(/\n{3,}/g, '\n\n');
+/**
+ * Which of `headings` this file's sections are left as they are, because the
+ * two readings of its fences disagree on the heading (HB-0520): replaceSection
+ * and removeSection change nothing there, and withInstallSection nothing at
+ * all. So a sync can say which, and what to fix: a code fence above that does
+ * not close the way it opens.
+ */
+export function unsureSections(content: string, headings: string[], read = readFences(content)): string[] {
+  return headings.filter((h) => (h === INSTALL_HEADING ? installUnsure(read) : managedSection(read, h) === 'unsure'));
 }
 
-export function replaceSection(content: string, heading: string, section: string): string {
-  const lines = content.split('\n');
+/**
+ * Where the two readings of a file's fences part (HB-0520): the fence they
+ * read differently, and the one it should close, by line number (from 1).
+ * The owner fixes it there.
+ */
+export function fenceDisagreement(content: string, read = readFences(content)): { line: number; fence: string; opened: number } | undefined {
+  const { lines, loose, exact } = read;
+  const at = loose.findIndex((x, i) => x !== exact[i]);
+  if (at < 1) return undefined;
+  // Up to here they agree: the line before is the one that closes the block under one reading only.
+  const closer = at - 1;
+  let opener = closer - 1;
+  while (opener >= 0 && !(!loose[opener] && loose[opener + 1] && isFenceLine(lines[opener]!))) opener--;
+  const run = FENCE_LINE.exec(lines[opener >= 0 ? opener : closer]!.replace(/\r$/, ''))?.[1] ?? '```';
+  return { line: closer + 1, fence: run, opened: opener + 1 };
+}
+
+/** Drop a managed section (heading through the line before the next heading or fence). No-op if absent or unsure. */
+export function removeSection(content: string, heading: string, read = readFences(content)): string {
+  const { lines } = read;
+  const at = managedSection(read, heading);
+  if (typeof at === 'string') return content;
+  const before = lines.slice(0, at.start);
+  // Cutting the block leaves the blank line before it AND the one that ended
+  // it back-to-back; collapse that to one separator. Only there: blank lines
+  // elsewhere, in the agent's code blocks too, stay as they are.
+  while (before.length >= 2 && isBlank(before[before.length - 1]!) && isBlank(before[before.length - 2]!)) before.pop();
+  return [...before, ...lines.slice(at.end)].join('\n');
+}
+
+/**
+ * For what leaves this machine (a template export): every copy of a managed
+ * section that EITHER reading of the fences takes as real goes, with its text.
+ * removeSection leaves a file alone where the readings disagree, which is right
+ * for an agent's own AGENTS.md, but an export must not carry the owner's
+ * identity, addresses or folders because the agent's fences do not balance.
+ * Each cut ends before the next heading or fence line, so it holds no fence,
+ * and what is left reads as it did; one pass, whatever the number of copies.
+ */
+export function removeSectionEverywhere(content: string, heading: string): string {
+  const { lines, loose, exact, indented } = readFences(content);
+  const out: string[] = [];
+  let cut = false;
+  for (let i = 0; i < lines.length; i++) {
+    if ((!loose[i] || !exact[i] || !indented[i]) && lines[i]!.trimEnd() === heading) {
+      cut = true;
+      while (i + 1 < lines.length && !/^#{1,6} /.test(lines[i + 1]!) && !isFenceLine(lines[i + 1]!)) i++;
+      // The blank line before it and the one that ended it meet: one is enough.
+      while (out.length >= 2 && isBlank(out[out.length - 1]!) && isBlank(out[out.length - 2]!)) out.pop();
+      continue;
+    }
+    out.push(lines[i]!);
+  }
+  return cut ? out.join('\n') : content;
+}
+
+export function replaceSection(content: string, heading: string, section: string, read = readFences(content)): string {
+  const { lines } = read;
   // A ``` region can legitimately CONTAIN the heading text (docs showing an
   // example AGENTS.md); rewriting there mangles the fence and orphans the real
   // section, so heading detection skips fenced lines.
-  const inFence = fenceMask(lines);
-  const isHeading = (i: number) => !inFence[i] && /^#{1,6} /.test(lines[i]!);
-  const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
-  if (start === -1) {
+  const at = managedSection(read, heading);
+  if (at === 'unsure') return content;
+  // A managed section holds no fence line, so it ends where it was written
+  // (operatorSection neutralises the owner's own the same way).
+  const body = section.split('\n').map((l) => (isFenceLine(l) ? l.replace(/^(\s*)/, '$1\u200b') : l));
+  if (at === 'absent') {
     const fence = unclosedFence(lines);
-    return `${content.trimEnd()}${fence ? `\n${fence}` : ''}\n\n${section}\n`;
+    return `${content.trimEnd()}${fence ? `\n${fence}` : ''}\n\n${body.join('\n')}\n`;
   }
   // Our section runs to the next heading of ANY level, so a following `###`
-  // (or `#`) ends it rather than being swallowed.
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (isHeading(i)) { end = i; break; }
-  }
-  const out = [...lines.slice(0, start), ...section.split('\n'), ...lines.slice(end)].join('\n');
+  // (or `#`) ends it rather than being swallowed. The blank lines that ended
+  // the old one end the new one too: taken with it, the first sync after a
+  // section was appended wrote the file again for one blank line (HB-0517).
+  while (body.length > 1 && isBlank(body[body.length - 1]!)) body.pop();
+  let k = 0;
+  while (at.end - 1 - k > at.start && isBlank(lines[at.end - 1 - k]!)) k++;
+  const out = [...lines.slice(0, at.start), ...body, ...lines.slice(at.end - k)].join('\n');
   // Preserve the file's trailing newline: when our section is last, slicing
   // consumed the empty final element that represented it.
   return content.endsWith('\n') && !out.endsWith('\n') ? `${out}\n` : out;
@@ -146,16 +267,20 @@ export function replaceSection(content: string, heading: string, section: string
  * lift one file's section and splice it into another (push-definition keeps
  * each child's own "## Data sources" this way). Empty string when absent.
  */
-export function extractSection(content: string, heading: string): string {
-  const lines = content.split('\n');
-  const inFence = fenceMask(lines);
-  const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
-  if (start === -1) return '';
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (!inFence[i] && /^#{1,6} /.test(lines[i]!)) { end = i; break; }
-  }
-  return lines.slice(start, end).join('\n').trimEnd();
+export function extractSection(content: string, heading: string, read = readFences(content)): string {
+  return readSection(content, heading, read).text;
+}
+
+/**
+ * extractSection that tells a section left alone from one that is not there:
+ * `unsure` when the two readings of the fences disagree on its heading
+ * (HB-0520), and `text` empty then. A caller that would read empty as "none"
+ * (push-definition keeping a child's own sections) must not (eighth review).
+ */
+export function readSection(content: string, heading: string, read = readFences(content)): { text: string; unsure: boolean } {
+  const at = managedSection(read, heading);
+  if (typeof at === 'string') return { text: '', unsure: at === 'unsure' };
+  return { text: read.lines.slice(at.start, at.end).join('\n').trimEnd(), unsure: false };
 }
 
 /** In-container location of a data source — where the agent actually finds it. */
@@ -378,8 +503,9 @@ function installBlocks(lines: string[], inFence: boolean[]): Array<[number, numb
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!.trimEnd();
     if (inFence[i] || (l !== INSTALL_HEADING && l !== AGENTCLAW_INSTALL_HEADING)) continue;
+    // It ends at a code fence too, as every managed section does (HB-0520).
     let end = lines.length;
-    for (let j = i + 1; j < lines.length; j++) if (!inFence[j] && isHeadingLine(lines[j]!)) { end = j; break; }
+    for (let j = i + 1; j < lines.length; j++) if (isHeadingLine(lines[j]!) || isFenceLine(lines[j]!)) { end = j; break; }
     if (l === INSTALL_HEADING && known.every((k, n) => lines[i + n]?.trimEnd() === k)) end = Math.min(end, i + known.length);
     else {
       // An edited or older copy (AgentClaw's) ends where its own last lines do,
@@ -422,6 +548,15 @@ function cutBlocks(lines: string[], blocks: Array<[number, number]>, mark?: stri
 }
 
 /**
+ * A heading withInstallSection works by that one reading of the fences calls
+ * real and the other quotes: the file is left as it is (HB-0520, as managedSection).
+ */
+function installUnsure({ lines, loose, exact, indented }: Read): boolean {
+  const ours = new Set([INSTALL_HEADING, AGENTCLAW_INSTALL_HEADING, MIGRATED_TOOLS_HEADING, TOOLS_MD_TITLE, OPENCLAW_TOOLS_TEMPLATE_BODY[0]]);
+  return lines.some((l, i) => (loose[i] !== exact[i] || loose[i] !== indented[i]) && ours.has(l.trimEnd()));
+}
+
+/**
  * AGENTS.md with exactly one current install section (HB-0397).
  *
  * The section lived in TOOLS.md from 2026-09-29, but OpenClaw 2026.9 puts
@@ -444,10 +579,12 @@ function cutBlocks(lines: string[], blocks: Array<[number, number]>, mark?: stri
  *    nothing of the agent's runs on inside it.
  * OpenClaw's untouched TOOLS.md template, merged the same way, goes too.
  */
-export function withInstallSection(content: string): string {
+export function withInstallSection(content: string, read = readFences(content)): string {
   const eol = content.includes('\r\n') ? '\r' : '';
-  let lines = content.split('\n');
-  let inFence = fenceMask(lines);
+  if (installUnsure(read)) return content;
+  // A copy: the lines readFences keeps are shared, and these are changed below.
+  let lines = read.lines.slice();
+  let inFence = read.loose;
   const migrated = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === MIGRATED_TOOLS_HEADING);
   if (migrated !== -1) {
     // OpenClaw's template, word for word, after the migrated heading.

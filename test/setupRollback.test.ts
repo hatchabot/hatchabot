@@ -11,6 +11,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { Store } from '../src/store/store.js';
 import { MemSecrets } from './support/world.js';
+import { isBusy } from '../src/orchestrator/busy.js';
 
 /**
  * A setup that failed and can be retried: nothing is over for the people on the
@@ -95,7 +96,7 @@ describe('waiting for a bot token after a failed setup (HB-0414)', () => {
     const failed = await runProvisionSteps(w.deps as never, 'a1');
     expect(failed.agent.state).toBe('FAILED');
     expect(w.store.getChannelForAgent('a1')).toBeUndefined();
-    expect(w.manual.hasPending('a1')).toBe(true);
+    expect(await w.manual.waitingFor('a1')).toBe(true);
     const healthy = new MockProvider();
     const retried = await runProvisionSteps({ ...w.deps, provider: healthy } as never, 'a1');
     expect(retried.setupRequired).toBeUndefined();
@@ -109,7 +110,7 @@ describe('waiting for a bot token after a failed setup (HB-0414)', () => {
     await w.secrets.put('telegram/bot/pastedbot', '123456:not-a-real-token');
     await w.manual.release('pastedbot', { reason: 'deleted', agentId: 'a1' });
     await expect(w.secrets.get('telegram/bot/pastedbot')).rejects.toThrow();
-    expect(w.manual.hasPending('a1')).toBe(false);
+    expect(await w.manual.waitingFor('a1')).toBe(false);
   });
 });
 
@@ -154,5 +155,72 @@ describe('Retry keeps the "comes back web-only" promise (HB-0415)', () => {
     await f.inject({ method: 'POST', url: '/v1/agents/retry-b/provision', headers: H, payload: {} });
     await vi.waitFor(() => expect(store.getAgent('retry-b')!.pendingAction?.type).toBe('bot_token'), { timeout: 4000, interval: 20 });
     expect(store.getAgent('retry-b')!.webOnly).toBeFalsy();
+  });
+});
+
+// Twelfth review of fix/r3-cli: a token held from an earlier setup won over
+// the pool at a later attach, and outlived the agent getting another bot.
+describe('a stale held token gives way once the agent gets a bot another way', () => {
+  const HELD = 'made_up_held_bot';
+  /** As a failed setup leaves it: the pasted bot's token goes back to waiting for a Retry. */
+  async function holdFromFailedSetup(w: ReturnType<typeof world>) {
+    await w.secrets.put(`telegram/bot/${HELD}`, '123456:made-up-held-token');
+    await w.manual.release(HELD, { reason: 'setup-failed', agentId: 'a1' });
+    expect(await w.manual.waitingFor('a1')).toBe(true);
+  }
+
+  it('attach from the pool: the pool bot, and the held token is dropped', async () => {
+    const w = world();
+    w.store.setAgentWebOnly('a1', true);
+    expect((await runProvisionSteps(w.deps as never, 'a1')).agent.state).toBe('RUNNING');
+    await holdFromFailedSetup(w);
+    await w.pool.addToPool('sparebot', 'not-a-real-token');
+    const f = Fastify();
+    await registerRoutes(f, { store: w.store, secrets: w.secrets, providers: new Map([['mock', w.provider]]), channel: w.channel } as never);
+    const r = await f.inject({ method: 'POST', url: '/v1/agents/a1/telegram', headers: { 'x-hatchabot-owner': OWNER }, payload: {} });
+    expect(r.statusCode, r.body).toBe(202);
+    expect(r.json().username).toBe('sparebot');
+    expect(w.store.getChannelForAgent('a1')?.accountId).toBe('sparebot');
+    expect(await w.manual.waitingFor('a1')).toBe(false);
+    expect(w.secrets.map.has(TelegramManualProvisioner.pendingRef('a1'))).toBe(false);
+    await vi.waitFor(() => expect(isBusy('a1')).toBe(false)); // the rebuild the attach started
+  });
+
+  it('setup that finishes with another bot drops a token still held', async () => {
+    const w = world();
+    await w.pool.addToPool('sparebot', 'not-a-real-token');
+    const leased = await w.pool.provision({ agentId: 'a1', agentName: 'Kitchen', slug: 'kitchen' });
+    w.store.insertChannel({ id: 'ch-a1', agentId: 'a1', kind: 'telegram', accountId: leased.accountId, secretRef: leased.secretRef, deepLink: leased.deepLink, createdAt: 'now' } as never);
+    await holdFromFailedSetup(w);
+    expect((await runProvisionSteps(w.deps as never, 'a1')).agent.state).toBe('RUNNING');
+    expect(w.store.getChannelForAgent('a1')?.accountId).toBe('sparebot');
+    expect(await w.manual.waitingFor('a1')).toBe(false);
+  });
+});
+
+// Fourteenth review: every provision read the store twice (and setup once
+// more) for a held token. Held tokens are in memory, read once at boot.
+describe('held bot tokens are read from the store once, at boot', () => {
+  it('a provision with no held token reads nothing held from the store', async () => {
+    const w = world();
+    await w.pool.addToPool('sparebot', 'not-a-real-token');
+    const get = vi.spyOn(w.secrets, 'get');
+    expect((await runProvisionSteps(w.deps as never, 'a1')).agent.state).toBe('RUNNING');
+    expect(w.store.getChannelForAgent('a1')?.accountId).toBe('sparebot');
+    expect(get.mock.calls.map(([ref]) => ref)).not.toContain(TelegramManualProvisioner.pendingRef('a1'));
+  });
+
+  it('a token held before a restart is found after it, by the boot read', async () => {
+    const w = world();
+    await w.manual.submitToken('a1', '123456:made-up-held-token', 'made_up_held_bot');
+    const after = new TelegramManualProvisioner(w.secrets);
+    after.loadHeld(['a1']);
+    expect(await after.waitingFor('a1')).toBe(true);
+    expect(await after.heldBot('a1', '123456:made-up-held-token')).toBe('made_up_held_bot');
+    // registerRoutes reads it at boot.
+    const booted = new TelegramManualProvisioner(w.secrets);
+    const f = Fastify();
+    await registerRoutes(f, { store: w.store, secrets: w.secrets, providers: new Map([['mock', w.provider]]), channel: new CompositeTelegramProvisioner(w.pool, booted) } as never);
+    expect(await booted.waitingFor('a1')).toBe(true);
   });
 });

@@ -24,15 +24,22 @@ function configDefaults(): Record<string, string> {
   // Pre-rename ~/.config/agentclaw/env first, then the current file on top —
   // a fresh `login` writes only the token to the new file and must not hide
   // the URL that still lives in the old one. Keys are aliased on read.
+  return { ...readConfigFile(legacyConfigPath()), ...readConfigFile(configPath()) };
+}
+
+/** The pre-rename config file, read beneath the current one. */
+function legacyConfigPath(): string {
+  return join(homedir(), '.config', 'agentclaw', 'env');
+}
+
+function readConfigFile(file: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const file of [join(homedir(), '.config', 'agentclaw', 'env'), configPath()]) {
-    let text: string;
-    try { text = readFileSync(file, 'utf8'); } catch { continue; }
-    for (const raw of text.split('\n')) {
-      const l = raw.trim();
-      if (!l || l.startsWith('#') || !l.includes('=')) continue;
-      out[l.slice(0, l.indexOf('=')).replace(/^AGENTCLAW_/, 'HATCHABOT_')] = unquoteEnvValue(l.slice(l.indexOf('=') + 1));
-    }
+  let text: string;
+  try { text = readFileSync(file, 'utf8'); } catch { return out; }
+  for (const raw of text.split('\n')) {
+    const l = raw.trim();
+    if (!l || l.startsWith('#') || !l.includes('=')) continue;
+    out[l.slice(0, l.indexOf('=')).replace(/^AGENTCLAW_/, 'HATCHABOT_')] = unquoteEnvValue(l.slice(l.indexOf('=') + 1));
   }
   return out;
 }
@@ -166,11 +173,13 @@ Commands:
                                Pinned to an image this machine lacks: shows its
                                recipe and asks (build it here, or default image)
   backups [list]               This machine's nightly backup sets (machine owner)
-  backups restore <agent name> <YYYY-MM-DD> --yes [--no-wait]
+  backups restore <agent name> <YYYY-MM-DD> --yes [--no-wait] [--other-key]
                                Put an agent back as it was in that night's set:
                                the agent's full name and --yes, as the app asks.
                                Its current bot, members and settings are put
-                               back over it; a copy of it now is kept first
+                               back over it; a copy of it now is kept first.
+                               --other-key: a set made by another install, or
+                               under an earlier key (it says so first)
   ops [agent] [--all] [--json] Long changes — moves, imports, restores, archives,
                                app installs: kind, status, step n/m, outcome, age.
                                Without --all: what is not over and the last day's
@@ -399,6 +408,8 @@ interface Ctx {
 interface IdentityConfig {
   authMode: string;
   identity?: { apiKey?: string; projectId?: string };
+  /** 2: the server says when a bot hand-over's step is answered (HANDOVER_SAYS). */
+  handover?: number;
 }
 
 /** ~/.config/hatchabot/env — same file the password default lives in. */
@@ -413,12 +424,27 @@ function configPath(): string {
  * release stayed readable by everyone with the token in it (A068).
  */
 export function writeConfigValue(key: string, value: string, path = configPath()): void {
+  writeConfigValues({ [key]: value }, path);
+}
+
+/**
+ * Set several keys in one write, so a sign-in's server and credentials land
+ * together. `null` takes a key out (HB-0539, HB-0541).
+ */
+export function writeConfigValues(values: Record<string, string | null>, path = configPath()): void {
+  // Both spellings go: a pre-rename AGENTCLAW_ line is read as the same key
+  // (readConfigFile), so one left beside the new value could win over it.
+  const keys = Object.keys(values);
+  const dropped = keys.flatMap((k) => [k, k.replace(/^HATCHABOT_/, 'AGENTCLAW_')]);
   let lines: string[] = [];
   try {
-    lines = readFileSync(path, 'utf8').split('\n').filter((l) => !l.startsWith(`${key}=`));
+    lines = readFileSync(path, 'utf8').split('\n').filter((l) => !dropped.some((key) => l.trim().startsWith(`${key}=`)));
   } catch { /* first write */ }
   lines = lines.filter((l) => l.trim().length > 0);
-  lines.push(`${key}=${value}`);
+  for (const key of keys) {
+    const value = values[key];
+    if (value !== null && value !== undefined) lines.push(`${key}=${value}`);
+  }
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   rmSync(tmp, { force: true }); // a leftover keeps its own mode; start fresh
@@ -481,6 +507,125 @@ async function askSecret(q: string): Promise<string> {
 function fail(msg: string): never {
   console.error(`error: ${msg}`);
   process.exit(1);
+}
+
+/** The archive route's answer: where the bot went (HB-0476); null when it had none. */
+type ArchiveAnswer = { botReturn?: { username: string; outcome: 'pool' | 'left-to-copy' | 'not-parked' | string } | null };
+
+/**
+ * What became of an archived agent's bot, as the server says it happened: a
+ * bot it could not park is free but not in the pool. A server too old to say
+ * (no botReturn): what should have happened, as before.
+ */
+export function archivedBotLine(r: ArchiveAnswer): string {
+  if (!r || !('botReturn' in r)) return ' — its bot is back in the pool';
+  const b = r.botReturn;
+  if (!b) return '';
+  if (b.outcome === 'left-to-copy') return ` — bot @${b.username} was left to the downloaded copy, not put back in the pool`;
+  if (b.outcome === 'not-parked') return ` — its bot @${b.username} could not be put back in the pool; to use it again, paste its token into an agent`;
+  return ' — its bot is back in the pool';
+}
+
+/**
+ * Whether a bot-token post was refused for the token itself (the token check:
+ * 400, or 422), so adopt asks for another. A 409 is the agent's state ("not
+ * waiting for a bot token", "a bot token came in already"): another token
+ * meets the same answer, so it stops with that. A throttle (429) or no answer
+ * (5xx) says nothing of the token.
+ */
+export function tokenTurnedDown(err: unknown): boolean {
+  const status = (err as { status?: number } | undefined)?.status ?? 0;
+  return status === 400 || status === 422;
+}
+
+/** The bot an agent is on: its botUsername, or (a server before v2.178 sends none for one agent) its t.me link. */
+export function botOf(a: { botUsername?: string; deepLink?: string }): string | undefined {
+  return a.botUsername?.replace(/^@/, '') || /^https:\/\/t\.me\/([A-Za-z0-9_]+)/.exec(a.deepLink ?? '')?.[1];
+}
+
+/**
+ * When a running agent is on another bot than the one handed over to it (a
+ * pool bot leased as the token came in): which bot, and that the handed-over
+ * one was not used. Undefined when they match, or either is not known.
+ */
+export function otherBotLine(a: { botUsername?: string; deepLink?: string }, handedOver: string | undefined): string | undefined {
+  const on = botOf(a);
+  const gave = handedOver?.replace(/^@/, '');
+  if (!on || !gave || on.toLowerCase() === gave.toLowerCase()) return undefined;
+  return `  note: it is on @${on}, not @${gave} — @${gave} was not used`;
+}
+
+/** An agent that had not got past `state` when the command's --timeout ran out. */
+class StillWaiting extends Error {
+  constructor(readonly state: string, readonly minutes: number) {
+    super(`still ${state} after ${minutes} min — it may yet finish; check: hatchabot list`);
+  }
+}
+
+/**
+ * Waits before a bot token is posted again when the server or Telegram did
+ * not answer (502–504), or the connection failed or dropped (noAnswer): that
+ * says nothing of the token, so the same one is sent again rather than asked
+ * for again.
+ */
+const HANDOVER_RETRY_MS = [2_000, 4_000, 8_000];
+
+/**
+ * The channel-token route's answer to a hand-over: the bot's name, and
+ * `stepAnswered` from a server that marks the step answered until setup
+ * takes the token (after v2.177).
+ */
+type HandOverAnswer = { username?: string; stepAnswered?: boolean };
+
+/**
+ * A server whose /v1/config says `handover` this or more marks a bot-token
+ * step answered when a token comes in, until setup takes it or turns it
+ * down, and answers the same token posted again 202. One that does not say
+ * (v2.177 and before) is told apart by that, not by timing.
+ */
+export const HANDOVER_SAYS = 2;
+
+/**
+ * How long an older server's bot-token step may stay after a hand-over (it
+ * shows the step until setup takes the token) before the CLI stops waiting:
+ * not a refusal, which that server does not tell apart (StepNotSaid). Only
+ * for a server without HANDOVER_SAYS.
+ */
+const STEP_GRACE_MS = 30_000;
+
+/**
+ * A server of v2.177 or before still showed the bot-token step
+ * STEP_GRACE_MS after a hand-over: it does not say whether setup took the
+ * token or turned it down, so the agent is left as it is.
+ */
+class StepNotSaid extends Error {
+  constructor(readonly agentId: string) {
+    super(`it still asks for a bot token ${STEP_GRACE_MS / 1000} s after the hand-over, and this server (v2.177 or before) does not say whether setup took it — watch: hatchabot setup-log ${agentId}`);
+  }
+}
+
+/**
+ * Whether a post got no answer: Telegram or a proxy did not answer (502–504),
+ * or the connection failed: fetch rejects with a TypeError "fetch failed",
+ * the socket's code (ECONNRESET, ENOTFOUND, UND_ERR_SOCKET…) on its cause.
+ * Another TypeError is a bug (an invalid URL, ERR_INVALID_URL on its cause;
+ * a bad header), and is not sent again; nor is an answer. The web's
+ * handOverBot counts any TypeError: a browser names its network failures
+ * in its own words.
+ */
+export function noAnswer(err: unknown): boolean {
+  const e = err as { status?: unknown; message?: unknown; cause?: { code?: unknown } } | undefined;
+  if (typeof e?.status === 'number') return e.status >= 502 && e.status <= 504;
+  if (!(err instanceof TypeError)) return false;
+  const code = e?.cause?.code;
+  return e?.message === 'fetch failed' || (typeof code === 'string' && !code.startsWith('ERR_'));
+}
+
+/** A failed request in words: fetch's own ("fetch failed") with the socket's code (ECONNRESET) when it has one. */
+function noAnswerWords(err: unknown): string {
+  const code = (err as { cause?: { code?: unknown } } | undefined)?.cause?.code;
+  const text = err instanceof Error ? err.message : String(err);
+  return typeof code === 'string' && !text.includes(code) ? `${text} (${code})` : text;
 }
 
 /** <repo> root, from this file's location (<repo>/src/cli.ts). */
@@ -621,7 +766,7 @@ export function pairingTargets<T extends { state?: string; role?: string; botUse
   return list.filter((a) => a.state === 'RUNNING' && (!a.role || a.role === 'owner') && (!!a.botUsername || !!a.otherChannels?.length));
 }
 
-const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only', 'invited-only']);
+const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only', 'invited-only', 'other-key']);
 const VALUE_FLAGS = new Set(['ref', 'kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -681,7 +826,7 @@ async function api(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Resp
     // still land in main().catch → fail().
     throw Object.assign(
       new Error((data as any).error ?? (data as any).message ?? `${init.method ?? 'GET'} ${path} → ${res.status}`),
-      { data }, // the whole answer, for the callers that act on a `code`
+      { data, status: res.status }, // the whole answer, for the callers that act on a `code`
     );
   }
   return res;
@@ -897,9 +1042,21 @@ const ago = (iso?: string) => {
 
 /** Interactive sign-in for identity mode; stores the refresh token 0600. */
 async function doLogin(url: string, server: IdentityConfig, flags: Map<string, string>): Promise<void> {
-  // `--url B` saves B too: the token alone, beside server A's saved URL, sent
-  // B's token to A on every later command (night review, 2026-09-28).
-  const saveUrl = () => { if (flags.has('url')) writeConfigValue('HATCHABOT_URL', url); };
+  // A server chosen for this sign-in (--url B, or HATCHABOT_URL=B) is saved
+  // with its credential, in one write: the token alone, beside server A's
+  // saved URL, went to A on every later command (night review, 2026-09-28;
+  // HB-0539 for HATCHABOT_URL).
+  const urlChosen = flags.has('url') || !!process.env.HATCHABOT_URL;
+  // One way of signing in at a time. A saved access token is used before a
+  // refresh token, so an email sign-in beside an old token went on acting as
+  // the old account (HB-0541). A key the pre-rename file still holds is
+  // saved empty rather than left out, or the old value would show through.
+  const legacy = readConfigFile(legacyConfigPath());
+  const save = (key: string, value: string, replaces: string) => writeConfigValues({
+    [key]: value,
+    [replaces]: replaces in legacy ? '' : null,
+    ...(urlChosen ? { HATCHABOT_URL: url } : {}),
+  });
 
   // An access token minted by the app. The only path that works for accounts
   // with no password — i.e. anyone who signed in with Google. Not echoed: a
@@ -914,9 +1071,9 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
     if (!token.startsWith('hatchabot_') && !token.startsWith('agentclaw_')) fail('that does not look like a Hatchabot token');
     const res = await fetch(`${url}/v1/agents`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) fail(`that token was rejected (${res.status})`);
-    writeConfigValue('HATCHABOT_TOKEN', token);
-    saveUrl();
+    save('HATCHABOT_TOKEN', token, 'HATCHABOT_REFRESH_TOKEN');
     console.log(`signed in. Token saved to ${configPath()} (chmod 600)`);
+    if (process.env.HATCHABOT_TOKEN && process.env.HATCHABOT_TOKEN.trim() !== token) envTokenNote();
     return;
   }
 
@@ -943,10 +1100,15 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
   );
   const data = (await res.json()) as any;
   if (!res.ok) fail(`sign-in failed: ${data?.error?.message ?? res.status}`);
-  writeConfigValue('HATCHABOT_REFRESH_TOKEN', data.refreshToken);
-  saveUrl();
+  save('HATCHABOT_REFRESH_TOKEN', data.refreshToken, 'HATCHABOT_TOKEN');
   console.log(`signed in as ${data.email}`);
   console.log(`refresh token saved to ${configPath()} (chmod 600)`);
+  if (process.env.HATCHABOT_TOKEN) envTokenNote();
+}
+
+/** A token in the environment is used before a saved sign-in (main), so a new one would not count. */
+function envTokenNote(): void {
+  console.error('note: HATCHABOT_TOKEN is set in your environment, and it is used before this sign-in — unset it.');
 }
 
 /**
@@ -1363,8 +1525,13 @@ async function main() {
 
   if (cmd === 'doctor') {
     process.chdir(repoDir()); // .env, data/ and the scripts live in the checkout, wherever doctor was typed
-    const { doctorReport, gatherFacts } = await import('./doctor.js');
-    const facts = await gatherFacts(url);
+    const { doctorReport, doctorTarget, envMap, gatherFacts } = await import('./doctor.js');
+    // --url is asked; a saved or shell URL only when it is another machine's.
+    // Else the listener this machine's .env describes, not the CLI's default
+    // (HB-0549), nor a saved local address that a PORT change left behind.
+    const env = envMap('.env');
+    const target = await doctorTarget(flags.get('url'), process.env.HATCHABOT_URL ?? defaults.HATCHABOT_URL, env);
+    const facts = await gatherFacts(target?.replace(/\/$/, ''), env);
     const lines = doctorReport(facts);
     if (flags.has('json')) {
       // For a program watching many installs (a hosting monitor): the verdict,
@@ -1466,14 +1633,64 @@ async function main() {
   };
   // Bounded: an agent stuck provisioning used to hold the command forever,
   // which a script or a regression run can't tell from progress (CLI audit).
-  const pollAgent = async (id: string): Promise<any> => {
+  // Thrown, not exited: a caller that made the agent cleans up first (HB-0543).
+  /**
+   * Whether the server says when a hand-over's step is answered: by its
+   * /v1/config (HANDOVER_SAYS), not by timing.
+   */
+  const handoverSays = (server.handover ?? 0) >= HANDOVER_SAYS;
+  /**
+   * Until the agent runs, fails or waits on you. `handedOver`: the route's
+   * answer to a bot hand-over. A server that says (handoverSays) shows no
+   * step until setup takes the token up or turns it down, so a step seen
+   * then is a refusal, however slow setup is. An older one (v2.177 and
+   * before) shows its step until setup takes the token, and does not tell a
+   * refusal apart: a step that stays STEP_GRACE_MS there is StepNotSaid.
+   */
+  const pollAgent = async (id: string, handedOver?: HandOverAnswer): Promise<any> => {
     const limit = minutesFlag(15);
     const deadline = Date.now() + limit * 60_000;
+    if (handedOver) await new Promise((r) => setTimeout(r, 3000));
+    let stepSince: number | undefined;
     for (;;) {
       const a = (await (await api(ctx, `/v1/agents/${id}`)).json()) as any;
-      if (a.state === 'RUNNING' || a.state === 'FAILED' || a.pendingAction) return a;
-      if (Date.now() > deadline) fail(`still ${a.state} after ${limit} min — it may yet finish; check: hatchabot list`);
+      if (a.state === 'RUNNING' || a.state === 'FAILED') return a;
+      if (!a.pendingAction) stepSince = undefined;
+      else if (!handedOver || handedOver.stepAnswered || handoverSays) return a;
+      else if (Date.now() - (stepSince ??= Date.now()) >= STEP_GRACE_MS) throw new StepNotSaid(id);
+      if (Date.now() > deadline) throw new StillWaiting(String(a.state), limit);
       await new Promise((r) => setTimeout(r, 3000));
+    }
+  };
+  /**
+   * Posts a bot token (or the workspace's bot) and gives the route's answer;
+   * {} when it is not JSON. "Telegram did not answer" (503, or a proxy's 502
+   * or 504), or a connection refused or dropped, is sent again on its own a
+   * few times (HANDOVER_RETRY_MS).
+   */
+  const handOver = async (id: string, body: Record<string, unknown>): Promise<HandOverAnswer> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return ((await (await jsonPost(`/v1/agents/${id}/channel-token`, body)).json().catch(() => ({}))) ?? {}) as HandOverAnswer;
+      } catch (err) {
+        // Sent again after no answer, and refused for the agent's state: the
+        // first may have been taken. A server that says (handoverSays)
+        // answers the same token 202 again, so the agent is read: a step
+        // still open means the first never landed, and the 409 stands; one
+        // answered, the agent is watched. A server of v2.177 or before
+        // clears the step as it takes a token and does not know the same
+        // token again: watched as after a hand-over to it (no stepAnswered).
+        if (attempt > 0 && (err as { status?: number }).status === 409) {
+          if (!handoverSays) return {};
+          const a = (await (await api(ctx, `/v1/agents/${id}`)).json()) as any;
+          if (a.pendingAction && a.state !== 'RUNNING' && a.state !== 'FAILED') throw err;
+          return { stepAnswered: true };
+        }
+        const wait = HANDOVER_RETRY_MS[attempt];
+        if (wait === undefined || !noAnswer(err)) throw err;
+        console.error(`  ${noAnswerWords(err)} Trying again in ${wait / 1000} s…`);
+        await new Promise((r) => setTimeout(r, wait));
+      }
     }
   };
 
@@ -1667,11 +1884,13 @@ async function main() {
           console.log(a.pendingAction.instructions ?? 'A Telegram bot token is needed.');
           tok = await askSecret('Paste bot token (hidden): ');
         }
-        const sub: any = await (await jsonPost(`/v1/agents/${a.id}/channel-token`, { token: tok })).json();
-        console.log(`bot @${sub.username} attached — provisioning…`);
-        a = await pollAgent(a.id);
+        const sub = await handOver(a.id, { token: tok });
+        console.log(`${sub.username ? `bot @${sub.username}` : 'bot'} attached — provisioning…`);
+        a = await pollAgent(a.id, sub);
+        if (a.state === 'RUNNING') { const other = otherBotLine(a, sub.username); if (other) console.log(other); }
       }
       if (a.state === 'FAILED') fail(`provisioning failed: ${a.stateReason ?? 'unknown'} (try: hatchabot retry "${name}")`);
+      if (a.state !== 'RUNNING') fail(`"${a.name}" is ${a.state}${a.pendingAction ? ' and waiting on you' : ''} — check: hatchabot list`);
       console.log(`"${a.name}" is RUNNING.`);
       if (a.deepLink) console.log(`Say hi to claim it as owner: ${a.deepLink}`);
       else if (a.webOnly) console.log('No Telegram bot: talk to it in the web app (click its icon).');
@@ -1807,6 +2026,10 @@ async function main() {
         name, aiProfileId: profile, hostId: host,
         ...(webOnly ? { telegram: false } : {}),
         ...(seedMembers.length ? { seedMembers } : {}),
+        // Reusing its bot: no pool bot, so provisioning stops and waits for
+        // that bot's token. Without this a spare pool bot was taken instead,
+        // and the old bot was never taken over (HB-0542).
+        ...(flags.has('reuse-bot') ? { skipPool: true } : {}),
       })).json();
 
       // Everything past this point owns a half-made agent. If any step fails we
@@ -1814,12 +2037,21 @@ async function main() {
       // obvious next move — run the same command again — would fail on a
       // collision instead of retrying.
       let res: any;
+      // The route's answer once the bot or token went to the agent: from then
+      // on the agent is set up with it, and a wait that runs out leaves it.
+      let gave: HandOverAnswer | undefined;
+      // Before every reason a --reuse-bot run stops.
+      const notTaken = flags.has('reuse-bot') ? `@${bot!.accountId} was not taken over: ` : '';
       try {
         let a = await pollAgent(created.id);
-        if (a.pendingAction?.type === 'bot_token' && flags.has('reuse-bot')) {
-          await jsonPost(`/v1/agents/${a.id}/channel-token`, { fromWorkspace: dir });
-          console.log(`  took over @${bot!.accountId} — same bot, same conversations`);
-          a = await pollAgent(a.id);
+        if (flags.has('reuse-bot')) {
+          if (a.state !== 'FAILED' && a.pendingAction?.type !== 'bot_token') {
+            throw new Error(`${notTaken}"${name}" did not wait for a bot${botOf(a) ? ` (it has @${botOf(a)})` : ''}`);
+          }
+          if (a.state !== 'FAILED') {
+            gave = await handOver(a.id, { fromWorkspace: dir });
+            a = await pollAgent(a.id, gave);
+          }
         } else if (a.pendingAction?.type === 'bot_token') {
           console.log(a.pendingAction.instructions ?? 'A Telegram bot token is needed.');
           let tok = process.env.HATCHABOT_BOT_TOKEN?.trim();
@@ -1828,25 +2060,52 @@ async function main() {
           for (let attempt = 0; ; attempt++) {
             if (!tok) tok = await askSecret('Paste bot token (hidden): ');
             try {
-              await jsonPost(`/v1/agents/${a.id}/channel-token`, { token: tok });
+              gave = await handOver(a.id, { token: tok });
               break;
             } catch (err) {
+              // Asked again only when the token itself was turned down
+              // (tokenTurnedDown); the agent's state, a throttle or no answer stops here.
               // A token from the environment is a script's: re-prompting there
               // posted empty tokens twice (--bot-token is not a flag; night review).
-              if (attempt >= 2 || process.env.HATCHABOT_BOT_TOKEN?.trim() || !process.stdin.isTTY) throw err;
+              if (!tokenTurnedDown(err) || attempt >= 2 || process.env.HATCHABOT_BOT_TOKEN?.trim() || !process.stdin.isTTY) throw err;
               console.error(`  ${err instanceof Error ? err.message : String(err)}`);
               tok = undefined;
             }
           }
-          a = await pollAgent(a.id);
+          a = await pollAgent(a.id, gave);
         }
-        if (a.state === 'FAILED') throw new Error(`could not start: ${a.stateReason ?? 'unknown'}`);
+        if (a.state === 'FAILED') throw new Error(`${notTaken}"${name}" could not start: ${a.stateReason ?? 'no reason given'}`);
+        // Still waiting after the hand-over (the token was turned down): as
+        // create does, say so and copy nothing.
+        if (a.state !== 'RUNNING') throw new Error(`${notTaken}"${name}" is ${a.state}${a.pendingAction ? ' and waiting on you' : ''}`);
+        // On another bot than the one handed over (one leased as the token
+        // came in), by the server's own name for it: the workspace's account
+        // key (bot.accountId) may be any name, such as "default".
+        const other = gave ? otherBotLine(a, gave.username) : undefined;
+        if (other) console.log(other);
+        else if (flags.has('reuse-bot')) console.log(`  took over @${gave?.username ?? botOf(a) ?? bot!.accountId} — same bot, same conversations`);
 
         res = await (await jsonPost(`/v1/agents/${a.id}/adopt-workspace`, { path: dir })).json();
       } catch (err) {
-        await api(ctx, `/v1/agents/${created.id}`, { method: 'DELETE' }).catch(() => {});
-        fail(`${err instanceof Error ? err.message : String(err)}\n` +
-          `Nothing was adopted and "${name}" was cleaned up — fix the cause and run it again.`);
+        // Its bot went to it, and it is still setting up (or an older server
+        // does not say whether it took the token): left to finish, as the web
+        // app's adopt leaves it, not removed mid-setup.
+        if ((err instanceof StillWaiting || err instanceof StepNotSaid) && gave) {
+          const what = err instanceof StillWaiting
+            ? `was still ${err.state} after ${err.minutes} min, after its bot was handed over`
+            : `still asks for a bot token ${STEP_GRACE_MS / 1000} s after its bot was handed over, and this server (v2.177 or before) does not say whether setup took it`;
+          fail(`"${name}" ${what}: it was left to finish, and nothing was adopted.\n` +
+            `Watch it with: hatchabot setup-log ${created.id} — once it runs, remove it (hatchabot delete ${created.id} --yes) and run this again.`);
+        }
+        const why = err instanceof StillWaiting ? `"${name}" was still ${err.state} after ${err.minutes} min`
+          : err instanceof Error ? err.message : String(err);
+        // Said only when the delete went through: a refused one (still
+        // provisioning, the server gone) left the agent while this said it was
+        // cleaned up, and the retry it suggested collided with it (HB-0544).
+        const kept = await api(ctx, `/v1/agents/${created.id}`, { method: 'DELETE' }).then(() => undefined, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+        if (kept === undefined) fail(`${why}\nNothing was adopted and "${name}" was cleaned up — fix the cause and run it again.`);
+        fail(`${why}\nNothing was adopted, but "${name}" (${created.id}) could not be removed: ${kept}\n` +
+          `Remove it with: hatchabot delete ${created.id} --yes — then fix the cause and run this again.`);
       }
       console.log(`adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into "${name}".`);
       console.log(`The original at ${preview.path} is untouched — retire it when you're happy,`);
@@ -2248,7 +2507,7 @@ async function main() {
         const sets: any[] = b.backups ?? [];
         if (flags.has('json')) return console.log(JSON.stringify(b, null, 2));
         if (!sets.length) return console.log('no backups yet — the nightly job runs at 03:30');
-        for (const s of sets) console.log(`${s.date}  ${String((s.volumes ?? []).length).padStart(3)} agents  ${((s.sizeBytes ?? 0) / 1e9).toFixed(2)} GB${s.complete === false ? '  (incomplete)' : ''}`);
+        for (const s of sets) console.log(`${s.date}  ${String((s.volumes ?? []).length).padStart(3)} agents  ${((s.sizeBytes ?? 0) / 1e9).toFixed(2)} GB${s.complete === false ? '  (incomplete)' : ''}${s.foreign ? '  (made by another install, or under an earlier key)' : ''}`);
         return;
       }
       if (sub !== 'restore') fail(`unknown: backups ${sub}. Try: backups [list] | backups restore <agent> <date> --yes`);
@@ -2271,7 +2530,8 @@ async function main() {
       if (!flags.has('yes')) {
         fail(`This replaces everything "${a.name}" remembers with the ${date} backup (a copy of it now is kept first, and its current bot, members and settings are put back over it).\n  Re-run with --yes to do it.`);
       }
-      const res = (await (await jsonPost('/v1/backups/restore', { agentId: a.id, date })).json()) as any;
+      // --other-key: the owner's yes to a set made by another install or under an earlier key (the server says why).
+      const res = (await (await jsonPost('/v1/backups/restore', { agentId: a.id, date, ...(flags.has('other-key') ? { otherKey: true } : {}) })).json()) as any;
       const started = startedOperation(res);
       if (!started) { console.log(`restored "${a.name}" from the ${date} backup`); return; }
       const op = await followOperation(ctx, started, flags, a.name);
@@ -2648,8 +2908,8 @@ async function main() {
         );
         if (!/^y(es)?$/i.test(ok.trim())) fail('nothing archived');
       }
-      await jsonPost(`/v1/agents/${a.id}/archive`, {});
-      console.log(`"${a.name}" archived — its bot is back in the pool.`);
+      const done = (await (await jsonPost(`/v1/agents/${a.id}/archive`, {})).json().catch(() => ({}))) as ArchiveAnswer;
+      console.log(`"${a.name}" archived${archivedBotLine(done)}.`);
       return;
     }
     // NOT `restore` — that verb already means "restore from a downloaded

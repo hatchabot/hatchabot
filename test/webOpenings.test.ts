@@ -10,10 +10,11 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { inlineScripts } from '../scripts/inline-scripts.mjs';
 import { mergeConfig, type AppManifest } from '../src/orchestrator/apps.js';
 
 const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
-const js = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join('\n');
+const js = inlineScripts(html).join('\n');
 function source(name: string): string {
   const m = new RegExp(`^(?:async )?function ${name}\\([^\\n]*\\) \\{\\n[\\s\\S]*?^\\}`, 'm').exec(js);
   if (!m) throw new Error(`no function ${name} in web/index.html`);

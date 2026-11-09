@@ -4,6 +4,7 @@ import { hostname, homedir, userInfo } from 'node:os';
 import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { looksLikeCode, maskKeyMaterial, OTHER_QUOTED, maskKnownValues, quotedFieldMasker, redactSecrets } from '../domain/redact.js';
+import { regexpEscape } from '../domain/regexpEscape.js';
 
 /**
  * "Report a problem" (docs/field-reports.md): the manager agent — or the
@@ -64,7 +65,6 @@ export function localContext(): PublicRedactContext {
   return { home: homedir(), user, host: hostname() };
 }
 
-const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const isPrivateV4 = (a: number, b: number) =>
   a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
 /**
@@ -609,7 +609,7 @@ function maskSshWords(text: string): string {
 }
 
 const WORD_RUN = new RegExp(String.raw`[${LETTERS}]+`, 'gu');
-const wordPattern = (w: string) => w.split(/[\s_.+-]+/).filter(Boolean).map(esc).join(String.raw`(?:[\s_.+-]|%20)+`);
+const wordPattern = (w: string) => w.split(/[\s_.+-]+/).filter(Boolean).map(regexpEscape).join(String.raw`(?:[\s_.+-]|%20)+`);
 
 /** Where a word may start: not inside a word, but after a URL's escape (Hello%20Alice), whose digits are no part of the name. */
 const WORD_START = String.raw`(?:(?<![${LETTERS}])|(?<=%[0-9A-Fa-f]{2}))`;
@@ -656,7 +656,7 @@ function maskUsers(text: string, users: readonly string[]): string {
   let out = maskWords(maskWords(text, clean.filter((u) => !COMMON_WORD_USERS.has(u.toLowerCase())), '{user}', 'any'), common.filter((u) => /\p{Lu}/u.test(u)), '{user}', 'exact');
   const names = new Set(common.map((u) => u.toLowerCase()));
   if (!names.size) return out;
-  const name = `(${[...names].map(esc).join('|')})(?![${LETTERS}_-])`;
+  const name = `(${[...names].map(regexpEscape).join('|')})(?![${LETTERS}_-])`;
   const isUser = (w: string) => names.has(w.toLowerCase());
   return out
     .replace(new RegExp(String.raw`(?<![A-Za-z0-9-])((?:user(?:name)?|login|logname|owner|author|committer|whoami)[ \t]*[:=][ \t]*["']?|user[ \t]+["']?|(?:-[a-z]*[lu]|--user|--login)[ =]?["']?|[ug]id=\d+\(|sudo(?:\[\d+\])?:[ \t]+|su(?:[ \t]+-\S*)*[ \t]+|id:[ \t]+['‘]|(?:usermod|useradd|userdel|adduser|deluser|passwd|groups|getent[ \t]+passwd)(?:[ \t]+\S+){0,3}?[ \t]+)${name}`, 'giu'), '$1{user}')
@@ -869,10 +869,10 @@ function maskOnce(text: string, ctx: PublicRedactContext): string {
     if (p.length < 3 || (ctx.home && (p === ctx.home || p.startsWith(`${ctx.home}/`)))) continue;
     // Whole paths only: "/backups" is masked in "/backups/2026-10-22", never inside
     // "docs/backups.md", "/v1/backups" or "/backups-old" (regression audit, 2026-10-22).
-    out = out.replace(new RegExp(`(?<![\\w.~/-])${esc(p)}(?=/|[^\\w.-]|\\.(?!\\w)|$)`, 'g'), '{path}');
+    out = out.replace(new RegExp(`(?<![\\w.~/-])${regexpEscape(p)}(?=/|[^\\w.-]|\\.(?!\\w)|$)`, 'g'), '{path}');
   }
   // The whole name: /home/patricia is not inside /home/pat. It was "~ricia".
-  if (ctx.home && ctx.home.length > 1) out = out.replace(new RegExp(String.raw`(?<![${LETTERS}_./~-])${esc(ctx.home)}(?![${LETTERS}_.-])`, 'gu'), '~');
+  if (ctx.home && ctx.home.length > 1) out = out.replace(new RegExp(String.raw`(?<![${LETTERS}_./~-])${regexpEscape(ctx.home)}(?![${LETTERS}_.-])`, 'gu'), '~');
   out = maskPaths(out.replace(QUOTED_PATH, maskQuotedPath).replace(/(?<![\w.~%-])[\w.~%-]*%(?:2F|5C)[^\s&"'<>]*%(?:2F|5C)[^\s&"'<>]*/gi, '{path}').replace(SYSTEMD_ESCAPED, (_m, a?: string, b?: string) => `{path}${a ?? b}`).replace(QUERY_VALUE, maskQueryValue));
   out = out
     .replace(/(?:\{path\})+/g, '{path}')

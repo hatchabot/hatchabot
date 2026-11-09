@@ -64,10 +64,13 @@ describe('one bot, two agents, taking turns', () => {
     expect(store.getChannelForAgent('b')).toBeUndefined();
     expect(store.getAgent('b')!.pendingAction?.type).toBe('bot_token');
 
-    // Archive A: the bot goes back.
+    // Archive A: the bot goes back, and what was kept about its volume's writers is forgotten (seventh review).
+    const forgot: string[] = [];
+    Object.assign(provider, { forgetVolumeWriters: (ref: string) => { forgot.push(ref); } });
     await archiveAgent(deps as any, 'a');
     expect(store.getAgent('a')!.state).toBe('ARCHIVED');
     expect(pool.availableCount()).toBe(1);
+    expect(forgot).toEqual([store.getAgent('a')!.runtimeRef]);
 
     // Now B gets it, named for B.
     const second = await runProvisionSteps(deps as any, 'b');

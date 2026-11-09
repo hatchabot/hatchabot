@@ -1,4 +1,5 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
+import { safeEqual } from '../util/safeEqual.js';
 
 /**
  * Authenticator-app codes: HOTP (RFC 4226) and TOTP (RFC 6238), with
@@ -64,8 +65,7 @@ export function totpVerify(secret: Buffer, code: string, opts: { atMs?: number; 
   let matched: number | undefined;
   // Every candidate is computed and compared, whichever matches.
   for (const step of [now - 1, now, now + 1]) {
-    const want = Buffer.from(hotp(secret, step));
-    if (timingSafeEqual(want, Buffer.from(typed)) && matched === undefined) matched = step;
+    if (safeEqual(hotp(secret, step), typed) && matched === undefined) matched = step;
   }
   if (matched === undefined) return undefined;
   if (opts.lastStep !== undefined && matched <= opts.lastStep) return undefined;

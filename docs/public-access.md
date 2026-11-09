@@ -393,9 +393,11 @@ every thirty seconds. It is closed when its session is over ("Sign out on
 every device", the owner signing that person out, a password change or
 reset, the account disabled or removed, the session's own end); at the public
 address also when its sign-in was signed out, when nothing has been sent on
-it for the idle time, when the person's second factor is reset or one is
-removed, and when they no longer have the standing on that agent that opened
-it (the agent changed hands, a guest's web chat was switched off). This holds
+it for the idle time (on a guest's chat, nothing the guest sent: pings, pongs,
+the console's own polls and requests refused for a guest do not count), when
+the person's second factor is reset or one is removed, and when they no
+longer have the standing on that agent that opened it (the agent changed
+hands, a guest's web chat was switched off). This holds
 at the private address too, for the session and the standing. A socket that
 cannot be judged (the database does not answer) is closed.
 

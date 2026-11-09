@@ -208,7 +208,11 @@ describe('scripts/release.sh tags the version commit in the dev repo once everyt
     w.landed('9.8.7');
     refused(w.release(['9.8.7'], { HB_PRIVACY_TEXT: '1' }), w, /release notes did not pass the privacy check/);
     expect(w.privacyLog()).not.toContain('--sync-ci');
-    refused(w.release(['9.8.7'], { HB_PRIVACY_TEXT: '3' }), w, /did not pass the privacy check/);
+    // Incomplete (3: a record it could not read) is said as that, not blamed on the CHANGELOG (HB-0529).
+    const incomplete = w.release(['9.8.7'], { HB_PRIVACY_TEXT: '3' });
+    refused(incomplete, w, /could not check the release notes in full: it could not read what it names above/);
+    expect(incomplete.stderr.trim().split('\n').pop()).not.toContain('CHANGELOG');
+    refused(w.release(['9.8.7'], { HB_PRIVACY_TEXT: '2' }), w, /privacy check stopped \(exit 2\)/);
     refused(w.release(['9.8.7'], { HB_PRIVACY_SYNC: '3' }), w, /privacy fingerprints up to date/);
   });
 

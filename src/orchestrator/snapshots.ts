@@ -130,16 +130,50 @@ export async function readCoreFiles(
  * stdin to a one-shot on the volume. Linux caps one argument at 128 KiB, so
  * a MEMORY.md past ~98 KB failed to spawn ("Docker is not available") and a
  * snapshot restore stopped half-way (night review, 2026-09-27).
+ * `ifUnchanged`: the file is replaced only while it is still the one with
+ * this SHA-256 (what the caller read); otherwise nothing is written and it
+ * exits 3. A sync that does not hold the agent busy so never writes over a
+ * save made while it worked (HB-0599). The content goes to a file of its
+ * own first, and the file is hashed right before the rename, in one shell
+ * with nothing read between (larger content: staged on the volume, then
+ * that shell). `hold`: the turn Hatchabot's own writers of the file take
+ * (withAgentsMdTurn), around the staging, the check and the rename, so the
+ * staged file never waits in the workspace for the turn. It is removed,
+ * in the turn, however the write ends short of its rename: refused,
+ * failed or thrown.
  */
-export async function writeFileInAgent(provider: RuntimeProvider, runtimeRef: string, path: string, b64: string, via: VolumeAccess = {}): Promise<ExecResult> {
-  if (b64.length <= ARGV_SAFE_B64) {
+export async function writeFileInAgent(
+  provider: RuntimeProvider, runtimeRef: string, path: string, b64: string, via: VolumeAccess = {},
+  ifUnchanged?: { sha256: string; hold?: <T>(commit: () => Promise<T>) => Promise<T> },
+): Promise<ExecResult> {
+  const q = JSON.stringify(path);
+  const exec = (script: string) => via.onVolume ? provider.execShellOnVolume(runtimeRef, script, { image: via.image }) : provider.execShell(runtimeRef, script);
+  const small = b64.length <= ARGV_SAFE_B64;
+  if (!small && !provider.writeToVolume) return { code: 1, stdout: '', stderr: 'this machine cannot write a file that large into the agent' };
+  if (!ifUnchanged) {
     // tmp + mv, so a failure never leaves the file truncated.
-    const q = JSON.stringify(path);
-    const script = `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`;
-    return via.onVolume ? provider.execShellOnVolume(runtimeRef, script, { image: via.image }) : provider.execShell(runtimeRef, script);
+    if (small) return exec(`set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`);
+    return provider.writeToVolume!(runtimeRef, ['sh', '-c', 'cat > "$1.part-$$" && mv -f "$1.part-$$" "$1"', 'sh', path], Buffer.from(b64, 'base64'));
   }
-  if (!provider.writeToVolume) return { code: 1, stdout: '', stderr: 'this machine cannot write a file that large into the agent' };
-  return provider.writeToVolume(runtimeRef, ['sh', '-c', 'cat > "$1.part-$$" && mv -f "$1.part-$$" "$1"', 'sh', path], Buffer.from(b64, 'base64'));
+  const tmp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
+  const qt = JSON.stringify(tmp);
+  const swap = `[ "$(sha256sum < ${q} | cut -d' ' -f1)" = ${JSON.stringify(ifUnchanged.sha256)} ] || { echo 'it changed meanwhile' >&2; exit 3; }; mv -f ${qt} ${q}`;
+  const write = async (): Promise<ExecResult> => {
+    let renamed = false;
+    try {
+      let done: ExecResult;
+      if (small) done = await exec(`set -e; echo ${JSON.stringify(b64)} | base64 -d > ${qt}; ${swap}`);
+      else {
+        const staged = await provider.writeToVolume!(runtimeRef, ['sh', '-c', 'cat > "$1"', 'sh', tmp], Buffer.from(b64, 'base64'));
+        done = staged.code !== 0 ? staged : await exec(`set -e; ${swap}`);
+      }
+      renamed = done.code === 0;
+      return done;
+    } finally {
+      if (!renamed) await exec(`rm -f ${qt}`).catch(() => undefined);
+    }
+  };
+  return ifUnchanged.hold ? ifUnchanged.hold(write) : write();
 }
 /** Base64 up to this size rides in the shell argument; beyond it, stdin. */
 export const ARGV_SAFE_B64 = 96 * 1024;
@@ -213,12 +247,21 @@ export function snapshotsInUse(store: Store, agentId: string): string[] {
 export async function captureSnapshot(
   deps: SnapshotDeps,
   agentId: string,
-  opts: { label?: string; reason?: SnapshotReason } = {},
+  opts: {
+    label?: string;
+    reason?: SnapshotReason;
+    /** Asked once the files are read, before anything is stored: a reason given drops them, refused in those words. */
+    torn?: () => string | undefined;
+  } = {},
 ): Promise<SnapshotSummary> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
+  // Read here, when it is taken: a snapshot by hand may have waited its turn
+  // behind a change of several files, and the agent changed meanwhile.
   const agent = store.getAgent(agentId);
-  if (!agent?.runtimeRef) throw new SnapshotError('This agent has no runtime yet.');
+  if (!agent || agent.state === 'DELETED' || agent.state === 'DELETING') throw new SnapshotError('It was deleted.');
+  if (agent.state === 'ARCHIVED') throw new SnapshotError('It was archived. Unarchive it to snapshot its files.');
+  if (!agent.runtimeRef) throw new SnapshotError('This agent has no runtime yet.');
   if (agent.state !== 'RUNNING') {
     throw new SnapshotError('Start the agent to snapshot its files.');
   }
@@ -227,12 +270,16 @@ export async function captureSnapshot(
   if (Object.keys(files).length === 0) {
     throw new SnapshotError("Couldn't read the agent's files — is it healthy?");
   }
+  const torn = opts.torn?.();
+  if (torn) throw new SnapshotError(torn);
   const reason = opts.reason ?? 'manual';
   // The setup-values layer goes with the files: restoring the files alone
   // left the newer layer, and the next value edit re-rendered the version
-  // just undone (#68).
-  const params: SnapshotParams | null = agent.paramFiles
-    ? { values: agent.paramValues ?? {}, soul: agent.paramFiles.soul, agents: agent.paramFiles.agents }
+  // just undone (#68). As it is once they are read, not before: a file saved
+  // during the read stored its layer with it.
+  const now = store.getAgent(agentId) ?? agent;
+  const params: SnapshotParams | null = now.paramFiles
+    ? { values: now.paramValues ?? {}, soul: now.paramFiles.soul, agents: now.paramFiles.agents }
     : null;
   // An automatic capture identical to the newest snapshot adds nothing: two
   // thirds of them were copies (every fleet rebuild made one), and rotation

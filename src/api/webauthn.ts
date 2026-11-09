@@ -1,4 +1,5 @@
-import { createHash, createPublicKey, timingSafeEqual, verify as cryptoVerify } from 'node:crypto';
+import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto';
+import { safeEqual } from '../util/safeEqual.js';
 
 /** The JWK fields the three supported key types use. */
 export interface JsonWebKey { kty: string; crv?: string; x?: string; y?: string; n?: string; e?: string }
@@ -160,15 +161,14 @@ function checkClientData(json: Buffer, want: { type: string; challenge: string; 
   if (c === null || typeof c !== 'object' || Array.isArray(c)) return fail('client data is not an object');
   if (typeof c.type !== 'string' || typeof c.challenge !== 'string' || typeof c.origin !== 'string') return fail('client data is malformed');
   if (c.type !== want.type) fail(`client data type is ${String(c.type)}`);
-  const a = Buffer.from(String(c.challenge ?? '')), b = Buffer.from(want.challenge);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) fail('challenge does not match');
+  if (!safeEqual(c.challenge, want.challenge)) fail('challenge does not match');
   if (!want.origins.includes(String(c.origin))) fail(`origin ${String(c.origin)} is not this Hatchabot`);
   if (c.crossOrigin === true) fail('cross-origin use is refused');
 }
 
 function checkRp(auth: AuthenticatorData, rpId: string, requireUv: boolean): void {
   const want = sha256(rpId);
-  if (auth.rpIdHash.length !== 32 || !timingSafeEqual(auth.rpIdHash, want)) fail('made for another site (RP ID)');
+  if (!safeEqual(auth.rpIdHash, want)) fail('made for another site (RP ID)');
   if (!auth.userPresent) fail('user presence not asserted');
   if (requireUv && !auth.userVerified) fail('user verification was required');
   // A backed-up credential must be backup-eligible (§6.1): anything else is malformed.

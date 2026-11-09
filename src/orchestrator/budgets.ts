@@ -237,10 +237,20 @@ export interface BudgetDeps {
    * Move an agent to the cheapest model its source offers that its runtime can use (live), recorded in
    * the model ledger as the budget's; undefined when there is nothing cheaper.
    * `from` is its own model pin before (null: its source's default).
+   * `hold`: called with the record's write of the cheaper model, in one
+   * transaction, before it is applied: it opens the switch's pause row
+   * then, so a change made while it applies (a class's model) sees it and
+   * sets the model that comes back. A switch that throws has it dropped.
    */
-  downgrade?(agent: Agent): Promise<{ from: string | null; to: string } | undefined>;
+  downgrade?(agent: Agent, hold: (from: string | null, to: string) => void): Promise<{ from: string | null; to: string } | undefined>;
   /** Put an agent's model pin back (null = its source's default), recorded as the budget's. */
   restoreModel?(agent: Agent, pin: string | null): Promise<boolean>;
+  /**
+   * Put back the cheaper model a budget had chosen (its own was put back for a
+   * pause that then did not happen), recorded as that budget's switch. True
+   * only if the runtime took it; refused, its own pin stays (eighth review).
+   */
+  reapplyCheaper?(agent: Agent, model: string | null): Promise<boolean>;
   isBusy(agentId: string): boolean;
   log?(event: string, detail: Record<string, unknown>): void;
   /** The service log, for what would flood the agent's timeline. */
@@ -267,13 +277,29 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
   const spend = monthSpend(store, month);
   const budgets = store.listBudgets();
   const machineSpent = [...spend.values()].reduce((s, x) => s + x, 0);
-  /** This budget still says `kind` and is still reached. */
+  /**
+   * This budget still says `kind` and is still reached. The budget as it is NOW:
+   * a start or a stop earlier in this pass can take minutes, and a budget raised,
+   * removed or set to warn meanwhile must not be enforced as it was (HB-0574).
+   */
   const over = (scope: string, kind: AtLimit): boolean => {
-    const b = budgets.find((x) => x.scope === scope);
+    const b = store.getBudget(scope);
     if (!b || b.atLimit !== kind) return false;
     return (scope === MACHINE ? machineSpent : spend.get(scope) ?? 0) >= b.usd;
   };
   const paused: string[] = [], resumed: string[] = [], downgraded: string[] = [];
+  /**
+   * Its own model was put back for a pause that is not happening: the cheaper
+   * model a budget chose goes back, as that budget's switch, the record as it
+   * was. One the runtime does not take closes the switch as the budget's doing,
+   * so the next pass does not read its own model as the owner's choice (seventh
+   * and eighth reviews).
+   */
+  const putCheaperBackOrClose = async (a: Agent, cheap: { fromModel?: string | null; toModel?: string | null }): Promise<void> => {
+    if (deps.reapplyCheaper && (await deps.reapplyCheaper(a, cheap.toModel ?? null).catch(() => false))) return;
+    store.resumeBudgetPause(a.id, month, nowIso, 'budget-changed');
+    deps.log?.('budget.model_restored', { agentId: a.id, why: 'budget-changed', model: cheap.fromModel ?? null });
+  };
 
   // 1. What ends: a new month, a budget raised, removed or changed, the agent gone, or the owner taking over.
   for (const listed of store.listBudgetPauses({ open: true })) {
@@ -366,8 +392,19 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     // that remembered it — the agent came back on the cheaper model for good
     // (audit #010).
     const current = (a: Agent): Agent => store.getAgent(a.id) ?? a;
+    // The budget this pass read, unchanged since: each pause and each switch is
+    // checked against it just before it is made. Raised, removed or set to warn
+    // while an earlier agent stopped, the rest were still stopped (HB-0574). A
+    // revised budget is left to the pass its change queued: nothing more is done
+    // or told for it here.
+    const unchanged = (): boolean => {
+      const cur = store.getBudget(b.scope);
+      return !!cur && cur.usd === b.usd && cur.atLimit === b.atLimit && cur.setAt === b.setAt && cur.ownerId === b.ownerId;
+    };
+    let revised = false;
     if (level === 100 && b.atLimit === 'pause') {
       for (const a of pool.filter(pausable).map(current)) {
+        if (!unchanged()) { revised = true; break; }
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' && prior.kind === 'pause') continue; // started by hand after a pause: runs on until the 1st
         // Already paused (running again: a rebuild started it). A cheaper model another
@@ -395,15 +432,42 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         // restore that did not take defers the pause to the next pass: the pause
         // row would replace the one that remembers its own model (review R12, 2026-10-23).
         const cheap = prior && !prior.resumedAt && prior.kind === 'cheaper' ? prior : undefined;
+        let ownBack = false;
         if (cheap && deps.restoreModel && (a.model ?? null) === (cheap.toModel ?? null)) {
           if (!(await deps.restoreModel(a, cheap.fromModel ?? null).catch(() => false))) { deferred++; continue; }
+          ownBack = true;
+          if (!unchanged()) {
+            revised = true;
+            // Its own model is back, but the pause it was for is off. Left so,
+            // with the switch still open, the next pass read its own model as
+            // the owner's choice and the budget left it there until the 1st.
+            // The switch this budget made closes as its doing, and the next
+            // pass judges it afresh. Another budget's (the machine's) is not
+            // this one's to close: the cheaper model goes back, the record as
+            // it was, for the next pass to sort out (HB-0574 review). Only if
+            // that does not take does it close all the same, so it is not
+            // read as the owner's choice.
+            // Changed, not raised: it may have been lowered, set to warn, or removed.
+            if (cheap.scope === b.scope) {
+              store.resumeBudgetPause(a.id, month, nowIso, 'budget-changed');
+              deps.log?.('budget.model_restored', { agentId: a.id, why: 'budget-changed', model: cheap.fromModel ?? null });
+            } else await putCheaperBackOrClose(a, cheap);
+            break;
+          }
         }
         if (await deps.pause(a).catch(() => false)) {
           store.addBudgetPause(a.id, month, b.scope, nowIso);
           paused.push(a.id);
           acted.push({ a });
           deps.log?.('budget.paused', { agentId: a.id, scope: b.scope === MACHINE ? MACHINE : 'agent', spent: r2(spent), usd: b.usd });
-        } else deferred++;
+        } else {
+          deferred++;
+          // Its own model was put back for a pause that did not take: left so,
+          // the next pass read it as the owner's choice and the switch's budget
+          // left it alone until the 1st. The cheaper model goes back and the
+          // pause is tried again, or the switch closes (seventh review).
+          if (ownBack && cheap) await putCheaperBackOrClose(a, cheap);
+        }
       }
     }
     const refused: Agent[] = [];
@@ -411,6 +475,7 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
       const tries = refusalsOf(store);
       const told100 = !!store.budgetMark(b.scope, month, 100, b.usd)?.toldAt;
       for (const a of pool.filter(switchable).map(current)) {
+        if (!unchanged()) { revised = true; break; }
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' || (prior && !prior.resumedAt)) continue;
         if (deps.isBusy(a.id)) { deferred++; continue; }
@@ -420,7 +485,11 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         const last = tries.get(a.id);
         if (last && told100 && now - last.at < DOWNGRADE_RETRY_MS) { deferred++; refused.push(a); continue; }
         let r: Awaited<ReturnType<NonNullable<BudgetDeps['downgrade']>>>;
-        try { r = await deps.downgrade(a); } catch (err) {
+        let held = false;
+        const hold = (from: string | null, to: string) => { store.addBudgetPause(a.id, month, b.scope, nowIso, { fromModel: from, toModel: to }); held = true; };
+        try { r = await deps.downgrade(a, hold); } catch (err) {
+          // Not a switch: the row its hold opened goes, and the next pass tries again.
+          if (held) store.dropCheaperPause(a.id, month);
           deferred++;
           refused.push(a);
           const day = nowIso.slice(0, 10);
@@ -431,11 +500,16 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         }
         tries.delete(a.id);
         if (!r) continue; // nothing cheaper on its source
-        store.addBudgetPause(a.id, month, b.scope, nowIso, { fromModel: r.from, toModel: r.to });
+        // Opened by its hold already (a model to restore a change set since kept), or now.
+        if (!held) store.addBudgetPause(a.id, month, b.scope, nowIso, { fromModel: r.from, toModel: r.to });
         downgraded.push(a.id);
         acted.push({ a, to: r.to });
         deps.log?.('budget.downgraded', { agentId: a.id, scope: b.scope === MACHINE ? MACHINE : 'agent', to: r.to, spent: r2(spent), usd: b.usd });
       }
+    }
+    if (revised || !unchanged()) {
+      deps.warn?.('budget.revised_during_pass', { scope: b.scope === MACHINE ? MACHINE : 'agent', agentId: b.scope === MACHINE ? undefined : b.scope, acted: acted.length });
+      continue;
     }
     // The 100% message says what happened: while the action still waits on a turn, it waits too.
     // A switch refused past PAUSE_WAIT_MS does not hold it: it says the switch did not take.
@@ -627,6 +701,16 @@ export function pausedReplyText(agentName: string, scope: string, month: string)
     + `It is back on ${back}, or sooner if its owner raises the budget. Messages sent while it is paused may not reach it.`;
 }
 
+/** The most updates one getUpdates call returns. */
+const TELEGRAM_PAGE = 100;
+/**
+ * Kept in the pause row's replies, beside the chats answered: that this
+ * pause's full queue was said (`at`: when the pause began, so a second pause
+ * in the month says it again), once a pause, across restarts too. Never a
+ * chat id (those are numbers).
+ */
+export const QUEUE_FULL_TOLD = 'queue-full';
+
 /**
  * Someone writes to a paused agent on Telegram: its bot answers once (per
  * chat, at most every REPLY_EVERY_MS) so they are not left with silence.
@@ -649,13 +733,24 @@ export async function pausedReplySweep(deps: ReplyDeps, now = Date.now()): Promi
     try { token = await deps.secretOf(ch.secretRef); } catch { continue; }
     let updates: Array<{ update_id?: number; message?: { date?: number; chat?: { id?: number; type?: string }; from?: { is_bot?: boolean } } }>;
     try {
-      const res = await f(`https://api.telegram.org/bot${token}/getUpdates?limit=100&timeout=0`, { signal: AbortSignal.timeout(8000) });
+      const res = await f(`https://api.telegram.org/bot${token}/getUpdates?limit=${TELEGRAM_PAGE}&timeout=0`, { signal: AbortSignal.timeout(8000) });
       const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: typeof updates };
       if (body.ok !== true || !Array.isArray(body.result)) continue;
       updates = body.result;
     } catch { continue; }
-    const since = Date.parse(p.pausedAt) - 60_000;
+    // Telegram shows the first 100 waiting updates, and the only way past them
+    // is to confirm them, which would take them from the agent. So with 100
+    // waiting, whoever wrote after them gets no reply until the agent is back
+    // (HB-0576). Said once a pause, on the agent's activity, not hidden.
     const replies = { ...(p.replies ?? {}) };
+    let toldFull = false;
+    const pausedAt = Date.parse(p.pausedAt);
+    if (updates.length >= TELEGRAM_PAGE && replies[QUEUE_FULL_TOLD]?.at !== pausedAt) {
+      replies[QUEUE_FULL_TOLD] = { u: updates.length, at: pausedAt };
+      toldFull = true;
+      deps.log?.('budget.paused_reply_queue_full', { agentId: a.id, waiting: updates.length });
+    }
+    const since = pausedAt - 60_000;
     const newest = new Map<string, number>();
     for (const u of updates) {
       const m = u.message, id = Number(u.update_id) || 0;
@@ -664,7 +759,7 @@ export async function pausedReplySweep(deps: ReplyDeps, now = Date.now()): Promi
       const chat = String(m.chat.id);
       if (id > (replies[chat]?.u ?? 0) && id > (newest.get(chat) ?? 0)) newest.set(chat, id);
     }
-    if (!newest.size) continue;
+    if (!newest.size) { if (toldFull) store.setBudgetPauseReplies(p.agentId, p.month, replies); continue; }
     for (const [chat, u] of newest) {
       const last = replies[chat];
       // Answered lately: these messages are seen, and get no second reply.

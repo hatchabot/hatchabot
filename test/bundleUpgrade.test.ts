@@ -27,7 +27,7 @@ function bundleTree(root: string, tag: string, restartRc = 0, docs = false): str
   mkdirSync(join(dir, 'node_modules'), { recursive: true });
   symlinkSync(process.execPath, join(dir, '.node', 'bin', 'node'));
   symlinkSync(driver, join(dir, 'node_modules', 'better-sqlite3'));
-  for (const s of ['upgrade.sh', 'follow-channel.sh', 'release-target.sh', 'release-manifest.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
+  for (const s of ['upgrade.sh', 'follow-channel.sh', 'follow-tries.sh', 'release-target.sh', 'release-manifest.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
   writeFileSync(join(dir, 'scripts', 'restart.sh'), `#!/usr/bin/env bash\nexit ${restartRc}\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'VERSION'), tag);
   writeFileSync(join(dir, 'BUNDLE.json'), JSON.stringify({ version: tag.slice(1), tag, platform: 'linux-arm64' }) + '\n');
@@ -181,10 +181,10 @@ describe('scripts/upgrade.sh on a bundle install', () => {
       writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
       return bin;
     };
-    it('curl unable to write the download: exit 3, the disk, and no word of a missing release', () => {
+    it('curl unable to write the download: exit 5 (the machine, not the release), the disk, and no word of a missing release (HB-0470)', () => {
       const w = world();
       const r = upgrade(w, 'stable', shimmed(w, 'curl', 'echo "curl: (23) Failure writing output to destination" >&2; exit 23'), { HATCHABOT_UPGRADE_BY_TIMER: '1', HATCHABOT_UPGRADE_TARGET: 'v2.0.1' });
-      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.status, r.stdout + r.stderr).toBe(5);
       expect(r.stdout).toMatch(/is full \(\d+ MB free\), so the v2\.0\.1 bundle could not be written there: nothing was changed\. Free about 1 GB/);
       expect(r.stdout).not.toContain('No bundle');
       expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
@@ -193,16 +193,25 @@ describe('scripts/upgrade.sh on a bundle install', () => {
       const w = world();
       publish(w.base, 'v2.0.1');
       const r = upgrade(w, 'v2.0.1', shimmed(w, 'tar', 'echo "tar: hatchabot/VERSION: Cannot write: No space left on device"; exit 2'));
-      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.status, r.stdout + r.stderr).toBe(5);
       expect(r.stdout).toContain('No space left on device');
       expect(r.stdout).toMatch(/is full/);
       expect(r.stdout).not.toContain('Could not unpack');
+    });
+    it('a leftover the rm cannot remove: its own words, "remove them by hand", and nothing changed (seventh review)', () => {
+      const w = world();
+      publish(w.base, 'v2.0.1');
+      mkdirSync(join(w.install, '.prev-release', 'scripts'), { recursive: true });
+      const r = upgrade(w, 'v2.0.1', shimmed(w, 'rm', 'case "$*" in *.prev-release*) echo "rm: cannot remove \'.prev-release/scripts\': Operation not permitted" >&2; exit 1 ;; esac\nexec /bin/rm "$@"'));
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stdout).toContain(`Could not remove ${join(w.install, '.prev-release')} (above), so nothing was changed. Remove it by hand`);
+      expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
     });
     it('tar out of space in another language: still the disk, as tar is asked in English', () => {
       const w = world();
       publish(w.base, 'v2.0.1');
       const r = upgrade(w, 'v2.0.1', shimmed(w, 'tar', '[ "${LC_ALL:-}" = C ] && echo "tar: x: Cannot write: No space left on device" || echo "tar: x: Auf dem Gerät ist kein Speicherplatz mehr verfügbar"; exit 2'), { LC_ALL: 'de_DE.UTF-8', LANG: 'de_DE.UTF-8' });
-      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.status, r.stdout + r.stderr).toBe(5);
       expect(r.stdout).toMatch(/is full/);
       expect(r.stdout).not.toContain('Could not unpack');
     });
@@ -213,7 +222,7 @@ describe('scripts/upgrade.sh on a bundle install', () => {
       chmodSync(parent, 0o555);
       const r = upgrade(w, 'stable', '', { HATCHABOT_UPGRADE_BY_TIMER: '1', HATCHABOT_UPGRADE_TARGET: 'v2.0.1' });
       chmodSync(parent, 0o755);
-      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.status, r.stdout + r.stderr).toBe(5);
       expect(r.stdout).toContain(`This user cannot write to ${parent}`);
       expect(r.stdout).toContain('nothing was changed');
       expect(r.stdout).not.toMatch(/is full/);
@@ -224,7 +233,7 @@ describe('scripts/upgrade.sh on a bundle install', () => {
       // Only the folder beside the install: its first mktemp, for its own copy, goes on.
       const mktemp = spawnSync('sh', ['-c', 'command -v mktemp'], { encoding: 'utf8' }).stdout.trim();
       const r = upgrade(w, 'stable', shimmed(w, 'mktemp', `case "$*" in *.hatchabot-next-*) echo "mktemp: failed" >&2; exit 1 ;; esac\nexec ${JSON.stringify(mktemp)} "$@"`), { HATCHABOT_UPGRADE_BY_TIMER: '1', HATCHABOT_UPGRADE_TARGET: 'v2.0.1' });
-      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.status, r.stdout + r.stderr).toBe(5);
       expect(r.stdout).toMatch(/no room or no permission there \(\d+ MB free\): nothing was changed/);
       expect(r.stdout).not.toMatch(/is full/);
     });
@@ -235,10 +244,10 @@ describe('scripts/upgrade.sh on a bundle install', () => {
       expect(r.status).toBe(3);
       expect(r.stdout).toContain('Could not unpack the v2.0.1 bundle');
     });
-    it('no room for the temporary copy of itself: exit 3, which the timer does not read as a bad release', () => {
+    it('no room for the temporary copy of itself: exit 5, which the timer does not count against the release (HB-0470)', () => {
       const w = world();
       const r = upgrade(w, 'stable', shimmed(w, 'mktemp', 'echo "mktemp: failed to create file: No space left on device" >&2; exit 1'));
-      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.status, r.stdout + r.stderr).toBe(5);
       expect(r.stdout).toContain('a full disk?');
     });
     it('the network is the network', () => {
@@ -251,6 +260,29 @@ describe('scripts/upgrade.sh on a bundle install', () => {
 });
 
 const REAL_MV = spawnSync('sh', ['-c', 'command -v mv'], { encoding: 'utf8' }).stdout.trim();
+
+describe('the channel timer and the upgrade\'s state folder (ninth review)', () => {
+  it.skipIf(process.getuid?.() === 0)('a state folder this user cannot write in: the upgrade says 5, the machine\'s, and the timer never counts it against the release', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    const bin = join(w.root, 'channels-curl'); mkdirSync(bin);
+    const curl = spawnSync('sh', ['-c', 'command -v curl'], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(bin, 'curl'), `#!/usr/bin/env bash\ncase "$*" in *raw.githubusercontent*) echo '{"stable":"v2.0.1"}'; exit 0 ;; *api.github*) exit 7 ;; esac\nexec ${JSON.stringify(curl)} "$@"\n`, { mode: 0o755 });
+    const state = join(w.home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    chmodSync(state, 0o555);
+    try {
+      const r = spawnSync('bash', [join(w.install, 'scripts', 'follow-channel.sh'), 'stable'], {
+        encoding: 'utf8', timeout: 60_000,
+        env: { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: w.home, TMPDIR: join(w.home, 'tmp'), HATCHABOT_BUNDLE_BASE: `file://${w.base}`, HATCHABOT_UPGRADE_IMAGE: '0' },
+      });
+      expect(r.stdout).toContain('Could not take the upgrade lock');
+      expect(r.stdout).toContain('does not count against v2.0.1');
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(readdirSync(state).filter((n) => n.startsWith('follow-channel-failed'))).toEqual([]);
+    } finally { chmodSync(state, 0o755); }
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+  });
+});
 
 describe('a pin left by a kill, on a bundle install (HB-0428)', () => {
   const PIN = 'v2.170.0', file = (w: ReturnType<typeof world>) => join(w.install, 'data', 'channel');
@@ -481,7 +513,8 @@ describe('a pin left by a kill, on a bundle install (HB-0428)', () => {
     rmSync(lock, { recursive: true, force: true }); mkdirSync(lock, { recursive: true });
     writeFileSync(join(lock, 'owner'), String(process.pid));
     const r = tick(w);
-    expect(r.status).toBe(1);
+    expect(r.status, r.stdout + r.stderr).toBe(0); // 4, another upgrade holding the lock, is routine (ninth review)
+    expect(r.stdout).toContain('Another upgrade');
     expect(read(file(w)).trim()).toBe(PIN);
     expect(existsSync(record(w))).toBe(true);
     expect(existsSync(join(w.install, '.swapping'))).toBe(true);
@@ -490,7 +523,7 @@ describe('a pin left by a kill, on a bundle install (HB-0428)', () => {
     const src = read('scripts/upgrade.sh');
     const body = /^pin_named\(\) \{[\s\S]*?^\}$/m.exec(src)![0];
     const at = (t: string) => { expect(body).toContain(t); return body.indexOf(t); };
-    expect(at('mv -f "$PIN_RECORD.tmp" "$PIN_RECORD"')).toBeLessThan(at('PIN_ON="$ARG"'));
+    expect(at('put_line "$PIN_RECORD"')).toBeLessThan(at('PIN_ON="$ARG"'));
     expect(at('PIN_ON="$ARG"')).toBeLessThan(at('remember_channel "$ARG" "$ARG"'));
   });
 });
@@ -563,6 +596,213 @@ case "$1" in */.hatchabot-next-*/hatchabot/BUNDLE.json) kill -9 "$PPID" ;; esac
     repaired(w);
   });
 
+  it('a rollback that cannot move the old scripts/ back keeps the new one, so the next run still has an upgrade.sh to repair it (HB-0487)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1', { restartRc: 1 });
+    const bin = join(w.root, 'mv-fails'); mkdirSync(bin);
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\ncase "$1" in */.prev-release/scripts) exit 1 ;; esac\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+    const r = upgrade(w, 'v2.0.1', bin);
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain('Rolling back to v2.0.0');
+    expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+    expect(existsSync(join(w.install, '.prev-release', 'scripts', 'upgrade.sh'))).toBe(true);
+    expect(existsSync(join(w.install, '.swapping'))).toBe(true);
+    repaired(w);
+    expect(existsSync(join(w.install, '.rollback-aside'))).toBe(false);
+  });
+
+  describe('a rollback cut while it puts the old scripts/ back always leaves one to repair it (fourth review of HB-0487)', () => {
+    /** An mv that kills the rollback once it has done the move `when` names (a test of the shell, after the real mv). */
+    const killAfter = (w: ReturnType<typeof world>, name: string, when: string) => {
+      const bin = join(w.root, name); mkdirSync(bin);
+      writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\n${JSON.stringify(REAL_MV)} "$@" || exit $?\nINSTALL=${JSON.stringify(w.install)}\nif ${when}; then kill -9 "$PPID"; fi\nexit 0\n`, { mode: 0o755 });
+      return bin;
+    };
+    const cutRollback = (w: ReturnType<typeof world>, bin: string) => {
+      publish(w.base, 'v2.0.1', { restartRc: 1 });
+      const r = upgrade(w, 'v2.0.1', bin);
+      expect(r.signal, r.stdout + r.stderr).toBe('SIGKILL');
+      expect(r.stdout).toContain('Rolling back to v2.0.0');
+    };
+
+    it('cut once .swapping is struck for scripts/: the new scripts/ is still there, and the next run puts the old one in', () => {
+      const w = world();
+      // The strike's `mv -f .swapping.tmp .swapping`, in the rollback (something is held or beside).
+      cutRollback(w, killAfter(w, 'cut-strike', '[ "$2" = "$INSTALL/.swapping.tmp" ] && { [ -e "$INSTALL/.rollback-aside" ] || [ -e "$INSTALL/.rollback-scripts" ]; }'));
+      expect(existsSync(join(w.install, 'scripts', 'upgrade.sh')), 'scripts/upgrade.sh').toBe(true);
+      repaired(w);
+      expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+      for (const gone of ['.rollback-aside', '.rollback-scripts']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    });
+
+    it('cut once the old scripts/ is beside it: the next run sends it back and puts it in', () => {
+      const w = world();
+      cutRollback(w, killAfter(w, 'cut-beside', '[ "$2" = "$INSTALL/.rollback-scripts" ]'));
+      expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+      expect(existsSync(join(w.install, '.rollback-scripts', 'upgrade.sh'))).toBe(true);
+      repaired(w);
+      for (const gone of ['.rollback-aside', '.rollback-scripts']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    });
+
+    it('cut between the two renames (the one moment with no scripts/): the new upgrade.sh, held, repairs it run by hand', () => {
+      const w = world();
+      cutRollback(w, killAfter(w, 'cut-gap', '[ "$1" = "$INSTALL/scripts" ] && [ "$2" = "$INSTALL/.rollback-aside" ]'));
+      expect(existsSync(join(w.install, 'scripts'))).toBe(false);
+      expect(existsSync(join(w.install, '.rollback-scripts', 'upgrade.sh'))).toBe(true);
+      const r = spawnSync('bash', [join(w.install, '.rollback-aside', 'upgrade.sh'), 'v2.0.9'], {
+        encoding: 'utf8', timeout: 60_000,
+        env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: w.home, TMPDIR: join(w.home, 'tmp'), HATCHABOT_BUNDLE_BASE: `file://${w.base}`, HATCHABOT_UPGRADE_IMAGE: '0' },
+      });
+      expect(r.stdout).toContain('was cut off part-way — putting v2.0.0 back first');
+      expect(r.status, r.stdout + r.stderr).toBe(2);
+      expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+      expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+      for (const gone of ['.swapping', '.prev-release', '.rollback-aside', '.rollback-scripts']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    });
+  });
+
+  it('a record of the swap that cannot be added to is judged like a move: by its words, the disk is 5 and so is a permission, and the swap is put back (fifth, sixth and tenth reviews of HB-0470)', () => {
+    // Once the swap begins moving, .swapping takes no more lines: a link to /dev/full says the disk's words,
+    // a file this user cannot write says a permission, the machine's too, with room left (tenth review).
+    for (const how of ['full', 'denied'] as const) {
+      if (how === 'full' && !existsSync('/dev/full')) continue;
+      const w = world();
+      publish(w.base, 'v2.0.1');
+      const sw = join(w.install, '.swapping');
+      const bin = join(w.root, `swap-record-${how}`); mkdirSync(bin);
+      const spoil = how === 'full'
+        ? `[ -L ${JSON.stringify(sw)} ] || { ${JSON.stringify(REAL_MV)} ${JSON.stringify(sw)} ${JSON.stringify(sw + '.real')} && ln -s /dev/full ${JSON.stringify(sw)}; }`
+        : `chmod 444 ${JSON.stringify(sw)} 2>/dev/null`;
+      writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\nif [ "$1" = ${JSON.stringify(join(w.install, 'scripts'))} ]; then ${spoil}; fi\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+      // df, asked for the message before the rollback: the record is given back whole (/dev/full reads for ever).
+      writeFileSync(join(bin, 'df'), `#!/bin/sh\nif [ -L ${JSON.stringify(sw)} ]; then rm -f ${JSON.stringify(sw)}; ${JSON.stringify(REAL_MV)} ${JSON.stringify(sw + '.real')} ${JSON.stringify(sw)}; fi\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho ${how === 'full' ? '"/dev/made-up 1000000 989760 10240 99% /"' : '"/dev/made-up 100000000 1000000 99000000 1% /"'}\n`, { mode: 0o755 });
+      const r = upgrade(w, 'v2.0.1', bin);
+      expect(r.status, `${how}: ${r.stdout}${r.stderr}`).toBe(5);
+      expect(r.stdout).toContain(`Could not write ${sw}`);
+      expect(r.stderr).toContain(how === 'full' ? 'No space left on device' : 'Permission denied');
+      if (how === 'full') expect(r.stdout).toContain('is full (10 MB free)');
+      else expect(r.stdout).toContain(`This user could not write ${sw} (above: no permission there, or a read-only disk), so v2.0.1 could not be swapped in.`);
+      expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+      expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+      for (const gone of ['.swapping', '.swapping.real', '.prev-release']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    }
+  });
+
+  it('a rollback cut between its renames is repaired under the lock: with the lock held, it is left to the holder (fifth review of HB-0487)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1', { restartRc: 1 });
+    const bin = join(w.root, 'cut-gap'); mkdirSync(bin);
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\n${JSON.stringify(REAL_MV)} "$@" || exit $?\nif [ "$1" = ${JSON.stringify(join(w.install, 'scripts'))} ] && [ "$2" = ${JSON.stringify(join(w.install, '.rollback-aside'))} ]; then kill -9 "$PPID"; fi\n`, { mode: 0o755 });
+    expect(upgrade(w, 'v2.0.1', bin).signal).toBe('SIGKILL');
+    expect(existsSync(join(w.install, 'scripts'))).toBe(false);
+    const key = spawnSync('sh', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.install], { encoding: 'utf8' }).stdout.trim();
+    const lock = join(w.home, '.local', 'state', 'hatchabot', `upgrade-${key}.lock.d`);
+    rmSync(lock, { recursive: true, force: true });
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'owner'), String(process.pid)); // a holder that is alive
+    const byHand = () => spawnSync('bash', [join(w.install, '.rollback-aside', 'upgrade.sh'), 'v2.0.9'], {
+      encoding: 'utf8', timeout: 60_000,
+      env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: w.home, TMPDIR: join(w.home, 'tmp'), HATCHABOT_BUNDLE_BASE: `file://${w.base}`, HATCHABOT_UPGRADE_IMAGE: '0' },
+    });
+    const held = byHand();
+    expect(held.status, held.stdout + held.stderr).toBe(4);
+    expect(existsSync(join(w.install, 'scripts')), 'left to the holder').toBe(false);
+    expect(existsSync(join(w.install, '.rollback-scripts', 'upgrade.sh'))).toBe(true);
+    rmSync(lock, { recursive: true });
+    const free = byHand();
+    expect(free.status, free.stdout + free.stderr).toBe(2);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+  });
+
+  it('a step log a killed run left beside the lock is cleared by the next run to take it; another install\'s is left (fifth review)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    const state = join(w.home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    const key = spawnSync('sh', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.install], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(state, `upgrade-${key}.step.AbC123`), 'a killed run\'s\n');
+    writeFileSync(join(state, 'upgrade-1.step.XyZ789'), 'another install\'s\n');
+    const r = upgrade(w, 'v2.0.1');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readdirSync(state).filter((n) => n.includes('.step.'))).toEqual(['upgrade-1.step.XyZ789']);
+  });
+
+  it('a .rollback-scripts left with no swap under way is cleared at the swap\'s start, so a swap that fails then rolls back whole (eighth review)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    mkdirSync(join(w.install, '.rollback-scripts')); writeFileSync(join(w.install, '.rollback-scripts', 'upgrade.sh'), '# a leftover\n');
+    const bin = join(w.root, 'swap-fails'); mkdirSync(bin);
+    // The new VERSION cannot be moved in, for a reason of its own.
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\ncase "$1" in */.hatchabot-next-*/hatchabot/VERSION) echo "mv: cannot move: Operation not permitted" >&2; exit 1 ;; esac\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+    const r = upgrade(w, 'v2.0.1', bin);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stdout).toContain('Could not move the new VERSION');
+    expect(r.stdout).not.toContain('did not work either');
+    expect(r.stdout).not.toContain('are both there');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(JSON.parse(read(join(w.install, 'BUNDLE.json'))).tag).toBe('v2.0.0');
+    expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+    for (const gone of ['.swapping', '.prev-release', '.rollback-scripts', '.rollback-aside']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+  });
+  it('a swap move that fails on a full disk or a read-only one is put back and ends as the machine\'s, 5; one that fails otherwise stays 3 (second and tenth reviews of HB-0470)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    const bin = join(w.root, 'swap-full'); mkdirSync(bin);
+    // The new VERSION cannot be moved in; the disk holding the install has 10 MB left.
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\ncase "$1" in */.hatchabot-next-*/hatchabot/VERSION) echo "mv: No space left on device" >&2; exit 1 ;; esac\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'df'), '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/made-up 1000000 989760 10240 99% /"\n', { mode: 0o755 });
+    const r = upgrade(w, 'v2.0.1', bin);
+    expect(r.status, r.stdout + r.stderr).toBe(5);
+    expect(r.stdout).toContain('Could not move the new VERSION');
+    expect(r.stdout).toContain('is full (10 MB free)');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(JSON.parse(read(join(w.install, 'BUNDLE.json'))).tag).toBe('v2.0.0');
+    for (const gone of ['.swapping', '.prev-release']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    // Room enough again by the time it is looked at (a move across file systems
+    // removes its part copy): the move's own words say the disk (third review).
+    rmSync(join(bin, 'df'));
+    writeFileSync(join(bin, 'df'), '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/made-up 100000000 1000000 99000000 1% /"\n', { mode: 0o755 });
+    const words = upgrade(w, 'v2.0.1', bin);
+    expect(words.status, words.stdout + words.stderr).toBe(5);
+    expect(words.stderr).toContain('No space left on device'); // still shown
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    for (const gone of ['.swapping', '.prev-release']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    // Another failure, with room: not the machine's.
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\ncase "$1" in */.hatchabot-next-*/hatchabot/VERSION) echo "mv: cannot move: Device or resource busy" >&2; exit 1 ;; esac\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+    const other = upgrade(w, 'v2.0.1', bin);
+    expect(other.status, other.stdout + other.stderr).toBe(3);
+    expect(other.stdout).not.toContain('is full');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    // A read-only disk, as mv says it: the machine's, 5, the place named (tenth review).
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\ncase "$1" in */.hatchabot-next-*/hatchabot/VERSION) echo "mv: cannot move '$1' to '\${2}VERSION': Read-only file system" >&2; exit 1 ;; esac\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+    const erofs = upgrade(w, 'v2.0.1', bin);
+    expect(erofs.status, erofs.stdout + erofs.stderr).toBe(5);
+    expect(erofs.stdout).toContain(`This user could not write ${join(w.install, 'VERSION')} (above: no permission there, or a read-only disk), so v2.0.1 could not be swapped in.`);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    for (const gone of ['.swapping', '.prev-release']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    const fine = upgrade(w, 'v2.0.1');
+    expect(fine.status, fine.stdout + fine.stderr).toBe(0);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.1');
+  });
+
+  it('a held copy its rm could not remove takes nothing inside itself: no scripts/scripts/ (review of HB-0487)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1', { restartRc: 1 });
+    const bin = join(w.root, 'rm-fails'); mkdirSync(bin);
+    const realRm = spawnSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).stdout.trim();
+    // The rollback's own `rm -rf .rollback-aside` fails and leaves it there (a file it may not remove); and the old scripts/ cannot move back.
+    writeFileSync(join(bin, 'rm'), `#!/usr/bin/env bash\nif [ "$1" = -rf ] && [ $# = 2 ]; then case "$2" in */.rollback-aside) mkdir -p "$2" && : > "$2/stuck"; exit 1 ;; esac; fi\nexec ${JSON.stringify(realRm)} "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\ncase "$1" in */.prev-release/scripts) exit 1 ;; esac\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+    const r = upgrade(w, 'v2.0.1', bin);
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(existsSync(join(w.install, 'scripts', 'scripts')), 'scripts/scripts').toBe(false);
+    expect(existsSync(join(w.install, '.rollback-aside', 'scripts')), '.rollback-aside/scripts').toBe(false);
+    expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+    expect(r.stdout).toContain('Could not remove');
+    repaired(w);
+    expect(existsSync(join(w.install, '.rollback-aside'))).toBe(false);
+  });
+
   it('a swap cut off just before it moved an old file aside: the old file is put back, not removed (HB-0279)', () => {
     const w = world();
     publish(w.base, 'v2.0.1');
@@ -576,8 +816,8 @@ case "$1" in */.hatchabot-next-*/hatchabot/BUNDLE.json) kill -9 "$PPID" ;; esac
     // The installed upgrade.sh (v2.170.1 and before) writes the `in` line first, then moves the old file aside.
     const w = world();
     const now = read('scripts/upgrade.sh');
-    const aside = '    if [ -e "$DIR/$f" ]; then mv "$DIR/$f" "$PREV/" || { echo "Could not move $DIR/$f aside."; exit 3; }; fi\n';
-    const journal = '    printf \'in %s\\n\' "$f" >> "$SWAPPING"\n';
+    const aside = '    if [ -e "$DIR/$f" ]; then LC_ALL=C run_step mv "$DIR/$f" "$PREV/" || swap_failed "Could not move $DIR/$f aside."; fi\n';
+    const journal = '    LC_ALL=C run_step put_rec "$SWAPPING" \'>>\' "in $f" || swap_failed "Could not write $SWAPPING (above)."\n';
     expect(now).toContain(aside + journal);
     writeFileSync(join(w.install, 'scripts', 'upgrade.sh'), now.replace(aside + journal, journal + aside), { mode: 0o755 });
     publish(w.base, 'v2.0.1');
@@ -652,5 +892,68 @@ case "$1" in */.hatchabot-next-*/hatchabot/BUNDLE.json) kill -9 "$PPID" ;; esac
     expect(read(join(w.install, 'docs', 'old.md'))).toBe('left over');
     expect(existsSync(join(w.install, 'docs', 'guide.md'))).toBe(false);
     expect(existsSync(join(w.install, 'docs', 'docs'))).toBe(false);
+  });
+});
+
+describe('the twelfth review: a rollback on the disk that filled', () => {
+  it('ENOSPC in the swap, and its record cannot be rewritten as the files go back: the old release is back all the same, 5, not "did not work either" (3)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    const bin = join(w.root, 'swap-full-record'); mkdirSync(bin);
+    const realGrep = spawnSync('sh', ['-c', 'command -v grep'], { encoding: 'utf8' }).stdout.trim();
+    const stagedThen = join(w.root, 'stage-still-there');
+    // The new VERSION cannot be moved in for want of room; the disk holding the install has 10 MB left.
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\ncase "$1" in */.hatchabot-next-*/hatchabot/VERSION) echo "mv: No space left on device" >&2; exit 1 ;; esac\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'df'), '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/made-up 1000000 989760 10240 99% /"\n', { mode: 0o755 });
+    // Striking a line from .swapping writes a new copy: the disk is still full. Noted: was the unpacked bundle still there?
+    writeFileSync(join(bin, 'grep'), `#!/usr/bin/env bash\nif [ "$1" = -vxF ]; then\n  for d in ${JSON.stringify(dirname(w.install))}/.hatchabot-next-*; do [ -e "$d" ] && : > ${JSON.stringify(stagedThen)}; done\n  echo "grep: write error: No space left on device" >&2; exit 2\nfi\nexec ${JSON.stringify(realGrep)} "$@"\n`, { mode: 0o755 });
+    const r = upgrade(w, 'v2.0.1', bin);
+    expect(r.status, r.stdout + r.stderr).toBe(5);
+    expect(r.stdout).toContain('Could not move the new VERSION');
+    expect(r.stdout).toContain('is full (10 MB free)');
+    expect(r.stdout).toContain(`Could not write ${join(w.install, '.swapping')} as the files went back (a full disk?): they are back all the same.`);
+    expect(r.stdout).not.toContain('did not work either');
+    expect(existsSync(stagedThen), 'the unpacked bundle is freed before the rollback').toBe(false);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(JSON.parse(read(join(w.install, 'BUNDLE.json'))).tag).toBe('v2.0.0');
+    expect(existsSync(join(w.install, 'scripts', 'upgrade.sh'))).toBe(true);
+    expect(existsSync(join(w.install, '.node', 'bin', 'node'))).toBe(true);
+    for (const gone of ['.swapping', '.swapping.tmp', '.prev-release', '.rollback-aside', '.rollback-scripts']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    expect(readdirSync(dirname(w.install)).filter((n) => n.startsWith('.hatchabot-next-'))).toEqual([]);
+    // Nothing left in the way of the next try.
+    const fine = upgrade(w, 'v2.0.1');
+    expect(fine.status, fine.stdout + fine.stderr).toBe(0);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.1');
+  });
+});
+
+describe('the fourteenth review: a rollback cut off after lines it could not strike', () => {
+  it('a strike fails on the full disk and the run is killed before .swapping goes: the next run keeps the old files it finds put back', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    const bin = join(w.root, 'cut-unstruck'); mkdirSync(bin);
+    const realGrep = spawnSync('sh', ['-c', 'command -v grep'], { encoding: 'utf8' }).stdout.trim();
+    const realRm = spawnSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).stdout.trim();
+    const sw = join(w.install, '.swapping');
+    // The new VERSION cannot be moved in for want of room, no strike can be written, and the run is
+    // killed as its rollback removes .prev-release, after every file went back and before .swapping goes.
+    writeFileSync(join(bin, 'mv'), `#!/usr/bin/env bash\ncase "$1" in */.hatchabot-next-*/hatchabot/VERSION) echo "mv: No space left on device" >&2; exit 1 ;; esac\nexec ${JSON.stringify(REAL_MV)} "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'df'), '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/made-up 1000000 989760 10240 99% /"\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'grep'), `#!/usr/bin/env bash\nif [ "$1" = -vxF ]; then echo "grep: write error: No space left on device" >&2; exit 2; fi\nexec ${JSON.stringify(realGrep)} "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'rm'), `#!/usr/bin/env bash\nif [ "$1" = -rf ] && [ $# = 2 ] && [ -f ${JSON.stringify(sw)} ]; then case "$2" in */.prev-release) kill -9 "$PPID"; exit 1 ;; esac; fi\nexec ${JSON.stringify(realRm)} "$@"\n`, { mode: 0o755 });
+    expect(upgrade(w, 'v2.0.1', bin).signal).toBe('SIGKILL');
+    // Cut off with every old file back, their lines still in the record, and the unpacked bundle gone.
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(read(sw)).toMatch(/^in VERSION$/m);
+    expect(readdirSync(dirname(w.install)).filter((n) => n.startsWith('.hatchabot-next-'))).toEqual([]);
+    // The next run repairs first: the old release's files stay.
+    const r = upgrade(w, 'stable', '', { HATCHABOT_UPGRADE_REPAIR_ONLY: '1', HATCHABOT_UPGRADE_BY_TIMER: '1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('was cut off part-way');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(JSON.parse(read(join(w.install, 'BUNDLE.json'))).tag).toBe('v2.0.0');
+    for (const kept of ['scripts/upgrade.sh', '.bundle-files', '.node/bin/node', 'node_modules']) expect(existsSync(join(w.install, kept)), kept).toBe(true);
+    for (const gone of ['.swapping', '.prev-release']) expect(existsSync(join(w.install, gone)), gone).toBe(false);
+    expect(read(join(w.install, '.env'))).toBe('HATCHABOT_SECRET_KEY=made-up\n');
   });
 });

@@ -14,7 +14,7 @@ import Fastify, { type FastifyServerOptions } from 'fastify';
 import { Store } from './store/store.js';
 import { LocalSecretStore } from './secrets/localSecretStore.js';
 import { MockProvider } from './providers/mockProvider.js';
-import { LocalDockerProvider } from './providers/localDockerProvider.js';
+import { LocalDockerProvider, setVolumeEventSink } from './providers/localDockerProvider.js';
 import { resolveProvider } from './providers/resolveProvider.js';
 import type { Host } from './domain/types.js';
 import { TelegramPoolProvisioner } from './channels/telegramPool.js';
@@ -24,9 +24,10 @@ import { registerRoutes } from './api/routes.js';
 import { authIsEnabled, authModeFromEnv, bindHostFor, noSignInRefusal, registerAuth } from './api/auth.js';
 import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
 import { reconcileAgents, reconcileEventLog, startReconcileLoop } from './orchestrator/reconcile.js';
-import { markInterrupted, setOperationJournal } from './orchestrator/operations.js';
+import { markInterrupted, runtimeEventLog, setOperationJournal } from './orchestrator/operations.js';
 import { runPostureSweep } from './orchestrator/posture.js';
 import { LOCAL_OWNER } from './api/principal.js';
+import { firstAccountAdoption } from './api/firstAccount.js';
 import type { RuntimeProvider } from './providers/provider.js';
 import { syncEnvFile } from './config/envFile.js';
 
@@ -68,7 +69,6 @@ const pool = new TelegramPoolProvisioner(db, secrets, {
 const manual = new TelegramManualProvisioner(secrets);
 const channel = new CompositeTelegramProvisioner(pool, manual);
 
-let adoptionChecked = false;
 const providers = new Map<string, RuntimeProvider>();
 providers.set('mock', new MockProvider());
 // HATCHABOT_PREFIX namespaces docker container/volume names so a second
@@ -88,7 +88,10 @@ const LOCAL_HOST_ID = 'host-local-default';
 if (!store.getHost(LOCAL_HOST_ID)) {
   store.insertHost({
     id: LOCAL_HOST_ID,
-    ownerId: 'dev-owner',
+    // Made again after the install went to accounts: the owner's, not
+    // dev-owner's, whom nobody signed in can see (and whose data no account
+    // takes once the hand-over is done).
+    ownerId: store.installOwner(authModeFromEnv()),
     kind: 'local',
     provider: 'local-docker',
     name: `This machine (${hostname()})`,
@@ -144,6 +147,8 @@ const providerForHost = (host: Host): RuntimeProvider | undefined => {
 // agents to resumeOperations below (an interrupted import is undone, never
 // marked "tap Retry").
 setOperationJournal((e, d) => app.log.info(d, e));
+// A provider's note about an agent's volume: a warning, and on its Activity.
+setVolumeEventSink(runtimeEventLog(store, (e, d) => app.log.warn(d, e)));
 markInterrupted(store);
 // Reconcile's findings about an agent go to its timeline as well as the
 // journal (they were journal-only: "found stopped" never reached Activity).
@@ -160,12 +165,15 @@ await Promise.race([
 // Runners too, and again every 10 minutes (HB-0385): an import's one-shot is
 // not --rm, and one whose client was killed goes on to the end and stays
 // 'exited' with its files; a runner asleep at boot is swept soon after it
-// answers. After boot a 'created' one is left: a call may be making it.
-// At boot only 'created' ones made before this process started: resumed
-// operations and reconcile may be making their own on a runner meanwhile.
-const processStarted = Date.now() - process.uptime() * 1000;
+// answers. A 'created' one goes only when another process made it: this
+// one's calls (resumed operations, reconcile) may be making their own on a
+// runner. Told apart by a label, not by this machine's clock: a runner's is
+// not the same (HB-0511). And only once made over 5 minutes ago by the
+// daemon's clock: another process (a CLI command) may be making one now.
+// The same at boot and after, so a crashed process's go within 10 minutes,
+// not at the next boot.
 let oneShotSweepWarned = false;
-const sweepOneShots = (created: boolean) => {
+const sweepOneShots = () => {
   try {
     const all = new Set<RuntimeProvider>(providers.values());
     for (const id of store.listRunnerHostIds()) {
@@ -174,7 +182,7 @@ const sweepOneShots = (created: boolean) => {
       if (p) all.add(p);
     }
     for (const p of all) {
-      void p.sweepOneShots?.({ created, ...(created ? { createdBefore: processStarted } : {}) })
+      void p.sweepOneShots?.({ created: true, notThisProcess: true })
         .then((n) => { if (n) app.log.warn({ provider: p.key, removed: n }, 'removed leftover volume one-shots'); })
         .catch((err) => app.log.error({ err: String(err) }, 'one-shot sweep failed'));
     }
@@ -184,8 +192,8 @@ const sweepOneShots = (created: boolean) => {
     oneShotSweepWarned = true;
   }
 };
-sweepOneShots(true);
-const oneShotSweep = setInterval(() => sweepOneShots(false), 10 * 60_000);
+sweepOneShots();
+const oneShotSweep = setInterval(sweepOneShots, 10 * 60_000);
 oneShotSweep.unref();
 
 // Copies of a volume a move held when the process ended: they hold an agent's
@@ -204,6 +212,7 @@ if (sweptRefs.length) app.log.warn({ refs: sweptRefs }, 'deleted orphaned bot-to
 // agent's removal, an import's rollback, a source's removal).
 const sweptAgentRefs = store.sweepOrphanAgentSecrets();
 if (sweptAgentRefs.length) app.log.warn({ count: sweptAgentRefs.length }, 'deleted orphaned agent secrets');
+const adoptForFirstAccount = firstAccountAdoption(store, app.log);
 await registerAuth(app, {
   password: process.env.HATCHABOT_PASSWORD,
   store,
@@ -220,22 +229,8 @@ await registerAuth(app, {
       store.recordAccount(principal.ownerId, principal.email);
       if (principal.email) store.claimSharesForEmail(principal.ownerId, principal.email);
     }
-    // Phase 3: the first real account adopts what password mode owned. Runs
-    // at most once per process — it fires on every authenticated request.
-    if (adoptionChecked) return;
-    // Only a REAL account can adopt. A leftover dev-owner CLI token
-    // authenticating first (a cron/script after a mode switch) would
-    // otherwise consume the one-shot latch and adopt nothing, leaving the
-    // human's first sign-in facing an empty fleet.
-    if (principal.ownerId === LOCAL_OWNER) return;
-    adoptionChecked = true;
-    const rows = store.adoptLocalOwnerData(principal.ownerId);
-    if (rows > 0) {
-      app.log.warn(
-        { ownerId: principal.ownerId, email: principal.email, rows },
-        'adopted this installation\'s data into the first signed-in account',
-      );
-    }
+    // Phase 3: the first real account adopts what password mode owned.
+    adoptForFirstAccount(principal);
   },
 });
 const routes = await registerRoutes(app, {

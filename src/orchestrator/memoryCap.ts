@@ -84,12 +84,20 @@ export function memoryCapChoices(max: number): string[] {
  * The AGENTS.md section that tells the agent its budget. OpenClaw already
  * tells the model when a command was killed by SIGKILL and suggests narrowing
  * it; with the number in hand it can size a job before running it.
+ * `live`: written into a running container (its cap changed while it runs,
+ * or a section rewritten then): HATCHABOT_MEMORY_CAP in its environment is
+ * set when the container is made, so it holds the cap from then until a
+ * rebuild, and the section says so rather than name it as the new cap.
  */
-export function memoryBudgetSection(cap: string): string {
+export function memoryBudgetSection(cap: string, opts: { live?: boolean } = {}): string {
   const bytes = parseMemoryCap(cap) ?? parseMemoryCap(DEFAULT_MEMORY_CAP)!;
+  const where = opts.live
+    ? `now. \`HATCHABOT_MEMORY_CAP\` in your environment keeps the value from your
+  container's last start until it is rebuilt; this number is the one that applies.`
+    : `(also in the
+  environment as \`HATCHABOT_MEMORY_CAP=${formatMemoryCap(bytes)}\`).`;
   return `## Memory budget
-- Your container has **${describeMemoryCap(bytes)}** of memory in total (also in the
-  environment as \`HATCHABOT_MEMORY_CAP=${formatMemoryCap(bytes)}\`). OpenClaw itself uses
+- Your container has **${describeMemoryCap(bytes)}** of memory in total ${where} OpenClaw itself uses
   about 1 GB of that; the rest is for the commands and scripts you run.
 - Size jobs to fit: fewer parallel workers, chunked data, streaming over
   loading whole files. A command killed with SIGKILL and no other reason was

@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
 import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
-import type { Store } from '../store/store.js';
+import { SourceGoneError, type Store } from '../store/store.js';
 import { embedDefault } from '../embedder/embedder.js';
 import { needsPortHeal } from '../openclaw/configWriter.js';
 import type { SecretStore } from '../secrets/secretStore.js';
@@ -30,7 +30,7 @@ import { clearStaleRuntimePins } from './runtimePins.js';
 import { attachedGoogleAccounts, syncConnections } from './googleConnections.js';
 import { verifyAgentAccess } from './accessOverview.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
-import { buildWorkspaceSeed, dataSourcesSection, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, memoryPolicySection, operatorSection, peerOneLine, peerToolsSection, extractSection, removeSection, replaceSection, scheduledResultsSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING, toolsMdWithoutInstallSection, withInstallSection } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, memoryPolicySection, operatorSection, peerOneLine, peerToolsSection, extractSection, fenceDisagreement, readFences, removeSection, replaceSection, scheduledResultsSection, unsureSections, PEERS_HEADING, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING, toolsMdWithoutInstallSection, withInstallSection } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
 import { agentMemoryLimits } from './swap.js';
 
@@ -157,8 +157,9 @@ const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  * render a live progress card while runProvisionSteps() does the slow work.
  */
 export function createAgentRecord(store: Store, input: CreateAgentInput): Agent {
+  // Read in the same tick as the insert below: gone, the creator says so (409).
   const profile = store.getAIProfile(input.aiProfileId);
-  if (!profile) throw new Error(`No such AI profile: ${input.aiProfileId}`);
+  if (!profile) throw new SourceGoneError();
   const host = store.getHost(input.hostId);
   if (!host) throw new Error(`No such host: ${input.hostId}`);
 
@@ -300,14 +301,22 @@ async function runProvisionStepsInner(
   }
 
   const rollback: Array<() => Promise<void>> = [];
+  // Whether the bot-token step was answered already when this run began its
+  // bot step: then the answer is this run's to take, and not finding it means
+  // asking again. One answered after that came while this run looked.
+  let answeredAtStart = false;
 
   try {
     // Step 3: messaging identity.
     let provisioned = store.getChannelForAgent(agentId);
     if (!provisioned && agent.webOnly) {
-      // No Telegram: reached only through Hatchabot. Nothing to lease.
+      // No Telegram: reached only through Hatchabot. Nothing to lease. A
+      // bot-token step answered with "go on without one" is done here, by
+      // setup, not by the route that took the answer.
+      if (agent.pendingAction) store.setAgentPendingAction(agentId, null);
       log('channel.skipped', { agentId, reason: 'web-only' });
     } else if (!provisioned) {
+      answeredAtStart = !!store.getAgent(agentId)?.pendingAction?.received;
       const result = await provisionChannelOrGoWebOnly(deps, agent, log);
       if (!result) {
         // No bot was free: it goes on without Telegram (provisionChannelOrGoWebOnly).
@@ -343,7 +352,10 @@ async function runProvisionStepsInner(
           createdAt: new Date().toISOString(),
         };
         store.insertChannel(provisioned);
-        store.setAgentPendingAction(agentId, null); // any parked human step is done
+        // Any parked human step is done: setup took the token. The step is
+        // cleared here, not when the token is pasted, so an agent is never
+        // left setting up with no step and no setup running (HB-0542).
+        store.setAgentPendingAction(agentId, null);
         log('channel.provisioned', { agentId, accountId: provisioned.accountId });
       }
     } else {
@@ -354,6 +366,10 @@ async function runProvisionStepsInner(
       // itself instead of staying mislabelled for the life of the agent.
       await channel.syncDisplayName?.(provisioned.accountId, agent.name).catch(() => {});
     }
+    // It has its bot (one it had, or a pool bot leased as a token came in): a
+    // token still held is not that bot's (the manual path takes its own), and
+    // held, it would win over the pool at the next attach (composite.ts).
+    if (provisioned && await channel.waitingFor?.(agentId).catch(() => false)) channel.discardPending?.(agentId);
 
     // Step 5: render config + workspace.
     const spec = await buildRuntimeSpec(deps, agentId);
@@ -448,7 +464,14 @@ async function runProvisionStepsInner(
     // PROVISIONING with a pendingAction the app renders; once the user acts,
     // provisioning resumes right here.
     if (err instanceof ChannelSetupRequired) {
-      store.setAgentPendingAction(agentId, {
+      // Answered while this run looked (a token, or "go on without one"), as
+      // the record says: the step stays answered, and the setup the answer
+      // queued after this run takes it (routes.ts provisionWhenFree). An
+      // answer this run was given and did not find, and no answer, ask the
+      // owner. A failed setup drops the mark (below).
+      const now = store.getAgent(agentId);
+      const answered = !!now?.pendingAction?.received && (!answeredAtStart || !!now.webOnly);
+      if (!answered) store.setAgentPendingAction(agentId, {
         type: 'bot_token',
         instructions: err.instructions,
       });
@@ -478,6 +501,9 @@ async function runProvisionStepsInner(
     }
 
     store.setAgentState(agentId, 'FAILED', reason);
+    // An answered step was this setup's to take: it failed, so the answer is
+    // not waiting any more (a held token stays held for the Retry).
+    if (store.getAgent(agentId)?.pendingAction?.received) store.setAgentPendingAction(agentId, null);
     return { agent: store.getAgent(agentId)! };
   }
 }
@@ -938,7 +964,10 @@ export async function buildRuntimeSpec(
         })),
     ],
   };
-  renderedFrom.set(spec, { profileId: profile.id, model: effectiveModel(agent, profile) });
+  // An own key equal to the fleet's is the fleet's, as the search watch reads it (webSearch.ts).
+  const brave = spec.env.BRAVE_API_KEY;
+  const searchKeyFrom = !brave ? 'none' : perAgentEnv.BRAVE_API_KEY === brave && brave !== searchKey ? 'own' : 'fleet';
+  renderedFrom.set(spec, { profileId: profile.id, model: effectiveModel(agent, profile), searchKey: searchKeyFrom });
   return spec;
 }
 
@@ -1182,7 +1211,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
   if (agent.state === 'RUNNING') {
     // The model calls and refusals logged since the last usage sample live in
     // this container's logs, which the rebuild removes (night review).
-    await sampleAgentUsage({ store, providerFor: () => provider }, agent).catch(() => {});
+    await sampleAgentUsage({ store, secrets: deps.secrets, providerFor: () => provider }, agent).catch(() => {});
     await autoSnapshot({ store, provider, log }, agentId, 'pre-rebuild');
     // Save the conversation into memory BEFORE we touch the container, while
     // the old AI backend still answers — a source switch resets the thread on
@@ -1356,8 +1385,8 @@ export async function finishInterruptedRebuild(
   return opts.busyHeld ? run() : whileBusy(agentId, run);
 }
 
-/** The source and model each spec was rendered with: what recordApplied stamps (audit #094). */
-const renderedFrom = new WeakMap<RuntimeSpec, { profileId: string; model: string }>();
+/** The source and model each spec was rendered with: what recordApplied stamps (audit #094). And whose Brave key it holds (HB-0578 review). */
+const renderedFrom = new WeakMap<RuntimeSpec, { profileId: string; model: string; searchKey: 'own' | 'fleet' | 'none' }>();
 
 /**
  * Record what the runtime is actually running. Called only after a provider
@@ -1376,6 +1405,8 @@ export function recordApplied(store: Store, agentId: string, spec?: RuntimeSpec)
   if (agent && spec) store.dropAttentionAckKeys(agentId, ['restart:', 'memory', 'opsDrift']);
   if (agent && rendered) store.setAgentApplied(agentId, rendered.profileId, rendered.model);
   else if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
+  // Whose searches its Brave calls spend, until the next build (sourceUsage.ts attributeBrave).
+  if (agent && rendered) store.recordAppliedSearchKey(agentId, rendered.searchKey);
   // This container was made from the settings as they are: nothing is owed to
   // its next start. Only with a spec: a model written onto a stopped agent's
   // volume (applyModelNow) makes no container, and the old one still lacks the
@@ -1692,6 +1723,20 @@ async function scrubRemovedNow(
 }
 
 /**
+ * What agentsmd.section_unsure last said of each agent: a hash of the file and
+ * the headings. Every sync (each rebuild, each change to its sources, peers or
+ * accounts) found the same fence, and the agent's Activity filled with the
+ * same line (third review of HB-0520). Said again when either changes. At
+ * most UNSURE_SAID_MAX agents, the least lately said going first: nothing
+ * else forgets an agent deleted or archived with its fence unsure (sixth
+ * review); one forgotten is said again at its next sync.
+ */
+const unsureSaid = new Map<string, string>();
+/** The same for syncMemoryBudget's own Memory budget section (agentsmd.sync_unsure): said once per file. */
+const budgetUnsureSaid = new Map<string, string>();
+const UNSURE_SAID_MAX = 200;
+
+/**
  * Keep AGENTS.md's "## Data sources" section in step with what the agent
  * actually has mounted/checked out. Without this, adding a repo dropped the
  * files on the volume and left the agent with no idea they existed — the owner
@@ -1704,6 +1749,8 @@ export async function syncDataSourceDocs(
   agentId: string,
   runtimeRef: string,
   log: (event: string, detail: Record<string, unknown>) => void,
+  /** `turn`: the per-agent turn its AGENTS.md write waits for, the one a save and the budget's write take (withAgentsMdTurn). */
+  opts: { turn?: <T>(write: () => Promise<T>) => Promise<T> } = {},
 ): Promise<void> {
   const { store, provider } = deps;
   const agent = store.getAgent(agentId);
@@ -1729,25 +1776,57 @@ export async function syncDataSourceDocs(
     // instruction otherwise never landed on agents already created).
     const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
     if (read.code !== 0 || !read.stdout.trim()) return; // no file yet — seed owns it
-    let next = replaceSection(read.stdout, DATA_SOURCES_HEADING, dataSourcesSection(sources));
-    next = replaceSection(next, '## Memory policy', memoryPolicySection(agent.sharedMemory));
+    // A section its code fences make unsure is left as it is (HB-0520): said
+    // on the agent, so an owner who took an account or a peer away can see why
+    // AGENTS.md still names it, and what to fix.
+    // Each text's fences are read once and passed to every question asked of
+    // it; a section that changes the text reads the new one (seventh review).
+    let next = read.stdout;
+    let fences = readFences(next);
+    const take = (to: string) => { if (to !== next) { next = to; fences = readFences(next); } };
+    const unsure = unsureSections(next, [
+      DATA_SOURCES_HEADING, '## Memory policy', '## Memory budget', OPERATOR_HEADING, INSTALL_HEADING,
+      GOOGLE_ACCOUNTS_HEADING, SCHEDULED_RESULTS_HEADING, PEERS_HEADING, ...(agent.ops ? OPS_MANAGED_HEADINGS : []),
+    ], fences);
+    if (!unsure.length) unsureSaid.delete(agentId);
+    else {
+      const said = createHash('sha256').update(read.stdout).update('\0').update(unsure.join('\n')).digest('hex');
+      if (unsureSaid.get(agentId) !== said) {
+        unsureSaid.delete(agentId);
+        if (unsureSaid.size >= UNSURE_SAID_MAX) unsureSaid.delete(unsureSaid.keys().next().value!);
+        unsureSaid.set(agentId, said);
+        log('agentsmd.section_unsure', { agentId, headings: unsure, ...fenceDisagreement(next, fences) });
+      }
+    }
+    take(replaceSection(next, DATA_SOURCES_HEADING, dataSourcesSection(sources), fences));
+    take(replaceSection(next, '## Memory policy', memoryPolicySection(agent.sharedMemory), fences));
     // Its memory budget: what its container has, so it sizes jobs to fit.
-    next = replaceSection(next, '## Memory budget', memoryBudgetSection(memoryCapFor(store, agent)));
+    // A section that already says the cap it has now, in either wording, is
+    // left as it is: AGENTS.md is not rewritten for no change. One that does
+    // not is written in the seed's words when its container has just started
+    // on that cap (no `turn`: a seed or a rebuild), and otherwise, in a
+    // running container (a held sync, `turn`), in the live words, as
+    // syncMemoryBudget writes them: the cap changed after it started, so
+    // `HATCHABOT_MEMORY_CAP` in its environment is the old one.
+    const cap = memoryCapFor(store, agent);
+    if (!next.includes(memoryBudgetSection(cap)) && !next.includes(memoryBudgetSection(cap, { live: true }))) {
+      take(replaceSection(next, '## Memory budget', memoryBudgetSection(cap, { live: !!opts.turn }), fences));
+    }
     // The operator identity: injected so every agent already knows who it serves.
-    next = replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)));
+    take(replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)), fences));
     // Where to install tools: here, not TOOLS.md, which OpenClaw 2026.9 does not read (HB-0397).
-    next = withInstallSection(next);
+    take(withInstallSection(next, fences));
     // The Google accounts it holds: it could not otherwise know (HB-0394).
     const google = attachedGoogleAccounts(store, agentId);
-    next = google.length ? replaceSection(next, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection(google)) : removeSection(next, GOOGLE_ACCOUNTS_HEADING);
+    take(google.length ? replaceSection(next, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection(google), fences) : removeSection(next, GOOGLE_ACCOUNTS_HEADING, fences));
     // Where scheduled results go, for an agent in no chat app only: one asked
     // in its web chat told its owner it needed Telegram (2026-10-12). Adding or
     // removing a chat app rebuilds the agent, which brings this back here.
     if (store.listChannelsForAgent(agentId).length === 0) {
       const version = await provider.info(runtimeRef).then((i) => i.openclawVersion, () => undefined);
-      next = replaceSection(next, SCHEDULED_RESULTS_HEADING, scheduledResultsSection(agent.slug, conversationDeliverySupported(version)));
+      take(replaceSection(next, SCHEDULED_RESULTS_HEADING, scheduledResultsSection(agent.slug, conversationDeliverySupported(version)), fences));
     } else {
-      next = removeSection(next, SCHEDULED_RESULTS_HEADING);
+      take(removeSection(next, SCHEDULED_RESULTS_HEADING, fences));
     }
     // The management agent's own notes are Hatchabot's: keep the sections that
     // go stale between releases current on every build, instead of only when
@@ -1756,18 +1835,18 @@ export async function syncDataSourceDocs(
       // A renamed section takes the old one's place; never both.
       for (const [was, now] of Object.entries(OPS_RENAMED_HEADINGS)) {
         if (!next.split('\n').some((l) => l.trimEnd() === was)) continue;
-        next = next.split('\n').some((l) => l.trimEnd() === now) ? removeSection(next, was) : replaceSection(next, was, opsSection(now) ?? '');
+        take(next.split('\n').some((l) => l.trimEnd() === now) ? removeSection(next, was, fences) : replaceSection(next, was, opsSection(now) ?? '', fences));
       }
       for (const heading of OPS_MANAGED_HEADINGS) {
         const section = opsSection(heading);
-        if (section) next = replaceSection(next, heading, section);
+        if (section) take(replaceSection(next, heading, section, fences));
       }
     }
     // Agent-to-agent: install the call-agent tool + peer manifest, and list the
     // granted peers in AGENTS.md so the agent knows it can consult them.
     const peers = store.listAgentPeers(agentId).map((id) => store.getAgent(id)).filter((a): a is Agent => !!a && a.state !== 'DELETED');
     if (peers.length) {
-      next = replaceSection(next, '## Peers', peerToolsSection(peers.map((p) => ({ name: p.name }))));
+      take(replaceSection(next, '## Peers', peerToolsSection(peers.map((p) => ({ name: p.name }))), fences));
       const b64s = Buffer.from(CALL_AGENT_SCRIPT, 'utf8').toString('base64');
       const b64m = Buffer.from(JSON.stringify(peers.map((p) => ({ name: peerOneLine(p.name), id: p.id }))), 'utf8').toString('base64');
       await provider
@@ -1780,7 +1859,7 @@ export async function syncDataSourceDocs(
         .catch((e) => log('peer_tools.failed', { agentId, error: String((e as Error).message ?? e) }));
     } else {
       // No grant: make sure a previous one isn't still advertised/installed.
-      next = removeSection(next, '## Peers');
+      take(removeSection(next, '## Peers', fences));
       await provider
         .execShell(runtimeRef, 'rm -f ~/.local/bin/call-agent ~/.openclaw/peers.json')
         .catch(() => {});
@@ -1790,11 +1869,83 @@ export async function syncDataSourceDocs(
     // tmp+mv so a failure can't leave AGENTS.md truncated.
     // Through the helper: above ~96 KB it goes on stdin (one shell argument
     // caps at 128 KiB; a big AGENTS.md never synced again — night review).
-    const res = await writeFileInAgent(provider, runtimeRef, path, b64);
+    const write = () => writeFileInAgent(provider, runtimeRef, path, b64);
+    const res = await (opts.turn ? opts.turn(write) : write());
     if (res.code !== 0) log('agentsmd.sync_failed', { agentId, stderr: res.stderr.slice(0, 300) });
     else log('agentsmd.synced', { agentId, sources: sources.length });
   } catch (e) {
     log('agentsmd.sync_error', { agentId, error: String((e as Error).message ?? e) });
+  }
+}
+
+/**
+ * Only the "## Memory budget" section of AGENTS.md, rewritten for the cap
+ * the agent's container has now (tellMemoryBudget, HB-0599): read, that
+ * section replaced, and written only if the file is still what was read,
+ * checked and renamed in `turn`, the per-agent turn a save of AGENTS.md
+ * takes (writeFileInAgent's ifUnchanged). It runs without the busy flag, so
+ * it touches nothing else: the agent's peers, its call-agent tool and the
+ * other sections stay with the syncs that hold it (syncDataSourceDocs).
+ * Read as bytes (base64), so the hash checked before the rename is of the
+ * file as it is, and every byte outside the section is written back as it
+ * was, one that is not UTF-8 included.
+ * 'changed': the file changed after it was read; nothing was written.
+ */
+export async function syncMemoryBudget(
+  deps: { store: Store; provider: RuntimeProvider },
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  turn?: <T>(commit: () => Promise<T>) => Promise<T>,
+): Promise<'written' | 'current' | 'changed' | 'failed'> {
+  const { store, provider } = deps;
+  const slug = store.getAgent(agentId)?.slug;
+  if (!slug) return 'failed';
+  const path = workspacePath(slug, 'AGENTS.md');
+  try {
+    const read = await provider.execShell(runtimeRef, `cat ${JSON.stringify(path)} 2>/dev/null | base64`);
+    if (read.code !== 0) return 'failed';
+    const raw = Buffer.from(read.stdout, 'base64');
+    // One char per byte: the section is found by its ASCII heading, and the bytes around it kept.
+    const text = raw.toString('latin1');
+    if (!text.trim()) { budgetUnsureSaid.delete(agentId); return 'current'; } // no file yet — seed owns it
+    // The cap as stored once the file is read: a change since asks again.
+    const agent = store.getAgent(agentId);
+    if (!agent) return 'failed';
+    // A section that already says the cap it has, in either wording (as a
+    // seed wrote it, or as a change of its cap made while it ran wrote it),
+    // is current, as syncDataSourceDocs reads it: not rewritten for no change.
+    const cap = memoryCapFor(store, agent);
+    if ([memoryBudgetSection(cap), memoryBudgetSection(cap, { live: true })].some((said) => raw.includes(Buffer.from(said, 'utf8')))) { budgetUnsureSaid.delete(agentId); return 'current'; }
+    const mark = `hatchabot-memory-budget-${randomUUID()}`;
+    const parts = replaceSection(text, '## Memory budget', mark).split(mark);
+    // A section its code fences leave unsure is left as it is (HB-0520): the
+    // budget is not told there. Said once for this file, as syncDataSourceDocs
+    // says its own: a class edit tells each member, and each would say it again.
+    if (parts.length !== 2) {
+      // The file and the cap it was not told: another cap that fails on the same fence is said too.
+      const said = createHash('sha256').update(raw).update('\0').update(memoryBudgetSection(cap)).digest('hex');
+      if (budgetUnsureSaid.get(agentId) !== said) {
+        budgetUnsureSaid.delete(agentId);
+        if (budgetUnsureSaid.size >= UNSURE_SAID_MAX) budgetUnsureSaid.delete(budgetUnsureSaid.keys().next().value!);
+        budgetUnsureSaid.set(agentId, said);
+        log('agentsmd.sync_unsure', { agentId, heading: '## Memory budget' });
+      }
+      return 'failed';
+    }
+    budgetUnsureSaid.delete(agentId);
+    const [before, after] = parts as [string, string];
+    const next = Buffer.concat([Buffer.from(before, 'latin1'), Buffer.from(memoryBudgetSection(cap, { live: true }), 'utf8'), Buffer.from(after, 'latin1')]);
+    if (next.equals(raw)) return 'current';
+    const sha256 = createHash('sha256').update(raw).digest('hex');
+    const res = await writeFileInAgent(provider, runtimeRef, path, next.toString('base64'), {}, { sha256, hold: turn });
+    if (res.code === 3 && /it changed meanwhile/.test(res.stderr)) { log('agentsmd.sync_raced', { agentId }); return 'changed'; }
+    if (res.code !== 0) { log('agentsmd.sync_failed', { agentId, stderr: res.stderr.slice(0, 300) }); return 'failed'; }
+    log('memory.budget_told', { agentId, cap });
+    return 'written';
+  } catch (e) {
+    log('agentsmd.sync_error', { agentId, error: String((e as Error).message ?? e) });
+    return 'failed';
   }
 }
 
@@ -2123,10 +2274,8 @@ export class ChannelConflictError extends Error {
 }
 
 export function slugify(name: string): string {
-  const base = name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+  // Runs are already one '-', so one at each end is all a trim can find; `-+$` there was
+  // quadratic on a long run of dashes (CodeQL js/polynomial-redos, HB-0617).
+  const base = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   return base || 'agent';
 }

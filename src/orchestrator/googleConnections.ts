@@ -204,44 +204,140 @@ function bootstrapScript(): string {
 }
 
 /**
- * Materialize one connection into a RUNNING agent's container. Secrets ride
- * base64 inside the script, which goes over stdin (execShell `secret`), never
- * a command line: `docker exec … bash -c` showed the refresh token and the
- * OAuth client secret to any local user's ps (2026-09-30). Inside, only
- * builtins (echo) and pipes carry them.
+ * Materialize one connection into a RUNNING agent's container: the batch
+ * below, with one.
  */
 export async function materializeConnection(
   deps: ConnectionSyncDeps,
   agent: { id: string; slug: string; runtimeRef: string },
   connectionId: string,
 ): Promise<{ ok: boolean; error?: string }> {
+  const [r] = await materializeConnections(deps, agent, [connectionId]);
+  return r!.error === undefined ? { ok: r!.ok } : { ok: r!.ok, error: r!.error };
+}
+
+/**
+ * An agent's accounts in one exec (one attached, or a new client secret owed
+ * to several, HB-0463): the client once, then each account's import, each
+ * with a line of its own saying how it went (its number and exit code, never
+ * its address or token), so each keeps its own result. An account that
+ * cannot be imported (not attached, its token gone) is not in the script.
+ *
+ * Secrets ride base64 inside the script, which goes over stdin (execShell
+ * `secret`), never a command line: `docker exec … bash -c` showed the refresh
+ * token and the OAuth client secret to any local user's ps (2026-09-30).
+ * Inside, only builtins (echo) and pipes carry them.
+ */
+export async function materializeConnections(
+  deps: ConnectionSyncDeps,
+  agent: { id: string; slug: string; runtimeRef: string },
+  connectionIds: string[],
+): Promise<Array<{ connectionId: string; ok: boolean; error?: string }>> {
   const { store, secrets, provider } = deps;
-  const conn = store.getConnection(connectionId);
-  if (!conn) return { ok: false, error: 'no such connection' };
-  const attach = store
-    .listAgentConnections(agent.id)
-    .find((a) => a.connectionId === connectionId);
+  const results = new Map<string, { ok: boolean; error?: string }>();
+  const answer = () => connectionIds.map((connectionId) => ({ connectionId, ...results.get(connectionId)! }));
   // Only what is attached lands on a volume: a detach, or a delete (which
   // detaches before it lets the agent's turn go), is the record of intent,
   // and no caller may import past it (issue #18, 2026-10-09).
-  if (!attach) return { ok: false, error: 'not attached to this agent' };
-  // When the client and token were read, not when the import ended: a reconnect
-  // while a slow import ran left the agent on the old token, stamped as newer
-  // than the new consent and so never shown as stale (audit #074). Before both
-  // reads, so a secret saved meanwhile counts as not received (HB-0427).
+  const attached = new Map(store.listAgentConnections(agent.id).map((a) => [a.connectionId, a]));
+  const wanted: Array<{ conn: Connection; noSend: boolean }> = [];
+  for (const connectionId of connectionIds) {
+    const conn = store.getConnection(connectionId);
+    const attach = attached.get(connectionId);
+    if (!conn) results.set(connectionId, { ok: false, error: 'no such connection' });
+    else if (!attach) results.set(connectionId, { ok: false, error: 'not attached to this agent' });
+    else wanted.push({ conn, noSend: !!attach.gmailNoSend });
+  }
+  if (!wanted.length) return answer();
+  // When the client and tokens were read, not when the import ended: a
+  // reconnect while a slow import ran left the agent on the old token,
+  // stamped as newer than the new consent and so never shown as stale (audit
+  // #074). Before the reads, so a secret saved meanwhile counts as not
+  // received (HB-0427).
   const readAt = new Date().toISOString();
   const clientRaw = await secrets.get(GOOGLE_CLIENT_REF).catch(() => null);
   const client = clientRaw ? parseOAuthClient(clientRaw) : null;
-  if (!client) return { ok: false, error: 'Google OAuth client not configured' };
+  if (!client) {
+    for (const { conn } of wanted) results.set(conn.id, { ok: false, error: 'Google OAuth client not configured' });
+    return answer();
+  }
+  const ready: AccountImport[] = [];
+  (await Promise.all(wanted.map((w) => accountImport(deps, agent.id, w.conn, w.noSend, client)))).forEach((one, k) => {
+    if ('error' in one) results.set(wanted[k]!.conn.id, { ok: false, error: one.error });
+    else ready.push(one);
+  });
+  if (!ready.length) return answer();
+  // Under the inherited `set -e`, a failed import would stop the rest: each
+  // is caught, its output marked with its number (stdout as it comes, stderr
+  // once it failed), and its line written. On a line of its own: output
+  // that ends without a newline would run into it.
+  const script = [
+    ...credentialsScript(client),
+    'exec 3>&1',
+    ...ready.flatMap((one, i) => [
+      `rc=0; err=$( { { ${importCommand(one)}; } | sed 's/^/[${i}] /' >&3; exit "\${PIPESTATUS[0]}"; } 2>&1 ) || rc=$?`,
+      `if [ "$rc" -ne 0 ]; then printf '%s\\n' "$err" | sed 's/^/[${i}] /' >&2; fi`,
+      'echo',
+      `echo "IMPORTED ${i} $rc"`,
+    ]),
+  ].join('\n');
+  // A minute for each account, not one default minute for them all; ten at most.
+  const timeoutMs = Math.min(60_000 * ready.length, 10 * 60_000);
+  const res = await provider.execShell(agent.runtimeRef, script, { secret: true, timeoutMs });
+  const rcOf = new Map([...res.stdout.matchAll(/^IMPORTED (\d+) (\d+)$/gm)].map((m) => [Number(m[1]), Number(m[2])]));
+  // What no account's number marks: the client's step, or the shell's own.
+  const untagged = (text: string) => text.split('\n').filter((l) => l && !/^\[\d+\] /.test(l) && !/^IMPORTED \d+ \d+$/.test(l)).join('\n');
+  ready.forEach((one, i) => {
+    const rc = rcOf.get(i);
+    if (rc === 0) {
+      imported(deps, agent.id, one, readAt);
+      results.set(one.connectionId, { ok: true });
+      return;
+    }
+    // Only its own lines, stderr before stdout; with none and no line of its
+    // own (the script stopped before it, the client refused), what no
+    // account's number marks. Never another account's.
+    const tagged = (text: string) => text.split('\n').filter((l) => l.startsWith(`[${i}] `)).map((l) => l.slice(`[${i}] `.length)).filter(Boolean).join('\n');
+    const own = tagged(res.stderr) || tagged(res.stdout);
+    const error = (own || (rc === undefined ? untagged(res.stderr) || untagged(res.stdout) : '') || 'import failed').slice(0, 300);
+    deps.log?.('connection.materialize_failed', { agentId: agent.id, email: one.email, error });
+    results.set(one.connectionId, { ok: false, error });
+  });
+  return answer();
+}
+
+type Connection = NonNullable<ReturnType<Store['getConnection']>>;
+type AccountImport = { connectionId: string; email: string; b64Token: string; noSend: boolean };
+
+/**
+ * One attached account, checked for an import: made with this client, its
+ * token in the vault, its address safe for a shell line.
+ */
+async function accountImport(
+  deps: ConnectionSyncDeps,
+  agentId: string,
+  conn: Connection,
+  noSend: boolean,
+  client: OAuthClient,
+): Promise<AccountImport | { error: string }> {
   // A token another client issued fails at Google with this one: say what
   // mends it, rather than import a token that cannot work.
   if (conn.clientId && conn.clientId !== client.clientId) {
-    deps.log?.('connection.materialize_failed', { agentId: agent.id, email: conn.email, error: 'issued by a different OAuth client' });
-    return { ok: false, error: `${conn.email} was connected with a different Google OAuth client — connect it again (⚙ Settings → Connections)` };
+    deps.log?.('connection.materialize_failed', { agentId, email: conn.email, error: 'issued by a different OAuth client' });
+    return { error: `${conn.email} was connected with a different Google OAuth client — connect it again (⚙ Settings → Connections)` };
   }
-  const refreshToken = await secrets.get(conn.secretRef).catch(() => null);
-  if (!refreshToken) return { ok: false, error: 'connection token missing from the vault' };
+  const refreshToken = await deps.secrets.get(conn.secretRef).catch(() => null);
+  if (!refreshToken) return { error: 'connection token missing from the vault' };
+  // JSON.stringify does NOT neutralize $ / backtick / " for a shell — the
+  // email reaches a double-quoted bash context, so validate its shape first
+  // (Google-verified emails are safe, but that assumption must not be the
+  // only defense; matches dematerializeConnection's gate — audit 2026-09-06).
+  if (!isAccountEmail(conn.email)) return { error: 'connection email has an unexpected shape' };
+  return { connectionId: conn.id, email: conn.email, b64Token: Buffer.from(refreshToken, 'utf8').toString('base64'), noSend };
+}
 
+/** The client's credentials into gog, its secret file gone however the script ends. */
+function credentialsScript(client: OAuthClient): string[] {
   // gog expects Google's client_secret.json shape ("installed" works for the
   // web-app client here — gog reads client_id/client_secret from either key).
   const clientJson = JSON.stringify({
@@ -253,17 +349,8 @@ export async function materializeConnection(
       redirect_uris: ['http://localhost'],
     },
   });
-  // JSON.stringify does NOT neutralize $ / backtick / " for a shell — the
-  // email reaches a double-quoted bash context, so validate its shape first
-  // (Google-verified emails are safe, but that assumption must not be the
-  // only defense; matches dematerializeConnection's gate — audit 2026-09-06).
-  if (!/^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(conn.email) || conn.email.length > 254) {
-    return { ok: false, error: 'connection email has an unexpected shape' };
-  }
   const b64Client = Buffer.from(clientJson, 'utf8').toString('base64');
-  const b64Token = Buffer.from(refreshToken, 'utf8').toString('base64');
-  const noSend = attach?.gmailNoSend ? ' --gmail-no-send' : '';
-  const script = [
+  return [
     bootstrapScript(),
     `umask 077`,
     // Guarantee the plaintext client_secret is removed on ANY exit — under the
@@ -272,23 +359,24 @@ export async function materializeConnection(
     `trap 'rm -f ${GOG_HOME}/.client_secret.json' EXIT`,
     `echo ${JSON.stringify(b64Client)} | base64 -d > ${GOG_HOME}/.client_secret.json`,
     `~/.local/bin/gog auth credentials ${GOG_HOME}/.client_secret.json >/dev/null`,
-    // --force: the vault's token is the authority, and gog refuses an email it
-    // already holds ("entry already exists … use --force") — every rebuild and
-    // wake logged a false failure and a re-consented token never landed
-    // (review, 2026-09-29).
-    `echo ${JSON.stringify(b64Token)} | base64 -d | ~/.local/bin/gog auth import --email "${conn.email}" --refresh-token-stdin --no-input --force${noSend}`,
-  ].join('\n');
-  const res = await provider.execShell(agent.runtimeRef, script, { secret: true });
-  if (res.code !== 0) {
-    const error = (res.stderr || res.stdout || 'import failed').slice(0, 300);
-    deps.log?.('connection.materialize_failed', { agentId: agent.id, email: conn.email, error });
-    return { ok: false, error };
-  }
-  store.markConnectionMaterialized(agent.id, connectionId, readAt);
-  // The import exited 0: gog holds it now (the access overview's last check).
-  store.recordAccessCheck(agent.id, 'google', conn.email.toLowerCase(), true);
-  deps.log?.('connection.materialized', { agentId: agent.id, email: conn.email });
-  return { ok: true };
+  ];
+}
+
+/**
+ * One account's import. --force: the vault's token is the authority, and gog
+ * refuses an email it already holds ("entry already exists … use --force") —
+ * every rebuild and wake logged a false failure and a re-consented token never
+ * landed (review, 2026-09-29).
+ */
+function importCommand(one: AccountImport): string {
+  return `echo ${JSON.stringify(one.b64Token)} | base64 -d | ~/.local/bin/gog auth import --email "${one.email}" --refresh-token-stdin --no-input --force${one.noSend ? ' --gmail-no-send' : ''}`;
+}
+
+/** An import that exited 0: stamped as of when the client and token were read, and gog holds it now (the access overview's last check). */
+function imported(deps: ConnectionSyncDeps, agentId: string, one: AccountImport, readAt: string): void {
+  deps.store.markConnectionMaterialized(agentId, one.connectionId, readAt);
+  deps.store.recordAccessCheck(agentId, 'google', one.email.toLowerCase(), true);
+  deps.log?.('connection.materialized', { agentId, email: one.email });
 }
 
 /** Only unambiguous mailbox characters, first one alphanumeric: an email goes into a shell line. */

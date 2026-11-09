@@ -3,14 +3,17 @@
 // `doctorReport` turns them into ✓/⚠/✗ lines — pure, so it's tested without
 // a machine.
 import { execFileSync } from 'node:child_process';
+import type { ClientRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { rootCertificates } from 'node:tls';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
+import { homedir, hostname, networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { applyLegacyEnv, defaultBackupsDir, defaultDbPath } from './envCompat.js';
 import { activeValues, envValue } from './config/envFile.js';
-import { readSetStatus } from './orchestrator/backups.js';
+import { foreignSet, ownerMark, readSetStatus } from './orchestrator/backups.js';
 import { setAgeDays } from './orchestrator/recoveryReadiness.js';
 import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
 import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
@@ -194,11 +197,12 @@ export function limitsCheckLine(c: LimitsCheckSummary): DoctorLine {
 /** The machine's swap and who is set to use it; best-effort, never throws. */
 export async function swapFacts(env: Record<string, string>, dbPath: string, prefix: string, dockerOk: boolean): Promise<DoctorFacts['swap']> {
   let out: string | undefined;
+  const dockerEnv = serviceDockerEnv(env);
   if (process.platform === 'linux') out = sh('sh', ['-c', SWAP_PROBE_SCRIPT]);
-  else if (dockerOk) out = sh('docker', ['run', '--rm', '--network', 'none', 'alpine', 'sh', '-c', SWAP_PROBE_SCRIPT], 60_000);
+  else if (dockerOk) out = sh('docker', ['run', '--rm', '--network', 'none', 'alpine', 'sh', '-c', SWAP_PROBE_SCRIPT], 60_000, dockerEnv);
   const state = parseSwapProbe(out);
-  const merged = { ...env, ...(process.env.HATCHABOT_AGENT_SWAP !== undefined ? { HATCHABOT_AGENT_SWAP: process.env.HATCHABOT_AGENT_SWAP } : {}) } as NodeJS.ProcessEnv;
-  const fb = parseSwapAllowance(merged.HATCHABOT_AGENT_SWAP ?? '');
+  // The service's setting, from its .env: the shell's is not the service's.
+  const fb = parseSwapAllowance(env.HATCHABOT_AGENT_SWAP ?? '');
   const fleet = fb ? formatSwapAllowance(fb) : 'off';
   let agentsWithAllowance: number | undefined;
   if (existsSync(dbPath)) {
@@ -210,16 +214,16 @@ export async function swapFacts(env: Record<string, string>, dbPath: string, pre
         const rows = db.prepare(`SELECT memory_cap, swap_allowance, class_id FROM agents WHERE state NOT IN ('DELETED', 'ARCHIVED')`).all() as Array<{ memory_cap: string | null; swap_allowance: string | null; class_id: string | null }>;
         agentsWithAllowance = rows.filter((r) => {
           const c = r.class_id ? classes.get(r.class_id) : undefined;
-          return effectiveSwapAllowance({ memoryCap: r.memory_cap ?? undefined, swapAllowance: r.swap_allowance ?? undefined }, c ? { memoryCap: c.memory_cap ?? undefined, swapAllowance: c.swap_allowance ?? undefined } : undefined, merged) > 0;
+          return effectiveSwapAllowance({ memoryCap: r.memory_cap ?? undefined, swapAllowance: r.swap_allowance ?? undefined }, c ? { memoryCap: c.memory_cap ?? undefined, swapAllowance: c.swap_allowance ?? undefined } : undefined, env as NodeJS.ProcessEnv) > 0;
         }).length;
       } finally { db.close(); }
     } catch { /* an older database (no swap columns yet) or unreadable: not counted */ }
   }
   let containersWithSwap: number | undefined;
   if (dockerOk) {
-    const names = (sh('docker', ['ps', '-a', '--format', '{{.Names}}']) ?? '').split('\n').filter((n) => (n.startsWith(`${prefix}-`) || n.startsWith('agentclaw-')) && !/-(vx|io|fs)-[0-9a-f]{12}$/.test(n) && !/-(embedder|embed-door)$|-doorman-/.test(n));
+    const names = (sh('docker', ['ps', '-a', '--format', '{{.Names}}'], 8000, dockerEnv) ?? '').split('\n').filter((n) => (n.startsWith(`${prefix}-`) || n.startsWith('agentclaw-')) && !/-(vx|io|fs)-[0-9a-f]{12}$/.test(n) && !/-(embedder|embed-door)$|-doorman-/.test(n));
     if (names.length) {
-      const ins = sh('docker', ['inspect', '--format', '{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.State.Running}}', ...names]);
+      const ins = sh('docker', ['inspect', '--format', '{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}|{{.State.Running}}', ...names], 8000, dockerEnv);
       // Running ones: a stopped container is given its limits again when it starts.
       if (ins !== undefined) containersWithSwap = ins.split('\n').filter((l) => { const [m, w, r] = l.split('|'); return r === 'true' && !!Number(m) && (Number(w) < 0 || Number(w) > Number(m)); }).length;
     } else containersWithSwap = 0;
@@ -281,8 +285,8 @@ export async function publicAccessFacts(env: Record<string, string>, dbPath: str
   /** The .env the service reads (the note of an unfinished switch sits beside it). */
   envPath?: string;
 } = {}): Promise<NonNullable<DoctorFacts['publicAccess']>> {
-  const merged = { ...env, ...Object.fromEntries(Object.entries(process.env).filter(([k, v]) => k.startsWith('HATCHABOT_PUBLIC_') && v !== undefined)) } as NodeJS.ProcessEnv;
-  const cfg = publicConfig(merged);
+  // The service's settings, from its .env: the shell's are not the service's.
+  const cfg = publicConfig(env as NodeJS.ProcessEnv);
   const authMode = (env.HATCHABOT_AUTH ?? 'password').toLowerCase();
   let admins: ReturnType<typeof adminAccounts> = [];
   if (existsSync(dbPath)) {
@@ -385,8 +389,85 @@ export function checkoutFacts(dir = process.cwd(), home = homedir()): DoctorFact
   return { tag, ...onChannel, ...(channelTarget ? { channelTarget } : {}), dirty };
 }
 
-function sh(cmd: string, args: string[], timeout = 8000): string | undefined {
-  try { return execFileSync(cmd, args, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return undefined; }
+function sh(cmd: string, args: string[], timeout = 8000, env?: NodeJS.ProcessEnv): string | undefined {
+  try { return execFileSync(cmd, args, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'ignore'], ...(env ? { env } : {}) }).trim(); } catch { return undefined; }
+}
+
+/**
+ * The environment the service's docker client runs with: this shell's, less
+ * its own DOCKER_* settings, with the .env's (DOCKER_HOST, DOCKER_CONTEXT,
+ * the TLS ones). The service never sees the shell's, so a DOCKER_CONTEXT or
+ * DOCKER_TLS_VERIFY set only in the shell steered doctor to another daemon
+ * (HB-0550).
+ */
+export function serviceDockerEnv(env: Record<string, string>, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(base)) if (!k.startsWith('DOCKER_')) out[k] = v;
+  for (const [k, v] of Object.entries(env)) if (k.startsWith('DOCKER_')) out[k] = v;
+  return out;
+}
+
+/**
+ * Where this machine's service listens, from its .env as the service and
+ * restart.sh read it: https with HATCHABOT_TLS_CERT, PORT, and the
+ * HATCHABOT_BIND address when that is one host. Doctor asked
+ * http://localhost:8080 whatever these said (HB-0549). The same rules as
+ * scripts/restart.sh's probe (its LISTENER): test/doctorServiceTargets.test.ts
+ * runs those lines and compares.
+ */
+export function serviceUrl(env: Record<string, string | undefined>): string {
+  const scheme = env.HATCHABOT_TLS_CERT ? 'https' : 'http';
+  const bind = (env.HATCHABOT_BIND ?? '').trim();
+  const host = ['', '0.0.0.0', '::', '[::]', 'localhost', '127.0.0.1'].includes(bind) ? 'localhost'
+    : bind.startsWith('[') ? bind : bind.includes(':') ? `[${bind}]` : bind;
+  return `${scheme}://${host}:${servicePort(env)}`;
+}
+
+/** The port the service listens on, as the server reads it from its .env. */
+export function servicePort(env: Record<string, string | undefined>): number {
+  return Number(env.PORT) || 8080;
+}
+
+/** This machine's own names and addresses: loopback, its interfaces, its host name. */
+function thisMachine(): Set<string> {
+  const own = new Set(['localhost', '0.0.0.0', '::', '::1', hostname().toLowerCase()]);
+  for (const list of Object.values(networkInterfaces())) for (const a of list ?? []) own.add(a.address.toLowerCase());
+  return own;
+}
+
+/** How long doctorTarget waits for a saved host name to resolve. */
+export const TARGET_LOOKUP_MS = 1500;
+
+const lookupAll = (host: string): Promise<string[]> => dnsLookup(host, { all: true }).then((l) => l.map((a) => a.address));
+
+/** Every address a name resolves to, or none when it does not within `ms`. */
+export async function addressesOf(host: string, ms = TARGET_LOOKUP_MS, look: (host: string) => Promise<string[]> = lookupAll): Promise<string[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<string[]>((r) => { timer = setTimeout(() => r([]), ms); timer.unref?.(); });
+  try {
+    return await Promise.race([look(host), late]);
+  } catch { return []; } finally { clearTimeout(timer); }
+}
+
+/**
+ * The URL doctor asks, or undefined for the listener the .env describes
+ * (serviceUrl). --url is asked as given. A saved or shell URL for this
+ * machine is not: setup-host.sh saves http://127.0.0.1:<PORT>, and after a
+ * PORT or bind change in .env doctor probed the old address. This machine is
+ * a loopback address, one of its own, its host name, or a name (a full one,
+ * a .local one, a tailnet one) that resolves to one of those; a name that
+ * does not resolve in time is judged by the rest. A remote one is kept as
+ * chosen, and so is a local one when there is no .env to go by.
+ */
+export async function doctorTarget(flagUrl: string | undefined, savedUrl: string | undefined, env: Record<string, string>,
+  own: Set<string> = thisMachine(), resolve: (host: string) => Promise<string[]> = addressesOf): Promise<string | undefined> {
+  if (flagUrl) return flagUrl;
+  if (!savedUrl) return undefined;
+  let host: string;
+  try { host = new URL(savedUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase(); } catch { return savedUrl; }
+  const mine = (a: string) => { const x = a.toLowerCase().replace(/^::ffff:/, ''); return own.has(x) || /^127\./.test(x) || x === '::1'; };
+  const local = mine(host) || (!isIP(host) && (await resolve(host)).some(mine));
+  return local && Object.keys(env).length > 0 ? undefined : savedUrl;
 }
 /**
  * The settings in force in a .env, read as the server reads them: the same
@@ -407,12 +488,14 @@ export function envMap(file: string): Record<string, string> {
 /**
  * GET the app's home page and read its version marker. A LAN install's certificate is
  * self-signed: the probe trusts the install's own certificate (`HATCHABOT_TLS_CERT`, the file
- * the server serves) beside the system roots, and skips the hostname check only for loopback,
- * where such a certificate often names no address. It never turns certificate checks off
+ * the server serves) beside the system roots, and skips the hostname check only for loopback
+ * and for the address the .env binds to (`bind`, HATCHABOT_BIND, when it is an IP address: a
+ * LAN or tailnet address the certificate may not name), where doctor checks this machine's own
+ * listener. A bind that is a name is checked like any other name. It never turns certificate checks off
  * (NODE_TLS_REJECT_UNAUTHORIZED=0 did, process-wide; CodeQL js/disabling-certificate-validation,
  * 2026-10-24): an https address with no certificate file is checked like any other.
  */
-export async function probeControlPlane(url: string, certFile?: string): Promise<DoctorFacts['controlPlane']> {
+export async function probeControlPlane(url: string, certFile?: string, bind?: string): Promise<DoctorFacts['controlPlane']> {
   const home = `${url.replace(/\/$/, '')}/`;
   try {
     if (!home.startsWith('https:')) {
@@ -421,22 +504,52 @@ export async function probeControlPlane(url: string, certFile?: string): Promise
     }
     const u = new URL(home);
     const cert = certFile && existsSync(certFile) ? readFileSync(certFile) : undefined;
-    const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname);
+    const bare = (h: string) => h.trim().replace(/^\[|\]$/g, '').toLowerCase();
+    // The bind only when it is an address: a name may resolve anywhere, and
+    // a certificate can name it, so it is checked like any other name.
+    const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname) || (!!bind && isIP(bare(bind)) !== 0 && bare(u.hostname) === bare(bind));
     const { status, body } = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = httpsRequest(u, {
-        method: 'GET',
-        timeout: 5000,
-        ...(cert ? { ca: [...rootCertificates, cert.toString()] } : {}),
-        ...(cert && loopback ? { checkServerIdentity: () => undefined } : {}),
-      }, (res) => {
-        let text = '';
-        res.setEncoding('utf8');
-        res.on('data', (c: string) => { if (text.length < 1_000_000) text += c; });
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
-      });
-      req.on('timeout', () => req.destroy(new Error('timed out')));
-      req.on('error', reject);
-      req.end();
+      // One deadline for the whole answer, and every way an answer can end:
+      // one cut off in its body (aborted, then closed) left this waiting for
+      // good, and doctor never printed its report (HB-0551).
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let req: ClientRequest | undefined;
+      const done = (v: { status: number; body: string }) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
+      const fail = (err: Error) => { if (settled) return; settled = true; clearTimeout(timer); req?.destroy(); reject(err); };
+      try {
+        req = httpsRequest(u, {
+          method: 'GET',
+          timeout: 5000,
+          // Its own connection: Node checks the name only on a full handshake,
+          // so a TLS session kept from a probe that skipped the check (loopback,
+          // the bind address) let a later probe elsewhere through unchecked.
+          agent: false,
+          ...(cert ? { ca: [...rootCertificates, cert.toString()] } : {}),
+          ...(cert && loopback ? { checkServerIdentity: () => undefined } : {}),
+        }, (res) => {
+          let text = '';
+          res.setEncoding('utf8');
+          res.on('data', (c: string) => { if (text.length < 1_000_000) text += c; });
+          res.on('end', () => done({ status: res.statusCode ?? 0, body: text }));
+          res.on('aborted', () => fail(new Error('the answer was cut off')));
+          res.on('error', fail);
+          res.on('close', () => { if (!res.complete) fail(new Error('the connection closed before the answer ended')); });
+        });
+      } catch (err) {
+        // Thrown before there was a request (options it refuses): no timer
+        // yet, so nothing fires later at a request that never was.
+        fail(err as Error);
+        return;
+      }
+      // Unref'd: an open socket keeps the process up, and once it is closed
+      // the handlers above have settled this already.
+      timer = setTimeout(() => fail(new Error('timed out')), PROBE_DEADLINE_MS);
+      timer.unref();
+      const r = req;
+      r.on('timeout', () => r.destroy(new Error('timed out')));
+      r.on('error', fail);
+      r.end();
     });
     return { url, ok: status >= 200 && status < 300, version: versionMarker(body) };
   } catch (err) {
@@ -444,17 +557,33 @@ export async function probeControlPlane(url: string, certFile?: string): Promise
   }
 }
 const versionMarker = (html: string) => /HATCHABOT_VERSION="([^"]+)"/.exec(html)?.[1];
+/** The longest the HTTPS probe waits for a whole answer. */
+const PROBE_DEADLINE_MS = 10_000;
 
 /**
  * The newest backup set in `bdir` and how old it is. Its age is counted by the
  * calendar, as the app's machine line counts it (setAgeDays): a set's date is
  * the local day it was made, and reading it as UTC midnight made it a day older
  * in an evening west of UTC, so doctor warned a day early (HB-0386).
+ * This install's own (`mark`, its key's): in a folder another install shares,
+ * that one's newer set hid this one's going stale (fourth review of HB-0540).
  */
-export function backupFacts(bdir: string, now: number): DoctorFacts['backups'] {
+/**
+ * The mark of this install's backup sets, from the service's .env, never the
+ * shell's. With no key there it is undefined (ownerMark is given '', since
+ * given undefined it reads this process's environment), and backupFacts then
+ * checks no set's owner: every set counts as this install's, as the script
+ * reads it. Keep it that way: a default for undefined would read the shell's key.
+ */
+export function serviceBackupMark(env: Record<string, string | undefined>): string | undefined {
+  return ownerMark(env.HATCHABOT_SECRET_KEY ?? '');
+}
+
+export function backupFacts(bdir: string, now: number, mark: string | undefined): DoctorFacts['backups'] {
   try {
-    const sets = readdirSync(bdir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && readdirSync(join(bdir, d)).some((f) => f.endsWith('.sqlite'))).sort();
-    const last = sets.pop();
+    const sets = readdirSync(bdir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && readdirSync(join(bdir, d)).some((f) => f.endsWith('.sqlite'))).sort().reverse();
+    // No mark, no check: foreignSet given undefined reads this process's key (the shell's here).
+    const last = sets.find((d) => !(mark && foreignSet(join(bdir, d), mark)));
     if (!last) return { dir: bdir };
     const st = readSetStatus(join(bdir, last));
     return {
@@ -465,45 +594,57 @@ export function backupFacts(bdir: string, now: number): DoctorFacts['backups'] {
   } catch { return { dir: bdir }; /* no dir */ }
 }
 
-/** Probe this machine. `url` is where the control plane should answer. */
-export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
-  let url = urlIn;
-  const env = envMap('.env');
-  // A TLS install answers on https; the caller's default URL is plain http.
+/**
+ * Probe this machine. `urlIn` is where the control plane should answer when
+ * one was chosen (--url, HATCHABOT_URL, the CLI's saved one); without it, the
+ * listener the service's .env describes.
+ */
+export async function gatherFacts(urlIn?: string, envIn?: Record<string, string>): Promise<DoctorFacts> {
+  // The service's settings come from its .env alone, as the service reads
+  // them: the shell's PORT, image, prefix, network, database or backup
+  // folder are not the service's, and doctor checked those instead. The
+  // CLI passes the map it read already.
+  const env = envIn ?? envMap('.env');
+  // The .env only, as restart.sh reads it: the shell's PORT or TLS cert is
+  // not the service's, and gave a URL and a CA that did not go together.
+  let url = urlIn ?? serviceUrl(env);
+  // A TLS install answers on https; a chosen local URL may say plain http.
   if (env.HATCHABOT_TLS_CERT && /^http:\/\/(localhost|127\.0\.0\.1)/.test(url)) url = url.replace(/^http:/, 'https:');
-  const dockerCli = !!sh('docker', ['--version']);
-  const info = dockerCli ? sh('docker', ['version', '--format', '{{.Server.Version}}|{{.Server.Arch}}']) : undefined;
-  const secopts = info ? sh('docker', ['info', '--format', '{{.SecurityOptions}}']) : undefined;
+  const dockerEnv = serviceDockerEnv(env);
+  const docker = (args: string[]) => sh('docker', args, 8000, dockerEnv);
+  const dockerCli = !!docker(['--version']);
+  const info = dockerCli ? docker(['version', '--format', '{{.Server.Version}}|{{.Server.Arch}}']) : undefined;
+  const secopts = info ? docker(['info', '--format', '{{.SecurityOptions}}']) : undefined;
   const dockerDaemon = info
     ? { ok: true, version: info.split('|')[0], arch: info.split('|')[1], rootless: /\bname=rootless\b/.test(secopts ?? '') }
     : { ok: false, error: dockerCli ? 'daemon not reachable' : undefined };
   let runtimeImage: DoctorFacts['runtimeImage'];
   if (dockerDaemon.ok) {
-    const img = sh('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{.Size}}', process.env.HATCHABOT_IMAGE ?? env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest']);
+    const img = docker(['image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{.Size}}', env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest']);
     if (img) runtimeImage = { openclawVersion: img.split('|')[0] || undefined, sizeGb: Number(img.split('|')[1]) / 1e9 };
   }
-  const prefix = process.env.HATCHABOT_PREFIX ?? env.HATCHABOT_PREFIX ?? 'hatchabot';
-  const ps = dockerDaemon.ok ? sh('docker', ['ps', '-a', '--format', '{{.Names}}|{{.Networks}}|{{.State}}']) : undefined;
+  const prefix = env.HATCHABOT_PREFIX ?? 'hatchabot';
+  const ps = dockerDaemon.ok ? docker(['ps', '-a', '--format', '{{.Names}}|{{.Networks}}|{{.State}}']) : undefined;
   const rows = (ps ?? '').split('\n').filter((l) => l.startsWith(`${prefix}-`) || l.startsWith('agentclaw-'));
-  const agentNet = (process.env.HATCHABOT_AGENT_NETWORK ?? env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
+  const agentNet = (env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
   const sharedNetwork = agentNet && agentNet !== 'bridge' && agentNet !== 'default'
     // Running ones only: a stopped container is either rebuilt when started, or
     // an archived agent's, which is made anew when restored.
     ? rows.filter((l) => l.split('|')[1] === 'bridge' && l.endsWith('|running')).length
     : 0;
-  const dbPath = process.env.HATCHABOT_DB ?? env.HATCHABOT_DB ?? defaultDbPath();
+  const dbPath = env.HATCHABOT_DB ?? defaultDbPath();
   const service: DoctorFacts['service'] = process.platform === 'darwin'
     ? { manager: existsSync(join(homedir(), 'Library/LaunchAgents/com.hatchabot.control-plane.plist')) || existsSync(join(homedir(), 'Library/LaunchAgents/com.agentclaw.control-plane.plist')) ? 'launchd' : 'none', active: !!sh('launchctl', ['list', 'com.hatchabot.control-plane']) || !!sh('launchctl', ['list', 'com.agentclaw.control-plane']) }
     : sh('systemctl', ['--user', 'cat', 'hatchabot.service']) ? { manager: 'systemd', active: sh('systemctl', ['--user', 'is-active', 'hatchabot']) === 'active', enabled: sh('systemctl', ['--user', 'is-enabled', 'hatchabot']) === 'enabled', dockerDenied: serviceDockerDenied() } : { manager: 'none' };
-  const controlPlane = await probeControlPlane(url, env.HATCHABOT_TLS_CERT);
+  const controlPlane = await probeControlPlane(url, env.HATCHABOT_TLS_CERT, env.HATCHABOT_BIND);
   const df = sh('df', ['-Pk', '.']); // -P: one line per filesystem on macOS too
   const diskFreeGb = df ? Number(df.split('\n').pop()!.split(/\s+/)[3]) / 1e6 : undefined;
-  const bdir = process.env.HATCHABOT_BACKUP_DIR ?? env.HATCHABOT_BACKUP_DIR ?? defaultBackupsDir();
-  const backups = backupFacts(bdir, Date.now());
+  const bdir = env.HATCHABOT_BACKUP_DIR ?? defaultBackupsDir();
+  const backups = backupFacts(bdir, Date.now(), serviceBackupMark(env));
   // The same lookup the app's HTTPS step uses: it knows the Mac app bundle,
   // Homebrew's path and `serve`. A plain `tailscale` on PATH missed the Mac
   // app entirely and told a working install it had no Tailscale (2026-09-22).
-  const port = Number(process.env.PORT ?? env.PORT ?? 8080) || 8080;
+  const port = servicePort(env);
   const ti = await tailnetInfo(port).catch(() => ({ installed: false }) as Awaited<ReturnType<typeof tailnetInfo>>);
   const tailscale: DoctorFacts['tailscale'] = { installed: ti.installed, appOnly: ti.appOnly, up: ti.up, dns: ti.dns, serving: ti.serving, reachable: ti.reachable, url: ti.url };
   return {

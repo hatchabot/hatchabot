@@ -30,7 +30,7 @@ function world() {
   writeFileSync(join(home, '.config', 'hatchabot', 'env'), 'HATCHABOT_URL=http://127.0.0.1:8080\nHATCHABOT_TOKEN=fake-cli-token\n');
   writeFileSync(join(home, '.config', 'hatchabot', 'channel'), 'stable\n');
   const repo = join(root, 'install'); mkdirSync(join(repo, 'scripts'), { recursive: true }); mkdirSync(join(repo, 'data'));
-  writeFileSync(join(repo, 'scripts', 'uninstall.sh'), readFileSync('scripts/uninstall.sh'), { mode: 0o755 });
+  for (const f of ['uninstall.sh', 'backup-owner.sh']) writeFileSync(join(repo, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
   writeFileSync(join(repo, '.env'), 'HATCHABOT_SECRET_KEY=x\n');
   writeFileSync(join(repo, 'data', 'hatchabot.sqlite'), 'not really a database');
   const bin = join(root, 'bin'); mkdirSync(bin);

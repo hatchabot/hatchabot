@@ -1,5 +1,6 @@
 import type { FastifyRequest } from 'fastify';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { safeEqual } from '../util/safeEqual.js';
 import { isPublic } from './trust.js';
 
 /**
@@ -53,10 +54,7 @@ export function internalPrincipal(req: FastifyRequest): Principal | undefined {
   // Funnel traffic arrives from 127.0.0.1 too (tailscaled proxies it): the
   // loopback test below would not tell it from an in-process call.
   if (isPublic(req)) return undefined;
-  // Bytes, not characters: 64 accented letters are 64 characters but more
-  // bytes, and timingSafeEqual throws on a length mismatch (a 500, not a no).
-  const a = Buffer.from(given), b = Buffer.from(INTERNAL_SECRET);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return undefined;
+  if (!safeEqual(given, INTERNAL_SECRET)) return undefined;
   if (req.ip !== '127.0.0.1' && req.ip !== '::1') return undefined;
   return { ownerId: owner, via: 'identity', subject: owner };
 }

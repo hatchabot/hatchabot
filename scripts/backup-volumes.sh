@@ -72,6 +72,18 @@ if [ -z "$KEEP_DAYS" ]; then
   KEEP_DAYS=14
 fi
 
+# Whose a set is (below): key_owner and set_owner, from scripts/backup-owner.sh
+# (the one copy). Read before this run makes the day's folder, and refused
+# when it cannot be read: sourced unguarded under set -e further down, after
+# the mkdir, a missing helper left an empty dated folder with no record, which
+# the app lists as a complete set from today (fifteenth review). Not stand-ins
+# that say no owner, as restore-drill.sh has (it only reads): this run writes
+# into a set that may be another install's, and could not tell.
+if ! { [ -r scripts/backup-owner.sh ] && . scripts/backup-owner.sh && declare -F key_owner set_owner >/dev/null; }; then
+  echo "✗ Could not read $PWD/scripts/backup-owner.sh: without it this run cannot tell whose the sets in $BASE are, so it stops before writing anything. Put the install's files back (a reinstall or an upgrade does)." >&2
+  exit 1
+fi
+
 # Tarballs contain openclaw.json — bot tokens and gateway tokens in the clear.
 # A base this run makes is 0700; one that is already there is left as it is
 # (chmod'ing a NAS share others use locked them out, 2026-10-09). Each dated
@@ -218,24 +230,13 @@ fi
 # itself), and a set of another install's is left as it is: this run stops
 # before it writes anything, and retention below passes over such sets. A run
 # with no key has no fingerprint and goes on as before: the key step below
-# fails it, and the day's set says incomplete. With $1, the fingerprint of the
-# key a set saved there (its secret-key.env), for a set from before the owner
-# file (retention, below).
-key_owner() {
-  node -e '
-  const fs = require("node:fs");
-  const { parseEnv } = require("node:util");
-  const saved = process.argv[1];
-  const file = saved ? (fs.existsSync(saved) ? parseEnv(fs.readFileSync(saved, "utf8")) : {})
-    : fs.existsSync(".env") ? parseEnv(fs.readFileSync(".env", "utf8")) : {};
-  const key = (saved ? undefined : process.env.HATCHABOT_SECRET_KEY ?? process.env.AGENTCLAW_SECRET_KEY)
-    ?? file.HATCHABOT_SECRET_KEY ?? file.AGENTCLAW_SECRET_KEY;
-  if (key) process.stdout.write(require("node:crypto").createHash("sha256").update("hatchabot-backup-owner\0" + key).digest("hex").slice(0, 16));' "${1:-}" 2>/dev/null || true
-}
+# fails it, and the day's set says incomplete. key_owner and set_owner
+# (scripts/backup-owner.sh, read above) make and read the fingerprint: of the
+# key in the environment, which has .env's (above), as the app reads it.
 owner="$(key_owner)"
 OWNER_FILE=".backup-owner"
-set_owner="$(cat "$DEST/$OWNER_FILE" 2>/dev/null || true)"
-if [ -n "$owner" ] && [ -n "$set_owner" ] && [ "$set_owner" != "$owner" ]; then
+dest_owner="$(cat "$DEST/$OWNER_FILE" 2>/dev/null || true)"
+if [ -n "$owner" ] && [ -n "$dest_owner" ] && [ "$dest_owner" != "$owner" ]; then
   echo "✗ $DEST is another Hatchabot install's backup set (two installs share $BASE) — this run stops and leaves it as it is. Give each install a HATCHABOT_BACKUP_DIR of its own." >&2
   exit 1
 fi
@@ -598,8 +599,7 @@ while IFS= read -r set; do
   # installs that wrote the same day's sets in turn left the later one's key
   # in each, and the other install pruned those, the later one's only copies
   # once its own runs stopped at the owner file (HB-0280).
-  so="$(cat "$set/$OWNER_FILE" 2>/dev/null || true)"
-  if [ -z "$so" ] && [ -n "$owner" ] && [ -f "$set/secret-key.env" ]; then so="$(key_owner "$set/secret-key.env")"; fi
+  so="$(set_owner "$set" "$owner")"
   if [ -n "$so" ] && [ "$so" != "$owner" ]; then continue; fi
   if grep -qxF -- "$set" <<<"$old_sets"; then
     held=""

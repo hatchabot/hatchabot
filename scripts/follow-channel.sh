@@ -44,14 +44,15 @@ if [ "${1:-}" = --install ]; then
   NODE_BIN="$(command -v node)" || { echo "node not found on PATH — run this from a shell where 'node --version' works." >&2; exit 1; }
   DOCKER_BIN="$(command -v docker)" || { echo "docker not found on PATH — run this from a shell where 'docker version' works." >&2; exit 1; }
   UNIT_PATH="$(dirname "$NODE_BIN"):$(dirname "$DOCKER_BIN"):/usr/local/bin:/usr/bin:/bin"
+  . scripts/systemd-quote.sh
   cat > "$UNITS/$NAME.service" <<UNIT
 [Unit]
 Description=Hatchabot: follow the release channel chosen last (installed for $2)
 
 [Service]
 Type=oneshot
-Environment="PATH=$(printf '%s' "$UNIT_PATH" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g')"
-ExecStart=/usr/bin/env bash "$(printf '%s' "$DIR" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g' -e 's/\$/$$/g')/scripts/follow-channel.sh" $2
+Environment="PATH=$(systemd_quoted "$UNIT_PATH")"
+ExecStart=/usr/bin/env bash "$(systemd_arg "$DIR")/scripts/follow-channel.sh" $2
 UNIT
   cat > "$UNITS/$NAME.timer" <<UNIT
 [Unit]
@@ -118,8 +119,20 @@ if valid "$REMEMBERED"; then CHANNEL="$REMEMBERED"; fi
 # What the channel names now — the same resolution as upgrade.sh, needed here
 # only to remember a failure and not retry it every ten minutes.
 # (A bundle install has no clone: release-target.sh asks GitHub instead.)
-TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL" 2>/dev/null)" || exit 0
-[ -n "$TARGET" ] || exit 0
+TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL" 2>/dev/null)" || TARGET=""
+if [ -z "$TARGET" ]; then
+  # Not found (no network, as a rule). An upgrade cut off part-way is still
+  # repaired from what is on this machine: it used to wait for the network,
+  # with the service half changed meanwhile (HB-0547). The release waits for
+  # a tick that can find it, and no try is counted against it.
+  repair_due || exit 0
+  echo "Could not find which release $CHANNEL names now, so only the upgrade that was cut off is repaired."
+  # As below: 4 (another upgrade holds the lock, and repairs it) is routine,
+  # 0; anything else that failed, a full disk (5) too, 1, a failed unit to
+  # see. Nothing is counted here (ninth review).
+  rc=0; HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_REPAIR_ONLY=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL" || rc=$?
+  case "$rc" in 0|4) exit 0 ;; *) exit 1 ;; esac
+fi
 fi
 if [ -f BUNDLE.json ] && [ ! -d .git ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.json)"
 else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
@@ -130,7 +143,7 @@ else CUR="$(git describe --tags --exact-match 2>/dev/null || true)"; fi
 [ "$CUR" = "$TARGET" ] && ! repair_due && exit 0
 mkdir -p "$STATE"
 FAILED="$STATE/follow-channel-failed-$KEY"
-TRIES="$STATE/follow-channel-tries-$KEY"; MAX_TRIES=8
+TRIES="$STATE/follow-channel-tries-$KEY"
 for r in failed tries; do
   [ ! -f "$STATE/follow-channel-$r" ] || [ -e "$STATE/follow-channel-$r-$KEY" ] || mv -f "$STATE/follow-channel-$r" "$STATE/follow-channel-$r-$KEY" || true
 done
@@ -138,21 +151,37 @@ done
 # upgrade to repair: upgrade.sh puts the earlier release back first, then
 # tries this one once more.
 if ! repair_due && [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
-# A release whose install keeps failing (exit 3: npm ci against a lockfile
-# that does not match, a driver that will not compile) is not tried every ten
-# minutes for ever: after each failure in a row the wait doubles (10 min,
-# 20, 40 … a day at most), and after MAX_TRIES it is set aside like a
-# release that did not start (review, 2026-10-09). "<release> <failures> <epoch>".
-T_TARGET=""; T_COUNT=0; T_LAST=0
-{ read -r T_TARGET T_COUNT T_LAST < "$TRIES"; } 2>/dev/null || true
-case "${T_COUNT:-}${T_LAST:-}" in ''|*[!0-9]*) T_COUNT=0; T_LAST=0 ;; esac
-if [ "$T_TARGET" = "$TARGET" ] && [ "$T_COUNT" -gt 0 ]; then
-  WAIT=$(( 10 * (1 << (T_COUNT - 1)) - 5 ))   # minutes, less 5 for the timer's own jitter: 5, 15, 35 …
-  [ "$WAIT" -le 1440 ] || WAIT=1440
-  repair_due || [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
-else
-  T_COUNT=0
+# A release whose install keeps failing waits longer each time, then is set
+# aside; a full disk waits the same way, never counted against it: the try
+# record (scripts/follow-tries.sh, shared with follow-latest.sh).
+# Missing or unreadable (a checkout cut off, a permission), it must not stop
+# the tick before the repair (fifth review): stand-ins that count nothing.
+if ! { [ -r scripts/follow-tries.sh ] && . scripts/follow-tries.sh && declare -F tries_open tries_waiting note_try forget_tries >/dev/null; }; then
+  echo "Could not read $DIR/scripts/follow-tries.sh: this tick keeps no count of its tries, and tries the upgrade."
+  MAX_TRIES=8
+  tries_open() { T_COUNT=0; T_LAST=0; T_DISK=0; }
+  tries_waiting() { return 1; }
+  note_try() { :; }
+  forget_tries() { :; }
 fi
+tries_open "$TRIES" "hatchabot-follow-channel-tries-$KEY" "$TARGET"
+repair_due || ! tries_waiting || exit 0
+# set_aside RELEASE SAID AFTER: RELEASE is not tried again (FAILED names it)
+# and its record of tries goes; SAID and AFTER are said. FAILED is written
+# whole or not at all, and never ends the tick: `>` on a full disk left it cut
+# short, and under set -e ended the tick before anything was counted, so the
+# next tick ran the release again at once (thirteenth review). Not written,
+# the try is counted instead, so the next ones still wait.
+set_aside() {
+  if { printf '%s\n' "$1" > "$FAILED.tmp" && mv -f "$FAILED.tmp" "$FAILED"; } 2>/dev/null; then
+    forget_tries
+    echo "$2 $3"
+  else
+    rm -f "$FAILED.tmp" 2>/dev/null || true
+    echo "$2 Could not write $FAILED to set $1 aside (a full disk?): this try is counted instead, so the next ones wait."
+    note_try 0
+  fi
+}
 
 # upgrade.sh runs from its own copy (it checks out a different release of
 # itself), so calling it from here is safe. HATCHABOT_UPGRADE_BY_TIMER: it
@@ -161,24 +190,33 @@ fi
 # a channel that moved in between had the release upgrade.sh tried fail, this
 # one set aside, and the next tick try the failed one again (audit #042).
 if HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_TARGET="$TARGET" bash "$DIR/scripts/upgrade.sh" "$CHANNEL"; then
-  rm -f "$FAILED" "$TRIES"
+  rm -f "$FAILED"; forget_tries
 else
   rc=$?
   # Exit 1 = the release did not start and was rolled back: set aside at once.
   # 3 = it did not complete (the install step, the network): tried again, less
-  # and less often. 2 = refused (local changes), 4 = an upgrade was running.
+  # and less often. 5 = this machine's disk (full, or a folder it cannot
+  # write): tried again the same way, never set aside for it. 2 = refused
+  # (local changes), 4 = an upgrade was running, or the channel changed while
+  # this waited: routine, the tick ends 0 and counts nothing (ninth and
+  # thirteenth reviews). A full disk (5) ends 1, so the unit shows
+  # it failed, but counts only towards the wait, never against the release.
   # But a pin upgrade.sh took back is not tried again: the channel is, next tick.
-  if [ "$rc" != 1 ] && [ -n "$PINNED" ] && [ "$(remembered)" != "$PINNED" ]; then
+  if [ "$rc" = 4 ]; then
+    echo "Another upgrade of $DIR is running, or this machine's channel changed while this tick waited (above): it leaves $TARGET to the next tick."
+    exit 0
+  elif [ "$rc" != 1 ] && [ -n "$PINNED" ] && [ "$(remembered)" != "$PINNED" ]; then
     echo "Upgrading to $PINNED did not complete (see above), so this machine is no longer pinned to it."
   elif [ "$rc" = 1 ]; then
-    echo "$TARGET" > "$FAILED"; rm -f "$TRIES"
-    echo "Upgrading to $TARGET failed and was rolled back. It will not be retried; the channel's next release will be."
-  elif [ "$rc" = 3 ] && [ $((T_COUNT + 1)) -ge "$MAX_TRIES" ]; then
-    echo "$TARGET" > "$FAILED"; rm -f "$TRIES"
-    echo "Upgrading to $TARGET did not complete $MAX_TRIES times in a row. It will not be retried; the channel's next release will be (or run: hatchabot upgrade $CHANNEL)."
+    set_aside "$TARGET" "Upgrading to $TARGET failed and was rolled back." "It will not be retried; the channel's next release will be."
+  elif [ "$rc" = 3 ] && [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then
+    set_aside "$TARGET" "Upgrading to $TARGET did not complete $MAX_TRIES times in a row." "It will not be retried; the channel's next release will be (or run: hatchabot upgrade $CHANNEL)."
   elif [ "$rc" = 3 ]; then
-    echo "$TARGET $((T_COUNT + 1)) $(date +%s)" > "$TRIES"
-    echo "Upgrading to $TARGET did not complete (see above); it will be tried again later ($((T_COUNT + 1)) of $MAX_TRIES)."
+    note_try 0
+    echo "Upgrading to $TARGET did not complete (see above); it will be tried again later ($((T_COUNT + 1 - T_DISK)) of $MAX_TRIES)."
+  elif [ "$rc" = 5 ]; then
+    note_try 1
+    echo "Upgrading to $TARGET could not start on this machine's disk (see above); it will be tried again later. This does not count against $TARGET."
   else
     echo "Upgrading to $TARGET did not complete (see above); it will be tried again."
   fi

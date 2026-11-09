@@ -16,6 +16,12 @@ interface MockRuntime {
   purged: boolean;
 }
 
+/** What a batch of Google imports (materializeConnections) writes when each took: a line each. */
+export function importsTook(script: string): string {
+  const lines = [...script.matchAll(/echo "IMPORTED (\d+) \$rc"/g)].map((m) => `IMPORTED ${m[1]} 0`);
+  return lines.length ? `${lines.join('\n')}\n` : '';
+}
+
 /**
  * In-memory provider used to exercise the full tap-+ → first-reply loop with
  * zero cloud cost. It is also where we test failure handling: set
@@ -181,6 +187,12 @@ export class MockProvider implements RuntimeProvider {
       return { code: 0, stdout: JSON.stringify(u ?? { models: {}, sessions: 0, first: 0, last: 0 }), stderr: '' };
     }
     this.execLog.push(['sh', script]);
+    // A batch of Google imports (materializeConnections) says how each went,
+    // a line each: unless a test says otherwise, each took.
+    if (!this.execResponses.has('sh') && script.includes('gog auth import')) {
+      const stdout = importsTook(script);
+      if (stdout) return { code: 0, stdout, stderr: '' };
+    }
     return this.execResponses.get('sh') ?? { code: 0, stdout: '', stderr: '' };
   }
 
@@ -263,6 +275,12 @@ export class MockProvider implements RuntimeProvider {
   infoOverride = new Map<string, Partial<RuntimeInfo>>();
   async info(runtimeRef?: string): Promise<RuntimeInfo> {
     return { imageId: 'mock-image', openclawVersion: 'mock', ...(runtimeRef ? this.infoOverride.get(runtimeRef) : {}) };
+  }
+  /** One listing for many: counted, so a test can see a menu load did not inspect each. */
+  versionListings = 0;
+  async openclawVersions(runtimeRefs: string[]): Promise<Map<string, string>> {
+    this.versionListings++;
+    return new Map(runtimeRefs.map((ref) => [ref, this.infoOverride.get(ref)?.openclawVersion ?? 'mock'] as const));
   }
 
   /** What the mock image claims to carry; tests narrow it to check the "image lacks it" path. */

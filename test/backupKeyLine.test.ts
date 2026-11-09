@@ -26,7 +26,7 @@ function sandbox() {
   const root = mkdtempSync(join(tmpdir(), 'hb-keyline-')); dirs.push(root);
   const install = join(root, 'install'); const bin = join(root, 'bin'); const home = join(root, 'home'); const backups = join(root, 'backups');
   for (const d of [join(install, 'scripts'), join(install, 'data'), bin, home]) mkdirSync(d, { recursive: true });
-  for (const s of ['backup-volumes.sh', 'restore-drill.sh']) writeFileSync(join(install, 'scripts', s), readFileSync(join(repo, 'scripts', s)), { mode: 0o755 });
+  for (const s of ['backup-volumes.sh', 'restore-drill.sh', 'backup-owner.sh']) writeFileSync(join(install, 'scripts', s), readFileSync(join(repo, 'scripts', s)), { mode: 0o755 });
   // The drill's key check imports the secret store through tsx.
   symlinkSync(join(repo, 'node_modules'), join(install, 'node_modules'));
   symlinkSync(join(repo, 'src'), join(install, 'src'));
@@ -102,5 +102,15 @@ describe('scripts/restore-drill.sh reads the key line as a .env is read', () => 
     expect(r.stdout + r.stderr).toMatch(/The backed-up key could NOT decrypt the backed-up secrets/);
     const record = JSON.parse(readFileSync(join(s.backups, 'drills', readdirSync(join(s.backups, 'drills')).filter((f) => f.endsWith('.json'))[0]!), 'utf8'));
     expect(record.key).toBe('failed');
+  });
+});
+
+describe('scripts/backup-volumes.sh marks its set by the key the app reads (third review of HB-0540)', () => {
+  it('HATCHABOT_SECRET_KEY set but empty is no key, as for the app: no mark from .env\'s', async () => {
+    const s = sandbox();
+    await s.registry('fixture key in the env file');
+    writeFileSync(join(s.install, '.env'), 'HATCHABOT_SECRET_KEY=fixture key in the env file\n');
+    s.backup(''); // fails its key step (no key): the mark is what is read here
+    expect(existsSync(join(s.setDir(), '.backup-owner'))).toBe(false);
   });
 });

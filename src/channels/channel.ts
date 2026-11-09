@@ -82,8 +82,18 @@ export interface ChannelProvisioner {
   release(accountId: string, opts?: ReleaseOptions): Promise<void>;
 
   /** Forget a submitted-but-refused identity for this agent, if the
-   *  implementation holds one pending. */
-  discardPending?(agentId: string): void;
+   *  implementation holds one pending: at once in memory; settles once the
+   *  copy on disk is gone (never rejects). */
+  discardPending?(agentId: string): Promise<void> | void;
+
+  /** Whether a pasted token waits for this agent's setup (memory only; see loadHeld). */
+  waitingFor?(agentId: string): Promise<boolean>;
+
+  /** At boot: read the tokens held on disk for these agents into memory, once. */
+  loadHeld?(agentIds: string[]): void;
+
+  /** The bot's name, when the token waiting for this agent is this very one. */
+  heldBot?(agentId: string, token: string): Promise<string | undefined>;
 
   /**
    * Re-apply the agent's name to a bot we manage, if this provisioner manages

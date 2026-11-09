@@ -29,7 +29,7 @@ function drillWorld() {
   const root = tmp('hb-drillrec-');
   const install = join(root, 'install');
   mkdirSync(join(install, 'scripts'), { recursive: true });
-  writeFileSync(join(install, 'scripts', 'restore-drill.sh'), readFileSync(join(repo, 'scripts', 'restore-drill.sh')), { mode: 0o755 });
+  for (const f of ['restore-drill.sh', 'backup-owner.sh']) writeFileSync(join(install, 'scripts', f), readFileSync(join(repo, 'scripts', f)), { mode: 0o755 });
   symlinkSync(join(repo, 'node_modules'), join(install, 'node_modules'));
   symlinkSync(join(repo, 'src'), join(install, 'src'));
   const home = join(root, 'home'); mkdirSync(home);
@@ -117,7 +117,21 @@ describe('the drill writes a record of every run', () => {
     const none = drillWorld();
     none.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
     expect(none.run({}).status).toBe(0);
-    expect(none.lastRecord().owner).toBe('');
+    // No key here: the drilled set's own mark, from the key it saved (review of HB-0540; was '').
+    expect(none.lastRecord().owner).toBe(createHash('sha256').update('hatchabot-backup-owner\0not-a-real-key-for-tests').digest('hex').slice(0, 16));
+    const unmarked = drillWorld();
+    unmarked.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete', key: false });
+    unmarked.run({}); // fails its key check (no key saved): the record is what is read here
+    expect(unmarked.lastRecord()).toMatchObject({ set: '2026-10-08', owner: '' }); // nothing says whose
+  });
+  it('with scripts/backup-owner.sh missing it says so and still drills, and writes its record, naming no install (thirteenth review)', () => {
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    rmSync(join(w.install, 'scripts', 'backup-owner.sh'));
+    const r = w.run({ HATCHABOT_SECRET_KEY: 'not-a-real-key-for-tests' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stderr).toContain(`Could not read ${w.install}/scripts/backup-owner.sh: this drill cannot tell whose sets are whose`);
+    expect(w.lastRecord()).toMatchObject({ set: '2026-10-08', result: 'passed', owner: '' });
   });
   it('a passing set: each archive read, its layout found, restored in isolation; the record says so', () => {
     const w = drillWorld();
@@ -262,6 +276,132 @@ describe('the drill writes a record of every run', () => {
     expect(r.status).toBe(1);
     expect(w.lastRecord()).toMatchObject({ set: '', result: 'failed', reason: 'no-complete-set', volumes: [] });
     expect(w.dockerLog()).toBe('');
+  });
+
+  it('another install\'s newer set in a shared folder is passed over: the drill proves this install\'s own (HB-0540)', () => {
+    const w = drillWorld();
+    const KEY = 'not-a-real-key-for-tests';
+    const markOf = (k: string) => createHash('sha256').update(`hatchabot-backup-owner\0${k}`).digest('hex').slice(0, 16);
+    w.set('2026-10-07', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' }); // from before the mark: its saved key says whose
+    const marked = w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    writeFileSync(join(marked, '.backup-owner'), `${markOf('another-made-up-key')}\n`);
+    const r = w.run({ HATCHABOT_SECRET_KEY: KEY });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stderr).toContain("2026-10-08 is another Hatchabot install's set — passing over it");
+    expect(w.lastRecord()).toMatchObject({ set: '2026-10-07', result: 'passed', owner: markOf(KEY) });
+    // Only another install's: none of this install's to prove.
+    const only = drillWorld();
+    const theirs = only.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    writeFileSync(join(theirs, '.backup-owner'), `${markOf('another-made-up-key')}\n`);
+    expect(only.run({ HATCHABOT_SECRET_KEY: KEY }).status).toBe(1);
+    expect(only.lastRecord()).toMatchObject({ set: '', reason: 'no-complete-set' });
+    expect(only.dockerLog()).toBe('');
+  });
+
+  it('with no key of its own it passes over no set, as the app does, and its record names the drilled set\'s install (review of HB-0540)', () => {
+    const markOf = (k: string) => createHash('sha256').update(`hatchabot-backup-owner\0${k}`).digest('hex').slice(0, 16);
+    const w = drillWorld();
+    const marked = w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    writeFileSync(join(marked, '.backup-owner'), `${markOf('another-made-up-key')}\n`);
+    const r = w.run(); // no HATCHABOT_SECRET_KEY, and no .env beside the script
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stderr).not.toContain('passing over it');
+    expect(w.lastRecord()).toMatchObject({ set: '2026-10-08', result: 'passed', owner: markOf('another-made-up-key') });
+    // A set from before the mark: the key it saved says whose.
+    const old = drillWorld();
+    old.set('2026-10-07', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    expect(old.run().status).toBe(0);
+    expect(old.lastRecord()).toMatchObject({ set: '2026-10-07', owner: markOf('not-a-real-key-for-tests') });
+  });
+
+  it('another install\'s set drilled by hand is recorded as that install\'s, not this one\'s (second review of HB-0540)', () => {
+    const markOf = (k: string) => createHash('sha256').update(`hatchabot-backup-owner\0${k}`).digest('hex').slice(0, 16);
+    const w = drillWorld();
+    const theirs = w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    writeFileSync(join(theirs, '.backup-owner'), `${markOf('another-made-up-key')}\n`);
+    const r = w.run({ HATCHABOT_SECRET_KEY: 'not-a-real-key-for-tests' }, [theirs]);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stderr).toContain("another Hatchabot install's set");
+    expect(w.lastRecord()).toMatchObject({ set: '2026-10-08', result: 'passed', owner: markOf('another-made-up-key') });
+    // So this install's readiness has no drill of its own; the other's sees it.
+    expect(listDrills(w.backups, markOf('not-a-real-key-for-tests'))).toEqual([]);
+    expect(listDrills(w.backups, markOf('another-made-up-key'))).toHaveLength(1);
+  });
+
+  it('another install\'s set drilled from here leaves that install\'s records alone: this one prunes only its own (ninth review)', () => {
+    const markOf = (k: string) => createHash('sha256').update(`hatchabot-backup-owner\0${k}`).digest('hex').slice(0, 16);
+    const w = drillWorld();
+    const theirs = w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    writeFileSync(join(theirs, '.backup-owner'), `${markOf('another-made-up-key')}\n`);
+    const drills = join(w.backups, 'drills'); mkdirSync(drills, { recursive: true });
+    for (let i = 0; i < 40; i++) writeFileSync(join(drills, `2026-02-01T00-00-${String(i).padStart(2, '0')}Z.json`), JSON.stringify({ version: 1, set: '2026-10-01', result: 'passed', owner: markOf('another-made-up-key') }) + '\n');
+    const r = w.run({ HATCHABOT_SECRET_KEY: 'not-a-real-key-for-tests' }, [theirs]);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.lastRecord()).toMatchObject({ set: '2026-10-08', owner: markOf('another-made-up-key') });
+    // Its 40 and the one written for it here: none pruned by this install.
+    expect(w.records().filter((f) => JSON.parse(readFileSync(join(drills, f), 'utf8')).owner === markOf('another-made-up-key'))).toHaveLength(41);
+  });
+
+  it('a set\'s owner is read once, and only for a set the drill would take (second review of HB-0540)', () => {
+    const w = drillWorld();
+    // Sets from before the owner file: each one's owner is a node run on the key it saved.
+    w.set('2026-10-06', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    w.set('2026-10-07', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'running' });
+    const nodeLog = join(w.root, 'node.log');
+    writeFileSync(join(w.root, 'bin', 'node'), `#!/bin/sh\nfor a in "$@"; do case "$a" in */secret-key.env) echo "$a" >> "${nodeLog}" ;; esac; done\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+    const r = w.run({ HATCHABOT_SECRET_KEY: 'not-a-real-key-for-tests' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.lastRecord()).toMatchObject({ set: '2026-10-07', result: 'passed' });
+    // The running set is passed over by its record alone; the one taken, read once; the older one, not at all.
+    expect(readFileSync(nodeLog, 'utf8').trim().split('\n').map((l) => l.split('/').slice(-2, -1)[0])).toEqual(['2026-10-07']);
+  });
+
+  it('the newest 30 drill records of each install are kept: another\'s drills do not push this one\'s out (second review of HB-0540)', () => {
+    const markOf = (k: string) => createHash('sha256').update(`hatchabot-backup-owner\0${k}`).digest('hex').slice(0, 16);
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    const drills = join(w.backups, 'drills'); mkdirSync(drills, { recursive: true });
+    const rec = (stamp: string, owner: string) => writeFileSync(join(drills, `${stamp}.json`), JSON.stringify({ version: 1, set: '2026-10-01', result: 'passed', owner }) + '\n');
+    for (let i = 0; i < 31; i++) rec(`2026-01-01T00-00-${String(i).padStart(2, '0')}Z`, markOf('not-a-real-key-for-tests'));
+    for (let i = 0; i < 40; i++) rec(`2026-02-01T00-00-${String(i).padStart(2, '0')}Z`, markOf('another-made-up-key'));
+    // What reads the records: logged, then the real tool (third review: one pass, not a fork per record).
+    const reads = join(w.root, 'record-reads.log');
+    for (const tool of ['sed', 'awk']) {
+      const real = spawnSync('sh', ['-c', `PATH=/usr/bin:/bin command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
+      writeFileSync(join(w.root, 'bin', tool), `#!/bin/sh\ncase "$*" in *drills/20*) echo ${tool} >> ${JSON.stringify(reads)} ;; esac\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 });
+    }
+    const r = w.run({ HATCHABOT_SECRET_KEY: 'not-a-real-key-for-tests' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(reads, 'utf8').trim().split('\n')).toEqual(['awk']);
+    const by = (k: string) => w.records().filter((f) => JSON.parse(readFileSync(join(drills, f), 'utf8')).owner === markOf(k));
+    const mine = by('not-a-real-key-for-tests');
+    expect(mine).toHaveLength(30); // this run's and the newest 29 before it: the two oldest went
+    expect(mine).not.toContain('2026-01-01T00-00-00Z.json');
+    expect(mine).not.toContain('2026-01-01T00-00-01Z.json');
+    expect(by('another-made-up-key')).toHaveLength(40); // left to that install's own drills
+    // And the app finds this install's, under the other's newer ones.
+    const seen = listDrills(w.backups, markOf('not-a-real-key-for-tests'));
+    expect(seen).toHaveLength(30);
+    expect(seen[0]).toMatchObject({ set: '2026-10-08', passed: true });
+  });
+
+  it.skipIf(process.getuid?.() === 0)('a record it cannot read (another user\'s) never stops the trap: the drill still cleans up and lets go of its lock (fourth review of HB-0540)', () => {
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    const drills = join(w.backups, 'drills'); mkdirSync(drills, { recursive: true });
+    const theirs = join(drills, '2026-01-01T00-00-00Z.json');
+    writeFileSync(theirs, JSON.stringify({ version: 1, set: '2026-10-01', result: 'passed', owner: '0'.repeat(16) }) + '\n', { mode: 0o000 });
+    const tmp = join(w.root, 'drill-tmp'); mkdirSync(tmp);
+    try {
+      const r = w.run({ TMPDIR: tmp });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/Restore drill passed/);
+      expect(existsSync(join(drills, '.lock')), 'the lock').toBe(false);
+      expect(readdirSync(tmp).filter((n) => !n.startsWith('tsx-')), 'its scratch folder').toEqual([]); // tsx's own cache aside
+      expect(w.records().filter((f) => f !== '2026-01-01T00-00-00Z.json')).toHaveLength(1); // this run's
+      expect(existsSync(theirs)).toBe(true); // not this install's to prune
+    } finally { rmSync(theirs, { force: true }); }
   });
 
   it('one drill at a time; a dead drill\'s lock is taken over; the newest 30 records are kept', () => {

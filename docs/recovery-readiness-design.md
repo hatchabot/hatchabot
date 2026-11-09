@@ -37,7 +37,7 @@ drill `scripts/restore-drill.sh` runs. There is no second backup engine.
 
 Every run that found a backups directory writes
 `<backups>/drills/<UTC time>.json` (0600, in a 0700 folder; the newest 30
-kept). The nightly prune never touches it: it removes dated folders only.
+of each install's kept, by the record's `owner`). The nightly prune never touches it: it removes dated folders only.
 
 ```json
 { "version": 1, "set": "2026-10-08", "setState": "complete",

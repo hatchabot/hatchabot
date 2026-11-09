@@ -90,7 +90,8 @@ describe('a spare pool bot\'s token pasted while the agent waits for one (runtim
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ ok: true, result: { username: 'sparebot' } }), { status: 200 }));
     try {
       const r = await w.f.inject({ method: 'POST', url: '/v1/agents/park/channel-token', headers: H, payload: { token: '123456:made-up-token-for-the-test' } });
-      expect(r.statusCode).toBe(409);
+      // A token problem: 400, so the CLI's adopt asks for another (twelfth review of fix/r3-cli).
+      expect(r.statusCode).toBe(400);
       expect(r.json().error).toMatch(/spare bot in the pool/);
     } finally { fetchSpy.mockRestore(); }
   });

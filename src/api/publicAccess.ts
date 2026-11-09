@@ -1,11 +1,12 @@
 import { routedPath } from './routedPath.js';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
 import { addressBucket, approximateSource, isPublic, markPublicSocket, publicClientAddress } from './trust.js';
 import { guestMay, publicRuleFor, type PublicRule } from './publicRoutes.js';
 import { cookieFromHeader, readSessionCookie, sessionValue } from './sessionCookie.js';
+import { safeEqual } from '../util/safeEqual.js';
 import type { ConsoleSocketsApi } from './consoleSockets.js';
 import { adminAccounts, evaluateSafeguards, failingSafeguards, hostOf, publicConfig, usableFactors, type PublicConfig, type SafeguardCheck } from './safeguards.js';
 
@@ -370,7 +371,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     const i = raw.lastIndexOf('.');
     if (i < 0) return undefined;
     const body = raw.slice(0, i), sig = raw.slice(i + 1), want = sign(body);
-    if (sig.length !== want.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return undefined;
+    if (!safeEqual(sig, want)) return undefined;
     // (A pass from before generations has no `g`: generation 0, which is every
     // person's until their factors are first reset or one is removed.)
     const [v, sess, minted, seen, sfAt, used, en, g = '0'] = body.split('.');
@@ -399,7 +400,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     const pass = decodePass(cookieFromHeader(cookieHeaderOf(req), PASS_COOKIE));
     if (!pass || !session) return undefined;
     const want = sha(session);
-    if (pass.sess.length !== want.length || !timingSafeEqual(Buffer.from(pass.sess), Buffer.from(want))) return undefined;
+    if (!safeEqual(pass.sess, want)) return undefined;
     if (revoked.has(passName(pass))) return undefined;
     return pass;
   };

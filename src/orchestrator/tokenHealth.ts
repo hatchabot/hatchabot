@@ -1,7 +1,7 @@
 import type { Agent, AIProfile } from '../domain/types.js';
 import type { Store, TokenActionRow, TokenIncidentRow } from '../store/store.js';
 import type { CacheTally, Mix4, TokenHealthRaw } from './usage.js';
-import { priceMix } from './modelOptions.js';
+import { openclawAtLeast, priceMix } from './modelOptions.js';
 import { effectiveModel } from './provision.js';
 import { channelHandlerTimeoutMs, OPENCLAW_HANDLER_TIMEOUT_MS } from './channelTimeout.js';
 import { compactingNow } from './compactionState.js';
@@ -413,6 +413,28 @@ function priced(byModel: Record<string, Mix4> | undefined): { usd: number; parti
 }
 const hit = (c: CacheTally | undefined) => (c && c[2] > 0 ? r2(c[1] / c[2]) : undefined);
 
+/**
+ * OpenClaw from this version on leaves TOOLS.md out of the prompt (its doctor
+ * merges it into AGENTS.md, HB-0397). Read in the packages on hand: 2026.7.1
+ * still loads it (`loadWorkspaceBootstrapFiles`); 2026.9.6, the documented
+ * rollback, and 2026.9.8 do not (`WORKSPACE_BOOTSTRAP_FILENAMES`). No 2026.8
+ * or earlier 2026.9 package was there to read, so the change may be older:
+ * 2026.9.6 is the earliest seen without it.
+ */
+export const TOOLS_MD_LEFT_OUT_FROM = '2026.9.6';
+
+/**
+ * The instruction files OpenClaw puts in every turn, of those the reader saw:
+ * without TOOLS.md on an OpenClaw that does not load it (HB-0516). A version
+ * the reader did not find keeps it: counted, as before.
+ */
+export function promptFiles(files: Record<string, number>, openclawVersion?: string): Record<string, number> {
+  const v = typeof openclawVersion === 'string' && /^\d+\.\d+\.\d+/.test(openclawVersion) ? openclawVersion : undefined;
+  if (!v || !openclawAtLeast(v, TOOLS_MD_LEFT_OUT_FROM) || !('TOOLS.md' in files)) return files;
+  const { 'TOOLS.md': _left, ...rest } = files;
+  return rest;
+}
+
 /** The files' injected size, as OpenClaw caps it (system-prompt.md: 20,000 characters a file, 60,000 in all). */
 export function injectedSize(files: Record<string, number>): { chars: number; truncated: string[] } {
   const T = THRESHOLDS;
@@ -519,7 +541,7 @@ export function tokenHealthRow(a: Agent, profile: AIProfile | undefined, stored:
       reruns30d: perTask.reduce((s, j) => s + j.reruns, 0),
       perTask: perTask.slice(0, 6),
     };
-    const files = h.files?.[a.slug] ?? {};
+    const files = promptFiles(h.files?.[a.slug] ?? {}, h.ocv);
     if (Object.keys(files).length) {
       const inj = injectedSize(files);
       row.instructions = { files, injectedChars: inj.chars, tokensPerTurn: Math.round(inj.chars / 4), truncated: inj.truncated };

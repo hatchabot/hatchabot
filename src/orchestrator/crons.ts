@@ -438,7 +438,8 @@ export const CRON_QUICK_CHECK_MS = 5 * 60_000;
  * The shell that prints an agent's tasks straight from OpenClaw's own store
  * as `{"jobs":[…]}`, in the shape `cron list --json` gives: 2026.9 keeps them
  * in the state database (`~/.openclaw/state/openclaw.sqlite`, table
- * `cron_jobs`, one `job_json` per task, read-only here). One Node start, about
+ * `cron_jobs`, one `job_json` per task and its run state in `state_json`,
+ * read-only here). One Node start, about
  * 65 ms with the exec, where a `cron list` starts the whole CLI (4–8 s on
  * 2026.9). Prints nothing when there is no such store (2026.7 keeps a file)
  * or the read failed.
@@ -449,9 +450,13 @@ export function cronStoreReadShell(slug: string): string {
     'const {DatabaseSync}=require("node:sqlite");',
     `const db=new DatabaseSync(${JSON.stringify(db)},{readOnly:true});`,
     'const jobs=[];',
-    'for(const r of db.prepare("select job_id,declaration_key,job_json,updated_at from cron_jobs where agent_id is null or agent_id = ?").all(process.argv[1])){',
+    // The run state (last run, its status) is in its own column on 2026.9
+    // (state_json; job_json has none): read when the table has it.
+    'const st=db.prepare("pragma table_info(cron_jobs)").all().some((c)=>c.name==="state_json");',
+    'for(const r of db.prepare("select job_id,declaration_key,job_json,updated_at"+(st?",state_json":"")+" from cron_jobs where agent_id is null or agent_id = ?").all(process.argv[1])){',
     'let j={};try{j=JSON.parse(r.job_json)}catch(e){}',
-    'jobs.push({...j,id:r.job_id,declarationKey:j.declarationKey||r.declaration_key||undefined,updatedAtMs:r.updated_at})}',
+    'let s;try{s=st&&r.state_json?JSON.parse(r.state_json):undefined}catch(e){}',
+    'jobs.push({...j,...(s&&typeof s==="object"&&!j.state?{state:s}:{}),id:r.job_id,declarationKey:j.declarationKey||r.declaration_key||undefined,updatedAtMs:r.updated_at})}',
     'process.stdout.write(JSON.stringify({jobs}));',
   ].join('');
   // Single quotes inside the node script would end the shell quoting; there are none.
@@ -483,6 +488,20 @@ export function tasksToRetarget(jobs: Cron[], target: CronTarget | undefined, he
 export async function pendingRetarget(
   provider: RuntimeProvider, runtimeRef: string, slug: string, target: CronTarget | undefined, held: readonly string[] = [], attached?: readonly string[],
 ): Promise<{ ids: string[]; sig: string } | undefined> {
+  const read = await readCronStore(provider, runtimeRef, slug);
+  return read && retargetDue(read, target, held, attached);
+}
+
+/** One read of the task store: the tasks, run state included, and each one's last change. */
+export interface CronStoreRead { jobs: Cron[]; stamp: Map<string, number> }
+
+/**
+ * The agent's tasks read once from OpenClaw's store (cronStoreReadShell), for
+ * the quick pass: what needs re-pointing (retargetDue) and which runs to tell
+ * the owner of (taskNotes.ts). Undefined when the store could not be read
+ * (an older OpenClaw keeps a file; a failed read; a bad slug).
+ */
+export async function readCronStore(provider: RuntimeProvider, runtimeRef: string, slug: string): Promise<CronStoreRead | undefined> {
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug)) return undefined;
   const res = await provider.execShell(runtimeRef, cronStoreReadShell(slug)).catch(() => undefined);
   if (!res || res.code !== 0 || !res.stdout.trim()) return undefined;
@@ -493,10 +512,13 @@ export async function pendingRetarget(
     .filter((j): j is Record<string, any> => !!j && typeof j === 'object' && typeof j.id === 'string' && j.id !== '')
     // The gateway reads a stored delivery with no mode as "announce" (row-codec, 2026.9).
     .map((j) => (j.delivery && typeof j.delivery === 'object' && j.delivery.mode === undefined ? { ...j, delivery: { ...j.delivery, mode: 'announce' } } : j));
-  const stamp = new Map(jobs.map((j) => [String(j.id), Number(j.updatedAtMs) || 0]));
-  const due = tasksToRetarget(jobs.map(normalizeCron), target, held, attached);
-  const ids = due.map((j) => j.id).sort();
-  return { ids, sig: ids.map((id) => `${id}@${stamp.get(id)}`).join(',') };
+  return { jobs: jobs.map(normalizeCron), stamp: new Map(jobs.map((j) => [String(j.id), Number(j.updatedAtMs) || 0])) };
+}
+
+/** From one read: the tasks a retargetImplicitCrons pass would change, with their signature (pendingRetarget). */
+export function retargetDue(read: CronStoreRead, target: CronTarget | undefined, held: readonly string[] = [], attached?: readonly string[]): { ids: string[]; sig: string } {
+  const ids = tasksToRetarget(read.jobs, target, held, attached).map((j) => j.id).sort();
+  return { ids, sig: ids.map((id) => `${id}@${read.stamp.get(id)}`).join(',') };
 }
 
 /**

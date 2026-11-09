@@ -422,6 +422,44 @@ describe('--sync-ci', () => {
     expect(readFileSync(join(units, 'hatchabot-privacy-sync.timer'), 'utf8')).toContain('OnCalendar=daily');
     expect(readFileSync(join(dir, 'systemctl.log'), 'utf8')).toContain('--user enable --now hatchabot-privacy-sync.timer');
   });
+
+  it('the timer\'s unit names a folder with spaces, %, $, quotes and backslashes as systemd reads it (review of HB-0546)', () => {
+    writeFileSync(join(bin, 'systemctl'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const folder = join(dir, 'repo copy', '50% a$b "q" back\\slash');
+    mkdirSync(join(folder, 'scripts'), { recursive: true });
+    for (const f of ['privacy-sync.sh', 'systemd-quote.sh']) writeFileSync(join(folder, 'scripts', f), readFileSync(join(ROOT, 'scripts', f)), { mode: 0o755 });
+    const r = spawnSync('bash', [join(folder, 'scripts', 'privacy-sync.sh'), '--install', '--also', 'example/site'], { encoding: 'utf8', env: scriptEnv(dir, PATH()) });
+    expect(r.status, shown(r)).toBe(0);
+    const text = readFileSync(join(dir, '.config', 'systemd', 'user', 'hatchabot-privacy-sync.service'), 'utf8');
+    // Read back as systemd does: quotes off, C escapes, %% and (an argument) $$.
+    const unquote = (v: string) => v.replace(/\\(.)|%%|\$\$/g, (m, c: string | undefined) => (c ?? m[0]!));
+    const execs = [...text.matchAll(/^ExecStart=\/usr\/bin\/env node "((?:[^"\\]|\\.)*)" --sync-ci(.*)$/gm)];
+    expect(execs.map((m) => [unquote(m[1]!), m[2]])).toEqual([
+      [join(folder, 'scripts', 'privacy-check.mjs'), ''],
+      [join(folder, 'scripts', 'privacy-check.mjs'), ' --repo example/site'],
+    ]);
+  });
+
+  it('every script that writes a unit quotes through the one helper (scripts/systemd-quote.sh)', () => {
+    for (const f of ['install-service.sh', 'follow-channel.sh', 'follow-latest.sh', 'privacy-sync.sh']) {
+      const text = readFileSync(join(ROOT, 'scripts', f), 'utf8');
+      expect(text, f).toMatch(/^\s*\. .*systemd-quote\.sh"?$/m);
+      expect(text, f).not.toContain("'s/%/%%/g'");
+    }
+  });
+
+  it('both timers keep their tries through the one helper (scripts/follow-tries.sh), not a copy each (fourth review of HB-0470)', () => {
+    const helper = readFileSync(join(ROOT, 'scripts', 'follow-tries.sh'), 'utf8');
+    for (const fn of ['tries_open', 'tries_waiting', 'note_try', 'forget_tries']) expect(helper).toMatch(new RegExp(`^${fn}\\(\\) \\{`, 'm'));
+    for (const f of ['follow-channel.sh', 'follow-latest.sh']) {
+      const text = readFileSync(join(ROOT, 'scripts', f), 'utf8');
+      // Sourced only when readable, with stand-ins that count nothing otherwise: a missing helper must not stop the tick before the repair (fifth review).
+      expect(text, f).toMatch(/\[ -r [^\]]*follow-tries\.sh"? \] && \. [^&]*follow-tries\.sh"? &&|\[ -r "\$TRIES_HELPER" \] && \. "\$TRIES_HELPER" &&/);
+      expect(text, f).toMatch(/^tries_open /m);
+      expect(text, f).toMatch(/^\s*note_try\(\) \{ :; \}$/m);
+      for (const own of [/^\s*note_try\(\) \{\s*$/m, /^\s*forget_tries\(\) \{\s*$/m, /^\s*HELD=/m, /^\s*T_FILE=/m, /1 << /, /TRIES\.tmp/]) expect(text, `${f}: ${own}`).not.toMatch(own);
+    }
+  });
 });
 
 describe('the workflows', () => {

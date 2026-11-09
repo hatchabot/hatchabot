@@ -59,8 +59,8 @@ export function pushText(headline: string, detail: string | undefined, tail: str
 
 export interface OpsPush {
   /** Fire-and-forget; resolves false when there was nowhere to send. */
-  /** `note`: something to know, with nothing to confirm. */
-  waiting(ownerId: string, headline: string, detail?: string, opts?: { note?: boolean }): Promise<boolean>;
+  /** `note`: something to know, with nothing to confirm. `tail`: the last line in place of the app's address (a link of its own). */
+  waiting(ownerId: string, headline: string, detail?: string, opts?: { note?: boolean; tail?: string }): Promise<boolean>;
 }
 
 /**
@@ -113,7 +113,8 @@ export function createOpsPush(deps: OpsPushDeps): OpsPush {
       const where = deps.appUrl?.();
       const text = pushText(headline, detail, [
         slot === 'last' ? 'That is the last of these for this hour — anything more waits in the app.' : '',
-        opts?.note ? (where ? `Hatchabot: ${where}` : '') : where ? `Confirm it in Hatchabot: ${where}` : 'Confirm it in the Hatchabot app.',
+        opts?.tail !== undefined ? opts.tail
+          : opts?.note ? (where ? `Hatchabot: ${where}` : '') : where ? `Confirm it in Hatchabot: ${where}` : 'Confirm it in the Hatchabot app.',
       ]);
       if (!token) {
         // No Telegram to carry it: the manager's Discord bot, when the owner is linked there.

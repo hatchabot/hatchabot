@@ -25,7 +25,7 @@ function bundle(folder = 'hatchabot', homeName = 'home') {
   writeFileSync(join(app, 'BUNDLE.json'), '{"tag":"v1.0.0","platform":"linux-x64"}\n');
   shim(join(app, '.node', 'bin'), 'node', 'printf "node ran: %s\\n" "$*"');
   writeFileSync(join(app, 'bin', 'hatchabot.mjs'), '// a made-up CLI\n');
-  for (const f of ['link-cli.sh', 'uninstall.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+  for (const f of ['link-cli.sh', 'uninstall.sh', 'backup-owner.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
   for (const t of ['systemctl', 'docker', 'npm', 'launchctl']) shim(bin, t, 'exit 0');
   const env = scriptEnv(home, `${launchers}:${bin}:/usr/bin:/bin`);
   const run = (script: string, ...args: string[]) => spawnSync('bash', [join(app, 'scripts', script), ...args], { encoding: 'utf8', input: '', env });

@@ -122,8 +122,9 @@ export class HttpApiClient implements ApiClient {
       | { models?: string[] };
     return Array.isArray(r) ? r : (r.models ?? []);
   }
-  async startAgent(id: string): Promise<void> {
-    await this.#req('POST', `/v1/agents/${id}/start`, {});
+  /** Its answer: a start that rebuilds answers 202 with the rebuild's operation (HB-0562). */
+  async startAgent(id: string): Promise<unknown> {
+    return this.#req('POST', `/v1/agents/${id}/start`, {});
   }
   async stopAgent(id: string): Promise<void> {
     await this.#req('POST', `/v1/agents/${id}/stop`, {});
@@ -135,20 +136,27 @@ export class HttpApiClient implements ApiClient {
   async setModel(id: string, model: string): Promise<string | void> {
     // The live route: OpenClaw reads the model per turn, so it applies now (PATCH only recorded it).
     const r = (await this.#req('POST', `/v1/agents/${id}/model`, { model })) as
-      | { model?: string; live?: boolean; staged?: boolean; rebuild?: boolean; failed?: boolean }
+      | { model?: string; live?: boolean; staged?: boolean; rebuild?: boolean; failed?: boolean; classDetached?: boolean | 'pending'; limitsKept?: { why?: string } }
       | null;
     // How it was applied, as the app says it: resolving with nothing turned
     // a refused or waiting change into a plain ✅ (audit #077).
     if (!r || typeof r !== 'object') return;
     const m = r.model ?? model;
-    if (r.live) return `It answers on ${m} from its next message.`;
-    if (r.staged) return `It is stopped: ${m} is written to it and applies when it next starts.`;
-    if (r.rebuild) return `An AI-source switch is waiting for its rebuild too, so ${m} applies with it (rebuild_agent applies both now).`;
-    if (r.failed) throw new Error(`its runtime did not take ${m}, so it still answers on its old model. The change is recorded: rebuild_agent applies it, or try set_model again`);
-    return `Recorded, but not on the agent yet (it was busy or not running): ${m} applies at its next rebuild or start.`;
+    // It left its class, and its container kept the class's memory limits:
+    // worded from the reason the server sends beside its sentence (limitsKept).
+    // Or whether it leaves its class waits for a change of that class
+    // being applied (classDetached 'pending'). Said with a refusal too.
+    const kept = (r.classDetached === 'pending' ? ' Its class is applying a change; whether it leaves the class is decided after.' : '')
+      + (r.limitsKept ? ` It left its class, but its container kept its old memory limits (${r.limitsKept.why || 'not applied'}); a rebuild applies them.` : '');
+    if (r.live) return `It answers on ${m} from its next message.${kept}`;
+    if (r.staged) return `It is stopped: ${m} is written to it and applies when it next starts.${kept}`;
+    if (r.rebuild) return `An AI-source switch is waiting for its rebuild too, so ${m} applies with it (rebuild_agent applies both now).${kept}`;
+    if (r.failed) throw new Error(`its runtime did not take ${m}, so it still answers on its old model. The change is recorded: rebuild_agent applies it, or try set_model again.${kept}`);
+    return `Recorded, but not on the agent yet (it was busy or not running): ${m} applies at its next rebuild or start.${kept}`;
   }
-  async modelCheck(id: string, model: string): Promise<{ from: string; evidence: string; warnings: string[]; downgrade: boolean }> {
-    return (await this.#req('GET', `/v1/agents/${id}/model-check?model=${encodeURIComponent(model)}`)) as { from: string; evidence: string; warnings: string[]; downgrade: boolean };
+  /** problem: what Confirm would refuse it with (null: it would take it); offered: the source's menu. */
+  async modelCheck(id: string, model: string): Promise<{ from: string; evidence: string; warnings: string[]; downgrade: boolean; problem?: string | null; offered?: string[] }> {
+    return (await this.#req('GET', `/v1/agents/${id}/model-check?model=${encodeURIComponent(model)}`)) as { from: string; evidence: string; warnings: string[]; downgrade: boolean; problem?: string | null; offered?: string[] };
   }
   async approvePairing(id: string, code: string): Promise<void> {
     await this.#req('POST', `/v1/agents/${id}/pairing/approve`, { code });

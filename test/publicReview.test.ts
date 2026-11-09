@@ -119,7 +119,8 @@ describe('what a signed-in public session cannot read without the second factor 
     const realNow = Date.now;
     try {
       Date.now = () => realNow() + 2 * 60_000;
-      for (const [method, path] of [['GET', '/v1/agents/a1/fs'], ['GET', '/v1/agents/a1/fs/file?path=.openclaw/openclaw.json'], ['PUT', '/v1/agents/a1/fs/file?path=x']] as const) {
+      // The Files tab's check (check=1) too: the page asks for the factor on this answer.
+      for (const [method, path] of [['GET', '/v1/agents/a1/fs'], ['GET', '/v1/agents/a1/fs/file?path=.openclaw/openclaw.json'], ['GET', '/v1/agents/a1/fs/file?path=out/report.pdf&inline=1&check=1'], ['PUT', '/v1/agents/a1/fs/file?path=x']] as const) {
         const r = await h.pub(path, { jar, method, ...(method === 'PUT' ? { body: {} } : {}) });
         expect(r.status, path).toBe(401);
         expect(r.json.secondFactor, path).toBe('step-up');

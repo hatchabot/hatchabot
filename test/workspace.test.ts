@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, buildWorkspaceSeed, dataSourcePath, dataSourcesSection, memoryPolicySection, replaceSection, DATA_SOURCES_HEADING, installConventionsSection, INSTALL_HEADING, toolsMdWithoutInstallSection, withInstallSection, removeSection, peerToolsSection, peerOneLine, PEERS_HEADING } from '../src/openclaw/workspace.js';
+import { GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, buildWorkspaceSeed, dataSourcePath, dataSourcesSection, extractSection, fenceDisagreement, fenceScansForTests, memoryPolicySection, readFences, removeSectionEverywhere, replaceSection, unsureSections, DATA_SOURCES_HEADING, installConventionsSection, INSTALL_HEADING, toolsMdWithoutInstallSection, withInstallSection, removeSection, peerToolsSection, peerOneLine, PEERS_HEADING } from '../src/openclaw/workspace.js';
 import { GOG_SKILL_MD } from '../src/openclaw/skills.js';
 
 // The memory policy is a managed section like the others (provision.ts):
@@ -347,6 +347,115 @@ describe('googleAccountsSection: what an agent is told about its accounts (HB-03
   });
 });
 
+describe('a sync writes a file once (HB-0517)', () => {
+  const sync = (s: string) => replaceSection(replaceSection(s, DATA_SOURCES_HEADING, '## Data sources\n- `/data/notes` — folder'), '## Peers', '## Peers\n- Pantry');
+
+  it('two sections added, then the same sync again: nothing changes', () => {
+    const first = sync('# Garden helper\n\nMy rules.\n');
+    expect(first).toBe('# Garden helper\n\nMy rules.\n\n## Data sources\n- `/data/notes` — folder\n\n## Peers\n- Pantry\n');
+    expect(sync(first)).toBe(first);
+    expect(sync(sync(first))).toBe(first);
+  });
+
+  it('a file the old sync left with sections back to back is not rewritten for it', () => {
+    const old = '# Garden helper\n\n## Data sources\n- `/data/notes` — folder\n## Peers\n- Pantry\n';
+    expect(sync(old)).toBe(old);
+  });
+
+  it('the blank lines that ended a section end it again, whatever the new text ends with', () => {
+    const doc = '# A\n\n## Data sources\n- old\n\n\n## Tail\nkeep\n';
+    const out = replaceSection(doc, DATA_SOURCES_HEADING, '## Data sources\n- new\n\n');
+    expect(out).toBe('# A\n\n## Data sources\n- new\n\n\n## Tail\nkeep\n');
+    expect(replaceSection(out, DATA_SOURCES_HEADING, '## Data sources\n- new\n\n')).toBe(out);
+  });
+});
+
+describe('fences that do not balance never cost the agent text (HB-0520)', () => {
+  const SEC = '## Data sources\n- `/data/new` — folder';
+  // An unclosed ```bash, then a ```` example that quotes the heading: one reading
+  // closes the first fence at the ````, the stricter one does not.
+  const misfenced = ['# My instructions', '```bash', 'an example I never closed', '````', '## Data sources', 'quoted in an example', '````', 'Important text of mine at the end', ''].join('\n');
+  // The other way round: the stricter reading says the heading is real, the other quotes it.
+  const otherWay = ['# Mine', '```', 'a', '````', 'b', '```', '## Data sources', '- old', '', 'Mine to keep', ''].join('\n');
+
+  it('a heading the two readings disagree on: replace, remove and extract leave the file alone', () => {
+    for (const doc of [misfenced, otherWay]) {
+      expect(replaceSection(doc, DATA_SOURCES_HEADING, SEC)).toBe(doc);
+      expect(removeSection(doc, DATA_SOURCES_HEADING)).toBe(doc);
+      expect(extractSection(doc, DATA_SOURCES_HEADING)).toBe('');
+    }
+  });
+
+  it('a section ends at a code fence of the agent\'s, as at a heading', () => {
+    const doc = '# A\n\n## Data sources\n- old\n\n```sh\nmy script\n## Data sources\n```\nafter my code\n';
+    const out = replaceSection(doc, DATA_SOURCES_HEADING, SEC);
+    expect(out).toBe('# A\n\n## Data sources\n- `/data/new` — folder\n\n```sh\nmy script\n## Data sources\n```\nafter my code\n');
+    expect(replaceSection(out, DATA_SOURCES_HEADING, SEC)).toBe(out);
+    expect(extractSection(out, DATA_SOURCES_HEADING)).toBe(SEC);
+    expect(removeSection(out, DATA_SOURCES_HEADING)).toBe('# A\n\n```sh\nmy script\n## Data sources\n```\nafter my code\n');
+  });
+
+  it('a section text with a fence line in it still ends where it was written', () => {
+    const sec = '## Peers\n- one\n```\n- two\n```';
+    const once = replaceSection('# A\n', '## Peers', sec);
+    expect(replaceSection(once, '## Peers', sec)).toBe(once);
+    expect(once.match(/^## Peers$/gm)).toHaveLength(1);
+    expect(once.split('\n').filter((l) => /^\s*```/.test(l))).toEqual([]);
+  });
+
+  it('removing a section leaves the blank lines in the agent\'s code as they are', () => {
+    const doc = '# A\n\n```py\nx = 1\n\n\n\ny = 2\n```\n\n## Peers\n- one\n\n## Tail\n';
+    expect(removeSection(doc, '## Peers')).toBe('# A\n\n```py\nx = 1\n\n\n\ny = 2\n```\n\n## Tail\n');
+  });
+
+  it('the install section: a heading the readings disagree on leaves AGENTS.md alone', () => {
+    const doc = misfenced.replace('## Data sources', INSTALL_HEADING);
+    expect(withInstallSection(doc)).toBe(doc);
+    // Written plainly, it is put in as before, and stays.
+    const plain = withInstallSection('# Mine\n\nNotes.\n');
+    expect(plain).toContain(INSTALL_HEADING);
+    expect(withInstallSection(plain)).toBe(plain);
+  });
+
+  it('fuzz: only the lines right under the heading are replaced, and a second sync changes nothing', () => {
+    const parts = ['```', '````', '~~~', '```bash', '', '## Data sources', '- managed', '## Other', '### Sub', INSTALL_HEADING, 'text'];
+    let seed = 20261108;
+    const rnd = (n: number) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+    const lost: string[] = [];
+    for (let t = 0; t < 3000; t++) {
+      const lines = Array.from({ length: 2 + rnd(14) }, (_, i) => { const p = parts[rnd(parts.length)]!; return p === 'text' ? `mine ${i}` : p; });
+      const doc = lines.join('\n') + (rnd(2) ? '\n' : '');
+      const once = replaceSection(doc, DATA_SOURCES_HEADING, SEC);
+      expect(replaceSection(once, DATA_SOURCES_HEADING, SEC)).toBe(once);
+      expect(withInstallSection(withInstallSection(doc))).toBe(withInstallSection(doc));
+      // A line of the agent's may go only where a section owns it: right under the heading, before any fence or heading.
+      const owned = new Set<number>();
+      lines.forEach((l, i) => { if (l === DATA_SOURCES_HEADING) for (let j = i + 1; j < lines.length && !/^\s*(`{3,}|~{3,})|^#{1,6} /.test(lines[j]!); j++) owned.add(j); });
+      lines.forEach((l, i) => { if (l.startsWith('mine') && !owned.has(i) && !once.includes(l)) lost.push(doc); });
+    }
+    expect(lost).toEqual([]);
+  });
+
+  it('a hostile file is read in time, not in time that grows with its square', () => {
+    const kinds = ['```', '````', '~~~', '', '## Data sources', '###### h', '- note', '```js', `${' '.repeat(200)}x`];
+    const lines: string[] = [];
+    for (let i = 0; i < 200_000; i++) lines.push(kinds[(i * 7 + (i >> 3)) % kinds.length]!);
+    lines.push(' '.repeat(1_000_000) + 'x', '`'.repeat(1_000_000), '`'.repeat(1_000_000) + 'x', ' '.repeat(1_000_000), '#'.repeat(1_000_000));
+    const doc = lines.join('\n');
+    for (const run of [
+      () => replaceSection(doc, DATA_SOURCES_HEADING, SEC),
+      () => removeSection(doc, DATA_SOURCES_HEADING),
+      () => extractSection(doc, DATA_SOURCES_HEADING),
+      () => withInstallSection(doc),
+      () => removeSectionEverywhere(doc, DATA_SOURCES_HEADING), // tens of thousands of copies, one pass
+    ]) {
+      const t = performance.now();
+      run();
+      expect(performance.now() - t).toBeLessThan(3000);
+    }
+  });
+});
+
 describe('removeSection', () => {
   it('drops a managed section and its leading blank lines; no-op when absent', () => {
     const doc = '# K\n\nMine.\n\n## Peers\n\n- **Tax**\n\n## Memory policy\n- keep\n';
@@ -378,5 +487,66 @@ describe('the "## Peers" section writes each name as plain text (HB-0087)', () =
   it('peers.json and the section name a peer the same way', () => {
     expect(peerOneLine('  Pantry\r\n\tHelper   ')).toBe('Pantry Helper');
     expect(peerOneLine('\n')).toBe('(unnamed)');
+  });
+});
+
+describe('which sections a file leaves alone, so a sync can say so (HB-0520 review)', () => {
+  it('names the headings the two readings of its fences disagree on, and no others', () => {
+    const doc = ['# Mine', '```bash', 'an example never closed', '````', '## Peers', '- an old peer', '## Installing tools (managed by Hatchabot)', 'notes', '````', '## Data sources', 'x'].join('\n');
+    expect(unsureSections(doc, ['## Peers', '## Installing tools (managed by Hatchabot)', '## Google accounts', '## Memory policy'])).toEqual(['## Peers', '## Installing tools (managed by Hatchabot)']);
+    expect(replaceSection(doc, '## Peers', '## Peers\n- someone new\n')).toBe(doc);
+    // A file whose fences close as they open: nothing to say.
+    const clean = ['# Mine', '```bash', 'ls', '```', '## Peers', '- a peer', ''].join('\n');
+    expect(unsureSections(clean, ['## Peers', '## Installing tools (managed by Hatchabot)'])).toEqual([]);
+    expect(fenceDisagreement(clean)).toBeUndefined();
+    // Where the readings part: the ```` on line 4 closes line 2's ``` for one only.
+    expect(fenceDisagreement(doc)).toEqual({ line: 4, fence: '```', opened: 2 });
+  });
+
+  it('a ``` indented 4 spaces is an indented code block, not a fence: the sections below it are found (fourth review of HB-0520)', () => {
+    const doc = ['# Mine', '', '## Peers', '- a peer', '', '    ```json', '    {"peer": "example"}', '', '## Memory policy', '- keep', ''].join('\n');
+    expect(unsureSections(doc, ['## Peers', '## Memory policy'])).toEqual([]);
+    expect(fenceDisagreement(doc)).toBeUndefined();
+    const next = replaceSection(doc, '## Memory policy', '## Memory policy\n- new\n');
+    expect(next).toBe(doc.replace('- keep', '- new'));
+    expect(next.match(/## Memory policy/g)).toHaveLength(1);
+    // Up to 3 spaces in, it is a fence, as before.
+    const fenced = doc.replace('    ```json', '   ```json');
+    expect(replaceSection(fenced, '## Memory policy', '## Memory policy\n- new\n').match(/## Memory policy/g)).toHaveLength(2);
+  });
+
+  it('a fence indented 4 spaces in a list item, quoting "## Data sources": the section is unsure, and nothing is written inside the code block (ninth review of HB-0520)', () => {
+    const doc = ['# Mine', '', '10. Example:', '', '    ```markdown', '## Data sources', '- /data/example', '    ```', '', '## After', 'keep', ''].join('\n');
+    expect(unsureSections(doc, [DATA_SOURCES_HEADING])).toEqual([DATA_SOURCES_HEADING]);
+    expect(replaceSection(doc, DATA_SOURCES_HEADING, '## Data sources\n- /data/real\n')).toBe(doc);
+    expect(removeSection(doc, DATA_SOURCES_HEADING)).toBe(doc);
+    expect(extractSection(doc, DATA_SOURCES_HEADING)).toBe('');
+    // By a tab, the same.
+    const tab = doc.replace('    ```markdown', '\t```markdown').replace('\n    ```\n', '\n\t```\n');
+    expect(unsureSections(tab, [DATA_SOURCES_HEADING])).toEqual([DATA_SOURCES_HEADING]);
+    expect(replaceSection(tab, DATA_SOURCES_HEADING, '## Data sources\n- /data/real\n')).toBe(tab);
+    // An export still takes every copy out.
+    expect(removeSectionEverywhere(doc, DATA_SOURCES_HEADING)).not.toContain('/data/example');
+  });
+
+  it('a file\'s fences are read once for all the questions a sync asks of it, passed to each, with nothing kept between calls (third and seventh reviews of HB-0520)', () => {
+    const doc = withInstallSection(['# Mine', '```bash', 'ls', '```', '## Peers', '- a peer', '', '## Memory policy', '- keep', '', '## Data sources', '- none', ''].join('\n'));
+    const before = fenceScansForTests();
+    const read = readFences(doc);
+    // Read once: the three readings of its fences.
+    expect(fenceScansForTests() - before).toBe(3);
+    expect(unsureSections(doc, ['## Peers', '## Memory policy', '## Data sources', '## Google accounts', INSTALL_HEADING], read)).toEqual([]);
+    expect(fenceDisagreement(doc, read)).toBeUndefined();
+    for (const h of ['## Peers', '## Memory policy', '## Data sources']) expect(replaceSection(doc, h, extractSection(doc, h, read), read)).toBe(doc);
+    expect(removeSection(doc, '## Google accounts', read)).toBe(doc);
+    expect(fenceScansForTests() - before).toBe(3);
+    // The install section reads only what it cuts and puts back.
+    expect(withInstallSection(doc, read)).toBe(doc);
+    expect(fenceScansForTests() - before).toBe(5);
+    // Asked without one, each call reads the text itself: nothing of the last text is kept in the module.
+    const at = fenceScansForTests();
+    expect(extractSection(doc, '## Memory policy')).toBe('## Memory policy\n- keep');
+    expect(extractSection(doc, '## Memory policy')).toBe('## Memory policy\n- keep');
+    expect(fenceScansForTests() - at).toBe(6);
   });
 });

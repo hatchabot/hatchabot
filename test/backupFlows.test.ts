@@ -21,7 +21,7 @@ afterAll(() => {
 });
 afterEach(() => {
   // clear dated sets between tests
-  for (const d of ['2026-08-20', '2026-08-21']) rmSync(join(base, d), { recursive: true, force: true });
+  for (const d of ['2026-08-20', '2026-08-21', '2099-01-01']) rmSync(join(base, d), { recursive: true, force: true });
 });
 
 /** Write a backup set for the given agents (by runtimeRef → archive name). */
@@ -76,6 +76,20 @@ describe('Backups list — GET /v1/backups', () => {
     expect(backups[0]).toMatchObject({ date: '2026-08-21', volumes: [] });
     // Still the machine owner's alone.
     expect((await w.f.inject({ method: 'GET', url: '/v1/backups?latest=1', headers: as('someone-else') })).statusCode).toBe(403);
+  });
+});
+
+describe('the home screen\'s backup line (fourteenth review)', () => {
+  it('?latest=1 says who the newest set leaves out, as the full list does, so the line never fetches every set', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w, { id: 'a1' });
+    await seedRunningAgent(w, { id: 'a2', slug: 'garden', name: 'Garden Planner', accountId: 'gardenbot' });
+    writeSet('2099-01-01', w, ['a1']); // a set from after both agents were made, without a2
+    const full = (await w.f.inject({ method: 'GET', url: '/v1/backups', headers: as() })).json();
+    const latest = (await w.f.inject({ method: 'GET', url: '/v1/backups?latest=1', headers: as() })).json();
+    expect(full.missing.map((m: any) => m.agentId)).toEqual(['a2']);
+    expect(latest.missing).toEqual(full.missing);
+    expect(latest.backups.map((b: any) => [b.date, b.volumes.length])).toEqual([['2099-01-01', 0]]);
   });
 });
 
@@ -137,6 +151,32 @@ describe('Backups restore — POST /v1/backups/restore', () => {
     const res = await w.f.inject({ method: 'POST', url: '/v1/backups/restore?wait=1', headers: as(), payload: { agentId: 'a1', date: '2026-08-20' } });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatch(/doesn't contain/i);
+  });
+
+  it('a set made by another install or under an earlier key: listed labelled, not the newest, restored on a yes (review of HB-0540)', async () => {
+    const prevKey = process.env.HATCHABOT_SECRET_KEY;
+    process.env.HATCHABOT_SECRET_KEY = 'made-up-key-after-a-reinstall';
+    try {
+      const w = await makeWorld();
+      await seedRunningAgent(w, { id: 'a1', memory: 'current' });
+      writeSet('2026-08-20', w, ['a1']);
+      writeSet('2026-08-21', w, ['a1']);
+      writeFileSync(join(base, '2026-08-21', '.backup-owner'), 'feedfacefeedface\n'); // a made-up mark of another key
+      const list = (await w.f.inject({ method: 'GET', url: '/v1/backups', headers: as() })).json();
+      expect(list.backups.map((b: any) => [b.date, b.foreign === true])).toEqual([['2026-08-21', true], ['2026-08-20', false]]);
+      const latest = (await w.f.inject({ method: 'GET', url: '/v1/backups?latest=1', headers: as() })).json();
+      expect(latest.backups.map((b: any) => b.date)).toEqual(['2026-08-20']); // this install's own newest
+      const asked = await w.f.inject({ method: 'POST', url: '/v1/backups/restore?wait=1', headers: as(), payload: { agentId: 'a1', date: '2026-08-21' } });
+      expect(asked.statusCode).toBe(400);
+      expect(asked.json()).toMatchObject({ code: 'other_key', error: expect.stringMatching(/under an earlier key/) });
+      const ref = w.store.getAgent('a1')!.runtimeRef!;
+      expect(w.provider.stateStore.get(ref)!.toString()).toBe('current');
+      const yes = await w.f.inject({ method: 'POST', url: '/v1/backups/restore?wait=1', headers: as(), payload: { agentId: 'a1', date: '2026-08-21', otherKey: true } });
+      expect(yes.statusCode, yes.body).toBe(200);
+      expect(w.provider.stateStore.get(ref)!.toString()).toBe('backup-of-a1');
+    } finally {
+      if (prevKey === undefined) delete process.env.HATCHABOT_SECRET_KEY; else process.env.HATCHABOT_SECRET_KEY = prevKey;
+    }
   });
 
   it('is refused to a non-host-owner (403)', async () => {

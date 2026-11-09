@@ -1226,7 +1226,10 @@ describe('the masks and GitHub markdown (HB-0405)', () => {
       { version: 'v1.0.0', install: 'git checkout', platform: 'linux-x64', node: 'v22' }, ctx);
     expect(r.title).toBe('Fails on {host}');
     expect(r.body).toContain('open {path} failed for {email} at {ip} on {host}');
-    const prose = r.body.replace(/^<!-- .*-->$/m, '').replace(/<\/?sub>/g, '');
+    // The report's own first-line comment cut by position, not a tag regexp (CodeQL
+    // js/bad-tag-filter, HB-0620); a `<!--` anywhere else stays and is judged.
+    const head = r.body.startsWith('<!--') ? r.body.indexOf('-->') : -1;
+    const prose = (head < 0 ? r.body : r.body.slice(head + 3)).replace(/<\/?sub>/g, '');
     expect(prose).not.toMatch(/<[a-z-]+>/);
   });
   it('a draft kept with the old masks moves to the new ones as it leaves', () => {

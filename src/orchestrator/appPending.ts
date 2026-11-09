@@ -14,18 +14,35 @@ const REF = '$secretRef';
 /** Where one waiting secret value is kept. */
 export const pendingSecretRef = (agentId: string, key: string): string => `app-pending/${agentId}/${key}`;
 
+/** What a stash stored, and how to take it back. */
+export interface StashedSecrets {
+  /** What the row keeps: the plain values, and a reference for each secret one. */
+  values: Record<string, unknown>;
+  /**
+   * Each ref it wrote back as it was: what it held put back, or deleted when it
+   * held nothing. `keep` false for a ref deletes it whatever it held (no row
+   * names it any more). A delete that fails is swept at the next start.
+   */
+  undo: (keep?: (ref: string) => boolean) => Promise<void>;
+}
+
 /**
  * Secret values of `values` moved to the secret store; what the row keeps.
  * JSON-encoded, so a number or a list comes back as it went in.
  */
 export async function stashPendingSecrets(
   secrets: SecretStore, agentId: string, m: AppManifest, values: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+): Promise<StashedSecrets> {
   const secret = new Set(fieldsToAsk(m).filter((f) => f.secret).map((f) => f.key));
   const out: Record<string, unknown> = {};
   // Each ref written, with what it held before: an install waiting already
   // (being replaced) keeps its row when this fails, and names the same refs.
   const written: Array<{ ref: string; was: string | undefined }> = [];
+  const undo = async (keep: (ref: string) => boolean = () => true): Promise<void> => {
+    for (const { ref, was } of written) {
+      await (was === undefined || !keep(ref) ? secrets.delete(ref) : secrets.put(ref, was)).catch(() => {});
+    }
+  };
   try {
     for (const [k, v] of Object.entries(values)) {
       if (!secret.has(k) || v === undefined || v === '') { out[k] = v; continue; }
@@ -42,12 +59,10 @@ export async function stashPendingSecrets(
     // still names is put back as it was, not deleted (final audit,
     // 2026-10-22). A delete that fails here is swept at the next start
     // (sweepOrphanAgentSecrets).
-    for (const { ref, was } of written) {
-      await (was === undefined ? secrets.delete(ref) : secrets.put(ref, was)).catch(() => {});
-    }
+    await undo();
     throw e;
   }
-  return out;
+  return { values: out, undo };
 }
 
 /** The secret refs a row names: only this agent's own, one per key, whatever else the row says. */
@@ -138,7 +153,7 @@ export async function stashOldPendingSecrets(
     if (!Object.keys(plain).length) continue;
     const m = await manifestFor(row.source, row.ref).catch(() => undefined);
     if (!m) { unknown.push(row.agentId); continue; }
-    const kept = await stashPendingSecrets(secrets, row.agentId, m, plain);
+    const { values: kept } = await stashPendingSecrets(secrets, row.agentId, m, plain);
     if (!pendingSecretRefs(row.agentId, kept).length) continue; // none of them secret
     if (store.replaceAppPendingValues(row.agentId, row.vals, { ...values, ...kept })) { moved.push(row.agentId); continue; }
     // The row went while its secrets were being stored: they would be left behind.

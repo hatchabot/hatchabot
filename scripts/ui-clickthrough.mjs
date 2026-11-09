@@ -65,6 +65,35 @@ const RECORDER = `(() => {
   window.confirm = (text) => { window.__confirms.push(text); return window.__confirmAnswer; };
   window.prompt = () => window.__promptAnswer ?? null;
   window.alert = () => {};
+  // Headless Chrome under virtual time draws no frames (2026-11-08): no requestAnimationFrame callback
+  // runs and no ResizeObserver reports. window.__frame() stands in for one, in a browser's order: the
+  // frame callbacks waiting run, then each ResizeObserver hears of the boxes it watches whose size has
+  // changed (all of them, the first time), with the page's own callback.
+  const nativeFrame = window.requestAnimationFrame.bind(window), NativeRO = window.ResizeObserver, waiting = new Map();
+  let frames = 0;
+  window.requestAnimationFrame = (f) => { const id = ++frames, run = (at) => { if (waiting.delete(id)) f(at); }; waiting.set(id, run); nativeFrame(run); return id; };
+  window.cancelAnimationFrame = (id) => { waiting.delete(id); };
+  const watchers = [];
+  if (NativeRO) window.ResizeObserver = class extends NativeRO {
+    constructor(cb) { super(cb); this.cb = cb; this.sizes = new Map(); watchers.push(this); }
+    observe(el, o) { super.observe(el, o); if (!this.sizes.has(el)) this.sizes.set(el, null); }
+    unobserve(el) { super.unobserve(el); this.sizes.delete(el); }
+    disconnect() { super.disconnect(); this.sizes.clear(); }
+  };
+  window.__frame = () => {
+    for (const run of [...waiting.values()]) run(performance.now());
+    for (const o of watchers) {
+      const entries = [];
+      for (const [el, was] of o.sizes) {
+        const cs = getComputedStyle(el), px = (k) => parseFloat(cs[k]) || 0;
+        const w = Math.max(0, el.clientWidth - px('paddingLeft') - px('paddingRight')), h = Math.max(0, el.clientHeight - px('paddingTop') - px('paddingBottom'));
+        if (w + 'x' + h === was) continue;
+        o.sizes.set(el, w + 'x' + h);
+        entries.push({ target: el, contentRect: new DOMRectReadOnly(0, 0, w, h) });
+      }
+      if (entries.length) o.cb(entries, o);
+    }
+  };
 })();`;
 
 /** The scenarios run inside the page once it has painted. Each is a name and an async body; \`t\` is the toolkit. */
@@ -136,11 +165,16 @@ const SCENARIOS = String.raw`(() => {
         { id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 12 },
         { id: 'h2', name: 'Laptop runner', kind: 'cloud', agentCount: 2, reachable: false },
       ];
-      window.__override['/v1/backups'] = { backups: [{ date: new Date(now - 5 * 864e5).toISOString().slice(0, 10), hasKey: true, complete: true }], keepDays: 14, missing: [] };
+      // A newer set made by another install (or under an earlier key) first: this install's own, 5 days old, is what the line judges.
+      window.__override['/v1/backups'] = { backups: [{ date: new Date(now).toISOString().slice(0, 10), hasKey: true, complete: true, foreign: true },
+        { date: new Date(now - 5 * 864e5).toISOString().slice(0, 10), hasKey: true, complete: true }], keepDays: 14, missing: [] };
       window.__override['/v1/runtime'] = { imageVersion: '2026.9.6', upgradeAvailable: false };
       const owner = myAccount.hostOwner; myAccount.hostOwner = true;
       try {
+        const asked = window.__calls.length;
         await v2LoadActivity(true); await v2LoadMachine(true);
+        const sets = window.__calls.slice(asked).filter((c) => c.path === '/v1/backups').map((c) => c.url);
+        ok('the machine line asks for the newest set only, not every set (fourteenth review): ' + sets.join(' '), sets.length >= 1 && sets.every((u) => u.endsWith('/v1/backups?latest=1')));
         const act = document.getElementById('v2Activity');
         ok('an Activity section at the foot', !act.hidden && act.textContent.includes('Homework Helper') && act.textContent.includes('Soccer Schedule'));
         ok('below the agents', document.getElementById('v2groups').compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING);
@@ -724,9 +758,11 @@ const SCENARIOS = String.raw`(() => {
       window.__answer = { 'POST /v1/agents/a1/snapshots/s1/restore': [
         { status: 409, body: { error: 'Its current files could not be snapshotted first, so the restore would not be undoable — nothing was changed.' } },
         { status: 200, body: { restored: ['SOUL.md', 'AGENTS.md', 'MEMORY.md'] } } ] };
-      editAgentId = 'a1';
-      await loadSnapshots();
-      const btn = await until(() => [...document.querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert'));
+      // On its sheet's Personality tab, where the restore points are: its refusal is said under them (forAgent).
+      openV2Agent('a1', 'personality');
+      await until(() => v2AgentId === 'a1' && editAgentId === 'a1' && $('v2Pane').querySelector('#snapList'));
+      await loadSnapshots(); // the list with the restore point above, whatever was open before
+      const btn = await until(() => [...$('v2Pane').querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert'));
       const asked = window.__confirms.length;
       btn.click();
       await until(() => document.getElementById('editErr').textContent.includes('nothing was changed'));
@@ -734,7 +770,8 @@ const SCENARIOS = String.raw`(() => {
       btn.click();
       await until(() => document.getElementById('toast').textContent.includes('Reverted SOUL.md'));
       eq('two restore calls', calls('POST', /\/snapshots\/s1\/restore$/).length, 2);
-      window.__answer = {};
+      window.__answer = {}; delete window.__override['/v1/agents/a1/snapshots'];
+      try { v2Close(); v2EditFor = null; v2SheetNotes.clear(); } catch {}
     },
     downloadRefused: async () => {
       window.__answer = { 'GET /v1/agents/a1/backup': [{ status: 409, body: { error: 'Another operation is already running on this agent.' } }] };
@@ -985,6 +1022,26 @@ const SCENARIOS = String.raw`(() => {
       ok('the orphan volume is named as left out', list.includes('Left out: agentclaw-old-vol'));
       aiDlg.close(); delete window.__override['/v1/backups'];
     },
+    // A set made by another install or under an earlier key: labelled, no Delete, and a restore says why and asks (review of HB-0540).
+    backupOtherKey: async () => {
+      window.__override['/v1/backups'] = { dir: '/backups', keepDays: 7, run: { status: 'idle' }, backups: [
+        { date: '2026-09-25', sizeBytes: 1024, hasDb: true, hasKey: true, foreign: true, volumes: [{ name: 'Homework Helper', agentId: 'a1', sizeBytes: 1024 }] }] };
+      await openAiDlg('backups');
+      const list = await until(() => { const t = document.getElementById('bkList').textContent; return t.includes('2026-09-25') ? t : null; });
+      ok('it is labelled', list.includes('Made by another install, or under an earlier key'));
+      ok('no Delete set on it', ![...document.querySelectorAll('#bkList button')].some((b) => b.textContent === 'Delete set'));
+      const restore = [...document.querySelectorAll('#bkList button')].find((b) => b.textContent === 'Restore');
+      const why = 'The 2026-09-25 backup was made by another install, or under an earlier key. Confirm to go ahead.';
+      window.__promptAnswer = 'Homework Helper';
+      window.__answer = { 'POST /v1/backups/restore': [{ status: 400, body: { error: why, code: 'other_key' } }, { status: 200, body: { date: '2026-09-25', running: false } }] };
+      const before = calls('POST', /\/v1\/backups\/restore$/).length;
+      restore.click();
+      await until(() => calls('POST', /\/v1\/backups\/restore$/).length === before + 2);
+      eq('it said why and asked', window.__confirms.at(-1), why + '\n\nRestore “Homework Helper” from it anyway?');
+      eq('then the restore, on the yes', calls('POST', /\/v1\/backups\/restore$/).at(-1).body, { agentId: 'a1', date: '2026-09-25', otherKey: true });
+      await until(() => document.getElementById('toast').textContent.includes('Restored'));
+      aiDlg.close(); window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/backups'];
+    },
     hostsDrain: async () => {
       window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', hostname: 'home', kind: 'local', online: true, status: 'online', agentCount: 13 },
         { id: 'h2', name: 'Laptop', kind: 'docker', settings: { dockerHost: 'ssh://laptop' }, online: true, status: 'online', agentCount: 2 }];
@@ -1092,8 +1149,72 @@ const SCENARIOS = String.raw`(() => {
       await faApply();
       await until(() => !document.getElementById('faApplyBtn').disabled);
       ok('the running one rebuilt', calls('POST', /\/v1\/agents\/a1\/rebuild$/).length >= 1);
-      eq('the stopped one left alone', calls('POST', new RegExp('/v1/agents/' + tax.id + '/rebuild$')).length, 0);
+      eq('the stopped one, already current, left alone', calls('POST', new RegExp('/v1/agents/' + tax.id + '/rebuild$')).length, 0);
       fleetActionsDlg.close();
+      // On an older image (fourth review): marked for its next start, as Rebuild all does, and said so.
+      const list = await (await fetch('/v1/agents')).json();
+      try {
+        window.__override['/v1/agents'] = list.map((a) => a.id === tax.id ? { ...a, updateAvailable: true, rebuild: { level: 'recommended', reasons: ['a newer runtime image is ready'] } } : a);
+        await refresh(false);
+        await openFleetActions();
+        await until(() => document.querySelectorAll('.faCb').length);
+        document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = cb.dataset.id === tax.id; });
+        document.getElementById('faAction').value = 'rebuild'; faRenderAction();
+        window.__answer = { ['POST /v1/agents/' + tax.id + '/rebuild']: [{ status: 202, body: { rebuilding: false, atNextStart: true } }] };
+        await faApply();
+        await until(() => !document.getElementById('faApplyBtn').disabled);
+        eq('behind: marked, with stoppedWaits', calls('POST', new RegExp('/v1/agents/' + tax.id + '/rebuild$')).map((c) => c.body), [{ stoppedWaits: true }]);
+        ok('and said: ' + $('faResults').textContent, $('faResults').textContent.includes('1 not running: rebuilt when it next starts') && !$('faResults').textContent.includes('skipped'));
+        // Seventh review: by the page's own rule, as the Needs rebuild chip counts: peer changes waiting are a change a rebuild brings.
+        fleetActionsDlg.close();
+        window.__override['/v1/agents'] = list.map((a) => a.id === tax.id ? { ...a, rebuild: undefined, updateAvailable: false, peersPending: true } : a);
+        await refresh(false);
+        await openFleetActions();
+        await until(() => document.querySelectorAll('.faCb').length);
+        document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = cb.dataset.id === tax.id; });
+        document.getElementById('faAction').value = 'rebuild'; faRenderAction();
+        const marks = calls('POST', new RegExp('/v1/agents/' + tax.id + '/rebuild$')).length;
+        window.__answer = { ['POST /v1/agents/' + tax.id + '/rebuild']: [{ status: 202, body: { rebuilding: false, atNextStart: true } }] };
+        await faApply();
+        await until(() => !document.getElementById('faApplyBtn').disabled);
+        eq('peers waiting: marked too', calls('POST', new RegExp('/v1/agents/' + tax.id + '/rebuild$')).length - marks, 1);
+        // Ninth review: as Rebuild all, one never built (no container yet) or moved to another machine is skipped, not sent.
+        fleetActionsDlg.close();
+        window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, runtimeRef: undefined } : a.id === tax.id ? { ...a, peersPending: true, migratedTo: 'h-made-up' } : a);
+        await refresh(false);
+        await openFleetActions();
+        await until(() => document.querySelectorAll('.faCb').length);
+        document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = cb.dataset.id === 'a1' || cb.dataset.id === tax.id; });
+        document.getElementById('faAction').value = 'rebuild'; faRenderAction();
+        const sent = calls('POST', /\/rebuild$/).length;
+        await faApply();
+        await until(() => !document.getElementById('faApplyBtn').disabled);
+        eq('never built, or moved: nothing sent', calls('POST', /\/rebuild$/).length - sent, 0);
+        ok('and both skipped, none failed: ' + $('faResults').textContent, /2 skipped/.test($('faResults').textContent) && !/failed/.test($('faResults').textContent));
+      } finally {
+        window.__answer = {}; delete window.__override['/v1/agents']; await refresh(false);
+        if (fleetActionsDlg.open) fleetActionsDlg.close();
+      }
+    },
+    meshNamesTheSleeping: async () => {
+      // HB-0465: the bulk Connect's answer names an agent that is asleep, which takes the change at its next Start or Rebuild.
+      await openFleetActions();
+      await until(() => document.querySelectorAll('.faCb').length >= 2);
+      const picked = [...document.querySelectorAll('.faCb')].slice(0, 2);
+      document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = picked.includes(cb); });
+      document.getElementById('faAction').value = 'peers-connect'; faRenderAction();
+      const asleep = agents.find((a) => a.id === picked[1].dataset.id);
+      const note = asleep.name + ' is asleep. A sleeping agent wakes for a message as it was; it takes this change at its next Start or Rebuild, and its card says its peers changed.';
+      window.__answer = { 'POST /v1/agent-peers/mesh': [{ status: 200, body: { agents: 2, grants: 2, changed: true, needRebuild: [], skipped: [], note } }] };
+      try {
+        await faApply();
+        await until(() => !document.getElementById('faApplyBtn').disabled);
+        const said = document.getElementById('faResults').textContent;
+        ok('the answer names the sleeping one: ' + said, said.includes(asleep.name + ' is asleep') && said.endsWith('its card says its peers changed.'));
+      } finally {
+        window.__answer = {};
+        fleetActionsDlg.close();
+      }
     },
     stoppedStaysStopped: async () => {
       // HB-0411, HB-0420, HB-0441: a change does not start a stopped agent, and every surface says so.
@@ -1145,6 +1266,7 @@ const SCENARIOS = String.raw`(() => {
         editAgentId = tax.id;
         const sel = document.getElementById('editImage');
         const o = document.createElement('option'); o.value = 'hatchabot/runtime:trial'; sel.replaceChildren(o); sel.value = o.value;
+        sel.dataset.agent = tax.id; delete sel.dataset.loading; // its own list, loaded
         window.__answer = { ['PATCH /v1/agents/' + tax.id]: [{ status: 200, body: { id: tax.id, image: o.value, sameImage: false } }] };
         const rebuilds = calls('POST', new RegExp('/v1/agents/' + tax.id + '/rebuild$')).length;
         await saveImagePin();
@@ -1272,6 +1394,39 @@ const SCENARIOS = String.raw`(() => {
       v2Close();
       delete window.__override['/v1/agents'];
       await refresh(false);
+    },
+    // The paste-a-token box sends the token again when Telegram did not
+    // answer, or the connection dropped, as adopt does (thirteenth review).
+    tokenFormRetries: async () => {
+      window.__answer = window.__answer || {};
+      const list = await (await fetch('/v1/agents')).json();
+      window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, pendingAction: { type: 'bot_token', instructions: 'Make a bot with BotFather' } } : a);
+      try {
+        await refresh(false);
+        openV2Agent('a1', 'overview');
+        const box = await until(() => document.getElementById('tok-a1'));
+        box.value = '123456:made-up-token-for-the-test';
+        window.__answer['POST /v1/agents/a1/channel-token'] = [
+          { status: 503, body: { error: 'Telegram did not answer in time. Try again in a minute.' } },
+          { reject: 'Failed to fetch' },
+          { status: 202, body: { username: 'made_up_bot', stepAnswered: true } }];
+        window.__calls.length = 0;
+        await submitToken('a1'); await sleep(50);
+        const posts = window.__calls.filter((c) => c.method === 'POST' && c.path === '/v1/agents/a1/channel-token');
+        ok('the token is sent again after no answer and a dropped connection (' + posts.length + ' posts)', posts.length === 3 && posts.every((c) => c.body?.token === '123456:made-up-token-for-the-test'));
+        ok('and no error is left showing: ' + (document.getElementById('tokerr-a1')?.textContent ?? ''), !document.getElementById('tokerr-a1')?.textContent);
+        // A refusal is not sent again, and is said.
+        window.__answer['POST /v1/agents/a1/channel-token'] = [{ status: 400, body: { error: 'That token was not accepted by Telegram.' } }];
+        window.__calls.length = 0;
+        await submitToken('a1'); await sleep(50);
+        eq('a refused token is posted once', window.__calls.filter((c) => c.method === 'POST' && c.path === '/v1/agents/a1/channel-token').length, 1);
+        ok('and the refusal is said', /not accepted by Telegram/.test(document.getElementById('tokerr-a1')?.textContent ?? ''));
+      } finally {
+        delete window.__answer['POST /v1/agents/a1/channel-token'];
+        delete window.__override['/v1/agents'];
+        v2Close();
+        await refresh(false);
+      }
     },
     welcomeNeedsToken: async () => {
       // The Welcome card used to offer "leave the token blank" on Linux, which the
@@ -2196,6 +2351,53 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         delete window.__override['/v1/agents/a1/crons'];
         window.__answer = {};
+        v2Close();
+      }
+    },
+    taskPhoneNote: async () => {
+      // HB-0537: a task's run reached the phone only through an agent's own bot. Each task, and the add form,
+      // has "Tell me on Telegram when it runs"; with no bot to reach the owner it says how to get one.
+      const task = { id: 'c8', name: 'Market report', scheduleKind: 'cron', scheduleExpr: '0 8 * * 1-5', enabled: true, payloadKind: 'agentTurn', message: 'Write it', lastStatus: 'ok', consecutiveErrors: 0 };
+      window.__override['/v1/agents/a1/crons'] = { crons: [task], waiting: [], notes: [], noteReach: true };
+      try {
+        openV2Agent('a1', 'schedule');
+        const box = await until(() => document.querySelector('#cronList .pair .cron-note input'));
+        ok('each task has the box, off and usable: ' + box.closest('label').textContent.trim(), !box.checked && !box.disabled && box.closest('label').textContent.includes('Tell me on Telegram when it runs'));
+        ok('no hint while a note can reach the owner', !document.querySelector('.cron-note-hint'));
+        const before = calls('PATCH', /\/v1\/agents\/a1\/crons\/c8$/).length;
+        box.click();
+        const patch = await until(() => calls('PATCH', /\/v1\/agents\/a1\/crons\/c8$/)[before]);
+        eq('ticking it turns the note on for that task alone', patch.body, { notify: true });
+        await until(() => document.getElementById('toast').textContent.includes('a link, not the result'));
+        ok('and says what comes: ' + document.getElementById('toast').textContent, true);
+
+        // A new task can be added with it on.
+        document.getElementById('cronMode').value = 'cron'; cronModeChanged();
+        document.getElementById('cronName').value = 'Evening report';
+        document.getElementById('cronExpr').value = '0 18 * * 1-5';
+        document.getElementById('cronMsg').value = 'Write the evening report';
+        ok('the form has the box too, usable', !document.getElementById('cronNote').disabled);
+        document.getElementById('cronNote').checked = true;
+        const posts = calls('POST', /\/v1\/agents\/a1\/crons$/).length;
+        document.getElementById('cronAddBtn').click();
+        const post = await until(() => calls('POST', /\/v1\/agents\/a1\/crons$/)[posts]);
+        ok('the new task is asked for with the note on: ' + JSON.stringify(post.body), post.body.notify === true && post.body.name === 'Evening report');
+        await until(() => !document.getElementById('cronNote').checked);
+        ok('the form is cleared after, box included', document.getElementById('cronName').value === '');
+
+        // No bot reaches the owner: the hint says how, a note already on can still be turned off, a new one cannot be turned on.
+        window.__override['/v1/agents/a1/crons'] = { crons: [task, { ...task, id: 'c9', name: 'Weekly menu' }], waiting: [], notes: ['c8'], noteReach: false };
+        await loadCrons();
+        const hint = await until(() => document.querySelector('#cronList .cron-note-hint'));
+        ok('the list says where notes come from and how to get them: ' + hint.textContent.replace(/\s+/g, ' ').slice(0, 240),
+          hint.textContent.includes("Hatchabot agent's bot") && hint.textContent.includes('Telegram bot') && hint.textContent.includes('not sent'));
+        const rows = [...document.querySelectorAll('#cronList .pair')];
+        const on = rows[0].querySelector('.cron-note input'), off = rows[1].querySelector('.cron-note input');
+        ok('the task with a note keeps it, and can turn it off', on.checked && !on.disabled);
+        ok('the task without one cannot turn it on yet', !off.checked && off.disabled);
+        ok('nor can the form', document.getElementById('cronNote').disabled);
+      } finally {
+        delete window.__override['/v1/agents/a1/crons'];
         v2Close();
       }
     },
@@ -3467,7 +3669,7 @@ const SCENARIOS = String.raw`(() => {
         const sel = await until(() => document.getElementById('editSwapAllowance'));
         const vals = [...sel.options].map((o) => o.value);
         ok('it offers inherit, off and sizes up to the 3 GB cap only: ' + vals, vals[0] === '' && vals.includes('off') && vals.includes('2g') && vals.includes('3g') && !vals.includes('4g'));
-        ok('the inherited choice names the machine setting: ' + sel.options[0].textContent, sel.options[0].textContent.includes("the machine's setting: off"));
+        ok('the inherited choice names the machine setting: ' + sel.options[0].textContent, sel.options[0].textContent.includes("the machine's: off"));
         ok('says it has no swap: ' + status(), status().includes('No swap'));
         sel.value = '2g';
         document.getElementById('swapSaveBtn').click();
@@ -4118,6 +4320,212 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    // Taking over a workspace's bot (HB-0542): no pool bot is used, and the
+    // workspace goes only into an agent that runs after the hand-over; one
+    // asking for a bot again is removed and says why. Made-up workspace and bot.
+    adoptReuseBotRunsFirst: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-pantry-helper';
+      const bot = { accountId: 'made_up_pantry_bot', sourceAgentId: 'pantry', enabledInSource: false, polling: 'idle', allowFrom: [] };
+      const waiting = { id: 'ad2', name: 'Pantry Helper', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('taking over its bot is offered and ticked', !!$('adoptReuse')?.checked);
+        $('adoptName').value = 'Pantry Helper';
+        // Setup turns the bot down: it asks for a bot again after the hand-over.
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad2', name: 'Pantry Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad2'] = [{ body: waiting }, { body: waiting }];
+        window.__answer['POST /v1/agents/ad2/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
+        window.__answer['DELETE /v1/agents/ad2'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        const made = window.__calls.find((c) => c.method === 'POST' && c.path === '/v1/agents');
+        ok('the agent is made with no pool bot (skipPool)', made?.body?.skipPool === true);
+        ok('the old bot is handed over', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad2/channel-token' && c.body?.fromWorkspace === WS));
+        ok('nothing is copied into an agent that is not running', !window.__calls.some((c) => c.path === '/v1/agents/ad2/adopt-workspace'));
+        ok('the half-made agent is removed', window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad2'));
+        ok('and it says why: ' + $('adoptErr').textContent, /@made_up_pantry_bot was not taken over: “Pantry Helper” is PROVISIONING and waiting for a bot token/.test($('adoptErr').textContent));
+
+        // An agent that came up on another bot: the old one was never taken over.
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad2', name: 'Pantry Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad2'] = [{ body: { id: 'ad2', name: 'Pantry Helper', state: 'RUNNING', botUsername: 'made_up_pool_bot' } }];
+        window.__answer['DELETE /v1/agents/ad2'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('an agent that did not wait for the bot is not adopted into', !window.__calls.some((c) => c.path === '/v1/agents/ad2/adopt-workspace' || /channel-token/.test(c.path)));
+        ok('and it says so: ' + $('adoptErr').textContent, /did not wait for a bot \(it has @made_up_pool_bot\), so @made_up_pantry_bot was not taken over/.test($('adoptErr').textContent));
+      } finally {
+        hosts = hadHosts;
+        for (const k of ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad2', 'POST /v1/agents/ad2/channel-token', 'DELETE /v1/agents/ad2']) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    // Adopt waits as long as the CLI after a bot is handed over (15 minutes),
+    // and an agent still setting up then is left to finish, not removed
+    // (eighth review). Made-up workspace and bot.
+    adoptWaitsForSlowSetup: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-porch-helper';
+      const bot = { accountId: 'made_up_porch_bot', sourceAgentId: 'porch', enabledInSource: false, polling: 'idle', allowFrom: [] };
+      const waiting = { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } };
+      const setting = { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad3', 'POST /v1/agents/ad3/channel-token', 'POST /v1/agents/ad3/adopt-workspace', 'DELETE /v1/agents/ad3'];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('taking over its bot is offered and ticked', !!$('adoptReuse')?.checked);
+        $('adoptName').value = 'Porch Helper';
+
+        // Still setting up after 15 minutes: left to finish, and said so.
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad3'] = [{ body: waiting }];
+        window.__override['/v1/agents/ad3'] = setting;
+        window.__answer['POST /v1/agents/ad3/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
+        window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        const looks = window.__calls.filter((c) => c.method === 'GET' && c.path === '/v1/agents/ad3').length;
+        ok('it waits 15 minutes for setup after the hand-over (' + looks + ' looks)', looks >= 300);
+        ok('an agent still setting up then is not removed', !window.__calls.some((c) => c.method === 'DELETE'));
+        ok('nothing is copied into it', !window.__calls.some((c) => c.path === '/v1/agents/ad3/adopt-workspace'));
+        ok('and it says so: ' + $('adoptErr').textContent, /“Porch Helper” is still setting up after 15 minutes, so it was left to finish, and nothing was copied/.test($('adoptErr').textContent));
+
+        // Rebuilding at 15 minutes, after the hand-over (sixteenth review):
+        // any state then is still setting up, so it is left too.
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad3'] = [{ body: waiting }];
+        window.__override['/v1/agents/ad3'] = { ...setting, state: 'REBUILDING' };
+        window.__answer['POST /v1/agents/ad3/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
+        window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('rebuilding at 15 minutes after the hand-over: not removed', !window.__calls.some((c) => c.method === 'DELETE'));
+        ok('and it says so, with its state: ' + $('adoptErr').textContent, /“Porch Helper” is still setting up after 15 minutes \(it is rebuilding\), so it was left to finish/.test($('adoptErr').textContent));
+        window.__override['/v1/agents/ad3'] = setting;
+
+        // Still setting up after 15 minutes BEFORE the hand-over (eleventh
+        // review): made to wait for this bot, it would never run, so it is
+        // removed, and said so; a delete refused is said too.
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' } }];
+        delete window.__answer['GET /v1/agents/ad3'];
+        window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('cut off before the hand-over: no bot is handed over', !window.__calls.some((c) => /channel-token/.test(c.path)));
+        ok('and the agent is removed', window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad3'));
+        ok('and it says so: ' + $('adoptErr').textContent, /“Porch Helper” was still setting up after 15 minutes, before @made_up_porch_bot was handed over, so it was removed and nothing was copied/.test($('adoptErr').textContent));
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' } }];
+        window.__answer['DELETE /v1/agents/ad3'] = [{ status: 409, body: { error: 'Another operation is already running on this agent.' } }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('a delete refused then is said, with the reason: ' + $('adoptErr').textContent, /could not be removed: Another operation is already running on this agent\. Remove it from its card/.test($('adoptErr').textContent));
+
+        // A pasted token, and still setting up after 15 minutes before it was
+        // handed over (fourteenth review): removed too, and said so.
+        $('adoptReuse').checked = false;
+        $('adoptToken').value = '123456:made-up-token-for-the-test';
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' } }];
+        window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('a pasted token cut off before the hand-over: the token is never posted', !window.__calls.some((c) => /channel-token/.test(c.path)));
+        ok('and the agent is removed', window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad3'));
+        ok('and it says so: ' + $('adoptErr').textContent, /“Porch Helper” was still setting up after 15 minutes, before its bot token was handed over, so it was removed and nothing was copied/.test($('adoptErr').textContent));
+        $('adoptToken').value = '';
+        $('adoptReuse').checked = true;
+
+        // Setup takes three minutes after the hand-over: adopted, not removed at two.
+        delete window.__override['/v1/agents/ad3'];
+        delete window.__answer['DELETE /v1/agents/ad3'];
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad3'] = [{ body: waiting }, ...Array.from({ length: 60 }, () => ({ body: setting })), { body: { ...setting, state: 'RUNNING' } }];
+        window.__answer['POST /v1/agents/ad3/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
+        window.__answer['POST /v1/agents/ad3/adopt-workspace'] = [{ status: 200, body: { files: 1, bytes: 1024, crons: { carried: 0 } } }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('a setup of three minutes is waited for, and the workspace copied', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad3/adopt-workspace'));
+        ok('and the agent is not removed', !window.__calls.some((c) => c.method === 'DELETE'));
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        delete window.__override['/v1/agents/ad3'];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    // Adopt hands the bot over again when Telegram did not answer (502–504),
+    // with the same body, as the CLI does (ninth review). Made-up workspace and bot.
+    adoptRetriesWhenTelegramDoesNotAnswer: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-shed-helper';
+      const bot = { accountId: 'made_up_shed_bot', sourceAgentId: 'shed', enabledInSource: false, polling: 'idle', allowFrom: [] };
+      const waiting = { id: 'ad4', name: 'Shed Helper', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad4', 'POST /v1/agents/ad4/channel-token', 'POST /v1/agents/ad4/adopt-workspace', 'DELETE /v1/agents/ad4'];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('taking over its bot is offered and ticked', !!$('adoptReuse')?.checked);
+        $('adoptName').value = 'Shed Helper';
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad4', name: 'Shed Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad4'] = [{ body: waiting }, { body: { ...waiting, state: 'RUNNING', pendingAction: undefined } }];
+        window.__answer['POST /v1/agents/ad4/channel-token'] = [
+          { reject: 'Failed to fetch' }, // the connection dropped (twelfth review)
+          { status: 503, body: { error: 'Telegram did not answer in time. Try again in a minute.' } },
+          { status: 202, body: { username: bot.accountId } }];
+        window.__answer['POST /v1/agents/ad4/adopt-workspace'] = [{ status: 200, body: { files: 1, bytes: 1024, crons: { carried: 0 } } }];
+        window.__answer['DELETE /v1/agents/ad4'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        const posts = window.__calls.filter((c) => c.method === 'POST' && c.path === '/v1/agents/ad4/channel-token');
+        ok('the bot is handed over again after a dropped connection and no answer, with the same body (' + posts.length + ' posts)', posts.length === 3 && posts.every((c) => c.body?.fromWorkspace === WS));
+        ok('the workspace is copied in', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad4/adopt-workspace'));
+        ok('and the agent is not removed', !window.__calls.some((c) => c.method === 'DELETE'));
+
+        // Sixteenth review: a 409 to the post sent again, after setup took the
+        // first (the step answered): the agent is read, and it was handed over.
+        const setting = { ...waiting, pendingAction: undefined };
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad4', name: 'Shed Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad4'] = [{ body: waiting }, { body: setting }, { body: { ...setting, state: 'RUNNING' } }];
+        window.__answer['POST /v1/agents/ad4/channel-token'] = [
+          { status: 504, body: { error: 'Gateway Timeout' } },
+          { status: 409, body: { error: 'A bot token came in already.' } }];
+        window.__answer['POST /v1/agents/ad4/adopt-workspace'] = [{ status: 200, body: { files: 1, bytes: 1024, crons: { carried: 0 } } }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('a 409 to the post sent again, the step answered: adopted', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad4/adopt-workspace'));
+        ok('and not removed mid-setup', !window.__calls.some((c) => c.method === 'DELETE'));
+        // The step still open: the first never landed, so the 409 is the refusal.
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad4', name: 'Shed Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad4'] = [{ body: waiting }, { body: waiting }];
+        window.__answer['POST /v1/agents/ad4/channel-token'] = [
+          { status: 504, body: { error: 'Gateway Timeout' } },
+          { status: 409, body: { error: 'It is being deleted.' } }];
+        window.__answer['DELETE /v1/agents/ad4'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('a 409 to the post sent again, the step still open: removed', window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad4'));
+        ok('and the 409 is what it says: ' + $('adoptErr').textContent, /It is being deleted\./.test($('adoptErr').textContent));
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
     // Bringing in a bot when Telegram did not answer (C065): OpenClaw's poller is
     // not known to have stopped, so the bot is not taken over, and the row says
     // why even after the list is drawn again. Made-up workspace and bot.
@@ -4613,7 +5021,8 @@ const SCENARIOS = String.raw`(() => {
         const q2 = window.__confirms[asked2] || '';
         ok('a public repo: the copy goes, no deploy key named: ' + q2, q2.includes('is deleted') && !q2.includes('deploy key'));
         const said2 = document.getElementById('toast').textContent;
-        ok('and no rebuild asked for: ' + said2, said2.startsWith('Removed, with its copy') && !said2.includes('Rebuild'));
+        // No sheet open here, so the agent is named (agentPrefix).
+        ok('and no rebuild asked for: ' + said2, said2.startsWith('Homework Helper: Removed, with its copy') && !said2.includes('Rebuild'));
       } finally {
         editAgentId = prev; editData = prevData;
         if (window.__answer) delete window.__answer[key];
@@ -5116,6 +5525,71 @@ const SCENARIOS = String.raw`(() => {
         ok('it names the agent', document.getElementById('toast').textContent.includes('Homework Helper'));
       } finally { delete window.__override['/v1/agent-classes']; window.__answer = {}; if (v2AgentDlg.open) v2Close(); }
     },
+    classEditDeleted: async () => {
+      // An edit waiting behind the class's deletion answers 404: said so, and the list read again (HB-0560).
+      window.__override['/v1/agent-classes'] = { classes: [] };
+      window.__answer = { 'PUT /v1/agent-classes/c1': [{ status: 404, body: { error: 'Not found' } }] };
+      try {
+        agentClasses = [{ id: 'c1', name: 'Light', model: 'claude-haiku-4-5' }];
+        await updateClass('c1', 'model', 'claude-opus-5-5');
+        await until(() => document.getElementById('toast').textContent.includes('was deleted meanwhile'));
+        ok('the list is read again', agentClasses.length === 0);
+      } finally { delete window.__override['/v1/agent-classes']; window.__answer = {}; }
+    },
+    classRowBehind: async () => {
+      // A member the class's model has not reached (a rebuild that failed after the edit) is counted in its row.
+      // As the agent list sends them: the class's model is each one's pin
+      // (modelOverride), model what its runtime runs (appliedModel), and
+      // pendingModel the pin, sent only while the runtime runs another.
+      const keepAgents = agents, keepClasses = agentClasses;
+      try {
+        agentClasses = [{ id: 'c1', name: 'Light', model: 'claude-haiku-4-5' }];
+        agents = [
+          { ...keepAgents[0], id: 'x1', classId: 'c1', modelOverride: 'claude-haiku-4-5', appliedModel: 'claude-opus-4-8', model: 'claude-opus-4-8', pendingModel: 'claude-haiku-4-5' },
+          { ...keepAgents[0], id: 'x2', classId: 'c1', modelOverride: 'claude-haiku-4-5', appliedModel: 'claude-haiku-4-5', model: 'claude-haiku-4-5', pendingModel: undefined },
+          // Its source switched with the class: its model waits for that rebuild, it is not behind.
+          { ...keepAgents[0], id: 'x3', classId: 'c1', modelOverride: 'claude-haiku-4-5', appliedModel: 'claude-opus-4-8', model: 'claude-opus-4-8', pendingModel: 'claude-haiku-4-5', rebuildWaits: true },
+        ];
+        renderClassList();
+        const rowEl = document.querySelector('#classList .classrow');
+        const row = rowEl.textContent;
+        ok('the row counts its members, the one behind and the one waiting: ' + row, row.includes('3 agents') && row.includes('1 still on an old model') && row.includes('1 waiting for a rebuild'));
+        // The warning has the warning colour inside the row's grey line.
+        const ref = document.createElement('span'); ref.style.color = 'var(--warn)'; document.body.appendChild(ref);
+        const warnColour = getComputedStyle(ref).color; ref.remove();
+        eq('the warning is coloured', getComputedStyle(rowEl.querySelector('.sub .warn')).color, warnColour);
+      } finally { agents = keepAgents; agentClasses = keepClasses; renderClassList(); }
+    },
+    capKeptForNextStartSaid: async () => {
+      // A cap or swap saved while its container kept the old limits (its machine asleep): kept for its next start, not "applied".
+      const toastText = () => document.getElementById('toast').textContent;
+      const a = agents.find((x) => x.state === 'RUNNING') || agents[0];
+      const was = editAgentId;
+      editAgentId = a.id;
+      const capOpt = document.createElement('option'); capOpt.value = '2g'; capOpt.textContent = '2 GB';
+      const swapOpt = document.createElement('option'); swapOpt.value = '1g'; swapOpt.textContent = '1 GB';
+      $('editMemoryCap').append(capOpt); $('editSwapAllowance').append(swapOpt);
+      const answer = (extra) => ({ ['PATCH /v1/agents/' + a.id]: [{ body: { ...a, state: 'RUNNING', ...extra } }] });
+      const kept = { memoryPending: 'Words the page does not read.', limitsKept: { name: a.name, why: 'a made-up reason' } };
+      try {
+        $('editMemoryCap').value = '2g';
+        window.__answer = answer(kept);
+        await saveMemoryCap();
+        ok('a kept cap is kept for its next start: ' + toastText(), toastText().includes('kept for its next start: its container kept its old memory limits (a made-up reason)') && !toastText().includes('applied to the running container'));
+        $('editSwapAllowance').value = '1g';
+        window.__answer = answer(kept);
+        await saveSwapAllowance();
+        ok('a kept swap allowance too: ' + toastText(), toastText().includes('kept for its next start') && !toastText().includes('applied to the running container'));
+        $('editMemoryCap').value = '2g';
+        window.__answer = answer({});
+        await saveMemoryCap();
+        ok('a cap that went on says so: ' + toastText(), toastText().includes('applied to the running container'));
+      } finally {
+        capOpt.remove(); swapOpt.remove();
+        window.__answer = {}; editAgentId = was;
+        await refresh(true);
+      }
+    },
     homeKeyboard: async () => {
       const key = (el, k) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
       try {
@@ -5245,7 +5719,7 @@ const SCENARIOS = String.raw`(() => {
       const ready = { agentId: 'a1', name: 'Homework Helper', hostId: 'h1', status: 'ready', line: 'Recoverable from 2026-10-08 · last drill 2026-10-05 passed',
         latestUsable: { date: '2026-10-08', ageDays: 1, sizeBytes: 2048, complete: true }, leftOut: { count: 0, of: 3, asleep: 0, failed: 0, missing: 0, other: 0 },
         drill: { at: '2026-10-05T05:20:00Z', set: '2026-10-05', passed: true, restored: true, checks: ['archive read whole'] },
-        restorable: [{ date: '2026-10-08', sizeBytes: 2048, complete: true, drill: 'passed' }, { date: '2026-10-07', sizeBytes: 1024, complete: false }] };
+        restorable: [{ date: '2026-10-08', sizeBytes: 2048, complete: true, drill: 'passed' }, { date: '2026-10-07', sizeBytes: 1024, complete: false, otherKey: true }] };
       const answer = (over, rest = {}) => ({ agents: [{ ...ready, ...over }], newestSet: '2026-10-08', newestFresh: true, staleDays: 2, canRestore: true, drill: { every: 'off', hours: { from: 5, to: 7 } }, ...rest });
       window.__override['/v1/backups/readiness'] = answer({});
       try {
@@ -5262,6 +5736,10 @@ const SCENARIOS = String.raw`(() => {
         eq('the newest usable backup is chosen', document.querySelector('#v2RecoveryPick input[name="v2RecDate"]:checked').value, '2026-10-08');
         ok('what each set holds: ' + pick.textContent.replace(/\s+/g, ' ').slice(0, 300), pick.textContent.includes('drill passed') && pick.textContent.includes('a set that was not complete; its own copy is whole'));
         ok('what will be undone', pick.textContent.includes('What is undone: everything it learned or changed since 2026-10-08') && pick.textContent.includes('stay as they are now'));
+        // A set made by another install, or under an earlier key, says so beside its date, and only that one (sixth review of HB-0540).
+        const labelOf = (date) => [...pick.querySelectorAll('label')].find((l) => l.querySelector('input[value="' + date + '"]'))?.textContent.replace(/\s+/g, ' ') || '';
+        ok('the other key\'s set is labelled: ' + labelOf('2026-10-07'), labelOf('2026-10-07').includes('made by another install, or under an earlier key'));
+        ok('this install\'s own set is not', !labelOf('2026-10-08').includes('another install'));
         const other = [...document.querySelectorAll('#v2RecoveryPick input[name="v2RecDate"]')].find((i) => i.value === '2026-10-07');
         other.checked = true; other.dispatchEvent(new Event('change', { bubbles: true }));
         const go = await until(() => byText('#v2RecoveryPick button', 'Restore from 2026-10-07'));
@@ -5287,6 +5765,62 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         v2Close(); v2RecoveryPick = null; window.__promptAnswer = null; window.__answer = {};
         delete window.__override['/v1/backups/readiness']; v2Readiness = null; v2ReadinessAt = 0;
+      }
+    },
+    // Another install's newer set and this install's own older one: Restore… chooses its own; the other stays listed (eighth review).
+    recoveryPicksOwn: async () => {
+      const agent = { agentId: 'a1', name: 'Homework Helper', hostId: 'h1', status: 'stale',
+        line: 'Its newest backup is from 2026-10-06 (3 days ago). A newer copy made by another install, or under an earlier key, is from 2026-10-09.',
+        latestUsable: { date: '2026-10-09', ageDays: 0, sizeBytes: 4096, complete: true, otherKey: true },
+        ownLatest: { date: '2026-10-06', ageDays: 3, sizeBytes: 2048, complete: true },
+        leftOut: { count: 0, of: 3, asleep: 0, failed: 0, missing: 0, other: 0 },
+        restorable: [{ date: '2026-10-09', sizeBytes: 4096, complete: true, otherKey: true }, { date: '2026-10-06', sizeBytes: 2048, complete: true }] };
+      const answer = (a) => ({ agents: [a], newestSet: '2026-10-08', newestFresh: true, staleDays: 2, canRestore: true, drill: { every: 'off', hours: { from: 5, to: 7 } } });
+      const chosen = () => document.querySelector('#v2RecoveryPick input[name="v2RecDate"]:checked')?.value;
+      window.__override['/v1/backups/readiness'] = answer(agent);
+      try {
+        await v2LoadReadiness(true);
+        openV2Agent('a1', 'advanced');
+        await until(() => document.getElementById('v2RecoveryLine') && document.getElementById('v2RecoveryLine').textContent.includes('3 days ago'));
+        document.getElementById('v2RecoveryBtn').click();
+        await until(() => chosen());
+        eq('its own set is chosen, not the other install\'s newer one', chosen(), '2026-10-06');
+        eq('the other install\'s set is still listed', [...document.querySelectorAll('#v2RecoveryPick input[name="v2RecDate"]')].map((i) => i.value), ['2026-10-09', '2026-10-06']);
+        // With none of its own, the other install's is chosen (and restoring from it asks first: backupOtherKey).
+        const none = { ...agent, status: 'not covered', line: 'None of this install\'s backups holds it. A copy made by another install, or under an earlier key, is from 2026-10-09.', restorable: [agent.restorable[0]] };
+        delete none.ownLatest;
+        v2Close(); v2RecoveryPick = null;
+        window.__override['/v1/backups/readiness'] = answer(none);
+        await v2LoadReadiness(true);
+        openV2Agent('a1', 'advanced');
+        await until(() => document.getElementById('v2RecoveryLine') && document.getElementById('v2RecoveryLine').textContent.includes('None of this install'));
+        document.getElementById('v2RecoveryBtn').click();
+        await until(() => chosen());
+        eq('with none of its own, the other install\'s is chosen', chosen(), '2026-10-09');
+      } finally {
+        v2Close(); v2RecoveryPick = null;
+        delete window.__override['/v1/backups/readiness']; v2Readiness = null; v2ReadinessAt = 0;
+      }
+    },
+    // The Latest usable column is this install's own, as the Status reads it; another install's newer copy is named beside it (ninth review).
+    readinessTableOwnFirst: async () => {
+      window.__override['/v1/backups'] = { dir: '/backups', keepDays: 14, run: { status: 'idle' }, backups: [], missing: [] };
+      window.__override['/v1/backups/readiness'] = { newestSet: '2026-10-08', newestFresh: true, staleDays: 2, canRestore: true,
+        drill: { every: 'off', hours: { from: 5, to: 7 }, run: { status: 'idle' } },
+        agents: [{ agentId: 'a1', name: 'Homework Helper', hostId: 'h1', status: 'stale',
+          line: 'Its newest backup is from 2026-10-06 (3 days ago). A newer copy made by another install, or under an earlier key, is from 2026-10-09.',
+          latestUsable: { date: '2026-10-09', ageDays: 0, sizeBytes: 4096, complete: true, otherKey: true },
+          ownLatest: { date: '2026-10-06', ageDays: 3, sizeBytes: 2048, complete: true },
+          leftOut: { count: 1, of: 3, asleep: 0, failed: 1, missing: 0, other: 0 } }] };
+      try {
+        await openAiDlg('backups');
+        const row = await until(() => document.querySelector('#bkReadyTable tbody tr'));
+        const cells = [...row.querySelectorAll('td')].map((c) => c.textContent.replace(/\s+/g, ' ').trim());
+        eq('its own date, with the other install\'s newer copy beside it', cells[1], '2026-10-06 (3d ago) (a newer copy from another install: 2026-10-09)');
+        eq('and the Status that goes with it', cells[4], 'stale');
+      } finally {
+        clearTimeout(bkDrillTimer); bkDrillTimer = null; aiDlg.close(); window.__answer = {};
+        delete window.__override['/v1/backups']; delete window.__override['/v1/backups/readiness']; v2Readiness = null; v2ReadinessAt = 0;
       }
     },
     readinessTable: async () => {
@@ -6412,6 +6946,37 @@ const SCENARIOS = String.raw`(() => {
         if (paramFormDlg.open) paramFormDlg.close();
       }
     },
+    setupValuesWarning: async () => {
+      // HB-0567: Apply values and Reset say when the description could not take the values, rather than "applied".
+      const a = agents.find((x) => x.id === 'a1'), was = { parameters: a.parameters, paramValues: a.paramValues, state: a.state }, wasEdit = editAgentId;
+      const said = () => document.getElementById('toast').textContent;
+      const WARN = 'The files have the new values, but the description was changed meanwhile and was not filled in with them: too long.';
+      window.__answer = window.__answer || {};
+      try {
+        a.parameters = [{ key: 'tone', label: 'Tone', type: 'text', target: 'soul', required: false }];
+        a.paramValues = { tone: 'calm' }; a.state = 'RUNNING';
+        editAgentId = 'a1';
+        renderSetupValues(a);
+        window.__answer['PUT /v1/agents/a1/params'] = [
+          { body: { applied: true, values: { tone: 'calm' }, warning: WARN } },
+          { body: { applied: true, values: { tone: 'calm' } } },
+          { body: { applied: true, values: {}, warning: WARN } },
+        ];
+        await saveSetupValues();
+        ok('Apply values says the warning: ' + said(), said().includes('Values applied, but') && said().includes('was not filled in'));
+        renderSetupValues(Object.assign(agents.find((x) => x.id === 'a1'), { parameters: a.parameters, paramValues: { tone: 'calm' }, state: 'RUNNING' }));
+        await saveSetupValues();
+        // Said for its agent (named when its page is not the one open).
+        ok('without one, the usual words', said().includes('Values applied —') && !said().includes('⚠'));
+        window.__confirmAnswer = true;
+        await resetSetupValues();
+        ok('Reset says it too: ' + said(), said().includes('Reset to defaults, but') && said().includes('was not filled in'));
+        eq('three applies sent', calls('PUT', /\/v1\/agents\/a1\/params$/).length >= 3, true);
+      } finally {
+        Object.assign(agents.find((x) => x.id === 'a1') ?? a, was); editAgentId = wasEdit;
+        delete window.__answer['PUT /v1/agents/a1/params'];
+      }
+    },
     joinPageSecondFactor: async () => {
       // HB-0400: the real web/join.html in a frame. A right password that the public address refuses
       // for want of a second factor must say so, not bring the same form back with no message.
@@ -6540,6 +7105,1112 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = {};
         document.getElementById('acctInviteOut').style.display = 'none';
         for (const [id, hidden] of panels) document.getElementById(id).hidden = hidden;
+      }
+    },
+  });
+  // Deep audit of v2.177.0 (made-up data): a reply lands on the agent, draft or request it was for, and is read in full;
+  // a value typed for one agent stays with it; a saved edit does not hold the sheet back.
+  Object.assign(T, {
+    repliesStayWithTheirAgent: async () => {
+      // HB-0583, HB-0584, HB-0591: A's image list and A's folder, answered after B's sheet opened, land on A alone.
+      const h = auditHold();
+      const toastText = () => $('toast').textContent;
+      const folder = (id) => ({ id, legacy: true, kind: 'folder', hostPath: '/srv/made-up/' + id, mountName: id, access: 'ro' });
+      try {
+        // The image picker: A's list, late, over B's.
+        editAgentId = 'a1';
+        h.once(/\/v1\/runtime\/images$/);
+        const pa = populateImagePicker('hatchabot/runtime:trial');
+        await until(() => h.held.length === 1);
+        editAgentId = 'a2';
+        await populateImagePicker('');
+        eq("B's pin: the fleet default", $('editImage').value, '');
+        await h.free(); await pa;
+        eq("A's late list leaves B's pin", $('editImage').value, '');
+        ok("and A's pin is not offered as B's", ![...$('editImage').options].some((o) => o.value === 'hatchabot/runtime:trial'));
+        // A, then B while its list loads, then A again before it came: A's picker is drawn again, and Pin waits for A's list.
+        editAgentId = 'a1'; await populateImagePicker('hatchabot/runtime:trial');
+        editAgentId = 'a2';
+        h.once(/\/v1\/runtime\/images$/);
+        const pb = populateImagePicker('');
+        await until(() => h.held.length === 1);
+        editAgentId = 'a1';
+        h.once(/\/v1\/runtime\/images$/);
+        const pa2 = populateImagePicker('hatchabot/runtime:trial');
+        await until(() => h.held.length === 2);
+        eq("A again: its own pin, loading", [$('editImage').value, $('editImage').options.length], ['hatchabot/runtime:trial', 1]);
+        const pinMark = window.__calls.length;
+        await saveImagePin();
+        eq('Pin while it loads sends nothing', window.__calls.slice(pinMark).filter((x) => x.method === 'PATCH').length, 0);
+        await h.free(); await pb; await pa2;
+        eq("then A's list, with A's pin", $('editImage').value, 'hatchabot/runtime:trial');
+        // The Data tab: A's folder, added late, is not drawn in B's list.
+        editAgentId = 'a1';
+        $('pathNew').value = '/srv/made-up/notes'; $('pathAccess').value = 'ro';
+        window.__answer = { 'POST /v1/agents/a1/data-sources': [{ body: { dataSources: [folder('a-old')] } }] };
+        h.once(/\/v1\/agents\/a1\/data-sources$/, 'POST');
+        const added = addDataSource();
+        await until(() => h.held.length === 1);
+        editAgentId = 'a2';
+        renderDataList([folder('b-one'), folder('b-two')]);
+        await h.free(); await added;
+        eq("B's list stays B's", editData.map((d) => d.id), ['b-one', 'b-two']);
+        ok("A's add is said with its name: " + toastText(), toastText().startsWith('Homework Helper: Folder added'));
+        window.__confirmAnswer = true;
+        window.__answer = { 'PATCH /v1/agents/a2': [{ body: { dataSources: [folder('b-two')] } }] };
+        await removeDataSource('b-one');
+        eq("B's legacy folder removal sends B's other folders, to B", calls('PATCH', /\/v1\/agents\/a2$/).at(-1).body, { sharedPaths: ['/srv/made-up/b-two'] });
+        // A value typed for A and not added does not carry to B.
+        prepareEdit('a1', 'Homework Helper');
+        $('envName').value = 'MADE_UP_KEY'; $('envValue').value = 'made-up-value'; $('pathNew').value = '/srv/made-up/a';
+        prepareEdit('a1', 'Homework Helper');
+        eq('the same agent again: its own draft', $('envValue').value, 'made-up-value');
+        prepareEdit('a2', 'Soccer Schedule');
+        eq('another agent: the boxes are empty', [$('envName').value, $('envValue').value, $('pathNew').value], ['', '', '']);
+        // And the choices beside them: write access, a public repo.
+        prepareEdit('a1', 'Homework Helper');
+        $('pathAccess').value = 'rw'; $('repoAccess').value = 'rw'; $('repoPublic').checked = true; onRepoPublic();
+        prepareEdit('a1', 'Homework Helper');
+        eq('the same agent again: its choices', [$('pathAccess').value, $('repoPublic').checked], ['rw', true]);
+        prepareEdit('a2', 'Soccer Schedule');
+        eq('another agent: read-only, not public', [$('pathAccess').value, $('repoAccess').value, $('repoPublic').checked], ['ro', 'ro', false]);
+      } finally {
+        await h.free(); window.__answer = {}; window.__confirmAnswer = true;
+        for (const f of ['envName', 'envValue', 'pathNew']) $(f).value = '';
+        $('pathAccess').value = 'ro'; $('repoAccess').value = 'ro'; $('repoPublic').checked = false; onRepoPublic();
+        editAgentId = null; delete $('editImage').dataset.agent; delete $('editImage').dataset.loading;
+      }
+    },
+    sheetRepliesStayWithTheirAgent: async () => {
+      // HB-0590, HB-0587: a class or an app update for A, answered after B's sheet opened, leaves B's sheet alone and names A.
+      const h = auditHold();
+      const SHA = 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0';
+      const APP = { app: 'demoapp', name: 'Demo App', source: '/home/tester/demoapp', ref: 'HEAD', sha: SHA, previousSha: null,
+        installedAt: new Date(Date.now() - 3600e3).toISOString(), testOk: true, tasks: ['demoapp-tick'] };
+      const toastText = () => $('toast').textContent;
+      const paint = window.renderModelPickerForAgent, painted = [];
+      window.__override['/v1/agent-classes'] = { classes: [{ id: 'class-school', name: 'School', model: 'claude-sonnet-5' }] };
+      window.__override['/v1/agents/a1/app'] = { app: APP, pending: null, canChange: true };
+      window.__override['/v1/agents/a2/app'] = { app: APP, pending: null, canChange: true };
+      try {
+        v2AppCache = null;
+        openV2Agent('a1', 'overview');
+        await until(() => $('editClass') && $('editClass').querySelector('option[value="class-school"]') && $('v2AppUpdateBtn'));
+        // The class.
+        window.renderModelPickerForAgent = (a) => { painted.push(a && a.id); return paint(a); };
+        $('editClass').value = 'class-school';
+        window.__answer = { 'POST /v1/agents/a1/class': [{ body: { classId: 'class-school', rebuild: false } }] };
+        h.once(/\/v1\/agents\/a1\/class$/, 'POST');
+        const set = assignClass();
+        await until(() => h.held.length === 1);
+        v2AppCache = null;
+        openV2Agent('a2', 'overview');
+        await until(() => v2AgentId === 'a2' && $('editClass') && $('v2AppUpdateBtn'));
+        await h.free(); await set;
+        eq("B's model menu is not drawn for A", painted.filter((x) => x === 'a1'), []);
+        ok('A is named: ' + toastText(), toastText().startsWith('Homework Helper: Class set'));
+        window.renderModelPickerForAgent = paint;
+        // The app update: A needs a value, and B's sheet is open.
+        v2AppCache = null;
+        openV2Agent('a1', 'overview');
+        await until(() => v2AgentId === 'a1' && $('v2AppUpdateBtn'));
+        window.__answer = { 'POST /v1/agents/a1/app/update': [{ status: 400, body: { error: 'Needs a value for: mailbox.', needs: [{ key: 'mailbox', label: 'its address', type: 'email' }], unchanged: true } }] };
+        h.once(/\/v1\/agents\/a1\/app\/update$/, 'POST');
+        const up = v2AppUpdate('a1', $('v2AppUpdateBtn'));
+        await until(() => h.held.length === 1);
+        v2AppCache = null;
+        openV2Agent('a2', 'overview');
+        await until(() => v2AgentId === 'a2' && $('v2AppUpdateBtn'));
+        await h.free(); await up;
+        ok("no form for A's value in B's sheet", !$('v2AppV_mailbox'));
+        ok('A is named: ' + toastText(), toastText().startsWith("Homework Helper's app was not updated: it needs a value first"));
+        // A's own sheet, but on another tab when it answers: the App row is not on screen, so where to give it is said.
+        v2AppCache = null;
+        openV2Agent('a1', 'overview');
+        await until(() => v2AgentId === 'a1' && $('v2AppUpdateBtn'));
+        window.__answer = { 'POST /v1/agents/a1/app/update': [{ status: 400, body: { error: 'Needs a value for: mailbox.', needs: [{ key: 'mailbox', label: 'its address', type: 'email' }], unchanged: true } }] };
+        h.once(/\/v1\/agents\/a1\/app\/update$/, 'POST');
+        const up2 = v2AppUpdate('a1', $('v2AppUpdateBtn'));
+        await until(() => h.held.length === 1);
+        openV2Agent('a1', 'advanced');
+        await until(() => v2Tab === 'advanced' && !$('v2AppOut'));
+        await h.free(); await up2;
+        eq('its Advanced tab: said where to give it, with its name', toastText(), "Homework Helper's app was not updated: it needs a value first. Give it on its Overview, under App, and press Update again.");
+      } finally {
+        await h.free(); window.renderModelPickerForAgent = paint; window.__answer = {};
+        for (const k of ['/v1/agent-classes', '/v1/agents/a1/app', '/v1/agents/a2/app']) delete window.__override[k];
+        v2AppCache = null; try { v2Close(); } catch {}
+      }
+    },
+    reportSaveAndDiscardKeepWhatCameAfter: async () => {
+      // HB-0585: what is typed while a save is under way is kept, and saved too before it goes on.
+      // HB-0586: discarding A leaves B, opened while A was deleted.
+      const h = auditHold();
+      const toastText = () => $('toast').textContent;
+      const draft = (id, title, body) => ({ id, title, body, by: 'person', createdAt: new Date().toISOString(), issueUrl: 'https://example.com/' + id, fileName: id + '.md' });
+      try {
+        reportPaint(draft('r-a', 'Draft A', 'It stopped.'));
+        $('reportBody').value = 'It stopped on home-server.';
+        window.__answer = { 'PATCH /v1/problem-reports/r-a': [
+          { body: draft('r-a', 'Draft A', 'It stopped on {name}.') }, { body: draft('r-a', 'Draft A', 'It stopped on {name}. Typed while it saved.') }] };
+        const patches = calls('PATCH', /\/v1\/problem-reports\/r-a$/).length;
+        h.once(/\/v1\/problem-reports\/r-a$/, 'PATCH');
+        const rs = reportSaveEdits();
+        await until(() => h.held.length === 1);
+        $('reportBody').value = 'It stopped on home-server. Typed while it saved.';
+        await h.free();
+        const r = await rs;
+        eq('the words typed while it saved are saved too', calls('PATCH', /\/v1\/problem-reports\/r-a$/).slice(patches).map((c) => c.body.body),
+          ['It stopped on home-server.', 'It stopped on home-server. Typed while it saved.']);
+        eq('what Copy or GitHub goes on with is the newest, masked', r && r.body, 'It stopped on {name}. Typed while it saved.');
+        eq('and the field shows it', $('reportBody').value, 'It stopped on {name}. Typed while it saved.');
+        ok('the masking is said: ' + toastText(), toastText().includes('the report shows what will be sent'));
+        // Discard A; B is opened, and typed in, while A is deleted.
+        window.__confirmAnswer = true;
+        window.__override['/v1/problem-reports/r-b'] = draft('r-b', 'Draft B', 'body of B');
+        h.once(/\/v1\/problem-reports\/r-a$/, 'DELETE');
+        const gone = reportDiscard();
+        await until(() => h.held.length === 1);
+        await reportShow('r-b');
+        $('reportBody').value = 'B, being typed';
+        await h.free(); await gone;
+        eq('B stays the draft shown', reportCur && reportCur.id, 'r-b');
+        ok('its review open', !$('reportReview').hidden);
+        eq('with what is typed in it', $('reportBody').value, 'B, being typed');
+        ok('A was deleted', calls('DELETE', /\/v1\/problem-reports\/r-a$/).length >= 1);
+      } finally {
+        await h.free(); window.__answer = {}; window.__confirmAnswer = true;
+        delete window.__override['/v1/problem-reports/r-b'];
+        reportCur = null; reportGen++; $('reportBody').value = '';
+        if (reportDlg.open) reportDlg.close();
+      }
+    },
+    savedEditsLetTheSheetRedraw: async () => {
+      // HB-0475: an edit saved no longer holds back the redraw after Start or Stop; one typed and not saved still does.
+      const list = await (await fetch('/v1/agents')).json();
+      const a = list.find((x) => x.id === 'a1');
+      const set = async (state) => { window.__override['/v1/agents'] = list.map((x) => x.id === a.id ? { ...x, state } : x); await refresh(false); };
+      try {
+        await set('RUNNING');
+        openV2Agent(a.id, 'personality');
+        await until(() => $('v2Pane').querySelector('#editDesc'));
+        const desc = $('editDesc');
+        desc.value = 'Helps with homework, made up.';
+        desc.dispatchEvent(new Event('input', { bubbles: true }));
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        await set('STOPPED');
+        eq('typed and not saved: the redraw waits', v2SheetDrawnState, 'RUNNING');
+        await saveDescription();
+        await set('STOPPED');
+        eq('saved: the next poll redraws it', v2SheetDrawnState, 'STOPPED');
+        await set('RUNNING');
+        eq('and Start redraws it again', v2SheetDrawnState, 'RUNNING');
+      } finally {
+        delete window.__override['/v1/agents']; await refresh(false);
+        try { v2Close(); v2EditFor = null; v2SheetNotes.clear(); } catch {}
+      }
+    },
+    sheetEditCountsUntilItsSave: async () => {
+      // HB-0475 (review): an edit counts while its control differs from what it was. A token Connect used, then Stop:
+      // the tab is drawn again. A slow rename of A, B's sheet opened and B's name typed: B keeps its name, its header and its hold.
+      const list = await (await fetch('/v1/agents')).json();
+      const set = async (id, state) => { window.__override['/v1/agents'] = list.map((x) => x.id === id ? { ...x, state } : x); await refresh(false); };
+      const type = (el, value) => { el.focus(); el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); el.blur(); };
+      const h = auditHold();
+      window.__override['/v1/agents/a1/channels'] = { channels: [], imageSupports: ['telegram'], spare: {} };
+      try {
+        // Telegram: the token typed, then used by Connect.
+        await set('a1', 'RUNNING');
+        openV2Agent('a1', 'messaging');
+        const tok = await until(() => $('v2TgTokenIn'));
+        $('v2TgToken').hidden = false;
+        type(tok, 'made-up-token');
+        await set('a1', 'STOPPED');
+        eq('a token typed and not used: the redraw waits', v2SheetDrawnState, 'RUNNING');
+        window.__confirmAnswer = true;
+        window.__answer = { 'POST /v1/agents/a1/telegram': [{ body: { username: 'MadeUpBot', atNextStart: true } }] };
+        await v2AddTelegram('a1', true);
+        eq('Connect used it: the tab is drawn for the stopped agent', v2SheetDrawnState, 'STOPPED');
+        v2Close(); v2SheetNotes.clear();
+        // The rename: A's, slow; B's sheet opened meanwhile.
+        await set('a2', 'RUNNING');
+        openV2Agent('a1', 'personality');
+        await until(() => v2AgentId === 'a1' && $('v2Pane').querySelector('#editName') && $('editName').value === 'Homework Helper');
+        type($('editName'), 'Homework Helper, renamed');
+        h.once(/\/v1\/agents\/a1$/, 'PATCH');
+        const renamed = renameAgent();
+        await until(() => h.held.length === 1);
+        openV2Agent('a2', 'personality');
+        await until(() => v2AgentId === 'a2' && $('v2Pane').querySelector('#editName') && $('editName').value === 'Soccer Schedule');
+        type($('editName'), 'Soccer Schedule, typed');
+        await h.free(); await renamed;
+        eq("B's header is B's", $('editAgent').textContent, 'Soccer Schedule');
+        ok('A is named: ' + $('toast').textContent, $('toast').textContent.startsWith('Homework Helper: Renamed'));
+        await set('a2', 'STOPPED');
+        eq("B's name, typed and not saved, still holds the redraw", v2SheetDrawnState, 'RUNNING');
+        eq('and stays as typed', $('editName').value, 'Soccer Schedule, typed');
+      } finally {
+        await h.free(); window.__answer = {}; window.__confirmAnswer = true;
+        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/a1/channels']; await refresh(false);
+        try { v2Close(); v2EditFor = null; v2SheetNotes.clear(); } catch {}
+      }
+    },
+    sheetRefillsAreNotEdits: async () => {
+      // HB-0475 (second review): a control code fills again is noted as filled, so it holds no redraw: a connection
+      // attached (the picker and its box drawn again), the model menu opened and then drawn for a class, the
+      // swap row filled again with the memory row.
+      const list = await (await fetch('/v1/agents')).json();
+      const a = list.find((x) => x.id === 'a1');
+      let state = 'RUNNING';
+      const flip = async () => { state = state === 'RUNNING' ? 'STOPPED' : 'RUNNING'; window.__override['/v1/agents'] = list.map((x) => x.id === a.id ? { ...x, state } : x); await refresh(false); return state; };
+      const press = (el) => { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); el.focus(); el.blur(); };
+      const pick = (el, value) => { press(el); if (el.type === 'checkbox') el.checked = value; else el.value = value; el.dispatchEvent(new Event('change', { bubbles: true })); };
+      const conn = { id: 'c-made-up', kind: 'google', email: 'calendar@example.org', services: ['gmail'], createdAt: '2026-10-01T00:00:00Z', attachedTo: [] };
+      window.__override['/v1/connections'] = { connections: [conn] };
+      window.__override['/v1/agents/a1/connections'] = { accounts: [] };
+      try {
+        await flip(); await flip(); // RUNNING, drawn
+        // A connection attached: the picker and the no-send box are drawn again by its success.
+        openV2Agent('a1', 'knowledge');
+        await until(() => $('v2Pane').querySelector('#connAttachPick option[value="c-made-up"]'));
+        pick($('connAttachPick'), 'c-made-up'); pick($('connNoSend'), false);
+        window.__answer = { 'POST /v1/agents/a1/connections/attach': [{ body: { live: true } }] };
+        window.__override['/v1/connections'] = { connections: [{ ...conn, attachedTo: [{ id: 'a1' }] }] };
+        await attachConnection();
+        await until(() => !$('connAttachPick').querySelector('option[value="c-made-up"]'));
+        eq('attached: the tab redraws for the new state', await flip(), v2SheetDrawnState);
+        // The model menu opened and closed, then drawn again for a class with another model.
+        openV2Agent('a1', 'ai');
+        await until(() => $('v2Pane').querySelector('#editModel'));
+        press($('editModel'));
+        renderModelPickerForAgent({ ...a, profileModels: ['claude-sonnet-5', 'claude-opus-4-8'], profileDefaultModel: 'claude-sonnet-5', modelOverride: 'claude-opus-4-8' });
+        eq('the menu drawn for the class: the tab redraws', await flip(), v2SheetDrawnState);
+        // The memory and swap rows fill each other.
+        openV2Agent('a1', 'advanced');
+        await until(() => $('v2Pane').querySelector('#editSwapAllowance'));
+        press($('editSwapAllowance')); press($('editMemoryCap'));
+        fillMemoryCapRow({ ...v2Find('a1'), memoryCap: '4g', memoryCapEffective: '4g', swapAllowance: 'off' });
+        eq('the rows filled again: the tab redraws', await flip(), v2SheetDrawnState);
+        // And a box really typed in still holds it.
+        const env = $('envName');
+        env.focus(); env.value = 'MADE_UP_KEY'; env.dispatchEvent(new Event('input', { bubbles: true })); env.blur();
+        const held = v2SheetDrawnState;
+        await flip();
+        eq('a name typed and not added: it waits', v2SheetDrawnState, held);
+        env.value = '';
+      } finally {
+        window.__answer = {};
+        for (const k of ['/v1/agents', '/v1/connections', '/v1/agents/a1/connections']) delete window.__override[k];
+        await refresh(false);
+        try { v2Close(); v2EditFor = null; v2SheetNotes.clear(); } catch {}
+      }
+    },
+    editAnswersFollowWhatIsShown: async () => {
+      // HB-0584, HB-0475 (third review): what a save in an agent's edit forms comes back with goes by what is on screen
+      // (forAgent). A's variable removed, answered after B's Advanced tab opened: B's list stays B's, and A is named.
+      // A's add refused while B's Overview shows: said in a toast with A's name, not under forms out of sight. B's
+      // Schedule tab after an edit left on A's Advanced tab: A's edit holds nothing of B's. A file that would not
+      // load: nothing unsaved.
+      const list = await (await fetch('/v1/agents')).json();
+      const set = async (state) => { window.__override['/v1/agents'] = list.map((x) => x.id === 'a2' ? { ...x, state } : x); await refresh(false); };
+      const toastText = () => $('toast').textContent;
+      const type = (el, value) => { el.focus(); el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); el.blur(); };
+      const h = auditHold();
+      try {
+        await set('RUNNING');
+        // A's variable removed; B's Advanced tab opened while it went.
+        openV2Agent('a1', 'advanced');
+        await until(() => v2AgentId === 'a1' && editAgentId === 'a1' && $('v2Pane').querySelector('#envList'));
+        renderEnvList([{ id: 'env-a', name: 'MADE_UP_A' }]);
+        window.__confirmAnswer = true;
+        window.__answer = { 'DELETE /v1/agents/a1/env/env-a': [{ body: { envVars: [] } }] };
+        h.once(/\/v1\/agents\/a1\/env\/env-a$/, 'DELETE');
+        const mark = window.__calls.length;
+        const removed = removeEnvVar('env-a', 'MADE_UP_A');
+        await until(() => h.held.length === 1);
+        openV2Agent('a2', 'advanced');
+        await until(() => v2AgentId === 'a2' && editAgentId === 'a2' && $('v2Pane').querySelector('#envList'));
+        renderEnvList([{ id: 'env-b', name: 'MADE_UP_B' }]);
+        await h.free(); await removed;
+        ok("B's list stays B's: " + $('envList').textContent.trim(), $('envList').textContent.includes('MADE_UP_B'));
+        ok('A is named: ' + toastText(), toastText().startsWith('Homework Helper: MADE_UP_A removed'));
+        eq('removed from A', window.__calls.slice(mark).filter((x) => x.method === 'DELETE').map((x) => x.path), ['/v1/agents/a1/env/env-a']);
+        // A's add refused, B's Overview open: the forms are still A's, out of sight.
+        openV2Agent('a1', 'advanced');
+        await until(() => v2AgentId === 'a1' && editAgentId === 'a1' && $('v2Pane').contains($('editErr')));
+        $('envName').value = 'MADE_UP_KEY'; $('envValue').value = 'made-up-value';
+        window.__answer = { 'POST /v1/agents/a1/env': [{ status: 400, body: { error: 'That name is taken.' } }] };
+        await addEnvVar();
+        eq('A shown: said under its forms', $('editErr').textContent, 'That name is taken.');
+        window.__answer = { 'POST /v1/agents/a1/env': [{ status: 400, body: { error: 'That name is taken.' } }] };
+        h.once(/\/v1\/agents\/a1\/env$/, 'POST');
+        const adding = addEnvVar();
+        await until(() => h.held.length === 1);
+        openV2Agent('a2', 'overview');
+        await until(() => v2AgentId === 'a2' && v2Tab === 'overview' && !$('v2Pane').contains($('editErr')));
+        eq("B's Overview: the forms are still A's", editAgentId, 'a1');
+        await h.free(); await adding;
+        eq('said in a toast, with its name', toastText(), 'Homework Helper: That name is taken.');
+        eq('not under the forms out of sight', $('editErr').textContent, '');
+        // A's search test, answered after B's Advanced tab opened: not under B's button, said with A's name.
+        openV2Agent('a1', 'advanced');
+        await until(() => v2AgentId === 'a1' && editAgentId === 'a1' && $('v2Pane').querySelector('#agentSearchTestBtn'));
+        window.__answer = { 'POST /v1/agents/a1/search-test': [{ body: { ok: true, detail: 'Search works: DuckDuckGo answered.' } }] };
+        h.once(/\/v1\/agents\/a1\/search-test$/, 'POST');
+        const testing = testAgentSearch();
+        await until(() => h.held.length === 1);
+        openV2Agent('a2', 'advanced');
+        await until(() => v2AgentId === 'a2' && editAgentId === 'a2' && $('v2Pane').querySelector('#agentSearchTestOut'));
+        await h.free(); await testing;
+        eq("not under B's button", $('agentSearchTestOut').textContent, '');
+        eq("said with A's name", toastText(), 'Homework Helper: ✓ Search works: DuckDuckGo answered.');
+        // People who use another agent: A's list, answered after B's forms were filled, is not drawn in them.
+        editAgentId = 'a1';
+        window.__override['/v1/agents/a1/known-people'] = [{ userId: 'u-made-up', name: 'Sam Example' }];
+        h.once(/\/v1\/agents\/a1\/known-people$/);
+        const known = renderKnownPeople();
+        await until(() => h.held.length === 1);
+        editAgentId = 'a2'; $('tgKnownPeople').innerHTML = '';
+        await h.free(); await known;
+        ok("A's people are not offered on B's: " + $('tgKnownPeople').textContent, !$('tgKnownPeople').textContent.includes('Sam Example'));
+        editAgentId = 'a1';
+        await renderKnownPeople();
+        ok("on A's, Add adds to A: " + $('tgKnownPeople').innerHTML, $('tgKnownPeople').innerHTML.includes("addKnownPerson('a1','u-made-up','Sam Example')"));
+        // An edit left on A's Advanced tab, then B's Schedule tab.
+        openV2Agent('a1', 'advanced');
+        await until(() => v2AgentId === 'a1' && $('v2Pane').querySelector('#envName'));
+        type($('envName'), 'MADE_UP_SECOND');
+        ok('typed on A: unsaved', v2SheetUnsaved());
+        openV2Agent('a2', 'schedule');
+        await until(() => v2AgentId === 'a2' && $('v2Pane').contains($('cronBody')));
+        ok("B's Schedule: A's edit is not B's", !v2SheetUnsaved());
+        await set('STOPPED');
+        eq('so Stop redraws it', v2SheetDrawnState, 'STOPPED');
+        // A file that would not load: the file chosen is noted with it.
+        openV2Agent('a1', 'personality');
+        await until(() => v2AgentId === 'a1' && $('v2Pane').querySelector('#editFile') && $('editContent').value !== 'Loading…');
+        window.__answer = { 'GET /v1/agents/a1/files/MEMORY.md': [{ status: 413, body: { error: 'MEMORY.md is over the size limit.' } }] };
+        $('editFile').value = 'MEMORY.md'; $('editFile').dispatchEvent(new Event('change', { bubbles: true }));
+        await until(() => $('editErr').textContent.includes('nothing to save'));
+        ok('it would not load: nothing unsaved', !v2SheetUnsaved());
+      } finally {
+        await h.free(); window.__answer = {}; window.__confirmAnswer = true;
+        for (const f of ['envName', 'envValue']) $(f).value = '';
+        $('editFile').value = 'SOUL.md'; $('editErr').textContent = ''; $('tgKnownPeople').innerHTML = '';
+        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/a1/known-people']; await refresh(false);
+        try { v2Close(); v2EditFor = null; v2SheetNotes.clear(); } catch {}
+      }
+    },
+    scheduleFormAndTestsStayWithTheirAgent: async () => {
+      // HB-0591 (fifth review): a task typed on A's Schedule tab is not carried to B's, nor added there. A folder's Test,
+      // answered after B's Knowledge tab opened, is not drawn under B's rows: said with A's name (checkDataSource).
+      const h = auditHold();
+      const toastText = () => $('toast').textContent;
+      try {
+        openV2Agent('a1', 'schedule');
+        await until(() => v2AgentId === 'a1' && $('v2Pane').contains($('cronBody')));
+        $('cronName').value = 'Water reminder'; $('cronMsg').value = 'Water the beds'; $('cronMode').value = 'every'; cronModeChanged(); $('cronEvery').value = '30';
+        openV2Agent('a2', 'schedule');
+        await until(() => v2AgentId === 'a2' && cronAgentId === 'a2' && $('v2Pane').contains($('cronBody')));
+        eq("B's form is empty", ['cronName', 'cronMsg', 'cronEvery', 'cronMode'].map((id) => $(id).value), ['', '', '', 'cron']);
+        const mark = window.__calls.length;
+        await addCronJob();
+        eq('and Add there creates nothing', window.__calls.slice(mark).filter((c) => c.method === 'POST' && /\/crons$/.test(c.path)).length, 0);
+        $('cronErr').textContent = '';
+        // A folder's Test, slow; B's Knowledge tab opened meanwhile.
+        const folder = (id) => ({ id, kind: 'folder', hostPath: '/srv/made-up/' + id, mountName: id, access: 'ro' });
+        openV2Agent('a1', 'knowledge');
+        await until(() => v2AgentId === 'a1' && editAgentId === 'a1' && $('v2Pane').querySelector('#dataList'));
+        renderDataList([folder('a-notes')]);
+        const testBtn = await until(() => $('dataList').querySelector('[data-ds="a-notes"] button'));
+        window.__answer = { 'POST /v1/agents/a1/data-sources/a-notes/check': [{ body: { ok: true, message: 'The folder is there and readable.' } }] };
+        h.once(/\/v1\/agents\/a1\/data-sources\/a-notes\/check$/, 'POST');
+        const checking = checkDataSource('a-notes', testBtn);
+        await until(() => h.held.length === 1);
+        openV2Agent('a2', 'knowledge');
+        await until(() => v2AgentId === 'a2' && editAgentId === 'a2' && $('v2Pane').querySelector('#dataList'));
+        renderDataList([folder('b-notes')]);
+        await h.free(); await checking;
+        ok("not under B's rows: " + $('dataList').textContent, !$('dataList').textContent.includes('readable'));
+        eq("said with A's name", toastText(), 'Homework Helper: ✅ The folder is there and readable.');
+      } finally {
+        await h.free(); window.__answer = {};
+        for (const id of ['cronName', 'cronMsg', 'cronEvery']) $(id).value = '';
+        $('cronMode').value = 'cron'; cronModeChanged(); $('cronErr').textContent = '';
+        try { v2Close(); v2EditFor = null; v2SheetNotes.clear(); } catch {}
+      }
+    },
+    savedAfterARefillHoldsNothing: async () => {
+      // HB-0475 (fourth review): a rename answered after the sheet was closed and opened again. The box shows what the
+      // new open filled it with; the name sent is not noted under it, so it holds no redraw (and says nothing unsaved).
+      const list = await (await fetch('/v1/agents')).json();
+      const set = async (state) => { window.__override['/v1/agents'] = list.map((x) => x.id === 'a1' ? { ...x, state } : x); await refresh(false); };
+      const h = auditHold();
+      try {
+        await set('RUNNING');
+        openV2Agent('a1', 'personality');
+        await until(() => v2AgentId === 'a1' && $('v2Pane').querySelector('#editName') && $('editName').value === 'Homework Helper');
+        const name = $('editName');
+        name.focus(); name.value = 'Homework Helper, renamed'; name.dispatchEvent(new Event('input', { bubbles: true })); name.blur();
+        h.once(/\/v1\/agents\/a1$/, 'PATCH');
+        const renamed = renameAgent();
+        await until(() => h.held.length === 1);
+        // Closed, as its close event does (that comes with an animation frame, which a headless run may hold back).
+        v2Close(); v2AgentId = null; v2EditFor = null; v2SheetNotes.clear(); if (typeof v2NotesFor !== 'undefined') v2NotesFor = null;
+        openV2Agent('a1', 'personality');
+        await until(() => v2AgentId === 'a1' && $('v2Pane').querySelector('#editName') && $('editName').value === 'Homework Helper');
+        await h.free(); await renamed;
+        ok('the box as filled: nothing unsaved', !v2SheetUnsaved());
+        await set('STOPPED');
+        eq('so Stop redraws it', v2SheetDrawnState, 'STOPPED');
+      } finally {
+        await h.free(); delete window.__override['/v1/agents']; await refresh(false);
+        try { v2Close(); v2EditFor = null; v2SheetNotes.clear(); } catch {}
+      }
+    },
+    imageChoiceStaysAcrossTabs: async () => {
+      // Sixth review: an image chosen on Advanced and not pinned yet stays when another tab is opened and Advanced again;
+      // the sheet still counts it unsaved, and the machine's images are not read again.
+      const imgs = /\/v1\/runtime\/images$/;
+      const shut = () => { v2Close(); v2AgentId = null; v2EditFor = null; v2SheetNotes.clear(); if (typeof v2NotesFor !== 'undefined') v2NotesFor = null; };
+      window.__override['/v1/runtime/images'] = { default: 'hatchabot/runtime:2026.9.8', tags: [
+        { tag: 'hatchabot/runtime:made-up-one', exists: true, relation: 'newer' }, { tag: 'hatchabot/runtime:made-up-two', exists: true, relation: 'older' }] };
+      const h = auditHold();
+      try {
+        shut(); delete $('editImage').dataset.agent; delete $('editImage').dataset.loading;
+        // Eighth review: while its list loads, another tab and back does not read it again; the load under way fills it.
+        h.once(imgs);
+        const before = calls('GET', imgs).length;
+        openV2Agent('a1', 'advanced');
+        await until(() => h.held.length === 1);
+        openV2Agent('a1', 'personality');
+        await until(() => $('v2Pane').querySelector('#editName'));
+        openV2Agent('a1', 'advanced');
+        await until(() => $('v2Pane').querySelector('#editImage'));
+        await sleep(50);
+        eq('loading: the images not read again', calls('GET', imgs).length - before, 0);
+        await h.free();
+        await until(() => $('v2Pane').querySelector('#editImage') && !$('editImage').dataset.loading && [...$('editImage').options].some((o) => o.value === 'hatchabot/runtime:made-up-two'));
+        await sleep(50);
+        const read = calls('GET', imgs).length;
+        const sel = $('editImage');
+        ok('a choice to make', sel.value !== 'hatchabot/runtime:made-up-two');
+        sel.value = 'hatchabot/runtime:made-up-two'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+        ok('chosen: unsaved', v2SheetUnsaved());
+        openV2Agent('a1', 'personality');
+        await until(() => $('v2Pane').querySelector('#editName'));
+        openV2Agent('a1', 'advanced');
+        await until(() => $('v2Pane').querySelector('#editImage'));
+        await sleep(50);
+        eq('back on Advanced: still chosen, still unsaved, the images not read again', [$('editImage').value, v2SheetUnsaved(), calls('GET', imgs).length - read], ['hatchabot/runtime:made-up-two', true, 0]);
+        // Seventh review: a pin changed elsewhere (Bulk actions) while the sheet is open shows on Advanced, when nothing else is chosen here.
+        sel.value = v2SheetNotes.get(sel); sel.dispatchEvent(new Event('change', { bubbles: true }));
+        ok('the choice put back: nothing unsaved', !v2SheetUnsaved());
+        openV2Agent('a1', 'personality');
+        await until(() => $('v2Pane').querySelector('#editName'));
+        const list = await (await fetch('/v1/agents')).json();
+        window.__override['/v1/agents'] = list.map((x) => x.id === 'a1' ? { ...x, image: 'hatchabot/runtime:made-up-one' } : x);
+        await refresh(false);
+        // Ninth review: that refill loads as the first fill does: only the new pin offered, and Pin waits, until its list comes.
+        h.once(imgs);
+        openV2Agent('a1', 'advanced');
+        await until(() => h.held.length === 1);
+        eq('refilling: only the new pin, loading', [$('editImage').value, $('editImage').options.length, $('editImage').dataset.loading], ['hatchabot/runtime:made-up-one', 1, '1']);
+        const pinMark = window.__calls.length;
+        await saveImagePin();
+        eq('Pin while it loads sends nothing', window.__calls.slice(pinMark).filter((x) => x.method === 'PATCH').length, 0);
+        await h.free();
+        await until(() => $('editImage').value === 'hatchabot/runtime:made-up-one' && !$('editImage').dataset.loading && $('editImage').options.length > 1);
+        ok('the new pin shown, nothing unsaved', !v2SheetUnsaved());
+      } finally {
+        await h.free();
+        delete window.__override['/v1/runtime/images']; delete window.__override['/v1/agents']; await refresh(false);
+        shut(); editAgentId = null; delete $('editImage').dataset.agent; delete $('editImage').dataset.loading;
+      }
+    },
+    runtimeChoicesStayAcrossTabs: async () => {
+      // Ninth review: embed mode, memory cap and swap by the image's rule. A choice not saved yet stays when another tab is
+      // opened and Advanced again, and counts as unsaved; a change made elsewhere shows when nothing is chosen here.
+      const shut = () => { v2Close(); v2AgentId = null; v2EditFor = null; v2SheetNotes.clear(); if (typeof v2NotesFor !== 'undefined') v2NotesFor = null; };
+      const MENUS = ['editEmbedMode', 'editMemoryCap', 'editSwapAllowance'];
+      const change = (el, v) => { el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); };
+      const tabAndBack = async () => {
+        openV2Agent('a1', 'personality');
+        await until(() => $('v2Pane').querySelector('#editName'));
+        openV2Agent('a1', 'advanced');
+        await until(() => MENUS.every((id) => $('v2Pane').querySelector('#' + id)));
+        await sleep(50);
+      };
+      const dfltWas = myAccount.memoryCapDefault;
+      try {
+        shut();
+        openV2Agent('a1', 'advanced');
+        await until(() => MENUS.every((id) => $('v2Pane').querySelector('#' + id)));
+        ok('opened: nothing unsaved', !v2SheetUnsaved());
+        const chosen = MENUS.map((id) => { const el = $(id), o = [...el.options].find((x) => x.value !== el.value); change(el, o.value); return o.value; });
+        ok('chosen: unsaved', v2SheetUnsaved());
+        // Tenth review: the fleet default changed meanwhile (Settings): a kept choice's menu is worded afresh, its value kept.
+        myAccount.memoryCapDefault = chosen[1] === '6g' ? '4g' : '6g';
+        await tabAndBack();
+        eq('back on Advanced: each still chosen', MENUS.map((id) => $(id).value), chosen);
+        ok('and still unsaved', v2SheetUnsaved());
+        eq('the cap menu names the fleet default as it is now', [...$('editMemoryCap').options].filter((o) => o.textContent.includes('(the fleet default)')).map((o) => o.value), [myAccount.memoryCapDefault]);
+        myAccount.memoryCapDefault = dfltWas;
+        for (const id of MENUS) change($(id), v2SheetNotes.get($(id)));
+        ok('put back: nothing unsaved', !v2SheetUnsaved());
+        openV2Agent('a1', 'personality');
+        await until(() => $('v2Pane').querySelector('#editName'));
+        const list = await (await fetch('/v1/agents')).json();
+        const was = list.find((x) => x.id === 'a1');
+        const moved = { embedMode: (was.embedMode || 'baked') === 'baked' ? 'shared' : 'baked', memoryCap: was.memoryCap === '4g' ? '2g' : '4g', swapAllowance: was.swapAllowance === 'off' ? '' : 'off' };
+        window.__override['/v1/agents'] = list.map((x) => x.id === 'a1' ? { ...x, ...moved } : x);
+        await refresh(false);
+        openV2Agent('a1', 'advanced');
+        await until(() => $('v2Pane').querySelector('#editMemoryCap') && $('editMemoryCap').value === moved.memoryCap);
+        eq('changed elsewhere, nothing chosen here: shown', MENUS.map((id) => $(id).value), [moved.embedMode, moved.memoryCap, moved.swapAllowance]);
+        ok('and nothing unsaved', !v2SheetUnsaved());
+      } finally {
+        myAccount.memoryCapDefault = dfltWas;
+        delete window.__override['/v1/agents']; await refresh(false);
+        shut(); editAgentId = null;
+      }
+    },
+    scheduleEditStaysAcrossTabs: async () => {
+      // Tenth review: Edit, Overview, back to Schedule, change the message, Save: the one task is changed, not added again.
+      // Only another agent, or cancel, ends the edit.
+      const clear = () => { for (const id of ['cronName', 'cronExpr', 'cronEvery', 'cronTz', 'cronMsg']) $(id).value = ''; $('cronErr').textContent = ''; };
+      window.__crons = [{ id: 'c1', name: 'Morning brief', scheduleExpr: '0 8 * * *', message: 'Good morning', enabled: true, payloadKind: 'agentTurn' }];
+      try {
+        openV2Agent('a1', 'schedule');
+        await until(() => cronAgentId === 'a1' && cronCache.some((c) => c.id === 'c1') && $('v2Pane').contains($('cronBody')));
+        editCronJob('c1');
+        openV2Agent('a1', 'overview');
+        await until(() => v2Tab === 'overview' && !$('v2Pane').contains($('cronBody')));
+        openV2Agent('a1', 'schedule');
+        await until(() => $('v2Pane').contains($('cronBody')) && cronCache.some((c) => c.id === 'c1'));
+        await sleep(50);
+        eq('back on Schedule: still the edit, its button and its note', [cronEditingId, $('cronAddBtn').textContent, $('cronEditNote').style.display, $('cronName').value], ['c1', 'Save changes', '', 'Morning brief']);
+        const mark = window.__calls.length;
+        $('cronMsg').value = 'Good morning, made up';
+        $('cronAddBtn').click();
+        await until(() => $('cronAddBtn').textContent === 'Add task' && !$('cronAddBtn').disabled);
+        const after = window.__calls.slice(mark);
+        eq('the one task changed in place', after.filter((c) => c.method === 'PATCH').map((c) => [c.path, c.body]), [['/v1/agents/a1/crons/c1', { message: 'Good morning, made up' }]]);
+        eq('and none added', after.filter((c) => c.method === 'POST' && /\/crons$/.test(c.path)).length, 0);
+        // Another agent's Schedule tab ends it.
+        editCronJob('c1');
+        openV2Agent('a2', 'schedule');
+        await until(() => cronAgentId === 'a2');
+        eq('another agent: the edit ends', [cronEditingId, $('cronAddBtn').textContent, $('cronName').value], [null, 'Add task', '']);
+      } finally {
+        cancelCronEdit(); v2Close(); window.__crons = []; clear();
+      }
+    },
+    scheduleEditEndsWithTheSheet: async () => {
+      // Eleventh review: Edit, close the sheet, the task changes elsewhere, open it again and Save. Closing the sheet ended
+      // the edit, so nothing of the old task is sent back over the change. And a Save sends only what was changed from what
+      // Edit put in the form: a name changed elsewhere meanwhile stays.
+      const clear = () => { for (const id of ['cronName', 'cronExpr', 'cronEvery', 'cronTz', 'cronMsg']) $(id).value = ''; $('cronErr').textContent = ''; };
+      const sent = (mark) => window.__calls.slice(mark).filter((c) => c.method === 'PATCH' || (c.method === 'POST' && /\/crons$/.test(c.path))).map((c) => [c.method, c.path, c.body]);
+      window.__crons = [{ id: 'c1', name: 'Morning brief', scheduleExpr: '0 8 * * *', message: 'Good morning', enabled: true, payloadKind: 'agentTurn' }];
+      try {
+        openV2Agent('a1', 'schedule');
+        await until(() => cronAgentId === 'a1' && cronCache.some((c) => c.id === 'c1') && $('v2Pane').contains($('cronBody')));
+        editCronJob('c1');
+        v2Close();
+        // The check's Chrome does not always deliver a dialog's close event (it comes with a frame): sent as a browser would.
+        v2AgentDlg.dispatchEvent(new Event('close'));
+        await until(() => !v2AgentDlg.open && v2AgentId === null);
+        eq('closed: the edit ended, and what it put in the form went with it', [cronEditingId, $('cronAddBtn').textContent, $('cronName').value, $('cronMsg').value], [null, 'Add task', '', '']);
+        window.__crons = [{ ...window.__crons[0], message: 'Good morning, changed elsewhere' }];
+        openV2Agent('a1', 'schedule');
+        await until(() => $('v2Pane').contains($('cronBody')) && cronCache.some((c) => c.message === 'Good morning, changed elsewhere'));
+        await sleep(50);
+        const mark = window.__calls.length;
+        $('cronAddBtn').click();
+        await sleep(150);
+        eq('Save there sends nothing: the change made elsewhere stays', sent(mark), []);
+        // Edit again; the name is changed elsewhere and the list read again; the message is changed here: only it is sent.
+        clear();
+        editCronJob('c1');
+        window.__crons = [{ ...window.__crons[0], name: 'Morning brief (renamed elsewhere)' }];
+        await loadCrons();
+        $('cronMsg').value = 'Good morning, typed here';
+        const mark2 = window.__calls.length;
+        $('cronAddBtn').click();
+        await until(() => $('cronAddBtn').textContent === 'Add task' && !$('cronAddBtn').disabled);
+        eq('only the message: the name changed elsewhere is not put back', sent(mark2), [['PATCH', '/v1/agents/a1/crons/c1', { message: 'Good morning, typed here' }]]);
+      } finally {
+        cancelCronEdit(); v2Close(); window.__crons = []; clear();
+      }
+    },
+    groupChatChoiceIsUnsaved: async () => {
+      // Ninth review: Group chats and the room picker only show or hide fields, and Save is its own press: a change there
+      // is unsaved, so the messaging tab is not drawn over under it when the agent's state changes. Only a control whose
+      // change saves it (marked data-saves) is not counted.
+      const shut = () => { v2Close(); v2AgentId = null; v2EditFor = null; v2SheetNotes.clear(); if (typeof v2NotesFor !== 'undefined') v2NotesFor = null; };
+      const change = (el, v) => { el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); };
+      const list = await (await fetch('/v1/agents')).json();
+      try {
+        shut();
+        window.__override['/v1/agents/a1/channels'] = { channels: [{ kind: 'telegram', rooms: { mode: 'members' } }], imageSupports: [] };
+        openV2Agent('a1', 'messaging');
+        const mode = await until(() => document.getElementById('chanRoomMode-telegram'));
+        await sleep(50);
+        ok('opened: nothing unsaved', !v2SheetUnsaved());
+        change(mode, 'off');
+        ok('Group chats changed, not saved: unsaved', v2SheetUnsaved());
+        document.activeElement?.blur?.();
+        window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, state: a.state === 'RUNNING' ? 'STOPPED' : 'RUNNING' } : a);
+        await refresh(false);
+        await sleep(100);
+        eq('its state changed: the tab is not drawn over the choice', [document.getElementById('chanRoomMode-telegram') === mode, mode.value], [true, 'off']);
+        change(mode, 'members');
+        ok('put back: nothing unsaved', !v2SheetUnsaved());
+        const knocks = document.getElementById('chanKnocks-telegram');
+        ok('Who can reach it saves on its change: marked, and not counted', !!knocks && knocks.hasAttribute('data-saves') && !v2SheetCounts(knocks));
+        shut(); delete window.__override['/v1/agents']; await refresh(false);
+        // The room picker (Discord's servers), the same.
+        window.__override['/v1/agents/a2/channels'] = { channels: [{ kind: 'discord', rooms: { mode: 'room', roomId: 'srv-made-up-1' }, servers: [{ id: 'srv-made-up-1', name: 'Made-up Club' }, { id: 'srv-made-up-2', name: 'Made-up Team' }] }], imageSupports: ['discord'] };
+        openV2Agent('a2', 'channels');
+        const pick = await until(() => document.getElementById('chanRoomPick-discord'));
+        ok('opened on Discord: nothing unsaved', !v2SheetUnsaved());
+        change(pick, 'srv-made-up-2');
+        ok('another server picked, not saved: unsaved', v2SheetUnsaved());
+        change(pick, 'srv-made-up-1');
+        ok('put back: nothing unsaved again', !v2SheetUnsaved());
+      } finally {
+        delete window.__override['/v1/agents/a1/channels']; delete window.__override['/v1/agents/a2/channels']; delete window.__override['/v1/agents'];
+        await refresh(false);
+        shut(); editAgentId = null;
+      }
+    },
+    clearedAddBoxesAreNotEdits: async () => {
+      // Eighth review: a draft typed into an Add box, kept through a close and reopen (and noted as filled then), then
+      // added: the emptied box is as filled, so nothing is unsaved and the sheet still redraws after Stop.
+      const list = await (await fetch('/v1/agents')).json();
+      const set = async (state) => { window.__override['/v1/agents'] = list.map((x) => x.id === 'a1' ? { ...x, state } : x); await refresh(false); };
+      const shut = () => { v2Close(); v2AgentId = null; v2EditFor = null; v2SheetNotes.clear(); if (typeof v2NotesFor !== 'undefined') v2NotesFor = null; };
+      const type = (id, v) => { const el = $(id); el.focus(); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.blur(); };
+      const cases = [
+        ['advanced', [['envName', 'MADE_UP_KEY'], ['envValue', 'made-up-value']], () => addEnvVar(), 'POST /v1/agents/a1/env', { envVars: [{ id: 'e1', name: 'MADE_UP_KEY' }] }],
+        ['knowledge', [['pathNew', '/srv/made-up/notes']], () => addDataSource(), 'POST /v1/agents/a1/data-sources', { dataSources: [], state: 'RUNNING' }],
+        ['knowledge', [['repoUrl', 'https://example.com/made-up/notes.git']], () => addGitSource(), 'POST /v1/agents/a1/data-sources', { dataSources: [{ id: 'g1', kind: 'git', repoUrl: 'https://example.com/made-up/notes.git', access: 'ro' }], state: 'RUNNING' }],
+      ];
+      try {
+        for (const [tab, boxes, add, route, body] of cases) {
+          await set('RUNNING');
+          shut(); openV2Agent('a1', tab);
+          await until(() => $('v2Pane').querySelector('#' + boxes[0][0]));
+          for (const [id, v] of boxes) type(id, v);
+          shut(); openV2Agent('a1', tab);
+          await until(() => $('v2Pane').querySelector('#' + boxes[0][0]) && $(boxes[0][0]).value === boxes[0][1]);
+          window.__answer = { [route]: [{ body }] };
+          await add();
+          window.__answer = {};
+          eq(boxes[0][0] + ': added and emptied, nothing unsaved', [boxes.map(([id]) => $(id).value), v2SheetUnsaved()], [boxes.map(() => ''), false]);
+          await set('STOPPED');
+          eq(boxes[0][0] + ': so Stop redraws the sheet', v2SheetDrawnState, 'STOPPED');
+        }
+      } finally {
+        window.__answer = {}; delete window.__override['/v1/agents']; await refresh(false);
+        for (const id of ['envName', 'envValue', 'pathNew', 'repoUrl']) $(id).value = '';
+        try { shut(); } catch {}
+      }
+    },
+    setupFieldsSavedAfterARefill: async () => {
+      // Seventh review: setup fields saved while the sheet was closed and opened again. The list the new open filled is
+      // the baseline, as v2SheetSaving's guard keeps it: the sheet is not left "unsaved" for good.
+      const list = await (await fetch('/v1/agents')).json();
+      const fields = [{ key: 'p1', label: 'One', type: 'text', target: 'soul' }, { key: 'p2', label: 'Two', type: 'text', target: 'soul' }];
+      const shut = () => { v2Close(); v2AgentId = null; v2EditFor = null; v2SheetNotes.clear(); if (typeof v2NotesFor !== 'undefined') v2NotesFor = null; };
+      const h = auditHold();
+      try {
+        window.__override['/v1/agents'] = list.map((x) => x.id === 'a1' ? { ...x, state: 'RUNNING', parameters: fields } : x);
+        await refresh(false);
+        shut();
+        openV2Agent('a1', 'personality');
+        await until(() => $('v2Pane').querySelector('#paramList') && editParams.length === 2);
+        $('paramList').querySelector('button.danger').click();
+        ok('one removed: unsaved', v2SheetUnsaved());
+        h.once(/\/v1\/agents\/a1$/, 'PATCH');
+        const saving = saveSetupFields();
+        await until(() => h.held.length === 1);
+        shut();
+        openV2Agent('a1', 'personality');
+        await until(() => $('v2Pane').querySelector('#paramList') && editParams.length === 2);
+        await h.free(); await saving;
+        ok('saved after the refill: nothing held unsaved', !v2SheetUnsaved());
+      } finally {
+        await h.free(); delete window.__override['/v1/agents']; await refresh(false);
+        try { shut(); } catch {}
+      }
+    },
+    bulkRefusedIsNotDone: async () => {
+      // HB-0595: a model saved but refused by its runtime, or one that waits for a rebuild, is not counted as done.
+      try {
+        await openFleetActions();
+        await until(() => document.querySelectorAll('.faCb').length);
+        const ids = ['a1', 'a2', 'a4'];
+        document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = ids.includes(cb.dataset.id); });
+        $('faAction').value = 'model'; faRenderAction();
+        const o = document.createElement('option'); o.value = 'claude-sonnet-5'; $('faModel').replaceChildren(o); $('faModel').value = o.value;
+        agents.filter((x) => ids.includes(x.id)).forEach((x) => { x.profileModels = ['claude-sonnet-5']; });
+        window.__answer = {
+          'POST /v1/agents/a1/model': [{ body: { model: 'claude-sonnet-5', live: false, failed: true } }],
+          'POST /v1/agents/a2/model': [{ body: { model: 'claude-sonnet-5', live: true } }],
+          'POST /v1/agents/a4/model': [{ body: { model: 'claude-sonnet-5', rebuild: true } }],
+        };
+        await faApply();
+        await until(() => !$('faApplyBtn').disabled);
+        const said = $('faResults').textContent;
+        ok('one done, one at its next rebuild, one not applied: ' + said, said.includes('1 done') && said.includes('1 saved, applied at its next rebuild') && said.includes('1 saved, but not applied: Homework Helper'));
+        ok('and why, by name, with it: ' + said, said.includes('1 saved, but not applied: Homework Helper: saved, but its runtime refused it'));
+        // Connect as peers: the answer names the sleeping agents, which take it at their next Start or Rebuild.
+        $('faAction').value = 'peers-connect'; faRenderAction();
+        const note = 'Soccer Schedule is asleep. A sleeping agent wakes for a message as it was; it takes this change at its next Start or Rebuild, and its card says its peers changed.';
+        window.__answer = { 'POST /v1/agent-peers/mesh': [{ body: { connected: true, agents: 3, changed: 3, grants: 6, needRebuild: [], skipped: [], note } }] };
+        await faApply();
+        await until(() => !$('faApplyBtn').disabled);
+        ok('Connect says which sleep: ' + $('faResults').textContent, $('faResults').textContent.endsWith(note));
+      } finally {
+        window.__answer = {};
+        if (fleetActionsDlg.open) fleetActionsDlg.close();
+        await refresh(false);
+      }
+    },
+    importedShortTaskCanBeRenamed: async () => {
+      // HB-0588: a task made elsewhere that runs every 1.5 s can be renamed; its cadence is not sent, and a new short one is still refused.
+      window.__crons = [{ id: 'c1', name: 'Reminder', everyMs: 1500, message: 'Water the beds', enabled: true, payloadKind: 'agentTurn' },
+        { id: 'c2', name: 'Weekly tidy', everyMs: 100000, message: 'Tidy the notes', enabled: true, payloadKind: 'agentTurn' }];
+      try {
+        openV2Agent('a1', 'schedule');
+        await until(() => cronCache.some((c) => c.id === 'c2') && $('v2Pane').querySelector('#cronBody'));
+        editCronJob('c1');
+        eq('Edit shows its interval as the box can', $('cronEvery').value, '0.03');
+        const mark = window.__calls.length;
+        $('cronName').value = 'Water reminder'; $('cronErr').textContent = '';
+        await addCronJob();
+        const sent = window.__calls.slice(mark).filter((c) => c.method === 'PATCH' && c.path === '/v1/agents/a1/crons/c1');
+        eq('the new name alone is sent', sent.map((c) => c.body), [{ name: 'Water reminder' }]);
+        eq('no complaint', $('cronErr').textContent, '');
+        // 1.670 is the 1.67 Edit put there: the same interval, not sent.
+        editCronJob('c2');
+        eq('Edit shows 1.67', $('cronEvery').value, '1.67');
+        $('cronName').value = 'Weekly tidy, renamed'; $('cronEvery').value = '1.670'; $('cronErr').textContent = '';
+        const m3 = window.__calls.length;
+        await addCronJob();
+        eq('only the name is sent', window.__calls.slice(m3).filter((c) => c.method === 'PATCH' && c.path === '/v1/agents/a1/crons/c2').map((c) => c.body), [{ name: 'Weekly tidy, renamed' }]);
+        // A new task as short is refused, as before.
+        cancelCronEdit();
+        $('cronName').value = 'Too often'; $('cronMsg').value = 'Say hello.'; $('cronMode').value = 'every'; $('cronEvery').value = '0.03';
+        const m2 = window.__calls.length;
+        await addCronJob();
+        ok('a new one that short is refused: ' + $('cronErr').textContent, /0\.25/.test($('cronErr').textContent) && !window.__calls.slice(m2).some((c) => c.method === 'POST' && /\/crons$/.test(c.path)));
+      } finally {
+        window.__crons = []; cancelCronEdit(); $('cronName').value = ''; $('cronMsg').value = ''; $('cronEvery').value = ''; $('cronErr').textContent = '';
+        try { v2Close(); } catch {}
+      }
+    },
+    mediaAtThePublicAddressAsksWhenItFails: async () => {
+      // HB-0589: a picture or a player cannot ask for the second factor. It is drawn at once; at the public address, its load
+      // failing (here: there is no file behind the stub) asks the file route whether it may be read (check=1, which reads
+      // nothing) through api(), which asks for the factor, then loads it once more. Its folder is not read (ninth review).
+      window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
+      const STEP = { status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
+      const pub = appConfig.publicAddress;
+      const reads = () => calls('GET', /\/v1\/agents\/a1\/fs$/).length;
+      const fileCalls = () => calls('GET', /\/v1\/agents\/a1\/fs\/file$/);
+      const checks = () => fileCalls().filter((c) => /[?&]check=1$/.test(c.url)).length;
+      try {
+        window.__override['/v1/agents/a1/fs'] = { path: 'garden', entries: [{ name: 'plan.png', type: 'file', size: 2048, mtime: '' }, { name: 'walk.mp4', type: 'file', size: 2048, mtime: '' }] };
+        openV2Agent('a1', 'files');
+        await v2LoadFiles('a1', 'garden');
+        await until(() => byText('#v2FilesDrop td', 'plan.png'));
+        appConfig.publicAddress = true;
+        window.__answer = { 'GET /v1/agents/a1/fs/file': [STEP, { body: {} }] };
+        const n = checks(), r0 = reads();
+        await v2OpenFile('a1', 'garden', 'plan.png', 2048);
+        const img = $('v2Files').querySelector('img');
+        ok('the picture is drawn at once', !!img);
+        await until(() => sfDlg.open);
+        eq('the file is checked only once its load failed', checks() - n, 1);
+        sfDone();
+        await until(() => img.getAttribute('src').endsWith('&again=1'));
+        eq('given: checked again, and the picture loaded once more; its folder not read', [checks() - n, reads() - r0], [2, 0]);
+        await until(() => $('v2Files').textContent.includes('could not be shown here'));
+        ok('failing again, that is said', !$('v2Files').querySelector('img'));
+        window.__answer = { 'GET /v1/agents/a1/fs/file': [STEP] };
+        await v2OpenFile('a1', 'garden', 'walk.mp4', 2048);
+        await until(() => sfDlg.open);
+        byText('#sfDlg button', 'Cancel').click();
+        await until(() => $('v2Files').textContent.includes('The second factor was not given'));
+        ok('not given: said, and no player', !$('v2Files').querySelector('video'));
+        // A reader in a frame (eighth review): the file's check first, through api(), which asks; then the frame reads the
+        // sandboxed URL from the server. Its folder is not read, and the file is not downloaded through the page (ninth review).
+        const filesRead = fileCalls().length, k = reads();
+        window.__answer = { 'GET /v1/agents/a1/fs/file': [STEP, { body: {} }] };
+        const pdf = v2OpenFile('a1', 'garden', 'map.pdf', 2048);
+        await until(() => sfDlg.open);
+        ok('no frame before the factor is given', !$('v2Files').querySelector('iframe'));
+        sfDone();
+        await pdf;
+        const frame = $('v2Files').querySelector('iframe');
+        eq('then the reader is drawn from the server URL', frame && frame.getAttribute('src'), '/v1/agents/a1/fs/file?path=' + encodeURIComponent('garden/map.pdf') + '&inline=1');
+        eq('the check (check=1) asked twice, before and after the factor; nothing else of the file, and the folder not at all',
+          [fileCalls().slice(filesRead).map((c) => /[?&]check=1$/.test(c.url)), reads() - k], [[true, true], 0]);
+        appConfig.publicAddress = false;
+        const m = reads();
+        await v2OpenFile('a1', 'garden', 'plan.png', 2048);
+        ok('at the private address the picture is drawn', !!$('v2Files').querySelector('img'));
+        await sleep(200);
+        eq('and its failing reads nothing', reads(), m);
+      } finally {
+        appConfig.publicAddress = pub; window.__answer = {};
+        delete window.__override['/v1/second-factor']; delete window.__override['/v1/agents/a1/fs'];
+        if (sfDlg.open) sfDlg.close();
+        try { v2Close(); } catch {}
+      }
+    },
+    costChartsFollowThePoll: async () => {
+      // HB-0474: the poll reads the AI sources' Costs charts again, at most once a minute, and only those in sight
+      // (an open drawer, on screen); one that fails keeps the chart drawn, with a note.
+      const now = Date.now(), H = 3600e3;
+      window.__override['/v1/usage/spend'] = { range: 'week', bucketHours: 3, planShare: 0, monthly: 0, models: [{ model: 'claude-sonnet-5', cost: 8 }], choices: [],
+        buckets: Array.from({ length: 56 }, (_, i) => ({ at: new Date(now - (56 - i) * 3 * H).toISOString(), cacheWrite: 0.1, cacheRead: 0.02, output: 0.02, input: 0.003, tokens: 2e5 })),
+        totals: { cacheWrite: 5.6, cacheRead: 1.1, output: 1.1, input: 0.2, cost: 8, tokens: 11e6 } };
+      const asked = () => calls('GET', /\/v1\/usage\/spend$/).length;
+      const poll = async () => { const n = asked(); aiChartsAt = Date.now() - 61000; await loadSourceUsage(); await sleep(150); return asked() - n; };
+      try {
+        openAiDlg('ai');
+        const box = await until(() => document.querySelector('#aiList details.srcspend[open] .spendchart svg') && document.querySelector('#aiList details.srcspend[open]'));
+        const chart = box.querySelector('.spendchart'), shown = () => document.querySelectorAll('#aiList details.srcspend[open] .spendchart').length;
+        box.scrollIntoView({ block: 'center' });
+        await sleep(100);
+        let n = asked();
+        await loadSourceUsage();
+        await sleep(100);
+        eq('within a minute of drawing: not again', asked(), n);
+        const read = await poll();
+        ok('a minute on, the poll reads the one in sight again: ' + read, read >= 1 && read <= shown());
+        // Folded: not read, though it was drawn.
+        box.open = false; await sleep(50);
+        eq('a folded drawer: not read', await poll(), 0);
+        box.open = true; await until(() => chart.querySelector('svg')); box.scrollIntoView({ block: 'center' }); await sleep(100);
+        // Out of sight: scrolled away inside the dialog, or the dialog shut.
+        const pad = document.createElement('div'); pad.style.height = '4000px'; $('aiList').prepend(pad);
+        box.scrollIntoView({ block: 'center' }); pad.scrollIntoView({ block: 'start' }); await sleep(100);
+        eq('scrolled out of sight: not read', await poll(), 0);
+        pad.remove(); box.scrollIntoView({ block: 'center' }); await sleep(100);
+        // A read again that fails: the chart stays, with a note.
+        window.__answer = { 'GET /v1/usage/spend': Array.from({ length: shown() }, () => ({ status: 500, body: { error: 'The usage could not be read.' } })) };
+        await poll();
+        await until(() => chart.querySelector('.spendstale'));
+        ok('the chart is still drawn', !!chart.querySelector('svg'));
+        ok('with a note: ' + chart.querySelector('.spendstale').textContent, /The usage could not be read/.test(chart.querySelector('.spendstale').textContent));
+        window.__answer = {};
+        await poll();
+        await until(() => !chart.querySelector('.spendstale'));
+        ok('read again: the note goes', !chart.querySelector('.spendstale') && !!chart.querySelector('svg'));
+        aiDlg.close();
+        n = asked(); aiChartsAt = 0;
+        await loadSourceUsage();
+        await sleep(100);
+        eq('with Settings closed, not at all', asked(), n);
+      } finally { window.__answer = {}; delete window.__override['/v1/usage/spend']; if (aiDlg.open) aiDlg.close(); }
+    },
+    rebuildAllOwesStoppedAgents: async () => {
+      // HB-0466: Rebuild all says a stopped agent is rebuilt when it next starts: it asks the server to owe it that.
+      // Fourth review: only one a rebuild would change (here: on an older image); one already current is left as it is.
+      // Sixth review: "would change" is the server's own answer (rebuild), and a request that fails is said, by name, not skipped.
+      const list = await (await fetch('/v1/agents')).json();
+      const own = (a) => a.runtimeRef && !a.migratedTo && (a.role ? a.role === 'owner' : true);
+      const current = list.find((a) => own(a) && a.state === 'RUNNING' && a.id !== 'a1');
+      const rebRe = /\/v1\/agents\/[^/]+\/rebuild$/;
+      try {
+        window.__override['/v1/agents'] = list.map((a) => a.id === current.id ? { ...a, state: 'STOPPED', updateAvailable: true, rebuild: undefined }
+          : a.state === 'STOPPED' ? { ...a, updateAvailable: true, rebuild: { level: 'recommended', reasons: ['a newer runtime image is ready'] } } : a);
+        await refresh(false);
+        const down = agents.filter((a) => a.state === 'STOPPED' && own(a) && a.rebuild);
+        ok('a stopped agent behind in the stub', down.length >= 1);
+        window.__confirmAnswer = true;
+        window.__answer = Object.fromEntries(down.map((a) => ['POST /v1/agents/' + a.id + '/rebuild', [{ status: 202, body: { rebuilding: false, atNextStart: true } }]]));
+        const asked = window.__confirms.length, n = calls('POST', rebRe).length;
+        await rebuildAll();
+        ok('the question says it: ' + window.__confirms[asked], /stay(s)? down, and (is|each is) rebuilt when it next starts/.test(window.__confirms[asked]));
+        const sent = calls('POST', rebRe).slice(n);
+        eq('each stopped one is asked to wait for its next start', down.map((a) => sent.filter((c) => c.path === '/v1/agents/' + a.id + '/rebuild').map((c) => c.body)), down.map(() => [{ stoppedWaits: true }]));
+        ok('and every one with stoppedWaits', sent.length > down.length && sent.every((c) => c.body.stoppedWaits === true));
+        ok('the result says it: ' + $('toast').textContent, $('toast').textContent.includes(down.length + ' not running: ') && $('toast').textContent.includes('rebuilt when it next starts'));
+        eq('the one the server says needs none is not asked', sent.filter((c) => c.path === '/v1/agents/' + current.id + '/rebuild').length, 0);
+        // A refusal for being busy is skipped; any other failure is counted as failed, with its name and why.
+        const running = agents.filter((a) => a.state === 'RUNNING' && own(a));
+        window.__answer = {
+          ['POST /v1/agents/' + running[0].id + '/rebuild']: [{ status: 409, body: { error: 'Another operation is already running on this agent.' } }],
+          ['POST /v1/agents/' + running[1].id + '/rebuild']: [{ status: 500, body: { error: 'The machine did not answer.' } }],
+        };
+        await rebuildAll();
+        const said = $('toast').textContent;
+        ok('busy: skipped; failed: named, with why: ' + said, said.includes('1 skipped (busy or already changing)') && said.includes('1 failed — ' + running[1].name + ': The machine did not answer.'));
+      } finally { window.__answer = {}; window.__confirmAnswer = true; delete window.__override['/v1/agents']; await refresh(false); }
+    },
+    webChatCountsAfterTheRead: async () => {
+      // HB-0495: the log comes back as its last 100 messages. A message of the same words cut from its start no longer hides that the new one arrived.
+      const list = await (await fetch('/v1/agents')).json();
+      const a = list[1];
+      const chat = '/v1/agents/' + a.id + '/chat';
+      const box = $('wchatText');
+      const at = (m) => new Date(Date.UTC(2026, 10, 8, 9, m)).toISOString();
+      const pair = (m) => [{ role: 'user', text: 'ok', at: at(m) }, { role: 'assistant', text: 'Noted.', at: at(m) }];
+      const reopen = async () => { webChatDlg.close(); await openWebChatPanel(a.id); await until(() => !$('wchatEmpty') || !$('wchatEmpty').textContent.includes('Loading')); };
+      const unsure = async () => {
+        window.__answer = { ['POST ' + chat]: [{ status: 504, body: { error: 'No answer within 280 s.' } }] };
+        box.value = 'ok';
+        await webChatSend();
+        window.__answer = {};
+      };
+      try {
+        window.__override[chat] = { messages: [...pair(0), ...pair(1), ...pair(2)] };
+        await openWebChatPanel(a.id);
+        await until(() => $('wchatLog').querySelector('.wchat-msg'));
+        await unsure();
+        // It arrived; the log is cut to its last six now, so the oldest "ok" is gone.
+        window.__override[chat] = { messages: [...pair(1), ...pair(2), ...pair(3)] };
+        await reopen();
+        eq('it arrived: nothing comes back', [box.value, $('wchatErr').textContent], ['', '']);
+        // It did not arrive: nothing after the read.
+        await unsure();
+        await reopen();
+        eq('it did not: it comes back', box.value, 'ok');
+        ok('with the note: ' + $('wchatErr').textContent, /may not have been delivered/.test($('wchatErr').textContent));
+        // A log that gives a message no time: one with no time when it was read, and the new one, delivered, with none either.
+        box.value = ''; $('wchatErr').textContent = ''; webChatUnsure.clear();
+        const untimed = { role: 'user', text: 'ok' };
+        window.__override[chat] = { messages: [untimed, ...pair(1), ...pair(2)] };
+        await reopen();
+        await unsure();
+        window.__override[chat] = { messages: [untimed, ...pair(1), ...pair(2), untimed] };
+        await reopen();
+        eq('delivered with no time: nothing comes back', [box.value, $('wchatErr').textContent], ['', '']);
+        await unsure();
+        await reopen();
+        eq('not delivered: it comes back', box.value, 'ok');
+        // Tenth review: Send does not wait for the log. Sent while it loads, it goes at once and follows no read (sentAt,
+        // as after a read that failed); when the log comes, the message and its answer stay after it.
+        box.value = ''; $('wchatErr').textContent = ''; webChatUnsure.clear();
+        const h = auditHold();
+        h.once(new RegExp(chat + '$'), 'GET');
+        webChatDlg.close();
+        window.__override[chat] = { messages: [...pair(1), ...pair(2), ...pair(3)] };
+        const opening = openWebChatPanel(a.id);
+        await until(() => h.held.length === 1);
+        const posts = calls('POST', new RegExp(chat + '$')).length;
+        ok('while it loads, Send is on', !$('wchatSend').disabled);
+        window.__answer = { ['POST ' + chat]: [{ body: { reply: 'Noted early.' } }] };
+        box.value = 'ok early'; await webChatSend(); window.__answer = {};
+        eq('sent at once, with no read before it', [calls('POST', new RegExp(chat + '$')).length - posts, box.value, (webChatUnsure.get(a.id) || []).map((s) => !!s.sentAt)], [1, '', [true]]);
+        await h.free(); await opening;
+        eq('the log came: the message and its answer stay after it', [...$('wchatLog').querySelectorAll('.wchat-msg:not([data-log])')].map((el) => el.textContent), ['ok early', 'Noted early.']);
+        ok('the log drawn above them', $('wchatLog').querySelectorAll('.wchat-msg[data-log]').length === 6 && !$('wchatEmpty'));
+        ok('and Send on', !$('wchatSend').disabled);
+        // A fresh read for what follows.
+        webChatUnsure.clear(); await reopen();
+        // Answered with nothing in doubt, its record goes; the next "ok" keeps the count of those before it.
+        window.__answer = { ['POST ' + chat]: [{ body: { reply: 'Noted.' } }, { body: { reply: 'Noted.' } }] };
+        box.value = 'ok'; await webChatSend();
+        box.value = 'ok'; await webChatSend(); window.__answer = {};
+        eq('two answered: nothing kept for them', webChatUnsure.has(a.id), false);
+        await unsure();
+        eq('the third, a 504: kept, with the two before it', webChatUnsure.get(a.id).map((s) => [s.before, s.unsure]), [[2, true]]);
+        window.__override[chat] = { messages: [...pair(1), ...pair(2), ...pair(3), ...pair(4), ...pair(5)] }; // the two answered, not the third
+        await reopen();
+        eq('the third did not arrive: it comes back', box.value, 'ok');
+        box.value = ''; $('wchatErr').textContent = '';
+        await unsure();
+        window.__override[chat] = { messages: [...pair(1), ...pair(2), ...pair(3), ...pair(4), ...pair(5), ...pair(6)] };
+        await reopen();
+        eq('this one arrived: nothing comes back', [box.value, $('wchatErr').textContent], ['', '']);
+        // "ok" answered, then "ok" again still waiting when the chat is closed and opened again; its 504 comes after.
+        box.value = ''; $('wchatErr').textContent = ''; webChatUnsure.clear();
+        await reopen();
+        window.__answer = { ['POST ' + chat]: [{ body: { reply: 'Noted.' } }] };
+        box.value = 'ok'; await webChatSend();
+        const w = auditHold();
+        w.once(new RegExp(chat + '$'), 'POST');
+        box.value = 'ok'; const waiting = webChatSend();
+        await until(() => w.held.length === 1);
+        window.__override[chat] = { messages: [...pair(1), ...pair(2), ...pair(3), ...pair(4), ...pair(5), ...pair(6), ...pair(7)] }; // the first one's copy
+        await reopen();
+        eq('still waiting at the reopen: nothing comes back yet', [box.value, $('wchatErr').textContent], ['', '']);
+        window.__answer = { ['POST ' + chat]: [{ status: 504, body: { error: 'No answer within 280 s.' } }] };
+        await w.free(); await waiting; window.__answer = {};
+        await reopen();
+        eq('its 504 came after: the next open offers it', box.value, 'ok');
+        // Seventh review: the read fails, "ok" is sent and gets a 502; the next read holds three earlier "ok" only: it comes back.
+        const failRead = () => ({ ['GET ' + chat]: [{ status: 500, body: { error: 'Its conversation could not be read (made up).' } }] }); // a new list each time: the stub takes from it
+        const sendAfterFailedRead = async () => {
+          box.value = ''; $('wchatErr').textContent = ''; webChatUnsure.clear();
+          window.__answer = failRead();
+          webChatDlg.close(); await openWebChatPanel(a.id);
+          eq('the read failed: said, and Send on', [$('wchatErr').textContent, $('wchatSend').disabled], ['Its conversation could not be read (made up).', false]);
+          window.__answer = { ['POST ' + chat]: [{ status: 502, body: { error: 'The turn did not complete, and the message may have reached it.' } }] };
+          box.value = 'ok'; await webChatSend(); window.__answer = {};
+        };
+        await sendAfterFailedRead();
+        window.__override[chat] = { messages: [...pair(0), ...pair(1), ...pair(2)] };
+        await reopen();
+        eq('after a failed read, three earlier "ok" do not stand in for it: it comes back', box.value, 'ok');
+        // Its copy timed after it was sent: it arrived, nothing comes back.
+        await sendAfterFailedRead();
+        window.__override[chat] = { messages: [...pair(0), ...pair(1), ...pair(2), { role: 'user', text: 'ok', at: new Date(Date.now() + 1000).toISOString() }] };
+        await reopen();
+        eq('its copy after it: nothing comes back', [box.value, $('wchatErr').textContent], ['', '']);
+      } finally {
+        window.__answer = {}; delete window.__override[chat];
+        webChatUnsure.clear(); box.value = '';
+        if (webChatDlg.open) webChatDlg.close();
+      }
+    },
+    webChatEarlySendCountedOnce: async () => {
+      // Eleventh review: "ok" sent while the conversation loads, and answered; its copy is in the read. Then "ok" again,
+      // a 504 though it arrived. Counted against the read, the first was counted twice (in the read, and by its bubble),
+      // and the second came back on reopen. Counted together by time, it does not; one that did not arrive still does.
+      const list = await (await fetch('/v1/agents')).json();
+      const a = list[1];
+      const chat = '/v1/agents/' + a.id + '/chat';
+      const box = $('wchatText');
+      const ago = (m) => new Date(Date.now() - m * 60000).toISOString();
+      const older = [{ role: 'user', text: 'ok', at: ago(30) }, { role: 'assistant', text: 'Noted.', at: ago(30) }];
+      const copy = () => { const at = new Date(Date.now() + 500).toISOString(); return [{ role: 'user', text: 'ok', at }, { role: 'assistant', text: 'Noted.', at }]; };
+      const reopen = async () => { webChatDlg.close(); await openWebChatPanel(a.id); await until(() => !$('wchatEmpty') || !$('wchatEmpty').textContent.includes('Loading')); };
+      const round = async (secondArrives) => {
+        box.value = ''; $('wchatErr').textContent = ''; webChatUnsure.clear();
+        if (webChatDlg.open) webChatDlg.close();
+        const h = auditHold();
+        h.once(new RegExp(chat + '$'), 'GET');
+        const opening = openWebChatPanel(a.id);
+        await until(() => h.held.length === 1);
+        window.__answer = { ['POST ' + chat]: [{ body: { reply: 'Noted.' } }] };
+        box.value = 'ok'; await webChatSend(); window.__answer = {};
+        const first = copy();
+        window.__override[chat] = { messages: [...older, ...first] };
+        await h.free(); await opening;
+        ok('the read came, with the first one in it', $('wchatLog').querySelectorAll('.wchat-msg.me[data-log]').length === 2);
+        window.__answer = { ['POST ' + chat]: [{ status: 504, body: { error: 'No answer within 280 s.' } }] };
+        box.value = 'ok'; await webChatSend(); window.__answer = {};
+        window.__override[chat] = { messages: [...older, ...first, ...(secondArrives ? copy() : [])] };
+        await reopen();
+      };
+      try {
+        await round(true);
+        eq('the second arrived: nothing comes back', [box.value, $('wchatErr').textContent], ['', '']);
+        await round(false);
+        eq('it did not: it comes back', box.value, 'ok');
+        ok('with the note: ' + $('wchatErr').textContent, /may not have been delivered/.test($('wchatErr').textContent));
+      } finally {
+        window.__answer = {}; delete window.__override[chat];
+        webChatUnsure.clear(); box.value = ''; $('wchatErr').textContent = '';
+        if (webChatDlg.open) webChatDlg.close();
       }
     },
   });
@@ -6778,6 +8449,89 @@ const SCENARIOS = String.raw`(() => {
         if (moveSourceDlg.open) moveSourceDlg.close();
         window.__answer = {}; delete window.__override['/v1/ai-profiles'];
         profiles = was; await refresh(true); renderAiList();
+      }
+    },
+    classLeavingPendingSaid: async () => {
+      // An agent whose class is applying a change leaves it once that is done: the answers say so, not "detached".
+      const toastText = () => document.getElementById('toast').textContent;
+      const tax = agents.find((a) => a.name === 'Tax Helper') || agents[0];
+      const was = profiles;
+      const other = { ...profiles[0], id: 'pOther', name: 'Spare key', shared: true, defaultSource: false };
+      profiles = [...profiles, other];
+      window.__override['/v1/ai-profiles'] = profiles;
+      try {
+        await refresh(true);
+        await openFleetActions();
+        await until(() => document.querySelectorAll('.faCb').length);
+        document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = cb.dataset.id === tax.id; });
+        $('faAction').value = 'source'; faRenderAction();
+        $('faSource').value = 'pOther';
+        window.__answer = { 'POST /v1/ai-profiles/pOther/adopt-agents': [{ body: { switched: 1, rebuilding: 0, classDetached: 0, classDetachPending: 1, skipped: [] } }] };
+        await faApply();
+        await until(() => !$('faApplyBtn').disabled);
+        const said = $('faResults').textContent;
+        ok('the bulk switch says one may leave a class: ' + said, said.includes('1 may leave a class once the class change under way is done') && !said.includes('detached from a class'));
+        fleetActionsDlg.close();
+        editAgentId = tax.id;
+        const pick = document.createElement('option'); pick.value = 'claude-haiku-4-5'; $('editModel').replaceChildren(pick); $('editModel').value = 'claude-haiku-4-5';
+        window.__answer = { ['POST /v1/agents/' + tax.id + '/model']: [{ body: { model: 'claude-haiku-4-5', live: true, classDetached: 'pending' } }] };
+        await switchModel();
+        ok('the model change says the class decides after its change: ' + toastText(), toastText().includes('once that is done, it leaves the class') && !toastText().includes('Detached from its class'));
+      } finally {
+        if (fleetActionsDlg.open) fleetActionsDlg.close();
+        window.__answer = {}; delete window.__override['/v1/ai-profiles'];
+        profiles = was; await refresh(true);
+      }
+    },
+    defaultModelClassLeavingSaid: async () => {
+      // A new default that takes ticked agents off their class: the toast says so, the one still deciding too.
+      const toastText = () => document.getElementById('toast').textContent;
+      const tax = agents.find((a) => a.name === 'Tax Helper') || agents[0];
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.className = 'applyModelCb'; cb.dataset.id = tax.id; cb.checked = true;
+      document.body.appendChild(cb);
+      try {
+        applyModelState = { profileId: 'p1', model: 'claude-haiku-4-5', extras: [] };
+        window.__answer = { 'POST /v1/ai-profiles/p1/apply-default-model': [{ body: { applied: 2, live: 2, staged: 0, classDetached: 1, classDetachPending: 1 } }] };
+        await applyModelToSelected();
+        const said = toastText();
+        ok('the new default says one left a class and one may: ' + said, said.includes('1 detached from a class') && said.includes('1 may leave a class once the class change under way is done'));
+      } finally {
+        cb.remove(); window.__answer = {}; applyModelState = null;
+        await refresh(true);
+      }
+    },
+    classLeftLimitsKeptSaid: async () => {
+      // An agent that left its class but whose container kept the class's memory limits: each answer says so.
+      const toastText = () => document.getElementById('toast').textContent;
+      const tax = agents.find((a) => a.name === 'Tax Helper') || agents[0];
+      const kept = 'Its container kept its old memory limits (a made-up refusal); a rebuild applies them.';
+      const was = profiles;
+      const other = { ...profiles[0], id: 'pOther', name: 'Spare key', shared: true, defaultSource: false };
+      profiles = [...profiles, other];
+      window.__override['/v1/ai-profiles'] = profiles;
+      try {
+        await refresh(true);
+        await openFleetActions();
+        await until(() => document.querySelectorAll('.faCb').length);
+        document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = cb.dataset.id === tax.id; });
+        $('faAction').value = 'source'; faRenderAction();
+        $('faSource').value = 'pOther';
+        window.__answer = { 'POST /v1/ai-profiles/pOther/adopt-agents': [{ body: { switched: 1, rebuilding: 0, classDetached: 1, memoryPending: [tax.name + ': ' + kept], limitsKept: [{ name: tax.name, why: 'a made-up refusal' }], skipped: [] } }] };
+        await faApply();
+        await until(() => !$('faApplyBtn').disabled);
+        const said = $('faResults').textContent;
+        ok('the bulk switch names the agent whose container kept its limits: ' + said, said.includes(tax.name + ' left its class, but its container kept its old memory limits (a made-up refusal)'));
+        fleetActionsDlg.close();
+        editAgentId = tax.id;
+        const pick = document.createElement('option'); pick.value = 'claude-haiku-4-5'; $('editModel').replaceChildren(pick); $('editModel').value = 'claude-haiku-4-5';
+        window.__answer = { ['POST /v1/agents/' + tax.id + '/model']: [{ body: { model: 'claude-haiku-4-5', live: true, classDetached: true, memoryPending: kept, limitsKept: { name: tax.name, why: 'a made-up refusal' } } }] };
+        await switchModel();
+        ok('the model change says its container kept its limits: ' + toastText(), toastText().includes('It left its class, but its container kept its old memory limits (a made-up refusal)'));
+      } finally {
+        if (fleetActionsDlg.open) fleetActionsDlg.close();
+        window.__answer = {}; delete window.__override['/v1/ai-profiles'];
+        profiles = was; await refresh(true);
       }
     },
     connectedSheetFollowsTheAgent: async () => {
@@ -8105,7 +9859,7 @@ const SCENARIOS = String.raw`(() => {
       const withFields = list.map((x) => x.id === a.id ? { ...x, parameters: [{ key: 'p1', label: 'One', type: 'text', target: 'soul' }, { key: 'p2', label: 'Two', type: 'text', target: 'soul' }] } : x);
       const set = async (state) => { window.__override['/v1/agents'] = withFields.map((x) => x.id === a.id ? { ...x, state } : x); await refresh(false); };
       // Closing clears what the sheet held in its close event, which comes with an animation frame: virtual time runs on until then, so it is done here.
-      const closeSheet = () => { v2Close(); v2EditFor = null; v2SheetEdited = false; };
+      const closeSheet = () => { v2Close(); v2EditFor = null; v2SheetNotes.clear(); };
       try {
         await set('RUNNING');
         openV2Agent(a.id, 'personality');
@@ -8199,6 +9953,7 @@ const SCENARIOS = String.raw`(() => {
         editAgentId = a.id;
         const sel = $('editImage');
         const o = document.createElement('option'); o.value = 'hatchabot/runtime:trial'; sel.replaceChildren(o); sel.value = o.value;
+        sel.dataset.agent = a.id; delete sel.dataset.loading; // its own list, loaded
         window.__confirmAnswer = true;
         window.__answer = { ['PATCH /v1/agents/' + a.id]: [{ body: { id: a.id, image: o.value, sameImage: false } }], [reb]: [{ status: 202, body: { rebuilding: false, atNextStart: true } }] };
         await saveImagePin();
@@ -8218,13 +9973,13 @@ const SCENARIOS = String.raw`(() => {
           eq('Bulk ' + action, calls('POST', rebRe).slice(n).map((c) => c.body), [{ stoppedWaits: true }]);
           fleetActionsDlg.close();
         }
-        // Rebuild all: one stopped since the poll is not counted as rebuilding.
+        // Rebuild all: one stopped since the poll is not counted as rebuilding (the stub answers the stopped one as started).
         const n = calls('POST', /\/v1\/agents\/[^/]+\/rebuild$/).length;
         window.__answer = { [reb]: [{ status: 202, body: { rebuilding: false, atNextStart: true } }] };
         await rebuildAll();
         const bodies = calls('POST', /\/v1\/agents\/[^/]+\/rebuild$/).slice(n).map((c) => c.body);
         ok('Rebuild all asks for it each time', bodies.length > 1 && bodies.every((b) => b.stoppedWaits === true));
-        ok('and counts it apart: ' + toastText(), toastText().includes('Rebuilding ' + (bodies.length - 1) + ' agent') && toastText().includes('stopped just now'));
+        ok('and counts it apart: ' + toastText(), toastText().includes('Rebuilding ' + (bodies.length - 1) + ' agent') && toastText().includes('1 not running: it is rebuilt when it next starts'));
       } finally {
         window.__answer = {}; window.__confirmAnswer = true; editAgentId = null;
         if (fleetActionsDlg.open) fleetActionsDlg.close();
@@ -8237,10 +9992,10 @@ const SCENARIOS = String.raw`(() => {
       const bot = list.find((a) => a.botUsername && a.id === 'a1');
       const web = list.find((a) => a.webOnly && !a.ops);
       const toastSays = () => document.getElementById('toast').textContent;
-      const go = async (a, state, patch = {}) => {
+      const go = async (a, state, patch = {}, answer = { ok: true }) => {
         window.__override['/v1/agents'] = list.map((x) => x.id === a.id ? { ...x, state, ...patch } : x);
         await refresh(false);
-        window.__answer = { ['POST /v1/agents/' + a.id + '/archive']: [{ body: { ok: true } }] };
+        window.__answer = { ['POST /v1/agents/' + a.id + '/archive']: [{ body: answer }] };
         archiveAgent(a.id, a.name, state);
         const said = document.getElementById('archiveBotNote').textContent;
         window.__override['/v1/agents'] = list.map((x) => x.id === a.id ? { ...x, ...patch, state: 'ARCHIVED' } : x);
@@ -8254,7 +10009,12 @@ const SCENARIOS = String.raw`(() => {
         const copied = await go(bot, 'STOPPED', { exportedAt: new Date().toISOString() });
         ok('a downloaded copy keeps the bot: ' + copied.said, copied.said.includes('NOT put back in the pool') && copied.said.includes(bot.botUsername));
         ok('and after: ' + copied.toast, copied.toast.includes('left to the downloaded copy') && !copied.toast.includes('its bot is back'));
-        const none = await go(web, 'RUNNING');
+        // HB-0476: the toast says what the server did, not what it should have.
+        const failed = await go(bot, 'RUNNING', {}, { ok: true, botReturn: { username: bot.botUsername, outcome: 'not-parked' } });
+        ok('a bot the pool could not take is not "back in the pool": ' + failed.toast, failed.toast.includes('could not be put back in the pool') && failed.toast.includes(bot.botUsername) && !failed.toast.includes('is back in the pool'));
+        const told = await go(bot, 'RUNNING', {}, { ok: true, botReturn: { username: bot.botUsername, outcome: 'pool' } });
+        ok('one it took: ' + told.toast, told.toast.includes('its bot is back in the pool'));
+        const none = await go(web, 'RUNNING', {}, { ok: true, botReturn: null });
         eq('no bot: the dialog says nothing of one', none.said, '');
         eq('and nor does the toast', none.toast, '"' + web.name + '" archived.');
       } finally { window.__answer = {}; delete window.__override['/v1/agents']; await refresh(false); }
@@ -8532,8 +10292,24 @@ const SCENARIOS = String.raw`(() => {
         eq('Rich messages too', rich.value, 'on');
       } finally { window.__answer = {}; delete window.__override['/v1/agents/a1/channels']; try { v2Close(); } catch {} }
     },
+    // "More models" (Settings → AI, a new source): a phone shows no tooltip, so its placeholder shows the
+    // list; a list typed with spaces is taken as one with commas (2026-11-08).
+    moreModelsTakeCommasOrSpaces: async () => {
+      try {
+        await openAiDlg('ai');
+        ok('the placeholder shows a list: ' + $('aiModelsAdd').placeholder, /model-a, model-b/.test($('aiModelsAdd').placeholder));
+        $('aiKind').value = 'local'; aiKindChanged();
+        $('aiModelSelect').style.display = 'none';
+        $('aiName').value = 'Home server models'; $('aiModel').value = 'local-default';
+        $('aiModelsAdd').value = ' model-a model-b,model-c ,  model-d ';
+        window.__answer = { 'POST /v1/ai-profiles': [{ body: { id: 'p9' } }] };
+        await addAiProfile();
+        const sent = await until(() => calls('POST', /\/v1\/ai-profiles$/).at(-1));
+        eq('every model, however they were separated', sent.body.models, ['local-default', 'model-a', 'model-b', 'model-c', 'model-d']);
+      } finally { window.__answer = {}; $('aiModelsAdd').value = ''; $('aiName').value = ''; $('aiModel').value = ''; if (aiDlg.open) aiDlg.close(); }
+    },
   });
-  /** The phone run (the page opened 390 px wide): what has to fit a phone screen. The desktop suite is skipped there. */
+  /** The phone runs (the page opened 360 and 390 px wide): what has to fit a phone screen. The desktop suite is skipped there. */
   const P = {
     phoneSortButtonsReachable: async () => {
       // Five sort buttons (Cost, Age, Name, Activity, My order) ran past the edge of a phone screen and the
@@ -8746,10 +10522,14 @@ const SCENARIOS = String.raw`(() => {
         ok(what + ': nothing past the edge: ' + out.map((e) => e.getAttribute('aria-label') || e.id || e.tagName).join(', '), !out.length);
         const hit = [...header.querySelectorAll('.v2hubactions button:not([hidden]), #v2AvatarBtn')].filter((b) => { const q = b.getBoundingClientRect(); return q.width > 0 && q.left < r.right && q.right > r.left && q.top < r.bottom && q.bottom > r.top; });
         ok(what + ': clear of the buttons: ' + hit.map((b) => b.getAttribute('aria-label') || b.id).join(', '), !hit.length);
+        // A row that gives way (HB-0605) must not paint its buttons over each other or the account button.
+        const row = [...header.querySelectorAll('.v2hubactions button:not([hidden]), #v2AvatarBtn')].map((b) => [b.getAttribute('aria-label') || b.id, b.getBoundingClientRect()]).filter(([, q]) => q.width > 0);
+        const over = row.filter(([, a], i) => row.some(([, b], j) => j !== i && a.left < b.right - 0.5 && a.right > b.left + 0.5 && a.top < b.bottom && a.bottom > b.top)).map(([n]) => n);
+        ok(what + ': no button over another: ' + over.join(', '), !over.length);
         ok(what + ': no sideways scroll: ' + document.documentElement.scrollWidth, document.documentElement.scrollWidth <= innerWidth);
       };
       scrollTo(0, 0);
-      check('a 390 px phone');
+      check('a ' + innerWidth + ' px phone');
       const inbox = document.getElementById('v2InboxBtn'), was = inbox.hidden;
       try { inbox.hidden = false; check('with Inbox showing too'); } finally { inbox.hidden = was; }
     },
@@ -8791,6 +10571,24 @@ const SCENARIOS = String.raw`(() => {
         eq('and let go of its agent', v2AgentId, null);
       } finally { try { v2Close(); } catch {} }
     },
+    phoneTasksFit: async () => {
+      // Schedule on a phone (2026-11-07): each task row's four buttons sat in one line beside its words,
+      // so the tab was ~404 px at least and ran off the right of the screen, Delete and Add task with it.
+      const task = { id: 'c8', name: 'Pre-market briefing', scheduleKind: 'cron', scheduleExpr: '0 8 * * 1-5', scheduleTz: 'America/Toronto', enabled: true, payloadKind: 'agentTurn', message: 'Post the pre-market briefing', lastStatus: 'ok', consecutiveErrors: 0 };
+      window.__override['/v1/agents/a1/crons'] = { crons: [task, { ...task, id: 'c9', name: 'Weekly portfolio check' }], waiting: [], notes: ['c8'], noteReach: false };
+      const outside = (sel) => [...document.querySelectorAll(sel)].filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && (r.left < 0 || r.right > innerWidth); }).map((el) => (el.id || el.textContent.trim()).slice(0, 30));
+      try {
+        openV2Agent('a1', 'schedule');
+        await until(() => document.querySelectorAll('#cronList .pair').length === 2);
+        eq('the Tasks tab fits the screen', outside('#cronBody *'), []);
+        const row = document.querySelector('#cronList .pair'), words = row.querySelector('.grow');
+        ok('a task\'s words keep its width: ' + Math.round(words.getBoundingClientRect().width) + ' of ' + Math.round(row.getBoundingClientRect().width), words.getBoundingClientRect().width > row.getBoundingClientRect().width * 0.8);
+        ok('its buttons are under them', [...row.querySelectorAll(':scope > button')].every((b) => b.getBoundingClientRect().top >= words.getBoundingClientRect().bottom - 1));
+      } finally {
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/crons'];
+      }
+    },
     phoneAccessAndSpendingFit: async () => {
       // Sharing → Access and Usage → Spending on a phone (2026-10-25): nothing past the edge, and an
       // Access row's words keep most of its width (they were squeezed to a word a line).
@@ -8815,6 +10613,341 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/access']; delete window.__override['/v1/budgets']; v2AccessCache = null;
       }
     },
+    phoneInspectorShowsTheFile: async () => {
+      // An archived agent's inspector on a phone (review of HB-0610): the file list runs the width, the file
+      // under it, so a file tapped at the foot of a long list loaded out of sight. It is brought into view.
+      const files = Array.from({ length: 20 }, (_, i) => ({ name: 'memory/2026-10-' + String(i + 10) + '.md', bytes: 1200 + i }));
+      window.__override['/v1/agents/a1/inspect'] = { files, transcriptTurns: 3 };
+      // Long files: a page with room to scroll each one to the top of the screen.
+      const notes = (head, line) => head + '\n\n' + Array.from({ length: 40 }, (_, i) => '- ' + line + ' (' + (i + 1) + ')').join('\n');
+      window.__override['/v1/agents/a1/inspect/file/' + encodeURIComponent(files[19].name)] = { content: notes('# The last day', 'Spelling test on Friday') };
+      window.__override['/v1/agents/a1/inspect/file/' + encodeURIComponent(files[18].name)] = { content: notes('# The day before', 'Library books back on Thursday') };
+      try {
+        await openInspect('a1', 'Homework Helper');
+        const body = document.getElementById('inspFileBody');
+        const last = await until(() => document.querySelectorAll('#inspFileList .inspfile')[19]);
+        ok('the file starts below the screen: ' + Math.round(body.getBoundingClientRect().top), body.getBoundingClientRect().top > innerHeight);
+        last.click();
+        await until(() => body.textContent.includes('Spelling test'));
+        // In view: all of it, or (a long one) its start in the top half of the screen.
+        const r = body.getBoundingClientRect();
+        ok('a tapped file is brought into view: ' + Math.round(r.top) + ' to ' + Math.round(r.bottom) + ' of ' + innerHeight, r.top >= -1 && (r.bottom <= innerHeight + 1 || r.top < innerHeight / 2));
+        // The list scrolled back to where the file starts in sight: a tap there leaves it where it is.
+        const prev = document.querySelectorAll('#inspFileList .inspfile')[18];
+        prev.scrollIntoView({ block: 'center' });
+        const at = body.getBoundingClientRect().top, shown = Math.min(inspectDlg.getBoundingClientRect().bottom, innerHeight);
+        ok('the file starts in sight: ' + Math.round(at) + ' of ' + Math.round(shown), at > 0 && at < shown - 48);
+        prev.click();
+        await until(() => body.textContent.includes('Library books'));
+        ok('a tap with the file in sight scrolls nothing: ' + Math.round(at) + ' then ' + Math.round(body.getBoundingClientRect().top), Math.abs(body.getBoundingClientRect().top - at) <= 1);
+      } finally {
+        try { inspectDlg.close(); } catch {}
+        delete window.__override['/v1/agents/a1/inspect'];
+        for (const f of files.slice(18)) delete window.__override['/v1/agents/a1/inspect/file/' + encodeURIComponent(f.name)];
+      }
+    },
+    phoneEveryScreenFits: async () => {
+      // The owner's review of phone widths (2026-11-08, HB-0605 to HB-0615), kept: every home view, agent tab,
+      // Settings tab and dialog, opened on a phone with fuller data than the deck's, its names from the deck's
+      // invented household (members, tasks, files, an Inbox share, a long agent name, costs and the wide tables). Each must fit: nothing past the
+      // screen's edge and no sideways scroll (a row of tabs scrolls on purpose), no words spilling out of their
+      // box or squeezed into a narrow column beside something, no dropdown or text box narrower than its line
+      // while its own words are cut, no two-word button broken over two lines, no chart text under 10 px.
+      ok('a phone-wide window: ' + innerWidth, innerWidth <= 420);
+      const W = innerWidth, H = 3600e3, now = Date.now(), iso = (m) => new Date(now - m * 60000).toISOString(), month = new Date().toISOString().slice(0, 7);
+      // The dialogs slide in (v2slide, 24 px over 0.18 s): caught mid-slide, a dialog reads as past the edge.
+      const still = document.createElement('style');
+      still.textContent = '*, *::before, *::after { animation:none !important; transition:none !important }';
+      document.head.appendChild(still);
+      const fleet = await (await fetch('/v1/agents')).json();
+      const long = Object.assign({}, fleet[0], { id: 'a15', name: 'Home Maintenance, Garden Notes and Car Upkeep', slug: 'home-maintenance-garden-notes-and-car-upkeep', icon: '🔧', group: 'Household', botUsername: 'HomeMaintenanceAndGardenNotesBot' });
+      // A folder and a writable repo with its deploy key (the Data tab): a path beside three and four buttons.
+      const withData = Object.assign({}, fleet[0], { dataSources: [
+        { id: 'd1', kind: 'folder', access: 'ro', mountName: 'reading-lists', hostPath: '/home/you/Documents/Homework Helper/reading-lists' },
+        { id: 'g1', kind: 'git', access: 'rw', mountName: 'homework-helper', repoUrl: 'git@github.com:you/homework-helper.git', pubKey: 'ssh-ed25519 AAAAC3made-up-key-for-the-test test' }] });
+      const task = { id: 'c8', name: 'Pre-market briefing', scheduleKind: 'cron', scheduleExpr: '0 8 * * 1-5', scheduleTz: 'UTC', enabled: true, payloadKind: 'agentTurn', message: 'Post the pre-market briefing', lastStatus: 'ok', consecutiveErrors: 0, lastRunAtMs: now - H };
+      const price = (id, label, input, extra) => Object.assign({ id, label, input, output: input * 5, cacheRead: input / 10, cacheWrite: input * 1.25, cacheReadShare: 0.1 }, extra || {});
+      const ctx = (id, agent, mainNowK, extra) => Object.assign({ id, agent, model: 'anthropic/claude-sonnet-5', state: 'running', billing: 'api', conversation: { mainNowK, windowK: 200, mainAt: iso(22), ctxK: { p50: Math.round(mainNowK / 2), p90: mainNowK }, calls: 402 } }, extra || {});
+      const O = {
+        '/v1/agents': [withData].concat(fleet.slice(1, 3), [long], fleet.slice(3)),
+        '/v1/inbox': { shares: [{ id: 'sh1', agentName: 'Meal Planner', fromEmail: 'you+meal.planner.family.recipes@example.com', createdAt: iso(90), message: 'Here are all the family recipes, with the Sunday roast one at the top' }] },
+        '/v1/agents/a1/members': [
+          { userId: 'o1', role: 'owner', status: 'active', channelUserId: '11', identities: {}, account: true, webChat: false },
+          { userId: 'user-rfc', displayName: 'Soccer Schedule for Rivergate FC and Family HQ', role: 'user', status: 'active', channelUserId: '12', identities: {}, account: true, webChat: false },
+          { userId: 'user-hq', displayName: 'Family HQ', role: 'user', status: 'active', identities: {}, account: true, webChat: true },
+          { userId: 'member-1', displayName: 'Rivergate FC', role: 'user', status: 'active', channelUserId: '13', identities: {}, account: false, webChat: false }],
+        '/v1/agents/a1/crons': { crons: [task, Object.assign({}, task, { id: 'c9', name: 'Weekly homework round-up for the whole family' })], waiting: [], notes: ['c8'], noteReach: true },
+        '/v1/agents/a1/access': accOv(),
+        '/v1/agents/a1/fs': { path: '', entries: [
+          { name: 'memory', type: 'dir', size: 0, mtime: iso(60) },
+          { name: 'homework-plan-for-the-autumn-term-2026-with-reading-list.md', type: 'file', size: 18234, mtime: iso(90) },
+          { name: 'AGENTS.md', type: 'file', size: 4210, mtime: iso(600) },
+          { name: 'notes.txt', type: 'file', size: 10, mtime: iso(3000) }] },
+        '/v1/agents/a1/connections': { accounts: [
+          { email: 'you@example.com', client: 'default', auth: 'oauth', services: ['gmail', 'calendar', 'drive'] },
+          { email: 'you+family.calendar.shared@example.com', client: 'default', auth: 'oauth', services: ['calendar'] }] },
+        '/v1/agents/a1/snapshots': [{ id: 's1', label: 'Before the new persona', createdAt: iso(1440), size: 120000 }, { id: 's2', label: 'Weekly', createdAt: iso(10080), size: 118000 }],
+        '/v1/agents/a1/peers': { peers: [{ id: 'a4', name: 'Meal Planner' }], candidates: [{ id: 'a2', name: 'Soccer Schedule' }, { id: 'a8', name: 'Budget Tracker' }] },
+        '/v1/agents/a1/logs': { text: '2026-11-08T10:01:02.123Z [gateway] listening on ws://0.0.0.0:18789 (auth=token, trusted-proxy=on, telegram=polling)\n2026-11-08T10:01:09.881Z [agent] turn done in 4.2s, 12,345 tokens in, 345 out' },
+        '/v1/agents/a1/events': { events: [{ at: iso(5), label: 'Rebuilt', note: 'image ghcr.io/hatchabot/runtime:2026.9.8-1 with the shared embedding service; Telegram polling; 3 apps' }, { at: iso(60), label: 'Model changed', note: 'anthropic/claude-sonnet-5' }] },
+        '/v1/agents/a1/inspect': { files: [{ name: 'MEMORY.md', bytes: 2100 }, { name: 'AGENTS.md', bytes: 4210 }, { name: 'USER.md', bytes: 800 }, { name: 'memory/2026-11-07.md', bytes: 5300 }], transcriptTurns: 42 },
+        '/v1/agents/a1/inspect/file/MEMORY.md': { content: '# Memory\n\n- Homework is due on Thursdays; the maths teacher wants working shown.\n- Reading list for the autumn term is in homework-plan.md.\n- Prefers short answers with one worked example.' },
+        '/v1/problem-reports': [{ id: 'r1', title: 'Telegram replies stop after the agent has been running for about a day', createdAt: iso(30), by: 'agent' }, { id: 'r2', title: 'Rebuild failed', createdAt: iso(3000), sentAt: iso(2900), issueUrl: 'https://github.com/hatchabot/hatchabot/issues/12' }],
+        // Long versions beside the capabilities' names (Settings → Advanced): a long name ("Google Workspace") painted over its own.
+        '/v1/runtime/capabilities': { tools: { openclaw: '2026.9.8-candidate.20261107.1', 'claude-code': '2.1.300', gog: '0.9.1-candidate.20261107.1', python: '3.12.3', git: '2.43.0', node: '22.11.0' }, missing: ['ffmpeg', 'chromium'] },
+        '/v1/rebuild-policy': { policy: 'required-only', quietHours: '1-6' },
+        '/v1/rebuild-concurrency': { max: 6, atOnce: 2 },
+        '/v1/budgets': { month, tz: 'UTC', agents: [{ id: 'a1', name: 'Homework Helper', state: 'RUNNING', billing: 'api', spent: 12, lastMonth: 10, monthlyNow: 14, suggested: 20,
+          alertEvery: { every: 5, month, spent: 12, passed: 2, next: 15 }, budget: { scope: 'a1', usd: 20, atLimit: 'warn', month, spent: 12, pct: 60, level: 0, resetsOn: 'next 1st' } }] },
+        '/v1/model-prices': { models: [price('claude-opus-4-8', 'Claude Opus 4.8', 5), price('claude-sonnet-5', 'Claude Sonnet 5', 2), price('claude-haiku-4-5', 'Claude Haiku 4.5', 1, { legacy: true })],
+          cacheReadDefault: 0.1, cacheWrite: 1.25, checked: '2026-11-01', source: 'https://example.com/pricing', unpriced: [] },
+        // Soccer Schedule's conversation has no time read: its last cell is empty.
+        '/v1/token-health': { rows: [ctx('a8', 'Budget Tracker', 118), ctx('a4', 'Meal Planner', 71, { contextCap: { tokens: 150000, applied: true } }), ctx('a1', 'Homework Helper', 46),
+          ctx('a2', 'Soccer Schedule', 30, { conversation: { mainNowK: 30, windowK: 200, calls: 3 } })] },
+        '/v1/usage/periods': { period: 'day', buckets: [], agents: [], totals: { tokens: 0, requests: 0, limited: 0, failed: 0 }, alerts: [],
+          rightSize: { savingUSD: 11.2, apiUSD: 11.2, planUSD: 0, month, rows: [{ agent: 'Budget Tracker', from: 'anthropic/claude-opus-4-8', to: 'anthropic/claude-sonnet-5', since: iso(9 * 1440), isUSD: 8.4, wasUSD: 19.6, savingUSD: 11.2, billing: 'api' }] } },
+        '/v1/usage/spend': { range: 'week', bucketHours: 3, planShare: 0, monthly: 340, refused: 0, models: [{ model: 'claude-sonnet-5', cost: 80 }],
+          choices: [{ id: 'a1', name: 'Homework Helper', cost: 60 }, { id: 'a2', name: 'Soccer Schedule', cost: 20 }],
+          buckets: Array.from({ length: 56 }, (_, i) => ({ at: new Date(now - (56 - i) * 3 * H).toISOString(), cacheWrite: 1, cacheRead: 0.2, output: 0.2, input: 0.03, tokens: 2e6 })),
+          totals: { cacheWrite: 56, cacheRead: 11, output: 11, input: 2, cost: 80, tokens: 112e6 } },
+      };
+      const before = Object.assign({}, window.__override), confirmed = window.__confirmAnswer;
+      Object.assign(window.__override, O);
+      window.__confirmAnswer = false;
+      const screens = [];
+      const add = (label, open) => screens.push([label, open]);
+      // A screen is ready when nothing on the page has changed for 150 ms (3 s at most: a ticking clock never rests).
+      const quiet = (ms = 150, most = 3000) => new Promise((resolve) => {
+        let rest = 0, cap = 0;
+        const o = new MutationObserver(() => { clearTimeout(rest); rest = setTimeout(done, ms); });
+        function done() { o.disconnect(); clearTimeout(rest); clearTimeout(cap); resolve(); }
+        o.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+        rest = setTimeout(done, ms); cap = setTimeout(done, most);
+      });
+      const drawers = (sel) => { for (const d of document.querySelectorAll(sel + ' details')) d.open = true; };
+      add('home', () => {});
+      for (const [k] of V2_VIEWS) add('home by ' + k, () => v2SetView(k));
+      add('the account menu', () => { v2SetView('group'); v2ToggleAccount(true); });
+      for (const [k] of V2_TABS) add('agent ' + k, () => openV2Agent('a1', k));
+      for (const [k] of V2_TABS) add('agent ' + k + ', drawers open', async () => { openV2Agent('a1', k); await quiet(); drawers('#v2AgentDlg'); });
+      for (const k of ['overview', 'ai', 'messaging', 'advanced']) add('the Hatchabot agent ' + k, () => openV2Agent('a14', k));
+      for (const k of ['overview', 'messaging', 'sharing']) add('a long-named agent ' + k, () => openV2Agent('a15', k));
+      add('a stopped agent', () => openV2Agent('a10', 'overview'));
+      add('a Discord agent', () => openV2Agent('a2', 'channels'));
+      add('a Slack agent', () => openV2Agent('a7', 'slack'));
+      for (const [k] of V2_SETTINGS) add('Settings ' + k, () => openAiDlg(k));
+      for (const [k] of V2_SETTINGS) add('Settings ' + k + ', drawers open', async () => { await openAiDlg(k); await quiet(); drawers('#aiDlg'); });
+      // An AI source's cost chart drawn while another Settings tab showed (it measured 0 wide), then shown.
+      // A chart's own width (its viewBox), and the width of the box its picture sits in.
+      const chartW = (box) => box.querySelector('.spendsvg svg').viewBox.baseVal.width;
+      const picW = (box) => box.querySelector('.spendsvg').clientWidth;
+      // A box narrowed by so many px (as a phone turned, a window dragged), or back (0), and the two frames it takes.
+      const narrow = (box, by) => { box.style.width = by ? (box.clientWidth - by) + 'px' : ''; window.__frame(); window.__frame(); };
+      add('Settings ai, its chart drawn while hidden', async () => {
+        await openAiDlg('people'); await quiet();
+        const box = document.querySelector('#aiDlg .spendchart');
+        ok('the chart was drawn while hidden', !!box.querySelector('.spendsvg svg') && !box.clientWidth);
+        window.__frame();
+        const before = box.querySelector('.spendsvg svg'), pills = box.querySelector('.su-periods');
+        showTab('ai');
+        // Two frames (window.__frame, the RECORDER's): in the first, spendChartFit (a ResizeObserver)
+        // hears the box has a width now; in the next, the chart is fitted to it.
+        window.__frame(); window.__frame();
+        // Drawn at the width it shows at: its own width (viewBox) is the width it is shown at, which fills the box it sits in.
+        const svg = box.querySelector('.spendsvg svg'), drawn = svg.viewBox.baseVal.width, at = svg.getBoundingClientRect().width;
+        ok('drawn again at its width once shown: drawn ' + drawn + ', shown at ' + Math.round(at) + ' in a box of ' + svg.parentElement.clientWidth,
+          svg !== before && Math.abs(drawn - at) < 1 && Math.abs(at - svg.parentElement.clientWidth) < 1);
+        ok('only its picture drawn again: the range buttons are the ones it had', box.querySelector('.su-periods') === pills);
+        // Hidden again, its box narrowed meanwhile: fitted to its new width once shown.
+        const was = box.clientWidth;
+        showTab('people'); window.__frame(); window.__frame();
+        box.style.width = (was - 10) + 'px';
+        showTab('ai'); window.__frame(); window.__frame();
+        const then = chartW(box), room = picW(box);
+        narrow(box, 0);
+        ok('a change made while hidden is fitted once shown: ' + then + ' in ' + room + ', then ' + chartW(box), then === room && then < drawn && chartW(box) === drawn);
+      });
+      add('Settings ai, drawn three times: only the charts on the page watched', async () => {
+        await openAiDlg('people'); await quiet();
+        for (let i = 0; i < 3; i++) { renderAiList(); await quiet(); }
+        const live = [...document.querySelectorAll('#aiDlg .spendchart')].filter((el) => el._spend), seen = [...spendChartsSeen];
+        ok('three drawings leave only the charts on the page watched: ' + seen.length + ' watched, ' + live.length + ' in Settings, ' + seen.filter((el) => !el.isConnected).length + ' gone',
+          live.length > 0 && seen.every((el) => el.isConnected) && live.every((el) => spendChartsSeen.has(el)));
+      });
+      add('Usage, its agent picker open as its chart narrows', async () => {
+        openFleetUsage();
+        const box = await until(() => document.querySelector('#fleetUsageDlg .spendchart .spendpick')?.closest('.spendchart')), pick = box.querySelector('.spendpick');
+        pick.open = true;
+        const phoneW = box._spend.W;
+        narrow(box, 60);
+        const less = chartW(box), room = picW(box);
+        narrow(box, 0);
+        ok('drawn to its box as it narrows, and back: ' + less + ' in ' + room + ', then ' + chartW(box), less === room && less < phoneW && chartW(box) === phoneW);
+        ok('the agent picker stayed open through both', box.querySelector('.spendpick') === pick && pick.open);
+        pick.open = false;
+        // Closed, its chart is let go: no longer watched, its read dropped. A browser fires the dialog's close
+        // event as it closes; headless Chrome under virtual time never does (2026-11-08), so it is fired here.
+        fleetUsageDlg.close(); fleetUsageDlg.dispatchEvent(new Event('close'));
+        ok('its chart let go once the dialog closed', !spendChartsSeen.has(box) && !box._spend);
+        // Opened again: until its new chart is drawn, no old one (it would no longer fit the window) but Loading….
+        openFleetUsage();
+        ok('opened again, it shows no old chart while it loads: ' + box.textContent.trim().slice(0, 40), !fleetUsageDlg.querySelector('.spendchart .spendsvg') && /Loading/.test(box.textContent));
+        // Its new chart is drawn and watched, and a close event come late (the dialog open again by then)
+        // leaves it so: it still follows the window past 640 px.
+        const again = await until(() => { const el = document.querySelector('#fleetUsageDlg .spendchart'); return el !== box && el?.querySelector('.spendsvg svg') && el; });
+        ok('drawn and watched again when opened again', !!again._spend && spendChartsSeen.has(again));
+        fleetUsageDlg.dispatchEvent(new Event('close'));
+        window.__frame();
+        narrow(again, 60);
+        const lessAgain = chartW(again), roomAgain = picW(again);
+        narrow(again, 0);
+        ok('a close event come late leaves the new chart watched and fitted: ' + lessAgain + ' in ' + roomAgain + ', then ' + chartW(again),
+          spendChartsSeen.has(again) && !!again._spend && lessAgain === roomAgain && lessAgain < phoneW && chartW(again) === phoneW);
+      });
+      add('New agent', () => document.getElementById('fabBtn').click());
+      add('New agent from a repo', () => openAppDlg('create'));
+      add('Adopt', () => openAdoptDlg());
+      add('Inbox', () => openInbox());
+      add('Consoles', () => openConsoleHome(true));
+      add('Usage', () => openFleetUsage());
+      add('Resources', () => openFleetResources());
+      add('Bulk actions', () => openFleetActions());
+      add('Setup guide', () => openSetupGuide());
+      add('Help', () => helpDlg.showModal());
+      add('Report a problem', () => openReport());
+      add('Report a problem for an agent', () => openReport('a1'));
+      add('templates', () => openGallery());
+      add('an agent\'s usage', () => openUsage('a1', 'Homework Helper'));
+      add('logs', () => openLogs('a1', 'Homework Helper'));
+      add('Setup log', () => openSetupLog('a1', 'Homework Helper'));
+      add('the archive inspector', () => openInspect('a1', 'Homework Helper'));
+      add('proposals', () => openProposals('a1', 'Homework Helper'));
+      add('Audit log', () => openAudit('a1'));
+      add('Send', () => openSendAgent('a1', 'Homework Helper'));
+      add('move its source', () => openMigrate('a1', 'Homework Helper'));
+      add('Archive', () => archiveAgent('a1', 'Homework Helper', 'RUNNING'));
+      add('Invite', () => invite('a1', 'Homework Helper'));
+      add('web chat', () => openWebChatPanel('a1'));
+      add('Discord setup', () => openChanSetup('a1', 'discord'));
+      add('Slack setup', () => openChanSetup('a1', 'slack'));
+      add('icon', () => openV2Icon('a1'));
+      add('apply a model', () => openApplyModel('p1', 'claude-sonnet-5', [], agents.filter((a) => !a.ops), 'Anthropic API (household)'));
+      add('move agents to a source', () => moveAgentsToSource('p1', 'Anthropic API (household)'));
+      add('try an image', () => tryOnAgent('2026.9.8'));
+      add('a choice', () => { void askChoice('Rebuild now?', 'Three agents are running. Rebuild them now, or when each next starts?', [['now', 'Rebuild now'], ['later', 'When they next start'], ['cancel', 'Cancel']]); });
+      add('a second factor', () => { void askSecondFactor('totp'); });
+      add('backup codes', () => showBackupCodes(['abcd-efgh', 'ijkl-mnop', 'qrst-uvwx', 'yzab-cdef', 'ghij-klmn', 'opqr-stuv', 'wxyz-abcd', 'efgh-ijkl'], 'o1'));
+      add('a recovery code', () => showRecoveryCode('ABCD-EFGH-IJKL-MNOP-QRST', 'Keep this code somewhere safe.', 'o1'));
+      add('setup fields', () => { void collectParamValues([{ name: 'CITY', label: 'Your city', required: true }, { name: 'UNITS', label: 'Units', choices: ['metric', 'imperial'] }], 'Weather app'); });
+      add('sign-in', () => loginDlg.showModal());
+      add('install', () => installDlg.showModal());
+      const say = (el) => {
+        const what = el.tagName.toLowerCase() + (el.id ? '#' + el.id : el.classList.length ? '.' + [...el.classList].slice(0, 2).join('.') : '');
+        const words = (el.getAttribute('aria-label') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 32);
+        return what + (words ? ' "' + words + '"' : '');
+      };
+      const shown = (el) => el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+      const scroller = (el) => { for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) { const ox = getComputedStyle(p).overflowX; if ((ox === 'auto' || ox === 'scroll') && p.scrollWidth > p.clientWidth + 1) return p; } return null; };
+      // A row of tabs scrolls sideways on purpose (the agent's, Settings', a dialog's, the consoles').
+      const tabRow = (sc) => !!sc && (sc.getAttribute('role') === 'tablist' || sc.matches('.tabs, .v2tabs, .ctabs'));
+      const pen = document.createElement('canvas').getContext('2d');
+      const px = (cs, k) => parseFloat(cs[k]) || 0;
+      const check = (label) => {
+        const found = [], tell = (what) => found.push([what, label]);
+        if (document.documentElement.scrollWidth > W) tell('the page scrolls sideways (' + document.documentElement.scrollWidth + ' px wide)');
+        const open = [...document.querySelectorAll('dialog[open]')];
+        const top = open.length ? open[open.length - 1] : document.body;
+        const past = new Set();
+        for (const el of top.querySelectorAll('*')) {
+          if (/^(SCRIPT|STYLE|OPTION|BR|TEMPLATE)$/.test(el.tagName) || el.closest('svg')) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 1 || r.height < 1 || !shown(el)) continue;
+          const cs = getComputedStyle(el);
+          if (r.right > W + 1 || r.left < -1) {
+            past.add(el);
+            const sc = scroller(el);
+            if (!past.has(el.parentElement) && !tabRow(sc)) tell(say(el) + ' runs past the screen [' + Math.round(r.left) + ', ' + Math.round(r.right) + ']' + (sc ? ', scrolling ' + say(sc).slice(0, 40) + ' sideways' : ''));
+            continue;
+          }
+          const textHere = [...el.childNodes].some((n) => n.nodeType === 3 ? n.textContent.trim() : n.nodeType === 1 && getComputedStyle(n).display === 'inline' && n.textContent.trim());
+          // Words beside something, squeezed into a column a few words wide.
+          if (textHere && cs.display !== 'inline' && r.width < W * 0.4 && el.textContent.trim().length >= 30) {
+            const lh = px(cs, 'lineHeight') || px(cs, 'fontSize') * 1.25;
+            const lines = ((/auto|scroll/.test(cs.overflowY) ? el.scrollHeight : el.clientHeight) - px(cs, 'paddingTop') - px(cs, 'paddingBottom')) / lh;
+            if (lines >= 3.6) tell(say(el) + ' is squeezed into ' + Math.round(r.width) + ' px, ' + Math.round(lines) + ' lines');
+          }
+          // Words spilling out of their own box, over whatever is beside it.
+          if (textHere && !/^(SELECT|INPUT|TEXTAREA|PRE|CODE|TABLE|DIALOG|IMG|CANVAS)$/.test(el.tagName) && el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 3 && cs.overflowX === 'visible' && !scroller(el)) tell(say(el) + ' spills out of its box (' + el.scrollWidth + ' px in ' + el.clientWidth + ')');
+          // Cut off with no ellipsis (a clamp to so many lines ends in one: a tile's name).
+          if (/^(BUTTON|A|LABEL|SPAN|TH|TD|SUMMARY)$/.test(el.tagName) && /hidden|clip/.test(cs.overflowX) && el.scrollWidth > el.clientWidth + 2 && cs.textOverflow !== 'ellipsis' && cs.webkitLineClamp === 'none') tell(say(el) + ' is cut off');
+          // A column's name over nothing (a wide table's card rows on a phone): an empty cell is left unnamed.
+          if (el.tagName === 'TD' && el.dataset.label && !el.textContent.trim() && !el.children.length) tell(say(el) + ' names its column "' + el.dataset.label + '" over nothing');
+          // A two-word button ("1 hr") broken over two lines.
+          if (el.tagName === 'BUTTON' && !el.children.length && /^\S+ \S+$/.test(el.textContent.trim()) && el.textContent.trim().length <= 12 && el.clientHeight - px(cs, 'paddingTop') - px(cs, 'paddingBottom') > (px(cs, 'lineHeight') || px(cs, 'fontSize') * 1.25) * 1.6) tell(say(el) + ' is broken over two lines');
+          // A dropdown narrower than its line while its own choice is cut.
+          if (el.tagName === 'SELECT' && el.selectedIndex >= 0) {
+            const words = el.options[el.selectedIndex].text;
+            pen.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+            const need = pen.measureText(words).width + px(cs, 'paddingLeft') + px(cs, 'paddingRight') + 18;
+            const ps = getComputedStyle(el.parentElement), line = el.parentElement.clientWidth - px(ps, 'paddingLeft') - px(ps, 'paddingRight');
+            if (words && need > r.width + 4 && r.width < line - 8) tell(say(el).slice(0, 40) + ' shows "' + words.slice(0, 24) + '" in ' + Math.round(r.width) + ' px of the ' + Math.round(need) + ' it needs, with ' + Math.round(line) + ' on its line');
+          }
+          // A text box beside its label's words, not under them as the other fields are.
+          if (el.tagName === 'INPUT' && /^(text|search|email|url|password)$/.test(el.type) && el.parentElement.tagName === 'LABEL' && el.previousSibling?.nodeType === 3 && el.previousSibling.textContent.trim()
+            && r.left > el.parentElement.getBoundingClientRect().left + 20) tell(say(el) + ' sits beside its label, ' + Math.round(r.width) + ' px wide');
+        }
+        for (const t of top.querySelectorAll('svg text')) {
+          const m = t.getScreenCTM();
+          if (!m || !t.getBoundingClientRect().width || !shown(t)) continue;
+          const size = px(getComputedStyle(t), 'fontSize') * Math.hypot(m.a, m.b);
+          if (size < 9.95) tell('chart text "' + t.textContent.trim().slice(0, 24) + '" is ' + size.toFixed(1) + ' px high');
+        }
+        for (const d of open) {
+          const r = d.getBoundingClientRect();
+          if (r.right > W + 1 || r.left < -1 || (r.bottom > innerHeight + 1 && !/auto|scroll/.test(getComputedStyle(d).overflowY))) tell('the dialog ' + say(d).slice(0, 30) + ' does not fit the screen');
+        }
+        return found;
+      };
+      const putAway = async () => {
+        try { v2ToggleAccount(false); } catch {}
+        for (const d of [...document.querySelectorAll('dialog[open]')].reverse()) { try { d.close(); } catch {} }
+        try { v2Close(); } catch {}
+        scrollTo(0, 0);
+        await quiet(50);
+      };
+      const problems = new Map(), note = (what, label) => problems.set(what, (problems.get(what) || []).concat([label]));
+      const opening = [];
+      try {
+        await refresh(false);
+        await until(() => !document.getElementById('v2InboxBtn').hidden && tile('Garden Notes and Car Upkeep'));
+        for (const [label, open] of screens) {
+          // Ready: the opener is done (or 3 s on), then the page is quiet. An opener that fails later
+          // than that is still told, with its screen's name (it is caught whenever it fails).
+          const run = Promise.resolve().then(open);
+          opening.push(run.catch((e) => note('would not open: ' + String(e && e.message || e).slice(0, 120), label)));
+          await Promise.race([run.catch(() => {}), sleep(3000)]);
+          await quiet();
+          try { for (const [what] of check(label)) note(what, label); } catch (e) { note('could not be checked: ' + String(e && e.message || e).slice(0, 120), label); }
+          await putAway();
+        }
+        await Promise.race([Promise.all(opening), sleep(3000)]);
+      } finally {
+        await putAway();
+        for (const k of Object.keys(O)) { if (k in before) window.__override[k] = before[k]; else delete window.__override[k]; }
+        window.__confirmAnswer = confirmed;
+        v2SetView('group');
+        still.remove();
+        v2AccessCache = null;
+        await refresh(false);
+      }
+      // Each problem once, with the screens it was seen on.
+      const list = [...problems].map(([what, on]) => what + ' (' + (on.length > 3 ? on.length + ' screens: ' + on.slice(0, 3).join(', ') + '…' : on.join(', ')) + ')');
+      if (list.length) {
+        const err = new Error(list.length + ' things do not fit a ' + W + ' px phone; the first: ' + list.slice(0, 2).join(' · '));
+        err.detail = list.join('\n');
+        throw err;
+      }
+    },
   };
   (async () => {
     // The results so far go on the page after every scenario, with the one running: a page
@@ -8823,7 +10956,8 @@ const SCENARIOS = String.raw`(() => {
     for (const [name, run] of Object.entries(innerWidth <= 500 ? P : T)) {
       document.documentElement.setAttribute('data-ui-running', name);
       try { await run(); results.push({ name, ok: true }); }
-      catch (err) { results.push({ name, ok: false, error: String(err && err.message || err).slice(0, 300) }); }
+      // A check that finds many things (the phone sweep) says them all in err.detail.
+      catch (err) { results.push(Object.assign({ name, ok: false, error: String(err && err.message || err).slice(0, 300) }, err && err.detail ? { detail: String(err.detail).slice(0, 20000) } : {})); }
       report();
     }
     document.documentElement.removeAttribute('data-ui-running');
@@ -8858,11 +10992,13 @@ try {
   // "the page never reported" (2026-10-09). The page holds only test data.
   chmodSync(work, 0o755);
   chmodSync(join(work, 'page.html'), 0o644);
-  // The page is opened twice: a desktop window runs the suite, a phone-wide
-  // one (390 px, an ordinary phone) runs the checks of what has to fit a phone
-  // screen (the P suite, picked by the window's width; Chris, 2026-10-23).
+  // The page is opened three times: a desktop window runs the suite, and two
+  // phone-wide ones run the checks of what has to fit a phone screen (the P
+  // suite, picked by the window's width; Chris, 2026-10-23): 360 px, most
+  // Android phones (the header with Inbox broke there only, HB-0605), and
+  // 390 px, an iPhone (HB-0615 asked for both).
   let failed = 0, total = 0;
-  for (const [label, size] of [['desktop', '1400,1000'], ['phone', '390,844']]) {
+  for (const [label, size] of [['desktop', '1400,1000'], ['phone 360', '360,800'], ['phone 390', '390,844']]) {
     let dom = '';
     // The attribute, not the words: the page's own script names it too.
     for (let tries = 1; !/data-ui-done="/.test(dom) && tries <= 3; tries++) {
@@ -8879,18 +11015,19 @@ try {
         ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
       } catch (err) { dom = String(err.stdout ?? ''); }
     }
-    if (keep) writeFileSync(join(work, `dom-${label}.html`), dom);
+    if (keep) writeFileSync(join(work, `dom-${label.replace(' ', '-')}.html`), dom);
     const m = /data-ui-results="([^"]*)"/.exec(dom);
-    if (!m) throw new Error(`the page never reported (no data-ui-results in the ${label} DOM dump${keep ? `; see ${work}/dom-${label}.html` : '; run with --keep'})`);
+    if (!m) throw new Error(`the page never reported (no data-ui-results in the ${label} DOM dump${keep ? `; see ${work}/dom-${label.replace(' ', '-')}.html` : '; run with --keep'})`);
     const results = JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')); // &amp; last: an unescape in the other order turns "&amp;lt;" into "<" (CodeQL js/double-escaping)
     const done = /data-ui-done="(\d+)"/.exec(dom);
     const running = /data-ui-running="([^"]*)"/.exec(dom);
-    if (!done) { failed++; total++; console.log(`✗ ${running?.[1] ?? '(unknown)'}${label === 'phone' ? ' (phone)' : ''} — the page ran out of virtual time on it (${results.length} scenarios reported before it)`); }
+    const on = label === 'desktop' ? '' : ` (${label})`;
+    if (!done) { failed++; total++; console.log(`✗ ${running?.[1] ?? '(unknown)'}${on} — the page ran out of virtual time on it (${results.length} scenarios reported before it)`); }
     else if (done[1] > 3600) console.log(`(the ${label} run used ${done[1]} s of its 7200 s of virtual time)`);
     for (const r of results) {
       total++;
-      if (r.ok) console.log(`✓ ${r.name}${label === 'phone' ? ' (phone)' : ''}`);
-      else { failed++; console.log(`✗ ${r.name}${label === 'phone' ? ' (phone)' : ''} — ${r.error}`); }
+      if (r.ok) console.log(`✓ ${r.name}${on}`);
+      else { failed++; console.log(`✗ ${r.name}${on} — ${r.error}${r.detail ? `\n    ${r.detail.split('\n').join('\n    ')}` : ''}`); }
     }
   }
   console.log(`${total - failed}/${total} passed${keep ? ` · kept ${work}` : ''}`);

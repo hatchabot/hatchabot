@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { parseEnv } from 'node:util';
 import { defaultBackupsDir, defaultDbPath } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
 import { isDiskFull, OneShotNotGoneError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, type RuntimeProvider } from '../providers/provider.js';
@@ -18,6 +19,7 @@ import type { Store } from '../store/store.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
 import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from './members.js';
 import { beginOperation, handleFor, rethrowIfCrash, type OpHandle } from './operations.js';
+import { processAlive } from '../domain/processAlive.js';
 
 // A dated backup directory is exactly `YYYY-MM-DD`, matching what the script
 // creates (`date +%F`) and prunes. Anything else in the base dir is ignored,
@@ -83,6 +85,16 @@ export interface BackupSet {
    * (recoveryReadiness.ts).
    */
   captured?: string[];
+  /**
+   * Made by another install that shares this folder, or by this one under an
+   * earlier HATCHABOT_SECRET_KEY (a reinstall, a key changed by hand): its
+   * `.backup-owner`, or the key it saved, is not this install's (foreignSet).
+   * Listed only when asked (listBackups' `others`), labelled; the nightly
+   * clean-up and Delete leave it alone, and a restore from it asks first
+   * (review of HB-0540: hidden, an install's own sets vanished after a key
+   * change, exactly when they were needed).
+   */
+  foreign?: boolean;
 }
 
 type SetRecord = Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'orphans' | 'startedAt' | 'finishedAt' | 'missing' | 'skipped' | 'captured'>;
@@ -131,17 +143,31 @@ function safeStatSize(p: string): number {
   }
 }
 
-/** Every backup set on disk, newest first. Missing base dir → []. */
-export function listBackups(base = backupsDir()): BackupSet[] {
+/**
+ * Every backup set on disk, newest first. Missing base dir → []. `others`:
+ * also the sets made by another install or under an earlier key, marked
+ * `foreign` (the list and the readiness, which offer them for a restore);
+ * without it, this install's own only (what "the newest set" means).
+ * `limit`: stop at that many sets kept. Newest first, and a set's owner read
+ * only when it is reached: the home screen's ?latest=1 read every set's mark
+ * (and a legacy set's saved key) for the one it shows (second review of HB-0540).
+ */
+export function listBackups(base = backupsDir(), opts: { others?: boolean; limit?: number } = {}): BackupSet[] {
   if (!existsSync(base)) return [];
   const prefixes = [`${process.env.HATCHABOT_PREFIX || 'hatchabot'}-`, 'agentclaw-'];
+  const mark = ownerMark();
   const sets: BackupSet[] = [];
-  for (const entry of readdirSync(base)) {
-    if (!DATE_DIR.test(entry)) continue;
+  // The names are dates (YYYY-MM-DD): sorted as text, newest first.
+  for (const entry of readdirSync(base).filter((e) => DATE_DIR.test(e)).sort().reverse()) {
+    if (opts.limit !== undefined && sets.length >= opts.limit) break;
     const dir = join(base, entry);
     let files: string[];
+    let foreign = false;
     try {
       if (!statSync(dir).isDirectory()) continue;
+      foreign = foreignSet(dir, mark);
+      // Another install's, or this one's under an earlier key: only when asked (HB-0540).
+      if (foreign && !opts.others) continue;
       files = readdirSync(dir);
     } catch {
       continue;
@@ -168,9 +194,9 @@ export function listBackups(base = backupsDir()): BackupSet[] {
       hasKey: files.includes('secret-key.env'),
       volumes,
       ...readSetStatus(dir),
+      ...(foreign ? { foreign: true } : {}),
     });
   }
-  sets.sort((a, b) => b.date.localeCompare(a.date));
   return sets;
 }
 
@@ -215,6 +241,8 @@ export function pruneBackup(date: string, base = backupsDir()): boolean {
   if (lstatSync(target).isSymbolicLink()) {
     throw new Error(`The ${date} backup is a link to a folder elsewhere, not a set kept here. Remove the link (or what it points at) by hand once you have looked.`);
   }
+  // Another install's set, or this one's under an earlier key: never deleted from here (HB-0540).
+  if (foreignSet(target)) throw new Error(NOT_DELETED_HERE(date));
   // A set a run is still writing is not deleted: removing it took the run's
   // lock with it, so the run wrote into nothing and a second run could start
   // on the same day (#139). The lock is taken here, as the script takes it,
@@ -253,7 +281,7 @@ function lockHeld(lock: string): boolean {
   if (!Number.isInteger(pid) || pid <= 0) {
     try { return Date.now() - statSync(lock).mtimeMs < 60_000; } catch { return false; }
   }
-  try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code === 'EPERM'; }
+  return processAlive(pid);
 }
 
 // ---- "Back up now" -------------------------------------------------------
@@ -280,10 +308,73 @@ export function backupRunState(): BackupRunState {
 const LOCK_STALE_MS = 12 * 3600_000;
 
 /** The mark this install's sets carry in `.backup-owner` (key_owner in backup-volumes.sh); undefined without a key. */
-function ownerMark(): string | undefined {
-  const key = process.env.HATCHABOT_SECRET_KEY;
+export function ownerMark(key = process.env.HATCHABOT_SECRET_KEY): string | undefined {
   return key ? createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16) : undefined;
 }
+
+/**
+ * Whether a set was made by another install, or by this one under an earlier
+ * key: two installs that share a backup folder each write their own sets
+ * there, and the script leaves the other's alone. Listing, deleting and
+ * restoring here did not ask, so one install offered, deleted and restored
+ * from the other's sets (HB-0540). The mark cannot tell another install from
+ * this one before a reinstall or a key change, so such a set is listed,
+ * labelled, never deleted from here, and restored only when confirmed. Read as
+ * the script's retention reads it: the set's `.backup-owner`, or for a set
+ * from before that file, the mark of the key it saved. Only when this
+ * install's own mark is known (as backupRunning); a set that says neither is
+ * taken as this one's.
+ */
+export function foreignSet(dir: string, mark = ownerMark()): boolean {
+  if (!mark) return false;
+  const owner = setOwner(dir);
+  return owner !== '' && owner !== mark;
+}
+
+/**
+ * Each set's owner as last read, by its folder, until the files it was read
+ * from change: every listing read every set's mark, and hashed the saved key
+ * of every set from before the mark, on each call (sixth review of HB-0540).
+ * Small and bounded: a folder holds a few weeks of sets.
+ */
+const setOwners = new Map<string, { stamp: string; owner: string }>();
+const SET_OWNERS_MAX = 1000;
+function setOwner(dir: string): string {
+  const stampOf = (f: string) => { try { const st = statSync(join(dir, f)); return `${st.ino}:${st.size}:${st.mtimeMs}`; } catch { return '-'; } };
+  const stamp = `${stampOf('.backup-owner')}|${stampOf('secret-key.env')}`;
+  const known = setOwners.get(dir);
+  if (known && known.stamp === stamp) return known.owner;
+  let owner = '';
+  try { owner = readFileSync(join(dir, '.backup-owner'), 'utf8').trim(); } catch { /* not marked */ }
+  if (!owner) {
+    try {
+      const saved = parseEnv(readFileSync(join(dir, 'secret-key.env'), 'utf8'));
+      // '' for a file that holds neither name: undefined would take ownerMark's
+      // default, this install's own key, and call the set this install's,
+      // where backup-owner.sh's set_owner says it names none (fifteenth review).
+      owner = ownerMark(saved.HATCHABOT_SECRET_KEY ?? saved.AGENTCLAW_SECRET_KEY ?? '') ?? '';
+    } catch { /* no key saved */ }
+  }
+  if (setOwners.size >= SET_OWNERS_MAX) setOwners.clear();
+  setOwners.set(dir, { stamp, owner });
+  return owner;
+}
+
+/** Why a set is marked: the mark cannot tell which. */
+const OTHER_KEY_WHY = (date: string) =>
+  `The ${date} backup was made by another install, or under an earlier key: another Hatchabot install that shares this backup folder, or this one before its HATCHABOT_SECRET_KEY changed (a reinstall, or a key changed by hand).`;
+/** Said when Delete is asked for such a set. */
+const NOT_DELETED_HERE = (date: string) =>
+  `${OTHER_KEY_WHY(date)} So it is not deleted from here, and the nightly clean-up leaves it too. If it is this install's own and no longer wanted, delete its folder (${date}) in the backup folder by hand.`;
+/**
+ * Said when a restore from such a set is asked without the owner's yes. Its
+ * key does not stop the restore: only the agent's archive goes back into its
+ * volume (the set's database and saved key are not used), the archive holds
+ * nothing sealed with the install key, and this install's bot, members and
+ * model are put back over it (reapply).
+ */
+const RESTORE_ASKS = (date: string) =>
+  `${OTHER_KEY_WHY(date)} Restore from it only if it is this agent's own copy. The key it was made under does not stop it: the agent's memory and files come back, and its current bot, members and model are put back over them. Confirm to go ahead (from the command line: --other-key).`;
 
 /**
  * Whether a backup is being made now: "Back up now" from this process, or a
@@ -384,7 +475,8 @@ export function startBackup(now: number, onFinish?: (state: BackupRunState) => v
 // ---- restore ONE agent from a backup set ---------------------------------
 
 export class RestoreError extends Error {
-  constructor(public userMessage: string) {
+  /** `code`: a refusal the owner can answer (other_key: confirm with `otherKey`). */
+  constructor(public userMessage: string, public code?: 'other_key') {
     super(userMessage);
     this.name = 'RestoreError';
   }
@@ -544,6 +636,8 @@ export interface RestoreDeps {
   requestedBy?: string;
   /** Told the operation's id once it begins (the route answers 202 with it). */
   onOperation?: (id: string) => void;
+  /** The owner confirmed a set made by another install or under an earlier key (RESTORE_ASKS). */
+  otherKey?: boolean;
 }
 
 export async function restoreAgentFromBackup(
@@ -562,6 +656,8 @@ export async function restoreAgentFromBackup(
     throw new RestoreError(`Can't restore while the agent is ${agent.state}.`);
   }
 
+  // Another install's set, or this one's under an earlier key: only on the owner's yes (HB-0540).
+  if (!deps.otherKey && foreignSet(join(backupsDir(), date))) throw new RestoreError(RESTORE_ASKS(date), 'other_key');
   const file = join(backupsDir(), date, agentArchiveName(agent.runtimeRef));
   if (!existsSync(file)) {
     throw new RestoreError(`The ${date} backup doesn't contain this agent.`);

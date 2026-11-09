@@ -39,15 +39,19 @@ if [ "${1:-}" = --install ]; then
   # The user manager's PATH does not include a node installed by nvm or Homebrew, nor always gh.
   # Quoted whole, as install-service.sh writes it: unquoted, a space in a path split it (audit #044).
   UNIT_PATH="$(dirname "$(command -v node)"):$(dirname "$(command -v gh)"):/usr/local/bin:/usr/bin:/bin"
+  # The folder in ExecStart's quotes as systemd reads them, as every unit writer
+  # writes it: unescaped, a folder with a quote, % or $ in it ran another path.
+  . scripts/systemd-quote.sh
+  CHECK="$(systemd_arg "$DIR")/scripts/privacy-check.mjs"
   cat > "$UNITS/$NAME.service" <<UNIT
 [Unit]
 Description=Hatchabot: send GitHub the privacy check's keyed fingerprints
 
 [Service]
 Type=oneshot
-Environment="PATH=$(printf '%s' "$UNIT_PATH" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g')"
-ExecStart=/usr/bin/env node "$DIR/scripts/privacy-check.mjs" --sync-ci
-$(for r in ${ALSO[@]+"${ALSO[@]}"}; do echo "ExecStart=/usr/bin/env node \"$DIR/scripts/privacy-check.mjs\" --sync-ci --repo $r"; done)
+Environment="PATH=$(systemd_quoted "$UNIT_PATH")"
+ExecStart=/usr/bin/env node "$CHECK" --sync-ci
+$(for r in ${ALSO[@]+"${ALSO[@]}"}; do echo "ExecStart=/usr/bin/env node \"$CHECK\" --sync-ci --repo $r"; done)
 UNIT
   cat > "$UNITS/$NAME.timer" <<UNIT
 [Unit]

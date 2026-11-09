@@ -40,4 +40,20 @@ describe('continuing without Telegram', () => {
     b.store.setAgentPendingAction('lunch', null);
     expect((await b.f.inject({ method: 'POST', url: '/v1/agents/lunch/channel-token', headers: H, payload: { webOnly: true } })).statusCode).toBe(409);
   });
+
+  // Eleventh review of fix/r3-cli: the post sent again (a proxy lost the
+  // first answer) is answered as the first only where it was this answer.
+  it('sent again: 202 for an agent whose step was answered so, 409 for one made web-only that never waited', async () => {
+    const b = await box();
+    b.store.insertAgent({ id: 'never', ownerId: OWNER, name: 'Recipe Box', slug: 'recipe-box', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    const skip = (id: string) => b.f.inject({ method: 'POST', url: `/v1/agents/${id}/channel-token`, headers: H, payload: { webOnly: true } });
+    const never = await skip('never');
+    expect(never.statusCode).toBe(409);
+    expect(never.json().error).toMatch(/not waiting for a bot token/);
+    expect((await skip('lunch')).statusCode).toBe(202);
+    b.store.setAgentPendingAction('lunch', null); // setup took the answer
+    const again = await skip('lunch');
+    expect(again.statusCode).toBe(202);
+    expect(again.json()).toEqual({ webOnly: true });
+  });
 });

@@ -16,6 +16,7 @@ import { sq } from './apps.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 import { ensureConversation, listCrons, type Cron } from './crons.js';
+import { regexpEscape } from '../domain/regexpEscape.js';
 
 function stateDbPath(): string {
   return process.env.OPENCLAW_STATE_DB || resolve(homedir(), '.openclaw/state/openclaw.sqlite');
@@ -123,7 +124,7 @@ export function pathPattern(from: string): string {
   // `+ @ % =` go on a name too: `/data/work+archive` is another folder (A12).
   // Only after it: before it they end a setting (`WS=/home/…`, `--dir=…`).
   const name = '[\\p{L}\\p{N}_~+@%=-]';
-  return `(?<![\\p{L}\\p{N}_.~-])${from.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?!${name}|\\.${name})`;
+  return `(?<![\\p{L}\\p{N}_.~-])${regexpEscape(from)}(?!${name}|\\.${name})`;
 }
 
 export function applyReplacements(text: string | undefined, pairs: Array<[string, string]>): string | undefined {

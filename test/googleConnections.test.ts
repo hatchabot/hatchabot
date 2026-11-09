@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
-import { MockProvider } from '../src/providers/mockProvider.js';
+import { MockProvider, importsTook } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ExecResult, RuntimeProvider } from '../src/providers/provider.js';
@@ -630,7 +630,7 @@ describe('attach / detach / remove', () => {
     provider.execShell = (async (_ref: string, script: string) => {
       if (once && script.includes(what)) { once = false; entered(); await gate; }
       const email = /--email "([^"]+)"|remove --force -- "([^"]+)"/.exec(script);
-      if (script.includes('gog auth import')) { held.add(email![1]!); events.push('import'); return { code: 0, stdout: '', stderr: '' }; }
+      if (script.includes('gog auth import')) { held.add(email![1]!); events.push('import'); return { code: 0, stdout: importsTook(script), stderr: '' }; }
       if (script.includes('gog auth remove')) {
         events.push('remove');
         if (state.failRemove) return { code: 1, stdout: '', stderr: 'keyring locked' };

@@ -144,10 +144,12 @@ adopting, backing up, and operating a fleet of agents.
   the copy mentions, and where. **Import** stands up a fresh copy the recipient
   runs with their *own* bot and their *own* people.
 - **Bring your own AI — or none at all.** An Anthropic, OpenAI or Google
-  Gemini API key, a Claude Pro/Max subscription (its `claude setup-token`,
-  injected into each agent), or a **local model server you run yourself**
-  (Ollama). The local path needs no AI credential, and model calls never leave
-  the machine.
+  Gemini API key (a Claude Max or Ultra plan's monthly API credits come as an
+  Anthropic key), or a **local model server you run yourself** (Ollama). The
+  local path needs no AI credential, and model calls never leave the machine.
+  A Claude Pro/Max `claude setup-token` can be added too, but Anthropic's terms
+  keep a plan's sign-in for ordinary use of its own apps: see
+  [Why Hatchabot](docs/why-hatchabot.md) before relying on one.
 - **Different agents can use different AIs — and different models.** The
   kitchen helper on a local model, the homework tutor on Claude — chosen per
   agent. Switch models within a source instantly; switching providers takes

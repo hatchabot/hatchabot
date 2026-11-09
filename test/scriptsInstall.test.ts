@@ -252,14 +252,15 @@ describe('the units\' PATH holds a folder with a space in its name (audit #044)'
     const root = mkdtempSync(join(tmpdir(), 'hb-unit-path-')); dirs.push(root);
     const home = join(root, 'home'); mkdirSync(home);
     const bin = join(root, 'bin'); mkdirSync(bin);
-    // Node where a bundle install in such a folder keeps it (made-up names; a quote and a % too).
-    const nodeDir = join(root, 'node "binaries" 100%'); mkdirSync(nodeDir);
+    // Node where a bundle install in such a folder keeps it (made-up names; a quote, a % and a
+    // backslash too, the three characters the scripts escape for systemd).
+    const nodeDir = join(root, 'node "binaries" 100% back\\slash'); mkdirSync(nodeDir);
     shim(nodeDir, 'node', 'exit 0');
     for (const t of ['systemctl', 'docker']) shim(bin, t, 'exit 0');
     for (const t of ['getent', 'pgrep']) shim(bin, t, 'exit 1');
     shim(bin, 'loginctl', 'echo Linger=yes');
     const app = join(root, 'app'); mkdirSync(join(app, 'scripts'), { recursive: true }); mkdirSync(join(app, 'deploy')); mkdirSync(join(app, 'node_modules', '.bin'), { recursive: true });
-    for (const f of ['install-service.sh', 'follow-channel.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    for (const f of ['install-service.sh', 'follow-channel.sh', 'systemd-quote.sh', 'follow-tries.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     for (const u of ['hatchabot.service', 'hatchabot-backup.service', 'hatchabot-backup.timer']) writeFileSync(join(app, 'deploy', u), readFileSync(join('deploy', u)));
     for (const f of ['scripts/with-docker.sh', 'scripts/backup-volumes.sh', 'node_modules/.bin/tsx']) shim(app, f, 'exit 0');
     writeFileSync(join(app, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
@@ -268,13 +269,14 @@ describe('the units\' PATH holds a folder with a space in its name (audit #044)'
     return { home, nodeDir, run, unit: (name: string) => join(home, '.config', 'systemd', 'user', name) };
   }
 
-  it('is written quoted whole, the quote and the % escaped for systemd', () => {
+  it('is written quoted whole, the quote, the backslash and the % escaped for systemd', () => {
     const w = units();
     const a = w.run('install-service.sh');
     expect(a.status, a.stdout + a.stderr).toBe(0);
     const b = w.run('follow-channel.sh', '--install', 'stable');
     expect(b.status, b.stdout + b.stderr).toBe(0);
-    const want = `Environment="PATH=${w.nodeDir.replace(/"/g, '\\"').replace(/%/g, '%%')}:`;
+    // As the scripts escape it: `sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g'` (HB-0618).
+    const want = `Environment="PATH=${w.nodeDir.replace(/[\\"]/g, '\\$&').replace(/%/g, '%%')}:`;
     for (const u of ['hatchabot.service', 'hatchabot-backup.service', 'hatchabot-follow-channel.service']) {
       const text = readFileSync(w.unit(u), 'utf8');
       expect(text, u).toContain(want);
@@ -311,7 +313,7 @@ describe('the units hold an install folder with a % or a $ in its name (audit, 2
     for (const t of ['systemctl', 'docker', 'node']) shim(bin, t, 'exit 0');
     for (const t of ['getent', 'pgrep']) shim(bin, t, 'exit 1');
     shim(bin, 'loginctl', 'echo Linger=yes');
-    for (const f of ['install-service.sh', 'follow-channel.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    for (const f of ['install-service.sh', 'follow-channel.sh', 'systemd-quote.sh', 'follow-tries.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     for (const u of ['hatchabot.service', 'hatchabot-backup.service', 'hatchabot-backup.timer']) writeFileSync(join(app, 'deploy', u), readFileSync(join('deploy', u)));
     for (const f of ['scripts/with-docker.sh', 'scripts/backup-volumes.sh', 'node_modules/.bin/tsx']) shim(app, f, 'exit 0');
     writeFileSync(join(app, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
@@ -349,7 +351,7 @@ describe('scripts/install-service.sh without a docker group or $USER (review, 20
     const home = join(root, 'home'); mkdirSync(home);
     const bin = join(root, 'bin'); mkdirSync(bin);
     const app = join(root, 'app'); mkdirSync(join(app, 'scripts'), { recursive: true }); mkdirSync(join(app, 'deploy'));
-    writeFileSync(join(app, 'scripts', 'install-service.sh'), readFileSync('scripts/install-service.sh'), { mode: 0o755 });
+    for (const f of ['install-service.sh', 'systemd-quote.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     for (const u of ['hatchabot.service', 'hatchabot-backup.service', 'hatchabot-backup.timer']) writeFileSync(join(app, 'deploy', u), readFileSync(join('deploy', u)));
     writeFileSync(join(app, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
     const log = join(root, 'calls.log');

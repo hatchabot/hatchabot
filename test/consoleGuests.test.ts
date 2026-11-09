@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { createHash, randomBytes } from 'node:crypto';
@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { FrameReader, encodeFrame } from '../src/api/consoleProxy.js';
+import { FrameReader, GUEST_CONNECT_TIMEOUT_MS, GUEST_IDLE_TO_CLOSE_MS, GUEST_ROOM_EVERY_MS, MAX_GUEST_CONSOLES, encodeFrame } from '../src/api/consoleProxy.js';
 import { consoleIdentity, guestConsoleSessionKey, OWNER_ROLE } from '../src/openclaw/consoleIdentity.js';
 import { ConsoleAccess, consoleAllowUsers, consoleSyncBatch, parseConsoleState } from '../src/orchestrator/consoleAccess.js';
 
@@ -35,6 +35,15 @@ interface FakeGateway {
   /** The path of each HTTP request, as the gateway got it. */
   urls: string[];
   upgrades: Array<{ url: string; headers: IncomingHttpHeaders }>;
+  /** Upgrades for this identity are held, not answered (a gateway that hangs mid-handshake) until letIn. */
+  holdFor?: string;
+  held: import('node:net').Socket[];
+  /** Answer every upgrade held and still open. */
+  letIn: () => void;
+  /** Each connection it accepted, by name, with a way to send it a message. */
+  conns: Array<{ identity?: string; send: (o: unknown) => void; write: (b: Buffer) => void; end: () => void }>;
+  /** The payload of its answer to a request, when not the echo. */
+  answer?: (method: string, params: any) => unknown;
   received: Array<{ identity?: string; method: string; params: any }>;
   /** Scopes the hello grants, by the name Hatchabot sent. */
   scopes: (identity: string | undefined) => string[];
@@ -54,7 +63,9 @@ const FAKE_UI_CONFIG = JSON.stringify({ basePath: '', communityInvite: true, ter
 
 /** An OpenClaw gateway stand-in: HTTP answers "ok"; a WebSocket gets a challenge, a hello, and an echo per request. */
 async function fakeGateway(): Promise<FakeGateway> {
-  const g: FakeGateway = { port: 0, http: [], urls: [], upgrades: [], received: [], scopes: () => [], refusedConnects: [], dropAll: () => {}, dropped: [] };
+  const g: FakeGateway = { port: 0, http: [], urls: [], upgrades: [], held: [], letIn: () => {}, conns: [], received: [], scopes: () => [], refusedConnects: [], dropAll: () => {}, dropped: [] };
+  const holding: Array<() => void> = [];
+  g.letIn = () => { for (const go of holding.splice(0)) go(); };
   const server: Server = createServer((req, res) => {
     g.http.push(req.headers);
     g.urls.push(req.url ?? '');
@@ -72,9 +83,20 @@ async function fakeGateway(): Promise<FakeGateway> {
     socket.on('close', () => sockets.delete(socket as never));
     g.upgrades.push({ url: req.url ?? '', headers: req.headers });
     const identity = req.headers['x-hatchabot-user'] as string | undefined;
+    if (g.holdFor && identity === g.holdFor) {
+      g.held.push(socket as never);
+      socket.on('error', () => {});
+      socket.on('end', () => socket.destroy()); // the proxy gave up on it
+      holding.push(() => { if (!socket.destroyed) answerUpgrade(req, socket, identity); });
+      return;
+    }
+    answerUpgrade(req, socket, identity);
+  });
+  const answerUpgrade = (req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex, identity: string | undefined) => {
     const accept = createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
     const send = (o: unknown) => socket.write(encodeFrame(0x1, Buffer.from(JSON.stringify(o)), false));
+    g.conns.push({ identity, send, write: (b) => socket.write(b), end: () => socket.end() });
     send({ type: 'event', event: 'connect.challenge', payload: { nonce: 'n' } });
     const reader = new FrameReader(1 << 20);
     socket.on('data', (d: Buffer) => {
@@ -92,12 +114,12 @@ async function fakeGateway(): Promise<FakeGateway> {
             presence: [{ mode: 'gateway', reason: 'self' }, { mode: 'webchat', user: { email: ['owner-somebody', 'hatchabot.invalid'].join('@') } }],
           } } });
         } else {
-          send({ type: 'res', id: m.id, ok: true, payload: { method: m.method } });
+          send({ type: 'res', id: m.id, ok: true, payload: g.answer?.(m.method, m.params) ?? { method: m.method } });
         }
       }
     });
     socket.on('error', () => {});
-  });
+  };
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   g.port = (server.address() as { port: number }).port;
   toClose.push({ close: () => { for (const s of sockets) s.destroy(); server.close(); } });
@@ -338,6 +360,633 @@ describe("a guest's socket", () => {
     expect(await openConsole(w.port, 'user-stranger').ready).toBeUndefined();
     expect(await openConsole(w.port, OTHER).ready).toBeUndefined();
     expect(await openConsole(w.port, GUEST, {}, '/v1/agents/a1/ui/__openclaw__/worker').ready).toBeUndefined();
+  });
+
+  it('what the browser sends in the same packet as its upgrade request goes through the filter, not lost (HB-0593 review)', async () => {
+    const { port, gw, guestId } = await world();
+    const { connect } = await import('node:net');
+    const req = (id: string, method: string, params: unknown = {}) => encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'req', id, method, params })), true);
+    const sock = connect(port, '127.0.0.1');
+    toClose.push({ close: () => sock.destroy() });
+    await new Promise((r) => sock.once('connect', r));
+    let got = Buffer.alloc(0);
+    sock.on('data', (d: Buffer) => { got = Buffer.concat([got, d]); });
+    sock.on('error', () => {});
+    // The upgrade request and two requests after it, in one write: the two arrive as the upgrade's head.
+    sock.write(Buffer.concat([
+      Buffer.from([
+        'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+        `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+      ].join('\r\n')),
+      req('early-1', 'connect', { role: 'operator', client: { id: 'openclaw-control-ui', mode: 'webchat' } }),
+      req('early-2', 'logs.tail'),
+    ]));
+    const replies = () => {
+      const at = got.indexOf('\r\n\r\n');
+      return at < 0 ? [] : new FrameReader(1 << 20).push(got.subarray(at + 4)).filter((f) => f.opcode === 0x1).map((f) => JSON.parse(f.payload.toString()));
+    };
+    const end = Date.now() + 3000;
+    while (Date.now() < end && !(replies().some((m) => m.id === 'early-1') && replies().some((m) => m.id === 'early-2'))) await new Promise((r) => setTimeout(r, 20));
+    expect(got.subarray(0, 12).toString()).toBe('HTTP/1.1 101');
+    expect(gw.received.filter((r) => r.identity === guestId).map((r) => r.method)).toEqual(['connect']);
+    expect(replies().find((m) => m.id === 'early-1')?.ok).toBe(true);
+    expect(replies().find((m) => m.id === 'early-2')?.error?.code).toBe('FORBIDDEN');
+  });
+
+  /**
+   * Move on the clock a chat's use is timed by (performance.now(); it keeps
+   * running), by default past GUEST_IDLE_TO_CLOSE_MS: every chat open now
+   * has gone unused that long.
+   */
+  const realNow = performance.now.bind(performance);
+  let ahead = 0;
+  const laterOn = (by = GUEST_IDLE_TO_CLOSE_MS + 1000) => {
+    if (!vi.isMockFunction(performance.now)) vi.spyOn(performance, 'now').mockImplementation(() => realNow() + ahead);
+    ahead += by;
+  };
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); ahead = 0; });
+
+  it(`a guest may have ${MAX_GUEST_CONSOLES} chats open at once; the next closes their least recently active one, unused for GUEST_IDLE_TO_CLOSE_MS (1001), and opens`, async () => {
+    const { port, access } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((r) => setTimeout(r, 5)); // each a little later than the last
+    }
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+    laterOn();
+    // The first is used again: the second is now the least recently active.
+    expect((await open[0]!.call('m1', 'chat.history'))?.ok).toBe(true);
+    const codes: Array<{ code: number; reason: string }> = [];
+    open[1]!.ws.addEventListener('close', (ev: { code: number; reason: string }) => codes.push({ code: ev.code, reason: ev.reason }));
+    const ninth = openConsole(port, GUEST);
+    expect((await ninth.ready)?.ok).toBe(true);
+    expect(await open[1]!.until(() => open[1]!.isClosed())).toBe(true);
+    expect(codes).toEqual([{ code: 1001, reason: 'opened in another tab' }]);
+    expect(open.filter((c) => c.isClosed())).toEqual([open[1]]);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+    expect((await ninth.call('m2', 'chat.history'))?.ok).toBe(true);
+  });
+
+  it('a console whose browser went without a word (it looks open) never locks the guest out: it is the one closed', async () => {
+    const { port, access } = await world();
+    const { connect } = await import('node:net');
+    // A browser that opened a console and then went silent (a phone asleep):
+    // the server sees an open connection that never sends again.
+    const silent = connect(port, '127.0.0.1');
+    toClose.push({ close: () => silent.destroy() });
+    silent.on('error', () => {});
+    silent.on('data', () => {});
+    await new Promise((r) => silent.once('connect', r));
+    silent.write([
+      'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+      `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+    ].join('\r\n'));
+    const until = async (pred: () => boolean) => { for (let i = 0; i < 100 && !pred(); i++) await new Promise((r) => setTimeout(r, 20)); return pred(); };
+    expect(await until(() => access.openGuests('a1', GUEST) === 1)).toBe(true);
+    await new Promise((r) => setTimeout(r, 5));
+    const rest: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 1; i < MAX_GUEST_CONSOLES; i++) { const c = openConsole(port, GUEST); expect((await c.ready)?.ok).toBe(true); rest.push(c); }
+    laterOn();
+    let gone = false;
+    silent.on('close', () => { gone = true; });
+    expect((await openConsole(port, GUEST).ready)?.ok).toBe(true);
+    expect(await until(() => gone)).toBe(true);
+    expect(rest.some((c) => c.isClosed())).toBe(false);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+  });
+
+  it('one chat more is promised room at the door, and their least recently active idle one is closed only once it connects: not while it connects', async () => {
+    const { port, gw, guestId, access } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((r) => setTimeout(r, 5)); // each a little later than the last
+    }
+    laterOn();
+    gw.holdFor = guestId;
+    const codes: Array<{ code: number; reason: string }> = [];
+    open[0]!.ws.addEventListener('close', (ev: { code: number; reason: string }) => codes.push({ code: ev.code, reason: ev.reason }));
+    const ninth = openConsole(port, GUEST);
+    expect(await ninth.until(() => gw.held.length === 1)).toBe(true);
+    await new Promise((r) => setTimeout(r, 100));
+    // Promised, counted as gone, but open while the new one connects.
+    expect(open.filter((c) => c.isClosed())).toEqual([]);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+    expect(access.openGuests('a1', GUEST, 'connecting')).toBe(1);
+    gw.letIn();
+    expect((await ninth.ready)?.ok).toBe(true);
+    expect(await open[0]!.until(() => open[0]!.isClosed())).toBe(true);
+    expect(codes).toEqual([{ code: 1001, reason: 'opened in another tab' }]);
+    expect(open.filter((c) => c.isClosed())).toEqual([open[0]]);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+  });
+
+  it('a connect that fails, or times out, closes nothing: the room promised goes back, and the next open takes it', async () => {
+    const { port, gw, guestId, access } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((r) => setTimeout(r, 5)); // each a little later than the last
+    }
+    laterOn();
+    gw.holdFor = guestId;
+    // The 30 s connect limit is made short here; nothing else waits that long.
+    const realSetTimeout = globalThis.setTimeout;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) =>
+      (realSetTimeout as unknown as (...a: unknown[]) => NodeJS.Timeout)(fn, ms === GUEST_CONNECT_TIMEOUT_MS ? 300 : ms, ...rest)) as never);
+    const { connect } = await import('node:net');
+    const knock = async () => {
+      const sock = connect(port, '127.0.0.1');
+      toClose.push({ close: () => sock.destroy() });
+      sock.on('error', () => {});
+      const state = { sock, gone: false };
+      sock.on('close', () => { state.gone = true; });
+      await new Promise((r) => sock.once('connect', r));
+      sock.write([
+        'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+        `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+      ].join('\r\n'));
+      return state;
+    };
+    const until = async (pred: () => boolean) => { for (let i = 0; i < 100 && !pred(); i++) await new Promise((r) => realSetTimeout(r, 20)); return pred(); };
+    // The agent fails it.
+    const failed = await knock();
+    expect(await until(() => gw.held.length === 1)).toBe(true);
+    gw.held[0]!.destroy();
+    expect(await until(() => failed.gone)).toBe(true);
+    expect(await until(() => access.openGuests('a1', GUEST, 'connecting') === 0)).toBe(true);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES); // the one promised counts again
+    // The agent does not answer in time.
+    const slow = await knock();
+    expect(await until(() => gw.held.length === 2)).toBe(true);
+    expect(await until(() => slow.gone)).toBe(true);
+    expect(await until(() => access.openGuests('a1', GUEST, 'connecting') === 0)).toBe(true);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+    gw.letIn(); // too late: nothing is spliced
+    await new Promise((r) => realSetTimeout(r, 100));
+    expect(open.filter((c) => c.isClosed())).toEqual([]);
+    // The promise went back, and with it the window: the next open closes the idle one as it would have.
+    gw.holdFor = undefined;
+    const next = openConsole(port, GUEST);
+    expect((await next.ready)?.ok).toBe(true);
+    expect(await open[0]!.until(() => open[0]!.isClosed())).toBe(true);
+    expect(open.filter((c) => c.isClosed())).toEqual([open[0]]);
+  });
+
+  it('a console promised as room but used again before the new one connects stays: the new one is closed with 1008 (rare)', async () => {
+    const { port, gw, guestId, access, app } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    laterOn();
+    gw.holdFor = guestId;
+    const ninth = openConsole(port, GUEST);
+    const codes: Array<{ code: number; reason: string }> = [];
+    ninth.ws.addEventListener('close', (ev: { code: number; reason: string }) => codes.push({ code: ev.code, reason: ev.reason }));
+    expect(await ninth.until(() => gw.held.length === 1)).toBe(true);
+    expect((await open[0]!.call('back', 'chat.history'))?.ok).toBe(true); // the one promised, used again
+    const warn = vi.spyOn(app.log, 'warn');
+    gw.letIn();
+    expect(await ninth.until(() => ninth.isClosed())).toBe(true);
+    expect(codes).toEqual([{ code: 1008, reason: `refused: you have ${MAX_GUEST_CONSOLES} chats open; close one` }]);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(open.filter((c) => c.isClosed())).toEqual([]);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+    expect(warn.mock.calls.filter((c) => c.includes('console.guest_too_many' as never))).toHaveLength(1);
+    expect(warn.mock.calls.some((c) => c.includes('console.guest_oldest_closed' as never))).toBe(false);
+  });
+
+  it(`at most ${MAX_GUEST_CONSOLES} of a guest's chats may be connecting at once; one more is not let in`, async () => {
+    const { port, gw, guestId, access } = await world();
+    gw.holdFor = guestId;
+    const { connect } = await import('node:net');
+    const knock = async () => {
+      const sock = connect(port, '127.0.0.1');
+      toClose.push({ close: () => sock.destroy() });
+      sock.on('error', () => {});
+      const state = { gone: false, got: Buffer.alloc(0) };
+      sock.on('close', () => { state.gone = true; });
+      sock.on('data', (d: Buffer) => { state.got = Buffer.concat([state.got, d]); });
+      await new Promise((r) => sock.once('connect', r));
+      sock.write([
+        'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+        `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+      ].join('\r\n'));
+      return state;
+    };
+    const until = async (pred: () => boolean) => { for (let i = 0; i < 100 && !pred(); i++) await new Promise((r) => setTimeout(r, 20)); return pred(); };
+    const waiting = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) waiting.push(await knock());
+    expect(await until(() => gw.held.length === MAX_GUEST_CONSOLES)).toBe(true);
+    const extra = await knock();
+    expect(await until(() => extra.gone)).toBe(true);
+    expect(extra.got.length).toBe(0);
+    expect(gw.held).toHaveLength(MAX_GUEST_CONSOLES);
+    expect(access.openGuests('a1', GUEST, 'connecting')).toBe(MAX_GUEST_CONSOLES);
+    expect(waiting.some((w) => w.gone)).toBe(false);
+  });
+
+  it(`tabs in use do not close each other: with all ${MAX_GUEST_CONSOLES} used within GUEST_IDLE_TO_CLOSE_MS, one more is refused, and the tab closed for room, reconnecting, closes nothing`, async () => {
+    const { port, access } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+    }
+    laterOn();
+    // All but the first are used again.
+    for (const [i, c] of open.entries()) if (i) expect((await c.call(`use-${i}`, 'chat.history'))?.ok).toBe(true);
+    // A ninth tab: the first, unused, is closed to make room.
+    const ninth = openConsole(port, GUEST);
+    expect((await ninth.ready)?.ok).toBe(true);
+    expect(await open[0]!.until(() => open[0]!.isClosed())).toBe(true);
+    // The closed tab reconnects, again and again: the eight open are all in use, so it is refused each time.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const again = openConsole(port, GUEST);
+      expect(await again.ready).toBeUndefined();
+      expect(again.isClosed()).toBe(true);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect([...open.slice(1), ninth].filter((c) => c.isClosed())).toEqual([]);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+    expect((await ninth.call('still', 'chat.history'))?.ok).toBe(true);
+  });
+
+  it('two opens at once with one idle chat: the first is promised its place (closing it once connected), the second is refused at the door, before upgrading, and is not a visit', async () => {
+    const { port, access, app, gw, guestId } = await world();
+    const guestUpgrades = () => gw.upgrades.filter((u) => u.headers['x-hatchabot-user'] === guestId).length;
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+    }
+    laterOn();
+    // All but the first are used again: one idle chat.
+    for (const [i, c] of open.entries()) if (i) expect((await c.call(`use-${i}`, 'chat.history'))?.ok).toBe(true);
+    const names = vi.spyOn(access, 'nameGuests');
+    const info = vi.spyOn(app.log, 'info');
+    const both = [openConsole(port, GUEST), openConsole(port, GUEST)];
+    const ready = await Promise.all(both.map((c) => c.ready));
+    expect(ready.filter((r) => r?.ok)).toHaveLength(1);
+    expect(ready.filter((r) => r === undefined)).toHaveLength(1);
+    expect(guestUpgrades()).toBe(MAX_GUEST_CONSOLES + 1); // the one refused never reached the agent
+    expect(await open[0]!.until(() => open[0]!.isClosed())).toBe(true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(open.filter((c) => c.isClosed())).toEqual([open[0]]);
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+    expect(info.mock.calls.filter((c) => c.includes('console.guest_opened' as never))).toHaveLength(1);
+    expect(names).toHaveBeenCalledTimes(1);
+  });
+
+  it(`chats unused for GUEST_ROOM_EVERY_MS or more (a phone that slept) may always be closed for room: three opens within a minute each close one`, async () => {
+    const { port, access } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((r) => setTimeout(r, 5)); // each a little later than the last
+    }
+    laterOn(GUEST_ROOM_EVERY_MS + 1000);
+    for (let k = 0; k < 3; k++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      expect(await open[k]!.until(() => open[k]!.isClosed())).toBe(true);
+      laterOn(20_000);
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    expect(open.filter((c) => c.isClosed())).toEqual(open.slice(0, 3));
+    expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+  });
+
+  it('a chat being answered is not idle: the tab watching a reply stream for minutes without typing is not the one closed', async () => {
+    const { port, gw, guestId, token } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const sessionKey = guestConsoleSessionKey(token, 'recipe', GUEST);
+    const conns = gw.conns.filter((c) => c.identity === guestId);
+    expect(conns).toHaveLength(MAX_GUEST_CONSOLES);
+    const a = open[0]!, toA = conns[0]!.send;
+    // Tab A asks; the others are used a little later.
+    expect((await a.call('say', 'chat.send', { message: 'plan my week' }))?.ok).toBe(true);
+    laterOn(30_000);
+    for (const [i, c] of open.entries()) if (i) expect((await c.call(`use-${i}`, 'chat.history'))?.ok).toBe(true);
+    // A's answer streams, a piece every 30 s, for five minutes; at minute 3 a ninth opens.
+    const stream = async (seq: number) => {
+      laterOn(30_000);
+      toA({ type: 'event', event: 'chat', payload: { sessionKey, state: 'delta', seq } });
+      expect(await a.until(() => a.got.some((m) => m.event === 'chat' && m.payload?.seq === seq))).toBe(true);
+    };
+    for (let seq = 0; seq < 5; seq++) await stream(seq);
+    const ninth = openConsole(port, GUEST);
+    expect((await ninth.ready)?.ok).toBe(true);
+    expect(await open[1]!.until(() => open[1]!.isClosed())).toBe(true);
+    for (let seq = 5; seq < 9; seq++) await stream(seq);
+    expect(a.isClosed()).toBe(false);
+    expect(open.filter((c) => c.isClosed())).toEqual([open[1]]);
+  });
+
+  it('a chat whose answer is a long run, acknowledged and then only agent events for minutes, is being answered: not the one closed', async () => {
+    const { port, gw, guestId, token } = await world();
+    gw.answer = (method, params) => (method === 'chat.send' ? { runId: params?.idempotencyKey, status: 'started' } : undefined);
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const sessionKey = guestConsoleSessionKey(token, 'recipe', GUEST);
+    const conns = gw.conns.filter((c) => c.identity === guestId);
+    const a = open[0]!, toA = conns[0]!.send;
+    // Tab A asks; the agent acknowledges at once (the run started); the others are used a little later.
+    expect((await a.call('say', 'chat.send', { message: 'plan my week', idempotencyKey: 'run-a' }))?.payload).toEqual({ runId: 'run-a', status: 'started' });
+    laterOn(30_000);
+    for (const [i, c] of open.entries()) if (i) expect((await c.call(`use-${i}`, 'chat.history'))?.ok).toBe(true);
+    // Three minutes of tool work: agent events only, no chat event.
+    for (let seq = 0; seq < 6; seq++) {
+      laterOn(30_000);
+      toA({ type: 'event', event: 'agent', payload: { runId: 'run-a', sessionKey, seq, stream: 'tool', data: {} } });
+      expect(await a.until(() => a.got.some((m) => m.event === 'agent' && m.payload?.seq === seq))).toBe(true);
+    }
+    const ninth = openConsole(port, GUEST);
+    expect((await ninth.ready)?.ok).toBe(true);
+    expect(await open[1]!.until(() => open[1]!.isClosed())).toBe(true);
+    expect(a.isClosed()).toBe(false);
+    expect(open.filter((c) => c.isClosed())).toEqual([open[1]]);
+  });
+
+  it('a chat still being sent what waits after the agent closed stays counted and closable: web chat turned off then closes it', async () => {
+    const { port, app, gw, guestId, access } = await world();
+    const { connect } = await import('node:net');
+    const sock = connect(port, '127.0.0.1');
+    toClose.push({ close: () => sock.destroy() });
+    sock.on('error', () => {});
+    let got = 0;
+    let head = '';
+    let gone = false;
+    sock.on('data', (d: Buffer) => { got += d.length; if (head.length < 4096) head += d.toString('latin1'); });
+    sock.on('close', () => { gone = true; });
+    await new Promise((r) => sock.once('connect', r));
+    sock.write([
+      'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+      `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+    ].join('\r\n'));
+    const until = async (pred: () => boolean) => { for (let i = 0; i < 150 && !pred(); i++) await new Promise((r) => setTimeout(r, 20)); return pred(); };
+    expect(await until(() => head.includes('connect.challenge'))).toBe(true);
+    const conn = gw.conns.find((c) => c.identity === guestId)!;
+    // The browser stops reading; the agent sends 24 MB and closes, its close read with the end of it.
+    sock.pause();
+    const size = 24 * 1024 * 1024;
+    const frame = encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'event', event: 'chat', payload: { text: 'x'.repeat(size) } })), false);
+    conn.write(frame.subarray(0, frame.length - 100));
+    await new Promise((r) => setTimeout(r, 300));
+    conn.write(Buffer.concat([frame.subarray(frame.length - 100), encodeFrame(0x8, Buffer.from([0x03, 0xe8]), false)]));
+    conn.end();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(access.openGuests('a1', GUEST)).toBe(1); // still counted while it drains
+    const off = await app.inject({ method: 'PUT', url: `/v1/agents/a1/members/${GUEST}/web-chat`, headers: { 'x-hatchabot-owner': OWNER }, payload: { on: false } });
+    expect(off.statusCode).toBe(200);
+    expect(await until(() => access.openGuests('a1', GUEST) === 0)).toBe(true);
+    sock.resume();
+    expect(await until(() => gone)).toBe(true);
+    expect(got).toBeLessThan(size); // closed: the rest never came
+  });
+
+  it('an upload refused once whole puts back what its pieces marked: that chat is as idle as before it', async () => {
+    const { port } = await world();
+    // R: a chat over a plain socket, so its message can arrive in pieces.
+    const { connect } = await import('node:net');
+    const r = connect(port, '127.0.0.1');
+    toClose.push({ close: () => r.destroy() });
+    r.on('error', () => {});
+    let rGot = '';
+    let rGone = false;
+    r.on('data', (d: Buffer) => { rGot += d.toString('latin1'); });
+    r.on('close', () => { rGone = true; });
+    await new Promise((res) => r.once('connect', res));
+    r.write([
+      'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+      `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+    ].join('\r\n'));
+    const until = async (pred: () => boolean) => { for (let i = 0; i < 100 && !pred(); i++) await new Promise((res) => setTimeout(res, 20)); return pred(); };
+    expect(await until(() => rGot.includes('connect.challenge'))).toBe(true);
+    await new Promise((res) => setTimeout(res, 5));
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 1; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((res) => setTimeout(res, 5));
+    }
+    laterOn();
+    // R sends a large message (its pieces count as it arrives), but it is not a request: refused once whole.
+    const upload = encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'event', id: 'u1', method: 'chat.send', params: { message: 'w'.repeat(20_000) } })), true);
+    for (let at = 0; at < upload.length; at += 5000) {
+      r.write(upload.subarray(at, at + 5000));
+      await new Promise((res) => setTimeout(res, 30));
+    }
+    expect(await until(() => rGot.includes('FORBIDDEN'))).toBe(true);
+    // R is the least recently used again: a ninth closes it.
+    const ninth = openConsole(port, GUEST);
+    expect((await ninth.ready)?.ok).toBe(true);
+    expect(await until(() => rGone)).toBe(true);
+    expect(open.filter((c) => c.isClosed())).toEqual([]);
+  });
+
+  it(`idle tabs reconnecting do not close each other in turn: one is closed for room at most once in GUEST_ROOM_EVERY_MS (${GUEST_ROOM_EVERY_MS / 60_000} min); within it, one more is refused`, async () => {
+    const { port, access } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+      await new Promise((r) => setTimeout(r, 5)); // each a little later than the last
+    }
+    laterOn();
+    // A ninth: the first, idle, is closed for it.
+    const ninth = openConsole(port, GUEST);
+    expect((await ninth.ready)?.ok).toBe(true);
+    expect(await open[0]!.until(() => open[0]!.isClosed())).toBe(true);
+    // The closed tab reconnects every minute, the others idle (under GUEST_ROOM_EVERY_MS): within the window it is refused each time.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      laterOn(60_000);
+      const again = openConsole(port, GUEST);
+      expect(await again.ready).toBeUndefined();
+      expect(again.isClosed()).toBe(true);
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    expect(open.filter((c) => c.isClosed())).toEqual([open[0]]);
+    expect(ninth.isClosed()).toBe(false);
+    // Used again, then idle once more (under GUEST_ROOM_EVERY_MS) past the window: one more may close the least recently used.
+    for (const [i, c] of [...open.slice(1), ninth].entries()) expect((await c.call(`again-${i}`, 'chat.history'))?.ok).toBe(true);
+    laterOn(GUEST_ROOM_EVERY_MS - 3 * 60_000 + 1000);
+    const later = openConsole(port, GUEST);
+    expect((await later.ready)?.ok).toBe(true);
+    expect(await open[1]!.until(() => open[1]!.isClosed())).toBe(true);
+    expect(open.filter((c) => c.isClosed())).toEqual([open[0], open[1]]);
+  });
+
+  it('a wall clock set forward makes no chat idle: past the limit, one more is refused and none is closed', async () => {
+    const { port, access } = await world();
+    const open: Array<ReturnType<typeof openConsole>> = [];
+    for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      open.push(c);
+    }
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    const ninth = openConsole(port, GUEST);
+    expect(await ninth.ready).toBeUndefined();
+    expect(ninth.isClosed()).toBe(true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(open.filter((c) => c.isClosed())).toEqual([]);
+  });
+
+  it(`a chat the agent never answers gives up its place after GUEST_CONNECT_TIMEOUT_MS: both sides are closed, and console.guest_connect_timeout is logged`, async () => {
+    const { port, gw, guestId, access, app } = await world();
+    gw.holdFor = guestId;
+    // The 30 s are made short here; nothing else waits that long.
+    const realSetTimeout = globalThis.setTimeout;
+    const waited: number[] = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (ms === GUEST_CONNECT_TIMEOUT_MS) waited.push(ms);
+      return (realSetTimeout as unknown as (...a: unknown[]) => NodeJS.Timeout)(fn, ms === GUEST_CONNECT_TIMEOUT_MS ? 200 : ms, ...rest);
+    }) as never);
+    const warn = vi.spyOn(app.log, 'warn');
+    const { connect } = await import('node:net');
+    const sock = connect(port, '127.0.0.1');
+    toClose.push({ close: () => sock.destroy() });
+    sock.on('error', () => {});
+    await new Promise((r) => sock.once('connect', r));
+    let gone = false;
+    sock.on('close', () => { gone = true; });
+    sock.write([
+      'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+      `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+    ].join('\r\n'));
+    const until = async (pred: () => boolean) => { for (let i = 0; i < 100 && !pred(); i++) await new Promise((r) => realSetTimeout(r, 20)); return pred(); };
+    expect(await until(() => gw.held.length === 1)).toBe(true);
+    expect(access.openGuests('a1', GUEST, 'connecting')).toBe(1);
+    expect(warn.mock.calls.some((c) => c.includes('console.guest_connect_timeout' as never))).toBe(false);
+    expect(await until(() => gone)).toBe(true);
+    expect(waited).toEqual([GUEST_CONNECT_TIMEOUT_MS]);
+    expect(access.openGuests('a1', GUEST)).toBe(0);
+    expect(warn.mock.calls.filter((c) => c.includes('console.guest_connect_timeout' as never))).toHaveLength(1);
+    expect(await until(() => gw.held[0]!.destroyed)).toBe(true); // the request to the gateway is given up
+  });
+
+  it('room promised is their least recently active connected console, counted as gone at once and closed only when kept; released, nothing is; used again or gone meanwhile, nothing is', async () => {
+    const { access } = await world();
+    const closed: string[] = [];
+    const how = { idleFor: 60_000, every: GUEST_ROOM_EVERY_MS };
+    const long = performance.now() - 120_000; // two minutes ago
+    access.trackGuest('agent-one', 'user-x', () => closed.push('agent-one destroyed'), { lastActive: () => long + 5, evict: () => closed.push('agent-one') });
+    access.trackGuest('agent-two', 'user-x', () => {}, { lastActive: () => long + 1, evict: () => closed.push('agent-two'), connecting: () => true });
+    access.trackGuest('agent-one', 'user-y', () => {}, { lastActive: () => long, evict: () => closed.push('user-y') });
+    access.trackGuest('agent-four', 'user-x', () => {}, { lastActive: () => performance.now(), evict: () => closed.push('agent-four') });
+    const first = access.promiseRoom('user-x', how)!;
+    expect(first).toBeDefined();
+    expect(closed).toEqual([]);
+    expect(access.openGuests(undefined, 'user-x')).toBe(2); // agent-one counted as gone
+    // A second open at once: the one connecting and the one used lately are passed over, so none.
+    expect(access.promiseRoom('user-x', how)).toBeUndefined();
+    first.release();
+    first.release();
+    expect(closed).toEqual([]);
+    expect(access.openGuests(undefined, 'user-x')).toBe(3);
+    // Released, the window went back too: it may be promised again, and kept.
+    const again = access.promiseRoom('user-x', how)!;
+    expect(again.keep()).toEqual({ closed: 'agent-one' });
+    expect(again.keep()).toEqual({});
+    again.release();
+    expect(closed).toEqual(['agent-one']);
+    expect(access.openGuests(undefined, 'user-x')).toBe(2);
+    // Within the window, another idle one is not promised; one unused for GUEST_ROOM_EVERY_MS (a phone that slept) is.
+    access.trackGuest('agent-five', 'user-x', () => {}, { lastActive: () => long, evict: () => closed.push('agent-five') });
+    expect(access.promiseRoom('user-x', how)).toBeUndefined();
+    access.trackGuest('agent-six', 'user-x', () => {}, { lastActive: () => performance.now() - GUEST_ROOM_EVERY_MS - 1000, evict: () => closed.push('agent-six') });
+    expect(access.promiseRoom('user-x', how)!.keep()).toEqual({ closed: 'agent-six' });
+    // Used again before the new one connects: refused, nothing closed, and promised no more.
+    let used = long;
+    access.trackGuest('agent-one', 'user-z', () => {}, { lastActive: () => used, evict: () => closed.push('user-z') });
+    const z = access.promiseRoom('user-z', how)!;
+    expect(access.openGuests(undefined, 'user-z')).toBe(0);
+    used = performance.now();
+    expect(z.keep()).toEqual({ refused: true });
+    expect(access.openGuests(undefined, 'user-z')).toBe(1);
+    used = long; // idle again: the window went back
+    // Gone meanwhile (it closed by itself): its place is free, nothing more is closed.
+    const forgetW = access.trackGuest('agent-one', 'user-w', () => {}, { lastActive: () => long, evict: () => closed.push('user-w') });
+    const w = access.promiseRoom('user-w', how)!;
+    forgetW();
+    expect(w.keep()).toEqual({});
+    expect(access.promiseRoom('user-z', how)!.keep()).toEqual({ closed: 'agent-one' });
+    expect(closed).toEqual(['agent-one', 'agent-six', 'user-z']);
+  });
+
+  it("what a guest's chats hold is kept as a running total of their changes", async () => {
+    const { access } = await world();
+    expect(access.addGuestHeld('user-x', 100)).toBe(100);
+    expect(access.addGuestHeld('user-y', 7)).toBe(7);
+    expect(access.addGuestHeld('user-x', 50)).toBe(150);
+    expect(access.addGuestHeld('user-x', 0)).toBe(150);
+    expect(access.addGuestHeld('user-x', -150)).toBe(0);
+    expect(access.addGuestHeld('user-y', -7)).toBe(0);
+  });
+
+  it('a guest dropped while the gateway is still answering (web chat switched off) leaves nothing open, and is not counted', async () => {
+    const { port, gw, guestId, access } = await world();
+    gw.holdFor = guestId;
+    const { connect } = await import('node:net');
+    const sock = connect(port, '127.0.0.1');
+    toClose.push({ close: () => sock.destroy() });
+    sock.on('error', () => {});
+    await new Promise((r) => sock.once('connect', r));
+    sock.write([
+      'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+      `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+    ].join('\r\n'));
+    const until = async (pred: () => boolean) => { for (let i = 0; i < 100 && !pred(); i++) await new Promise((r) => setTimeout(r, 20)); return pred(); };
+    expect(await until(() => gw.held.length === 1)).toBe(true);
+    expect(access.openGuests('a1', GUEST)).toBe(1); // counted while it connects
+    let closed = false;
+    sock.on('close', () => { closed = true; });
+    expect(access.dropGuests('a1', GUEST)).toBe(1);
+    expect(await until(() => gw.held[0]!.destroyed)).toBe(true); // the request to the gateway is given up
+    expect(await until(() => closed)).toBe(true);
+    expect(access.openGuests('a1', GUEST)).toBe(0);
+  });
+
+  it("a console's forget works once: a late second call leaves a newer one counted", async () => {
+    const { access } = await world();
+    const forgetA = access.trackGuest('a1', 'user-a', () => {});
+    forgetA();
+    const forgetB = access.trackGuest('a1', 'user-b', () => {});
+    forgetA(); // the socket and its upstream both closing
+    expect(access.openGuests('a1', 'user-b')).toBe(1);
+    expect(access.openGuests('a1')).toBe(1);
+    forgetB();
+    expect(access.openGuests('a1')).toBe(0);
   });
 
   it("the owner's socket is named, uncapped and passed through untouched", async () => {

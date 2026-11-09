@@ -36,8 +36,22 @@ describe('deploy and upgrade', () => {
     expect(lockOf(u)?.[1]).toBe('DIR'); // DIR="$PWD" after its cd
     expect(u).toMatch(/DIR="\$PWD"/);
     // And judge a leftover the same way: by its holder, cleared under the same second lock (#226).
-    const fns = (s: string) => ['proc_start() {', 'lock_left_over() {', 'take_lock() {'].map((f) => s.slice(s.indexOf(f), s.indexOf('\n}\n', s.indexOf(f))));
+    // And tell the disk the same way (HB-0470): a full disk is 5 from either, never the release's.
+    // Every helper the two keep a copy of (eighth review: all of them, the
+    // messages too; deploy-release.sh names its tree DIR and its tag TARGET,
+    // and REDO what a person runs, so they can be the same text).
+    const fns = (s: string) => ['machine_short() {', 'free_mb() {', 'disk_words() {', 'proc_start() {', 'lock_left_over() {', 'take_lock() {', 'lock_short() {', 'lock_in_way() {',
+      'disk_short() {', 'run_step() {', 'put_rec() {', 'said_kind() {', 'said_path() {', 'step_tee() {', 'step_tail() {', 'new_step_log() {', 'own_place() {', 'step_short() {', 'change_failed() {',
+      'link_end() {', 'put_line() {', 'put_dir() {', 'put_failed() {'].map((f) => {
+      expect(s, f).toContain(f);
+      const at = s.indexOf(f), line = s.slice(at, s.indexOf('\n', at));
+      // A one-line helper ends on its own line; the others at the first "}" alone on a line.
+      return /\}\s*$/.test(line) ? line : s.slice(at, s.indexOf('\n}\n', at));
+    });
     expect(fns(d)).toEqual(fns(u));
+    // follow-latest.sh reads git's words with a copy of the same disk_words (fifteenth review).
+    const disk = (s: string) => { const at = s.indexOf('disk_words() {'); expect(at).toBeGreaterThan(-1); return s.slice(at, s.indexOf('\n}\n', at)); };
+    expect(disk(src('scripts/follow-latest.sh'))).toBe(disk(u));
     for (const s of [d, u]) expect(s).toContain('mkdir "$LOCK_PATH.clearing"');
   });
   it('upgrade.sh installs through ensure-deps (it writes the stamp restart.sh checks)', () => {
@@ -62,7 +76,7 @@ describe('scripts/uninstall.sh refuses a database it cannot read', () => {
     const home = join(root, 'home'); mkdirSync(join(home, '.config', 'hatchabot'), { recursive: true });
     const repo = join(root, 'install'); mkdirSync(join(repo, 'scripts'), { recursive: true }); mkdirSync(join(repo, 'data'));
     mkdirSync(join(repo, 'node_modules', 'better-sqlite3'), { recursive: true });
-    writeFileSync(join(repo, 'scripts', 'uninstall.sh'), readFileSync('scripts/uninstall.sh'), { mode: 0o755 });
+    for (const f of ['uninstall.sh', 'backup-owner.sh']) writeFileSync(join(repo, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     writeFileSync(join(repo, '.env'), 'HATCHABOT_SECRET_KEY=x\n');
     writeFileSync(join(repo, 'data', 'hatchabot.sqlite'), 'x');
     const bin = join(root, 'bin'); mkdirSync(bin);

@@ -1,4 +1,4 @@
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { PassThrough, pipeline, type Readable } from 'node:stream';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
@@ -57,11 +57,15 @@ export interface LocalDockerOptions {
   publishedImage?: (openclawVersion: string) => Promise<PublishedImage>;
   /** The wait between tries at removing a failed one-shot (tests); default REAP_RETRY_MS. */
   reapRetryMs?: number;
+  /** How long everyday writes to a volume go ahead unlooked after its listing failed (tests); default LIST_RETRY_MS. */
+  listRetryMs?: number;
 }
 
 /** How often, and how far apart, a failed one-shot's removal is tried before it is called not gone (HB-0385). */
 const REAP_TRIES = 3;
 const REAP_RETRY_MS = 3_000;
+/** After a volume's listing failed, everyday writes there go ahead without one for this long, then ask once more (HB-0509 review). */
+const LIST_RETRY_MS = 5 * 60_000;
 /** Docker's words for a container that is not there, from `rm -f` or `container inspect`. */
 const NO_SUCH_CONTAINER = /no such (container|object)/i;
 
@@ -82,6 +86,7 @@ const NO_SUCH_CONTAINER = /no such (container|object)/i;
 import { DEFAULT_PREFIX, dockerNames, LEGACY_PREFIXES } from './dockerNames.js';
 import { dockerConnArgs } from './runnerEndpoint.js';
 import { STATE_CACHE_EXCLUDES } from './volumeCopy.js';
+import { processAlive } from '../domain/processAlive.js';
 export { DEFAULT_PREFIX, LEGACY_PREFIXES };
 /** Docker image reference: repo[:tag] — no leading dash, so it can't parse as a flag. */
 /** basename() for a model path — the container sees the file under /models. */
@@ -131,6 +136,111 @@ interface OneShotEnd {
 /** Statuses in which a container writes nothing more. */
 const NOT_WRITING = new Set(['created', 'exited', 'dead']);
 
+/**
+ * Writer one-shots this process started whose docker client may still be
+ * running, or whose end is still being seen to (HB-0509): an everyday write's
+ * look for writers leaves them alone, so a write under way here is never
+ * taken for a stale one by the next write to the same volume. Readers are not
+ * listed: their mount is read-only, and the look leaves those alone.
+ *
+ * Only #runOneShot, #runStdin and #oneShotExit add and remove entries
+ * (#track): one is added once nothing more can stop its start, and removed
+ * only after its removal or a look at how it ended is done, and any give-up
+ * is noted (HB-0509, fourth and fifth reviews).
+ */
+const IN_FLIGHT = new Set<string>();
+
+/**
+ * Each volume's lock in this process, by #volumeKey (HB-0509, sixth review).
+ * An everyday write (a config write, a Files edit, execShellOnVolume,
+ * writeToVolume, a workspace copy) holds it shared from its look for writers
+ * until its one-shot's end is settled; a restore or import holds it
+ * exclusive. While a restore waits for it or holds it, a new everyday write
+ * is refused (RESTORE_RUNNING), never queued behind it; the restore waits for
+ * the writes already holding it. No expiry: a hold lasts as long as the
+ * operation that took it. Shared by every provider of the process.
+ */
+interface VolumeLock { shared: number; restores: number; held: boolean; wake: Array<() => void> }
+const VOLUME_LOCKS = new Map<string, VolumeLock>();
+function volumeLock(key: string): VolumeLock {
+  let l = VOLUME_LOCKS.get(key);
+  if (!l) VOLUME_LOCKS.set(key, (l = { shared: 0, restores: 0, held: false, wake: [] }));
+  return l;
+}
+/** Wakes whoever waits; the entry goes once nobody holds or waits for it. */
+function letGoOf(key: string, l: VolumeLock): void {
+  for (const w of l.wake.splice(0)) w();
+  if (!l.shared && !l.restores && VOLUME_LOCKS.get(key) === l) VOLUME_LOCKS.delete(key);
+}
+/** The volume shared, for an everyday write; undefined while a restore waits for it or holds it. */
+function shareVolume(key: string): (() => void) | undefined {
+  if (VOLUME_LOCKS.get(key)?.restores) return undefined;
+  const l = volumeLock(key);
+  l.shared++;
+  let done = false;
+  return () => { if (done) return; done = true; l.shared--; letGoOf(key, l); };
+}
+/** The volume to itself, for a restore: once the everyday writes holding it, and any restore before it, are done. */
+async function holdVolume(key: string): Promise<() => void> {
+  const l = volumeLock(key);
+  l.restores++;
+  while (l.shared || l.held) await new Promise<void>((r) => l.wake.push(r));
+  l.held = true;
+  let done = false;
+  return () => { if (done) return; done = true; l.held = false; l.restores--; letGoOf(key, l); };
+}
+/** Tests: how many one-shots are listed as this process's own, under way. */
+export function inFlightCountForTests(): number {
+  return IN_FLIGHT.size;
+}
+/** Tests: how many entries this process keeps for one volume (by name), or for all: GIVEN_UP, LOOKED, UNLISTED and VOLUME_LOCKS. */
+export function volumeEntriesForTests(volume?: string): number {
+  const counts = (k: string) => volume === undefined || k.endsWith(`|${volume}`);
+  return [GIVEN_UP, LOOKED, UNLISTED, VOLUME_LOCKS].reduce((n, m) => n + [...m.keys()].filter(counts).length, 0);
+}
+/** Tests: forget what this process knows of every volume's writers, as a new process would. */
+export function resetVolumeWritersForTests(): void {
+  IN_FLIGHT.clear();
+  VOLUME_LOCKS.clear();
+  GIVEN_UP.clear();
+  LOOKED.clear();
+  UNLISTED.clear();
+  volumeEvent = () => {};
+}
+/** A client cut off, not a script that ended: Docker's own failure (125), a dropped SSH link (255), a signal. */
+const cutOff = (r: { code: number | null; signalled?: boolean }): boolean => r.code === null || r.code === 125 || r.code === 255 || !!r.signalled;
+/** What an everyday write answers while this process restores or imports into the same volume (VOLUME_LOCKS). */
+const RESTORE_RUNNING = 'a restore is running on this agent\'s files; try again when it ends';
+/**
+ * Whether an everyday write need look for writers on a volume (HB-0509
+ * review). It looks once per volume after this process starts (one a
+ * previous process left), and again only after a one-shot writing there was
+ * given up (timed out, or its client was killed): one of those may still be
+ * writing. Otherwise the listing, a docker round trip (seconds over SSH to a
+ * runner), would come before every config write. Keyed by install, daemon and
+ * volume: GIVEN_UP counts the given-up writers, LOOKED is that count at the
+ * last look that left none writing.
+ */
+const GIVEN_UP = new Map<string, number>();
+const LOOKED = new Map<string, number>();
+/** When a volume's listing last failed: everyday writes go ahead unlooked for a while (LIST_RETRY_MS), then ask again. */
+const UNLISTED = new Map<string, { at: number; givenUp: number }>();
+/**
+ * Where a note about one agent's volume goes; the provider knows the agent by
+ * its runtime ref only. index.ts sends it to the journal at warn and onto the
+ * agent's timeline (operations.ts runtimeEventLog).
+ */
+let volumeEvent: (event: string, detail: { runtimeRef: string } & Record<string, unknown>) => void = () => {};
+export function setVolumeEventSink(fn: typeof volumeEvent): void {
+  volumeEvent = fn;
+}
+/** What a write answers when an earlier one-shot is still writing the volume and could not be removed. */
+const STALE_WRITER = 'an earlier copy is still writing to the agent\'s files';
+/** What an everyday write answers when a one-shot on the volume would not say whether it writes there (HB-0509, sixth review). */
+const UNSURE_WRITER = "couldn't check what else is writing to its files; try again";
+/** One-shots that only read an agent's volume, by the kind in their name (#oneShot; the nightly backup's are `bk`). */
+const READER_KINDS = new Set(['ex', 'fs', 'ro', 'bk']);
+
 /** A failure whose one-shot could not be shown to have stopped writing (HB-0385). */
 function notGoneError(err: unknown, name: string): OneShotNotGoneError {
   const e = err as { message?: string; userMessage?: string };
@@ -177,6 +287,21 @@ async function idFileFor(): Promise<IdFile | undefined> {
 
 /** The label on every volume one-shot; its value is the install's prefix. */
 export const ONESHOT_LABEL = 'hatchabot.oneshot';
+/**
+ * The second label on every one-shot: which process of the app made it. The
+ * boot sweep goes by this, not by the time it was made: a runner's clock is
+ * not the app's, and one running behind made a one-shot this process had just
+ * made look older than its start, so the sweep removed it (HB-0511).
+ */
+export const ONESHOT_PROCESS_LABEL = 'hatchabot.oneshot.process';
+export const THIS_PROCESS = randomBytes(8).toString('hex');
+/**
+ * How long a one-shot must have been idle (finished, or made and never run)
+ * before the sweep takes it: whichever process made it (this one, a CLI
+ * command, another instance on a shared runner) may be making it right now,
+ * or still reading what it left. Timed by the Docker daemon's own clock.
+ */
+export const ONESHOT_STALE_MS = 5 * 60_000;
 
 /**
  * A folder's entries on the disk, not just in its cache. A filesystem that
@@ -206,10 +331,12 @@ export class LocalDockerProvider implements RuntimeProvider {
   readonly #hostRoot: string;
   readonly #publishedImage: (openclawVersion: string) => Promise<PublishedImage>;
   readonly #reapRetryMs: number;
+  readonly #listRetryMs: number;
 
   constructor(opts: LocalDockerOptions = {}) {
     this.#fetch = opts.fetchImpl ?? fetch;
     this.#reapRetryMs = opts.reapRetryMs ?? REAP_RETRY_MS;
+    this.#listRetryMs = opts.listRetryMs ?? LIST_RETRY_MS;
     this.#publishedImage = opts.publishedImage ?? ((v) => publishedRuntimeImage(v));
     this.#swapProbe = opts.swapProbe;
     this.#hostRoot = opts.hostRoot ?? '';
@@ -262,6 +389,49 @@ export class LocalDockerProvider implements RuntimeProvider {
     return new ProviderError('remote docker host unreachable', "Its machine isn't answering — it may be asleep or offline.");
   }
 
+  /** See GIVEN_UP and VOLUME_LOCKS. */
+  #volumeKey(volume: string): string {
+    const t = this.#target;
+    return `${this.prefix}|${t ? `${t.host}:${t.port}` : 'local'}|${volume}`;
+  }
+  /**
+   * What this process knows of a volume's writers, forgotten: its volume
+   * removed (destroy), or its agent archived. Each map only ever saves a look:
+   * forgotten, the next write there looks once. Its lock goes only when
+   * nobody holds it (seventh review).
+   */
+  #forgetVolume(volume: string): void {
+    const k = this.#volumeKey(volume);
+    GIVEN_UP.delete(k);
+    LOOKED.delete(k);
+    UNLISTED.delete(k);
+    const l = VOLUME_LOCKS.get(k);
+    if (l && !l.shared && !l.restores) VOLUME_LOCKS.delete(k);
+  }
+  /** See RuntimeProvider.forgetVolumeWriters. */
+  forgetVolumeWriters(runtimeRef: string): void {
+    this.#forgetVolume(this.#names(runtimeRef).volume);
+  }
+  /** A one-shot writing `volume` was given up: the next everyday write there looks for it. */
+  #gaveUpOn(volume: string | undefined): void {
+    if (!volume) return;
+    const k = this.#volumeKey(volume);
+    GIVEN_UP.set(k, (GIVEN_UP.get(k) ?? 0) + 1);
+  }
+  /**
+   * A writer one-shot whose client was cut off (cutOff: a dropped SSH link to
+   * a runner exits 255) with the container perhaps writing on. Given up,
+   * unless Docker shows it gone or finished (HB-0509 review). A script's own
+   * failing exit is not asked about: an attached one-shot that said it has
+   * ended. Never rejects.
+   */
+  async #endedBadly(name: string, volume: string): Promise<void> {
+    const seen = await this.#inspectOneShot(name).catch((): OneShotSeen => ({}));
+    if (seen.found === false) return;
+    if (seen.found && (seen.status === 'exited' || seen.status === 'dead' || seen.status === 'removing')) return;
+    this.#gaveUpOn(volume);
+  }
+
   /**
    * Every one-shot on an agent's volume gets a name and this install's label.
    * An unnamed `run --rm` whose client was killed (a timeout, a control-plane
@@ -271,9 +441,55 @@ export class LocalDockerProvider implements RuntimeProvider {
    * 2026-09-29). Named, a timeout removes it; labelled, the boot sweep and
    * destroy() find the rest.
    */
-  #oneShot(kind: 'vx' | 'io' | 'fs' = 'vx'): { name: string; flags: string[] } {
+  #oneShot(kind: 'vx' | 'io' | 'ex' | 'fs' | 'ro' = 'vx'): { name: string; flags: string[] } {
     const name = `${this.prefix}-${kind}-${randomBytes(6).toString('hex')}`;
-    return { name, flags: ['--name', name, '--label', `${ONESHOT_LABEL}=${this.prefix}`] };
+    return { name, flags: ['--name', name, '--label', `${ONESHOT_PROCESS_LABEL}=${THIS_PROCESS}`, '--label', `${ONESHOT_LABEL}=${this.prefix}`] };
+  }
+
+  /** Whether a one-shot's name says it only reads (READER_KINDS). */
+  #reads(name: string): boolean {
+    return name.startsWith(`${this.prefix}-`) && READER_KINDS.has(name.slice(this.prefix.length + 1).split('-')[0] ?? '');
+  }
+
+  /** A writer one-shot about to start, listed as this process's own (see IN_FLIGHT); the caller removes it. */
+  #track(name: string): void {
+    IN_FLIGHT.add(name);
+  }
+
+  /**
+   * A one-shot run through #docker, with all its bookkeeping in one place. A
+   * writer (`volume`, not `readOnly`) is listed as this process's own until
+   * all after its end is done: reaped when it timed out, looked at when its
+   * client was cut off, and noted for the next write's look when it may write
+   * on (HB-0509 reviews). A machine that did not answer started nothing:
+   * nothing to reap or note.
+   */
+  async #runOneShot(args: (flags: string[]) => string[], o: { volume?: string; readOnly?: boolean; timeoutMs?: number } = {}): Promise<ExecResult> {
+    const one = this.#oneShot(o.readOnly && o.volume ? 'ro' : 'vx');
+    const writes = o.readOnly ? undefined : o.volume;
+    if (writes) this.#track(one.name);
+    try {
+      const res = await this.#docker(args(one.flags), o.timeoutMs);
+      if (res.unreachable) return res;
+      // Given up only when its removal did not show it gone.
+      if (res.timedOut) { if (!(await this.#reapOneShot(one.name))) this.#gaveUpOn(writes); }
+      else if (writes && cutOff(res)) await this.#endedBadly(one.name, writes);
+      return res;
+    } finally { IN_FLIGHT.delete(one.name); }
+  }
+
+  /**
+   * An everyday write on an agent's volume (HB-0509 and its reviews): `run`
+   * with the volume shared (VOLUME_LOCKS) from its look for writers until its
+   * one-shot's end is settled, or `refused` with why it may not go ahead.
+   */
+  async #everydayWrite<T>(volume: string, runtimeRef: string, refused: (why: string) => T, run: () => Promise<T>): Promise<T> {
+    const letGo = shareVolume(this.#volumeKey(volume));
+    if (!letGo) return refused(RESTORE_RUNNING);
+    try {
+      const busy = await this.#clearVolumeWriters(volume, { runtimeRef });
+      return busy ? refused(busy) : await run();
+    } finally { letGo(); }
   }
 
   /** What `container inspect` says of a one-shot: there or not (undefined: Docker did not say), its status, and whether it never started. */
@@ -338,13 +554,27 @@ export class LocalDockerProvider implements RuntimeProvider {
    * set. Finished and never-started ones are removed too, without waiting:
    * they pin the volume, and an import's may hold the archive. Undefined when
    * none is left writing; otherwise why not, naming it (HB-0385).
+   *
+   * `ordinary`: before an everyday write (a Files edit, a config write, an
+   * adopt), which must not cut off this process's own (IN_FLIGHT): only a
+   * writer whose client is gone (it timed out, or a restart cut it off) is
+   * removed, finished ones are left to the sweep (HB-0509), and why not is
+   * the write's whole answer.
    */
-  async #clearVolumeWriters(volume: string): Promise<string | undefined> {
+  async #clearVolumeWriters(volume: string, ordinary: false | { runtimeRef: string } = false): Promise<string | undefined> {
+    const key = this.#volumeKey(volume);
+    const givenUp = GIVEN_UP.get(key) ?? 0;
+    if (ordinary && LOOKED.get(key) === givenUp) return undefined;
+    // Its listing failed lately: not asked again yet, but never off for good,
+    // and asked at once when a write there was given up since.
+    const unlisted = UNLISTED.get(key);
+    if (ordinary && unlisted && unlisted.givenUp === givenUp && Date.now() - unlisted.at < this.#listRetryMs) return undefined;
     // Asked again a little later, with a fresh look at whether a runner
     // answers, as #settleOneShot does: one dropped answer must not refuse a
-    // rollback that could go ahead.
+    // rollback that could go ahead. An everyday write asks once: it goes
+    // ahead either way, and each try made it wait.
     let res: { code: number; stdout: string; stderr: string } = { code: 1, stdout: '', stderr: '' };
-    for (let i = 0; i < REAP_TRIES; i++) {
+    for (let i = 0; i < (ordinary ? 1 : REAP_TRIES); i++) {
       if (i) {
         await new Promise((r) => setTimeout(r, this.#reapRetryMs));
         this.#reach = undefined;
@@ -353,63 +583,157 @@ export class LocalDockerProvider implements RuntimeProvider {
         .catch((err: unknown) => ({ code: 1, stdout: '', stderr: String(err) }));
       if (res.code === 0) break;
     }
-    if (res.code !== 0) return `its containers could not be listed (${res.stderr.trim().slice(0, 160) || 'no answer'})`;
+    if (res.code !== 0) {
+      const why = `its containers could not be listed (${res.stderr.trim().slice(0, 160) || 'no answer'})`;
+      if (!ordinary) return why;
+      // An everyday write goes ahead, as before the look was added: a listing
+      // that failed says nothing of a writer. Said on the agent, and asked
+      // again only after a while (LIST_RETRY_MS): every write waited on it.
+      // Said once until a listing works again, not at each try.
+      const first = !UNLISTED.has(key);
+      UNLISTED.set(key, { at: Date.now(), givenUp });
+      if (first) volumeEvent('volume.writers_unlisted', { runtimeRef: ordinary.runtimeRef, volume, error: why });
+      return undefined;
+    }
+    // Whether the last look failed: said once until a look works again.
+    const saidUnlisted = UNLISTED.delete(key);
     const listed = res.stdout.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
       const [name = '', state = ''] = l.split('|');
       return { name, state };
     }).filter((c) => c.name);
     const done = listed.filter((c) => NOT_WRITING.has(c.state)).map((c) => c.name);
-    if (done.length) void this.#docker(['rm', '-f', ...done], 30_000).catch(() => {});
-    const live = listed.filter((c) => !NOT_WRITING.has(c.state));
-    if (!live.length) return undefined;
-    // How each mounts this volume: "false" is read-only. One not answered for is taken as a writer.
+    if (done.length && !ordinary) void this.#docker(['rm', '-f', ...done], 30_000).catch(() => {});
+    // Being removed, it has finished already.
+    const live = listed.filter((c) => !NOT_WRITING.has(c.state) && !(ordinary && (c.state === 'removing' || IN_FLIGHT.has(c.name))));
+    if (!live.length) { LOOKED.set(key, givenUp); return undefined; }
+    // How each mounts this volume: "true" writes, "false" is read-only.
     const rw = new Map<string, string>();
-    const mounts = await this.#docker(['container', 'inspect', '--format', `{{.Name}}|{{range .Mounts}}{{if eq .Name ${JSON.stringify(volume)}}}{{.RW}}{{end}}{{end}}`, ...live.map((c) => c.name)], 15_000)
-      .catch(() => ({ code: 1, stdout: '', stderr: '' }));
+    const mounts: { code: number; stdout: string; stderr: string; timedOut?: boolean } = await this.#docker(['container', 'inspect', '--format', `{{.Name}}|{{range .Mounts}}{{if eq .Name ${JSON.stringify(volume)}}}{{.RW}}{{end}}{{end}}`, ...live.map((c) => c.name)], 15_000)
+      .catch((err: unknown) => ({ code: 1, stdout: '', stderr: String(err) }));
     for (const l of mounts.stdout.split('\n')) {
       const [n = '', mode = ''] = l.trim().split('|');
       if (n) rw.set(n.replace(/^\//, ''), mode);
     }
-    const writers = live.filter((c) => rw.get(c.name) !== 'false');
+    // Gone since it was listed (it ended and was removed): Docker said so, by
+    // name. Not one it could not answer for (seventh review).
+    const gone = new Set([...mounts.stderr.matchAll(/no such (?:container|object):\s*(\S+)/gi)].map((m) => m[1]!.replace(/^\//, '')));
+    const here = live.filter((c) => !gone.has(c.name));
+    // For a restore, one not answered for is taken as a writer and removed.
+    // Before an everyday write only a known writer is: a backup's export whose
+    // inspect timed out was removed by a Files edit, and that night's set
+    // failed. One not answered for lets the write go ahead when its name says
+    // it reads, and otherwise refuses it (HB-0509, sixth review).
+    const known = (c: { name: string }) => rw.get(c.name) === 'true' || rw.get(c.name) === 'false';
+    const writers = here.filter((c) => (ordinary ? rw.get(c.name) === 'true' : rw.get(c.name) !== 'false'));
+    const unsure = ordinary ? here.filter((c) => !known(c) && !this.#reads(c.name)) : [];
     const stuck = (await Promise.all(writers.map(async (c) => ((await this.#reapOneShot(c.name)) ? undefined : c)))).filter((c) => c !== undefined);
-    return stuck.length ? stuck.map((c) => `${c!.name} is still ${c!.state || 'there'} and could not be removed`).join('; ') : undefined;
+    if (stuck.length) {
+      const why = stuck.map((c) => `${c!.name} is still ${c!.state || 'there'} and could not be removed`).join('; ');
+      return ordinary ? `${STALE_WRITER}: ${why}` : why;
+    }
+    if (unsure.length) {
+      // The look itself failed (no answer, or not in time), not an answer
+      // without them: as a listing that failed, the write goes ahead, said
+      // once, and the look waits as long (LIST_RETRY_MS) unless a write is
+      // given up there meanwhile. Refused, every write waited 15 s for the
+      // same failure and was refused all the same (eighth review).
+      if (mounts.timedOut || (mounts.code !== 0 && unsure.some((c) => !rw.has(c.name)))) {
+        UNLISTED.set(key, { at: Date.now(), givenUp });
+        if (!saidUnlisted && ordinary) volumeEvent('volume.writers_unlisted', { runtimeRef: ordinary.runtimeRef, volume, error: `how ${unsure.map((c) => c.name).join(', ')} mount its files could not be read (${mounts.stderr.trim().slice(0, 160) || (mounts.timedOut ? 'no answer in time' : 'no answer')})` });
+        return undefined;
+      }
+      return UNSURE_WRITER;
+    }
+    LOOKED.set(key, givenUp);
+    return undefined;
   }
 
-  /** See #clearVolumeWriters: for a restore, before it copies or replaces the volume. */
+  /**
+   * See #clearVolumeWriters: for a restore, before it copies or replaces the
+   * volume. With the volume to itself (VOLUME_LOCKS): this process's everyday
+   * writes are waited for, not cut off.
+   */
   async stopVolumeWriters(runtimeRef: string): Promise<string | undefined> {
     if (!(await this.reachable())) return "its machine isn't answering";
-    return this.#clearVolumeWriters(this.#names(runtimeRef).volume);
+    const { volume } = this.#names(runtimeRef);
+    const letGo = await holdVolume(this.#volumeKey(volume));
+    try { return await this.#clearVolumeWriters(volume); } finally { letGo(); }
   }
 
   /**
    * Remove this install's one-shots that finished and were never removed
    * ('exited' / 'dead': an import's is not --rm, and a killed client's goes
    * on to the end), and at boot also those that never ran ('created'). A
-   * running one is left alone, and a created one after boot: either may
-   * belong to a call still in flight. Returns how many went.
+   * running one is left alone. With notThisProcess (at boot and every 10
+   * minutes) every one goes only ONESHOT_STALE_MS after it finished (or,
+   * never run, was made), whichever process made it: a call (here, or a CLI
+   * command, or another instance on a shared runner) may be making one, or
+   * still reading what an exited one left, however long it ran. A running
+   * nightly backup's are its own. Returns how many went. With orThrow (a
+   * runner being removed: there is no next sweep) a docker call that failed
+   * throws, so the caller can say what it left; the timer's sweep looks again
+   * in 10 minutes instead (a sleeping runner would say so every time).
    */
-  async sweepOneShots(opts: { created?: boolean; createdBefore?: number } = {}): Promise<number> {
+  async sweepOneShots(opts: { created?: boolean; notThisProcess?: boolean; orThrow?: boolean } = {}): Promise<number> {
     const label = `label=${ONESHOT_LABEL}=${this.prefix}`;
-    // With createdBefore (the process's start): only 'created' ones made
-    // before it, never one a call of this process is making right now.
-    const byAge = opts.created !== false && opts.createdBefore !== undefined;
-    const res = await this.#docker(['ps', '-aq', '--filter', label, ...(opts.created === false || byAge ? [] : ['--filter', 'status=created']), '--filter', 'status=exited', '--filter', 'status=dead']);
-    const ids = res.code === 0 ? res.stdout.split(/\s+/).filter(Boolean) : [];
-    if (byAge) {
-      const made = await this.#docker(['ps', '-aq', '--filter', label, '--filter', 'status=created']);
-      const created = made.code === 0 ? made.stdout.split(/\s+/).filter(Boolean) : [];
-      if (created.length) {
-        const ages = await this.#docker(['container', 'inspect', '--format', '{{.Id}}|{{.Created}}', ...created]);
-        for (const l of ages.stdout.split('\n')) {
-          const [id = '', at = ''] = l.trim().split('|');
-          const t = Date.parse(at);
-          const short = created.find((c) => id.startsWith(c));
-          if (short && Number.isFinite(t) && t < opts.createdBefore!) ids.push(short);
-        }
+    const byMaker = opts.created !== false && opts.notThisProcess === true;
+    const ids: string[] = [];
+    if (!byMaker) {
+      const res = await this.#docker(['ps', '-aq', '--filter', label, ...(opts.created === false ? [] : ['--filter', 'status=created']), '--filter', 'status=exited', '--filter', 'status=dead']);
+      if (res.code === 0) ids.push(...res.stdout.split(/\s+/).filter(Boolean));
+      else if (opts.orThrow) throw new Error(`docker ps failed: ${res.stderr.trim().slice(0, 200)}`);
+    } else {
+      const made = await this.#docker(['ps', '-a', '--filter', label, '--filter', 'status=created', '--filter', 'status=exited', '--filter', 'status=dead',
+        '--format', `{{.ID}}|{{.Label "${ONESHOT_PROCESS_LABEL}"}}|{{.Names}}|{{.State}}`]);
+      const waitOld: string[] = [];
+      for (const l of made.code === 0 ? made.stdout.split('\n') : []) {
+        const [id = '', maker = '', name = ''] = l.trim().split('|');
+        if (!id) continue;
+        // The nightly backup's own (scripts/backup-volumes.sh: <prefix>-bk-<its pid>-…),
+        // while that run is still going: it removes its own.
+        const backupPid = name.startsWith(`${this.prefix}-bk-`) ? Number(name.slice(this.prefix.length + 4).split('-')[0]) : 0;
+        if (!maker && backupPid > 0 && processAlive(backupPid)) continue;
+        waitOld.push(id);
       }
+      if (waitOld.length) ids.push(...await this.#idleLongAgo(waitOld));
     }
-    if (ids.length) await this.#docker(['rm', '-f', ...ids]);
+    if (ids.length) {
+      const rm = await this.#docker(['rm', '-f', ...ids]);
+      // One its own client removed after the list is gone, not left: only another error is said.
+      const errors = rm.stderr.split('\n').map((l) => l.trim()).filter(Boolean).filter((l) => !/no such container/i.test(l));
+      if (rm.code !== 0 && opts.orThrow && (errors.length || !rm.stderr.trim())) throw new Error(`docker rm failed: ${(errors.join('; ') || `exit ${rm.code}`).slice(0, 200)}`);
+    }
     return ids.length;
+  }
+
+  /**
+   * Of these one-shots, those idle ONESHOT_STALE_MS or more: one that ran,
+   * timed from when it finished (an 8-minute import that has just exited is
+   * still being read); one that never ran, from when it was made. One that
+   * runs by now stays. Both times are the daemon's (its clock now, and its
+   * own times for each), so a runner's clock that differs from this
+   * machine's does not count (HB-0511). No clock from the daemon: none go,
+   * and the next sweep looks again.
+   */
+  async #idleLongAgo(ids: string[]): Promise<string[]> {
+    const [clock, made] = await Promise.all([
+      this.#docker(['info', '--format', '{{.SystemTime}}']),
+      this.#docker(['container', 'inspect', '--format', '{{.Id}}|{{.Created}}|{{.State.Status}}|{{.State.FinishedAt}}', ...ids]),
+    ]);
+    const now = clock.code === 0 ? Date.parse(clock.stdout.trim()) : NaN;
+    if (!Number.isFinite(now)) return [];
+    const old: string[] = [];
+    for (const l of made.stdout.split('\n')) {
+      const [full = '', at = '', status = '', finished = ''] = l.trim().split('|');
+      if (status && !['created', 'exited', 'dead'].includes(status)) continue;
+      const madeAt = Date.parse(at);
+      // A one-shot that never ran says it finished in year 1: its making counts.
+      const doneAt = status === 'created' ? NaN : Date.parse(finished);
+      const t = Number.isFinite(doneAt) && doneAt >= madeAt ? doneAt : madeAt;
+      const short = ids.find((c) => full && full.startsWith(c));
+      if (short && Number.isFinite(t) && now - t >= ONESHOT_STALE_MS) old.push(short);
+    }
+    return old;
   }
 
   /**
@@ -557,6 +881,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // on a shared host those are other tenants (night review, 2026-09-28).
     await this.#withEnvFile(spec.env, (flag, childEnv) => this.#must([...args, ...flag, image, 'openclaw', 'gateway'], 'The agent runtime could not be created.', childEnv));
     this.#infoCache.delete(container);
+    this.#listing = undefined;
 
     return { runtimeRef };
   }
@@ -592,11 +917,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       'find /vol -mindepth 1 -maxdepth 1 ! -name .openclaw -exec mv -t /vol/.openclaw {} + ; ' +
       // Marker LAST: a run that dies midway simply finishes next time.
       'touch /vol/.openclaw/.agentclaw-home-v2';
-    const one = this.#oneShot();
-    const res = await this.#docker([
-      'run', '--rm', ...one.flags, '--network', 'none', '-v', `${volume}:/vol`, 'alpine', 'sh', '-c', script,
-    ]);
-    if (res.timedOut) await this.#reapOneShot(one.name);
+    const res = await this.#runOneShot((flags) => [
+      'run', '--rm', ...flags, '--network', 'none', '-v', `${volume}:/vol`, 'alpine', 'sh', '-c', script,
+    ], { volume });
     if (res.code !== 0) {
       throw new ProviderError(
         `home-layout migration failed (${res.code}): ${res.stderr.slice(-300)}`,
@@ -729,7 +1052,6 @@ export class LocalDockerProvider implements RuntimeProvider {
       let res: ExecResult;
       // Named: a seed that timed out kept running doctor against the volume,
       // and a Retry could start a second one on it (review, 2026-09-29).
-      const one = this.#oneShot();
       if (streamSeed) {
         // The seed dir is on THIS box; a remote daemon can't bind-mount it (and
         // a rootless one can't read it), so stream it in as a tar over stdin
@@ -739,10 +1061,10 @@ export class LocalDockerProvider implements RuntimeProvider {
           maxBuffer: 256 * 1024 * 1024,
         });
         res = await this.#runStdin(
-          ['run', '--rm', '-i', ...one.flags, '--network', 'none', '-v', `${volume}:/home/node`, spec.image ?? this.image,
+          (flags) => ['run', '--rm', '-i', ...flags, '--network', 'none', '-v', `${volume}:/home/node`, spec.image ?? this.image,
             'bash', '-c', `mkdir -p ${seedBase} && tar xz -C ${seedBase} && bash ${seedBase}/seed.sh`],
           tar.stdout as Buffer,
-          one.name,
+          volume,
         );
       } else {
         // The long timeout, not the probe default (60 s): on OpenClaw 2026.8+
@@ -751,11 +1073,10 @@ export class LocalDockerProvider implements RuntimeProvider {
         // network: nothing in the seed needs one — links, config writes,
         // doctor, the token paste are all local — and with it, doctor's npm
         // calls for a stale per-volume plugin stall on DNS retries.
-        res = await this.#docker([
-          'run', '--rm', ...one.flags, '--network', 'none', '-v', `${volume}:/home/node`, '-v', `${seedDir}:/seed:ro`,
+        res = await this.#runOneShot((flags) => [
+          'run', '--rm', ...flags, '--network', 'none', '-v', `${volume}:/home/node`, '-v', `${seedDir}:/seed:ro`,
           spec.image ?? this.image, 'bash', '/seed/seed.sh',
-        ], IO_TIMEOUT_MS);
-        if (res.timedOut) await this.#reapOneShot(one.name);
+        ], { volume, timeoutMs: IO_TIMEOUT_MS });
       }
       if (res.code !== 0) {
         // The failure text is recorded as an event every member of the agent
@@ -770,18 +1091,19 @@ export class LocalDockerProvider implements RuntimeProvider {
   async start(runtimeRef: string): Promise<void> {
     const { container } = this.#names(runtimeRef);
     try { await this.#must(['start', container], 'The agent could not start. Try again?'); }
-    finally { this.#infoCache.delete(container); }
+    finally { this.#infoCache.delete(container); this.#listing = undefined; }
   }
 
   async stop(runtimeRef: string): Promise<void> {
     const { container } = this.#names(runtimeRef);
     try { await this.#must(['stop', '-t', '10', container], 'The agent could not be stopped.'); }
-    finally { this.#infoCache.delete(container); }
+    finally { this.#infoCache.delete(container); this.#listing = undefined; }
   }
 
   async destroy(runtimeRef: string, opts?: { purge?: boolean }): Promise<void> {
     const { container, volume } = this.#names(runtimeRef);
     this.#infoCache.delete(container);
+    this.#listing = undefined;
     // #docker turns every non-zero exit (including an unreachable daemon) into
     // a RESULT, so ignoring it made destroy() unable to fail — and callers that
     // branch on failure (moveHost's orphan check, delete's "runtime may have
@@ -800,6 +1122,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (opts?.purge) {
       await this.#removeVolumeOneShots(volume, container);
       check(await this.#docker(['volume', 'rm', '-f', volume]), 'volume rm');
+      this.#forgetVolume(volume);
     }
   }
 
@@ -950,13 +1273,13 @@ export class LocalDockerProvider implements RuntimeProvider {
     const image = opts?.image && IMAGE_REF_RE.test(opts.image) ? opts.image : this.image;
     // No network: every caller only touches files on the volume (review,
     // 2026-09-29).
-    const one = this.#oneShot();
-    const res = await this.#docker([
-      'run', '--rm', ...one.flags, '--network', 'none', '-v', mount, image,
+    const run = () => this.#runOneShot((flags) => [
+      'run', '--rm', ...flags, '--network', 'none', '-v', mount, image,
       'bash', '-c', script,
-    ]);
-    if (res.timedOut) await this.#reapOneShot(one.name);
-    return res;
+    ], { volume, readOnly: !!opts?.readOnly });
+    if (opts?.readOnly) return run();
+    // A writer an earlier call left (HB-0509): removed first, or nothing is written.
+    return this.#everydayWrite(volume, runtimeRef, (why): ExecResult => ({ code: 1, stdout: '', stderr: why }), run);
   }
 
   /**
@@ -988,7 +1311,6 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Named, so a reader that goes away can have the CONTAINER removed:
     // killing the docker client alone leaves the one-shot streaming into the
     // daemon's log until cat/tar finishes (28th audit).
-    const { name, flags } = this.#oneShot('fs');
     // A stream cannot wait on a probe: a machine already known to be down fails it at once.
     if (this.#knownDown()) { const dead = new PassThrough(); queueMicrotask(() => dead.destroy(this.#unreachableError())); return dead; }
     // The copy the reader holds exists from here. The one-shot starts only
@@ -999,12 +1321,13 @@ export class LocalDockerProvider implements RuntimeProvider {
     void this.#volumeAbsent(volume).then((absent) => {
       if (out.destroyed) return;
       if (absent) out.destroy(absent.volumeMissing ? new VolumeGoneError(absent.stderr, VOLUME_GONE) : new Error(absent.stderr.trim().slice(-300)));
-      else this.#streamInto(out, volume, name, flags, argv);
+      else this.#streamInto(out, volume, argv);
     }, (err: unknown) => out.destroy(err instanceof Error ? err : new Error(String(err))));
     return out;
   }
 
-  #streamInto(out: PassThrough, volume: string, name: string, flags: string[], argv: string[]): void {
+  #streamInto(out: PassThrough, volume: string, argv: string[]): void {
+    const { name, flags } = this.#oneShot('fs');
     const child = spawn(this.docker, this.#argv([
       'run', '--rm', ...flags, '--network', 'none', '-v', `${volume}:/home/node:ro`, this.image, ...argv,
     ]), { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -1050,8 +1373,8 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (gone) return gone;
     // Writable mount, no network, as the agent's own uid (the image's user),
     // so what lands is the agent's to read and change.
-    const one = this.#oneShot();
-    return this.#runStdin(['run', '--rm', '-i', ...one.flags, '--network', 'none', '-v', `${volume}:/home/node`, this.image, ...argv], input, one.name);
+    return this.#everydayWrite(volume, runtimeRef, (why): ExecResult => ({ code: 1, stdout: '', stderr: why }),
+      () => this.#runStdin((flags) => ['run', '--rm', '-i', ...flags, '--network', 'none', '-v', `${volume}:/home/node`, this.image, ...argv], input, volume));
   }
 
   /**
@@ -1079,6 +1402,47 @@ export class LocalDockerProvider implements RuntimeProvider {
       void pending.then((r) => { if (r.code !== 0) forget(); }, forget);
     }
     return this.#infoAnswer(await pending);
+  }
+
+  /**
+   * The machine's running containers and their OpenClaw labels, kept
+   * INFO_CACHE_MS and shared by callers asking at once, as info() is: the
+   * source menu asks on every open. Forgotten at this provider's own create,
+   * start, stop and destroy, and when the listing failed. A kept listing
+   * that lacks a container asked for (one started since by another path)
+   * is listed again, once; that second listing (`again`) is kept as any
+   * other, and a container it lacks is not running: an exited one is not
+   * listed again on every ask.
+   */
+  #listing: { at: number; res: Promise<ExecResult>; again: boolean } | undefined;
+
+  #list(again = false): { entry: { at: number; res: Promise<ExecResult>; again: boolean }; fresh: boolean } {
+    const kept = this.#listing && Date.now() - this.#listing.at < INFO_CACHE_MS ? this.#listing : undefined;
+    if (kept) return { entry: kept, fresh: false };
+    const entry = { at: Date.now(), res: this.#docker(['ps', '--format', '{{.Names}}|{{ .Label "org.agentclaw.openclaw-version" }}']), again };
+    this.#listing = entry;
+    const forget = () => { if (this.#listing === entry) this.#listing = undefined; };
+    void entry.res.then((r) => { if (r.code !== 0) forget(); }, forget);
+    return { entry, fresh: true };
+  }
+
+  async openclawVersions(runtimeRefs: string[]): Promise<Map<string, string>> {
+    // Every running container's name, with its label ('' without one).
+    const read = async (entry: { res: Promise<ExecResult> }): Promise<Map<string, string>> => {
+      const res = await entry.res;
+      // Unanswered, not "no versions": the caller inspects each container instead.
+      if (res.code !== 0) throw new ProviderError(`docker ps failed: ${res.stderr.trim().slice(0, 200)}`, "Couldn't list the machine's containers.");
+      return new Map(res.stdout.split('\n').map((l) => l.trim().split('|')).filter((p) => p[0]).map((p) => [p[0]!, p[1] ?? ''] as const));
+    };
+    const first = this.#list();
+    let byName = await read(first.entry);
+    if (!first.fresh && !first.entry.again && runtimeRefs.some((ref) => !byName.has(this.#names(ref).container))) {
+      if (this.#listing === first.entry) this.#listing = undefined;
+      byName = await read(this.#list(true).entry);
+    }
+    const out = new Map<string, string>();
+    for (const ref of runtimeRefs) { const v = byName.get(this.#names(ref).container); if (v) out.set(ref, v); }
+    return out;
   }
 
   #inspectInfo(container: string): Promise<ExecResult> {
@@ -1435,9 +1799,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       const { stdout } = await execFileP('sh', ['-c', SWAP_PROBE_SCRIPT], { timeout: 5000, killSignal: 'SIGKILL' });
       return stdout;
     }
-    const one = this.#oneShot();
-    const res = await this.#docker(['run', '--rm', ...one.flags, '--network', 'none', 'alpine', 'sh', '-c', SWAP_PROBE_SCRIPT], 60_000);
-    if (res.timedOut) await this.#reapOneShot(one.name);
+    const res = await this.#runOneShot((flags) => ['run', '--rm', ...flags, '--network', 'none', 'alpine', 'sh', '-c', SWAP_PROBE_SCRIPT], { timeoutMs: 60_000 });
     return res.code === 0 ? res.stdout : undefined;
   }
 
@@ -1457,7 +1819,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // and a move went on to retire the real one (concurrency review,
     // 2026-10-09). The nightly backup script checks the same way.
     await this.#requireVolume(volume, EXPORT_VOLUME_GONE, EXPORT_FAILED);
-    const one = this.#oneShot('io');
+    const one = this.#oneShot('ex');
     try {
       const { stdout } = await execFileP(
         this.docker,
@@ -1505,7 +1867,7 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   /** The archive into `part`, a new owner-only file (it holds the agent's secrets). Resolves when it is written AND docker exited 0. */
   #pipeExport(volume: string, part: string): Promise<void> {
-    const one = this.#oneShot('io');
+    const one = this.#oneShot('ex');
     return new Promise<void>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(exportArgs(volume, one.flags)), { stdio: ['ignore', 'pipe', 'pipe'] });
       let stderr = '';
@@ -1568,25 +1930,31 @@ export class LocalDockerProvider implements RuntimeProvider {
       const down = this.#unreachableError();
       throw new VolumeUntouchedError(down.message, down.userMessage);
     }
-    // Never alongside an earlier copy that may still be unpacking (HB-0385).
-    const busy = await this.#clearVolumeWriters(volume);
-    if (busy) {
-      throw new VolumeUntouchedError(
-        `another one-shot may still be writing ${volume}: ${busy}`,
-        `An earlier copy into this agent's memory may still be running (${busy}), so nothing was changed. Try again once its machine answers.`,
-      );
-    }
-    // Where docker writes the one-shot's id once it has made it, before it
-    // starts it: no id after a failure means it never made one (HB-0384). Not
-    // for an agent's own copy going back (a rollback, Put back): what fails
-    // there is told the same either way, and on a full disk this file must not
-    // be what stops it. Without the file, `container inspect` alone decides.
-    const ids = ownCopy ? undefined : await idFileFor();
+    // The volume to itself from here to its end, its look for writers too:
+    // this process's everyday writes already under way are waited for, and
+    // new ones are refused until it ends (VOLUME_LOCKS; HB-0509, sixth review).
+    const letGo = await holdVolume(this.#volumeKey(volume));
     try {
-      await this.#importInto(volume, source, ownCopy, ids);
-    } finally {
-      if (ids) await rm(ids.dir, { recursive: true, force: true }).catch(() => {});
-    }
+      // Never alongside an earlier copy that may still be unpacking (HB-0385).
+      const busy = await this.#clearVolumeWriters(volume);
+      if (busy) {
+        throw new VolumeUntouchedError(
+          `another one-shot may still be writing ${volume}: ${busy}`,
+          `An earlier copy into this agent's memory may still be running (${busy}), so nothing was changed. Try again once its machine answers.`,
+        );
+      }
+      // Where docker writes the one-shot's id once it has made it, before it
+      // starts it: no id after a failure means it never made one (HB-0384). Not
+      // for an agent's own copy going back (a rollback, Put back): what fails
+      // there is told the same either way, and on a full disk this file must not
+      // be what stops it. Without the file, `container inspect` alone decides.
+      const ids = ownCopy ? undefined : await idFileFor();
+      try {
+        await this.#importInto(volume, source, ownCopy, ids);
+      } finally {
+        if (ids) await rm(ids.dir, { recursive: true, force: true }).catch(() => {});
+      }
+    } finally { letGo(); }
   }
 
   async #importInto(volume: string, source: Buffer | string, ownCopy: boolean, ids: IdFile | undefined): Promise<void> {
@@ -1662,7 +2030,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Putting an agent's own copy back must not be what gives up: a volume
     // that took the whole limit to copy out takes longer to extract, and by
     // then it has been emptied (HB-0066).
-    const ending = this.#oneShotExit(child, ioName, ownCopy ? OWN_COPY_IMPORT_TIMEOUT_MS : IO_TIMEOUT_MS);
+    const ending = this.#oneShotExit(child, ioName, ownCopy ? OWN_COPY_IMPORT_TIMEOUT_MS : IO_TIMEOUT_MS, volume);
     // Same EPIPE race as #runStdin: if the child exits before draining stdin
     // (a corrupt archive fails `gzip -t` early, docker refuses to start), the
     // write emits an unhandled stream error and takes the PROCESS down. The
@@ -1726,20 +2094,32 @@ export class LocalDockerProvider implements RuntimeProvider {
    * still fail the call, not pin the agent busy for ever (30th audit), but now
    * whichever comes first owns the outcome, and a failure of any kind (timeout,
    * error exit, a client killed by a signal) is reported only once the one-shot
-   * has been removed.
+   * has been removed. A writer's (`volume`) is this process's own (IN_FLIGHT)
+   * from just after its start until that is done.
    */
-  #oneShotExit(child: ChildProcess, name: string, timeoutMs = IO_TIMEOUT_MS): Promise<OneShotEnd> {
+  #oneShotExit(child: ChildProcess, name: string, timeoutMs = IO_TIMEOUT_MS, volume?: string): Promise<OneShotEnd> {
+    if (volume) this.#track(name);
     return new Promise((resolve) => {
       let stderr = '';
       let over = false;
       // Every failure waits for the one-shot to be settled (removed, and known
-      // not writing: HB-0385); a clean exit does not.
+      // not writing: HB-0385); a clean exit does not. It stays this process's
+      // own until then, and the caller's hold on the volume (VOLUME_LOCKS)
+      // with it: a restore cut off while it may still be unpacking keeps
+      // everyday writes out until it is removed (HB-0509, fourth review).
       const finish = (end: Omit<OneShotEnd, 'stderr' | 'settled'>, settle: boolean) => {
         if (over) return;
         over = true;
         clearTimeout(timer);
-        if (settle) void this.#settleOneShot(name).then((settled) => resolve({ ...end, stderr, settled }));
-        else resolve({ ...end, stderr });
+        const done = (settled?: OneShotEnd['settled']) => {
+          // Not seen removed or finished: it may write on, and the next write
+          // looks for it. Every failure is settled, the timeout too.
+          if (settled && !settled.notWriting) this.#gaveUpOn(volume);
+          IN_FLIGHT.delete(name);
+          resolve(settled ? { ...end, stderr, settled } : { ...end, stderr });
+        };
+        if (settle) void this.#settleOneShot(name).then(done);
+        else done();
       };
       const timer = setTimeout(() => {
         child.kill('SIGKILL');
@@ -1757,8 +2137,15 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (!(await this.reachable())) throw this.#unreachableError();
     // One workspace's files must not become a whole agent on a volume this just made (HB-0373).
     await this.#requireVolume(volume, VOLUME_GONE, "Couldn't copy the agent's files into its new home.");
+    const refused = (busy: string): never => {
+      throw new ProviderError(busy, busy === RESTORE_RUNNING
+        ? "Couldn't copy the agent's files into its new home: a restore is running on them. Try again when it ends."
+        : busy === UNSURE_WRITER
+          ? "Couldn't copy the agent's files into its new home: what else is writing there could not be checked. Try again."
+          : "Couldn't copy the agent's files into its new home: an earlier copy is still writing there. Try again in a few minutes.");
+    };
     const dir = `/vol/.openclaw/agents/${slug}/agent`;
-    await new Promise<void>((resolve, reject) => {
+    await this.#everydayWrite(volume, runtimeRef, refused, () => new Promise<void>((resolve, reject) => {
       const { name: ioName, flags: ioFlags } = this.#oneShot('io');
       const child = spawn(this.docker, this.#argv([
         'run', '--rm', '-i', ...ioFlags, '-v', `${volume}:/vol`, 'alpine',
@@ -1768,7 +2155,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         `mkdir -p ${dir} && tar xz --no-same-owner -C ${dir} && ` +
           `chown -R 1000:1000 /vol/.openclaw && chmod -R a-s /vol/.openclaw`,
       ]));
-      this.#oneShotExit(child, ioName).then((end) => {
+      this.#oneShotExit(child, ioName, IO_TIMEOUT_MS, volume).then((end) => {
         if (end.error === undefined && end.code === 0) { resolve(); return; }
         const err = end.error ?? new ProviderError(`workspace import failed (${end.code}): ${end.stderr.slice(-500)}`, "Couldn't copy the agent's files into its new home.");
         reject(end.settled?.notWriting === false ? notGoneError(err, ioName) : err);
@@ -1779,7 +2166,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // real failure is already reported by the close handler above.
       child.stdin.on('error', () => {});
       child.stdin.end(data);
-    });
+    }));
   }
 
   /** One jail per management agent: `<prefix>-ops-<agent>`, `--internal` so it
@@ -2462,12 +2849,24 @@ export class LocalDockerProvider implements RuntimeProvider {
     return res;
   }
 
-  /** Run a docker command, piping `data` to its stdin (for tar-over-stdin on a
-   *  remote daemon, where bind mounts of this box's paths aren't possible). */
-  async #runStdin(args: string[], data: Buffer | { file: string }, oneShot?: string): Promise<ExecResult> {
+  /**
+   * Run a docker command, piping `data` to its stdin (for tar-over-stdin on a
+   * remote daemon, where bind mounts of this box's paths aren't possible).
+   * `args` as a function of a one-shot's flags: a named one-shot, made here.
+   * `writes`: the volume it writes, listed as this process's own from its
+   * start until all after its end is done (see IN_FLIGHT).
+   */
+  async #runStdin(args: string[] | ((flags: string[]) => string[]), data: Buffer | { file: string }, writes?: string): Promise<ExecResult> {
     if (!(await this.reachable())) throw this.#unreachableError();
+    const one = typeof args === 'function' ? this.#oneShot('vx') : undefined;
+    const argv = typeof args === 'function' ? args(one!.flags) : args;
+    const oneShot = one?.name;
+    const volume = one ? writes : undefined;
     return new Promise<ExecResult>((resolve, reject) => {
-      const child = spawn(this.docker, this.#argv(args));
+      if (oneShot && volume) this.#track(oneShot);
+      const letGo = () => { if (oneShot) IN_FLIGHT.delete(oneShot); };
+      let child: ChildProcessWithoutNullStreams;
+      try { child = spawn(this.docker, this.#argv(argv)); } catch (err) { letGo(); reject(err); return; }
       // Once the call is given up (timeout, unreadable input), the killed
       // client's close is not the answer: the caller hears only after the
       // one-shot is removed, or its next step (a rollback) races it (#205).
@@ -2477,19 +2876,37 @@ export class LocalDockerProvider implements RuntimeProvider {
         abandoned = true;
         clearTimeout(timer);
         child.kill('SIGKILL');
-        if (oneShot) void this.#reapOneShot(oneShot).finally(() => reject(err)); else reject(err);
+        // Given up only when its removal did not show it gone.
+        const after = (gone: boolean) => { if (!gone) this.#gaveUpOn(volume); letGo(); reject(err); };
+        if (oneShot) this.#reapOneShot(oneShot).then(after, () => after(false)); else after(true);
       };
       // A stalled daemon/runner must fail the call, not pin the agent busy forever.
       // A named one-shot goes with it: the killed client alone leaves it running.
       const timer = setTimeout(() => abandon(new ProviderError('docker stdin op timed out', 'Docker did not respond in time.')), IO_TIMEOUT_MS);
       timer.unref();
-      child.on('close', () => clearTimeout(timer));
       let stdout = '';
       let stderr = '';
       child.stdout.on('data', (c) => (stdout += c));
       child.stderr.on('data', (c) => (stderr += c));
-      child.on('error', (err) => { if (!abandoned) reject(err); });
-      child.on('close', (code) => { if (!abandoned) resolve({ code: code ?? 1, stdout, stderr }); });
+      child.on('error', (err) => {
+        if (abandoned) return;
+        abandoned = true;
+        clearTimeout(timer);
+        // Started, then lost: it may write on. Never started: nothing to note.
+        if (child.pid !== undefined) this.#gaveUpOn(volume);
+        letGo();
+        reject(err);
+      });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (abandoned) return;
+        const r = { code: code ?? 1, stdout, stderr };
+        const done = () => { letGo(); resolve(r); };
+        // A writer whose client was cut off (killed, a dropped link to a
+        // runner) may write on: known before the caller writes again.
+        if (oneShot && volume && cutOff({ code })) this.#endedBadly(oneShot, volume).then(done, done);
+        else done();
+      });
       // If the child exits without draining stdin, the write races to EPIPE —
       // swallow it (the close handler above is the real result).
       child.stdin.on('error', () => {});
@@ -2533,6 +2950,7 @@ export class LocalDockerProvider implements RuntimeProvider {
           code: typeof err.code === 'number' ? err.code : 1,
           stdout: String(err.stdout ?? ''),
           stderr: String(err.stderr ?? err.message ?? ''),
+          ...(err?.signal ? { signalled: true } : {}),
         };
       }
       throw new ProviderError(

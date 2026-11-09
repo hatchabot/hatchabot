@@ -22,6 +22,41 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/doctor.ts` — `doctorReport`
 
+### `hatchabot doctor`: "Control plane not answering at http://localhost:8080" (or at an old port), while the app works on another port or address
+- **Check:** `.env` sets `PORT`, or `HATCHABOT_BIND` to one address, and the app answers there. Doctor was run with no `--url`, and either no `HATCHABOT_URL` was set, or the one in `~/.config/hatchabot/env` is this machine's (`http://127.0.0.1:<port>`, which `scripts/setup-host.sh` saves) with the port from before a change.
+- **Cause:** with nothing chosen, doctor asked the CLI's default, `http://localhost:8080`, whatever the service's `.env` said. A saved local URL was asked as it was, so after a `PORT` or `HATCHABOT_BIND` change doctor probed the old address.
+- **Fix:** upgrade: doctor asks the listener the `.env` describes (https with `HATCHABOT_TLS_CERT`, its `PORT`, its `HATCHABOT_BIND` address), as `scripts/restart.sh` does, unless `--url` is given or the saved URL is another machine's. A saved name (a full name, a `.local` name, a tailnet name) that resolves to this machine counts as this machine; one that does not resolve within 1.5 seconds is kept. The shell's own `PORT`, `HATCHABOT_BIND` or `HATCHABOT_TLS_CERT` play no part. Other commands still use the saved URL: change it in `~/.config/hatchabot/env` after a port change. On an older release: `hatchabot doctor --url http://<address>:<port>`.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/doctor.ts` — `gatherFacts`, `serviceUrl`, `servicePort`, `doctorTarget`, `addressesOf`; `src/cli.ts` — `'doctor'`
+
+### `hatchabot doctor` reports another Docker's images and containers, or "Docker is installed but not reachable", while agents run
+- **Check:** `.env` sets `DOCKER_HOST` (or `DOCKER_CONTEXT`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`), and your shell does not, or sets another; or the shell sets one the `.env` does not (`env | grep ^DOCKER_`).
+- **Cause:** doctor ran `docker` with the shell's settings, so it asked the shell's daemon, not the one the service uses.
+- **Fix:** upgrade: doctor's Docker checks use only the `.env`'s `DOCKER_*` settings, as the service does; the shell's are left out. On an older release, run doctor with the same `DOCKER_*` values as the `.env`, and unset any others.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/doctor.ts` — `serviceDockerEnv`, `gatherFacts`, `swapFacts`
+
+### `hatchabot doctor` reports another database, backup folder, runtime image or set of containers than the service uses
+- **Check:** your shell sets `HATCHABOT_DB`, `HATCHABOT_BACKUP_DIR`, `HATCHABOT_IMAGE`, `HATCHABOT_PREFIX`, `HATCHABOT_AGENT_NETWORK`, `HATCHABOT_AGENT_SWAP`, `HATCHABOT_PUBLIC_*` or `PORT` (`env | grep -E '^(HATCHABOT_|PORT=)'`) to something other than the `.env`.
+- **Cause:** doctor read these from the shell first and the `.env` second. The service reads only its `.env`, so doctor checked a database, folder, image or port the service does not use.
+- **Fix:** upgrade: doctor reads the service's settings from the `.env` alone. On an older release, unset those variables in the shell before running doctor.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/doctor.ts` — `gatherFacts`, `swapFacts`, `publicAccessFacts`
+
+### `hatchabot doctor` never finishes, or stops with no report, on an install that serves HTTPS itself
+- **Check:** `HATCHABOT_TLS_CERT` is set; `curl -vk https://localhost:<port>/` starts an answer and then the connection drops.
+- **Cause:** the HTTPS probe waited for the answer's end and had no way out when the connection closed before it, nor any deadline for the whole answer.
+- **Fix:** upgrade: the probe gives up after 10 seconds, or as soon as the answer is cut off, and the report says "Control plane not answering … (the answer was cut off)". Then look at the service: `journalctl --user -u hatchabot -n 50`.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/doctor.ts` — `probeControlPlane`
+
+### `hatchabot doctor`: "Control plane not answering" with a certificate error, on an install that serves HTTPS on a LAN or tailnet address
+- **Check:** `.env` sets `HATCHABOT_TLS_CERT`, and `HATCHABOT_BIND` to one address (a LAN or tailnet IP). The app answers in a browser there. Doctor's line names a certificate or a hostname/IP that does not match.
+- **Cause:** doctor trusted the install's own certificate, but skipped the check of the name in it only for loopback. A certificate made for a host name does not name the bind address, so the probe of this machine's own listener failed.
+- **Fix:** upgrade: doctor skips the name check for the address the `.env` binds to too, when that is an IP address (a bind that is a name is checked by name, as a certificate can hold it), and still checks that the certificate is the install's own. Each probe uses its own connection, so one that skipped the name check lets no later one through. On an older release: `hatchabot doctor --url https://<a name the certificate holds>:<port>`.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/doctor.ts` — `probeControlPlane`, `gatherFacts`
+
 ### Report a problem left a runner's address, a folder or a public IP address in the issue
 - **Check:** the review panel or the filed issue shows `someone@laptop`, `ssh://…`, `/srv/…`, `/home/<someone else>/…` or a public IP address as written.
 - **Cause:** the masking knew each host's label and not its address, needed a dot to read `user@host` as one, and masked only the home and backup folders and private IPs, though the panel said paths and addresses were masked.
@@ -119,6 +154,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade, and the next run of the day carries over what the earlier run wrote whole. Yesterday's set is still good meanwhile, and a `<volume>.tgz` in a set is always whole: a run that ends well marks the set complete again.
 - **Fixed in:** `v2.173.0`
 - **Code:** `scripts/backup-volumes.sh` — `earlier_captured`, `add_captured`
+
+
+### An agent's Recovery row offers yesterday's backup, though a run this morning took it whole and a later run failed on it
+- **Check:** today's `backup-status.json` names the agent's volume in both `captured` and `failedVolumes`, and its `<volume>.tgz` is in the set.
+- **Cause:** a later run of the same day that fails on a volume keeps the earlier run's whole archive (one is replaced only by renaming a whole one over it) and names the volume in both lists. Before v2.178.0 readiness and the guided restore read "failed" first and offered an older day.
+- **Fix:** upgrade. The morning's archive was there all along, and a run that ends well marks the set complete again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/recoveryReadiness.ts` — `usableFor`
 
 ### `hatchabot upgrade vX.Y.Z` failed, and since then the machine stays put: "Pinned to" a release it never got
 - **Check:** `cat <install>/data/channel` names a version that `hatchabot doctor` does not show as running; the channel timer's log is quiet; with public access on, the automatic-upgrades safeguard is off.
@@ -330,6 +373,70 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/follow-channel.sh` — `MAX_TRIES`; `scripts/upgrade.sh` — `rollback`
 
+
+### The channel timer set a release aside after the disk had been full for a while
+- **Check:** `cat ~/.local/state/hatchabot/follow-channel-failed*` names the release (on the machine that follows the newest tag, `follow-latest-failed`); `journalctl --user -u hatchabot-follow-channel` (or `-u hatchabot-follow-latest`) shows "is full" or "(a full disk?)" lines before "did not complete 8 times in a row".
+- **Cause:** before v2.178.0 a full disk ended `upgrade.sh` with exit 3, the same as an install that failed, and the eighth in a row set the release aside until the channel's next one. Now a full disk, or a folder it cannot write, is exit 5: the timer waits longer each time as before, but never counts it against the release. The wait doubles by the release's own failed tries (a day at most); tries that only the disk failed wait an hour at most, however long the disk stays full (twelfth review: before, nine of them made the wait a day, and the release, once there was room, waited that day for its first try of its own). That covers a bundle's download, unpacking and swap, and on a git install the checkout and `npm ci` (their error says "No space left on device" or a disk quota, or the disk has under 64 MB left), the upgrade's own records (the pin, the channel it follows, the checkout's record, the lock and its folder) and the temporary copy of the script. A lock it could not write its name in is removed, where it was left behind and the next hour of runs said "Another upgrade … is running". Only those exit 5: another command that exits 5 under the script is exit 3, and so is "ENOSPC: System limit for number of file watchers reached", which is the inotify watcher limit and not the disk. `deploy-release.sh` and the follow-latest timer do the same for a production checkout. A timer that cannot write its own record of the try on the full disk says "Could not record this try" and keeps it in the user's runtime folder (`$XDG_RUNTIME_DIR`, only when it is a folder of the user's own, and never through a symlink) until it can, so it still waits; with no runtime folder it keeps nothing and says the next tick tries again (never in a shared `/tmp`, where another user could plant the file). Before, it stopped there with no word and tried again every ten minutes. The record keeps the three fields the timers of releases before read (`<release> <failures> <time>`); how many of those failures were the disk's is kept beside it, in the same name with `.disk` (tenth review: a fourth field in the record made an older timer, after a rollback, start its count again). The checkout is asked in English (`LC_ALL=C`), and the install for its messages only (`LC_MESSAGES=C`, the user's `LC_ALL` moved to `LANG`), so a build keeps the user's locale (fourteenth review: `LC_ALL=C` over the whole install set every category); either way a full disk is read as one in any language, and their errors are kept in the state folder, not `$TMPDIR`, which may be the same full disk, and the last 4 KB in memory too, for when that file cannot be written. Where the state folder takes no new file, the errors go to `$TMPDIR`, so the path a permission names is still said (twelfth review: it said "could not write what it needed"). A step's words that say the disk ("No space left on device", ENOSPC, a disk quota, or a write that came up short with no reason given: "unable to write", "write error", "short write", as git's "fatal: unable to write new index file") are the disk; so is any failure when the disk has under 64 MB left, whatever it said. Words that say a permission or a read-only disk on writing ("Permission denied", EACCES, "Read-only file system", EROFS from opening, making, renaming, writing, copying or moving: npm's cache folder it may not write, a move onto a read-only disk) are the machine's too, exit 5, when the path they name is one of this install's own places (the install, its state folder, npm's and node-gyp's caches in the home folder, `$TMPDIR`); a write refused anywhere else, such as a global install into `/usr/local`, is the release's own, exit 3 (fourteenth review), and the run names the path they give: "This user could not write … (above: no permission there, or a read-only disk)" (tenth review; before, they were exit 3 and counted against the release). An ssh key a server turned away ("Permission denied (publickey)") is not one of them, nor a file the step could not run (a script without its execute bit, such as the release's `ensure-deps.sh`: bash's exit 126, npm's "code 126", "sh: 1: …: Permission denied", Node's "spawn … EACCES"), which is the release's own, exit 3 (eleventh review). Bash's own "line N: FILE: Permission denied", which it says both for a file it could not run and for a redirection it could not write, is judged by FILE: a regular file in the release's tree without its execute bit, that this user may write, is the release's (3); any other (a file outside the release, a record of the install's made read-only, or a file of its own on a disk mounted `noexec`) is the machine's, 5 (twelfth review). Words of its own (npm's lockfile mismatch) with more room than that are the step's own failure, exit 3. Only the step's last lines are judged (the last 20, 2 KB at most), which hold the error that ended it, and each line on its own (twelfth review: "spawn" on one line and EACCES on a later one read together as a file it could not run, so npm's "EACCES: permission denied, mkdir …" after gyp's "spawn make" was exit 3): before the eleventh review an early warning decided, such as gyp's "WARN EACCES" for its dev dir before a compile error, which then read as a permission (exit 5). Those last lines are kept in memory as the step runs, and the log is read only when there is nothing there: a log that stopped taking lines part-way, on the disk that filled, held only the step's earlier warnings. Each step is judged by its own words only: a warning an earlier step printed (the checkout's, say) no longer decides an install that failed after it. The lock's folder and the checkout's record, written before anything moves, are judged as the channel files are: something in the way is named (exit 2); any other failure there (no room, no permission, a read-only disk) is the machine's, 5, never the release's, as these are the install's own files. So is the lock itself: "Could not take the upgrade lock …" shows what mkdir said and names the folder to check, and is 5. Another upgrade holding the lock (exit 4) is routine: the channel timer's tick ends there quietly (0) and counts nothing, with the release found or offline, and so does the follow-latest timer's, its repair of a cut-off deploy too (tenth review); a full disk (5) still ends the tick as failed, so the unit shows it, but is never counted against the release. A relative `HATCHABOT_PROD_DIR` (run from another folder) is made absolute after the deploy's `cd`: before, the disk was looked for at a folder that was not there, and a nearly full one read as the release's failure (tenth review). `deploy-release.sh` says 5 only to a caller that sets `HATCHABOT_FOLLOW_KNOWS_5=1`, as `follow-latest.sh` does from v2.178.0: the timer that runs a new release's deploy is the release before's, and one from before 5 tried again every tick with no wait. To any other caller (that older timer, or a deploy by hand) the disk is 3, as it was, and it still says the disk is full. Under 64 MB left, a release that cannot install (npm's lockfile mismatch) is taken for the disk too, and not counted against it: a full disk whose error names no reason could not be told from it (eighth review). The channel files are written whole or not at all: a write that fails leaves the old value, not an empty file; one that is a link to a file (stow, a dotfiles folder) is written through, and the link kept. The records the swap and the checkout keep as they go (`.swapping`, its `in` lines and `restarted`, and the checkout's `restarted`) are judged the same way when a write fails: the disk is 5, after the old release is put back. Their errors are kept beside the lock, and one a killed run left there is removed by the next run to take the lock.
+- **Fix:** free about 1 GB, then `rm ~/.local/state/hatchabot/follow-channel-failed*` (or run `hatchabot upgrade stable`).
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/upgrade.sh` — `machine_short`, `said_kind`, `said_path`, `own_place`, `disk_short`, `step_tee`, `step_tail`, `new_step_log`, `run_step`, `step_short`, `put_rec`, `STEP_LOG`, `change_failed`, `disk_full`, `no_stage`, `swap_failed`, `pin_named`, `remember_channel`, `put_line`, `put_failed`, `unpin`, `take_lock`, `lock_short`; `scripts/follow-tries.sh` — `tries_open`, `tries_waiting`, `tries_put`, `note_try`, `forget_tries`, `HELD`; `scripts/follow-channel.sh` — `tries_open`, `note_try`; `scripts/deploy-release.sh` — `machine_short`, `said_kind`, `said_path`, `own_place`, `step_tee`, `step_short`, `put_rec`, `change_failed`, `STEP_LOG`, `take_lock`, `lock_short`, `put_dir`, `put_failed`, `finish`, `PROD`; `scripts/follow-latest.sh` — `tries_open`, `note_try`, `repair_cut`, `HATCHABOT_FOLLOW_KNOWS_5`
+
+### An upgrade or deploy says "Putting vX back did not work either (above), so … may be part-way between vX and vY"
+- **Check:** the lines above it give why the step failed and why the rollback did too (a checkout git refused, a file it could not replace); `ls ~/.local/state/hatchabot/upgrade-*.from` (a git install or production checkout) or `ls -a <install>/.swapping` (a bundle install) shows the record of the change is still there.
+- **Cause:** a step of the upgrade (or deploy) failed, and putting the previous release back failed as well, so the install may hold some of each. Before v2.178.0 that was not said: the run went on to say the disk was full (exit 5), which reads as "the previous release is back as it was; try again later". Now it says the rollback did not work, names the two releases, says what to run, and exits 3. A bundle's rollback on the disk that filled no longer needs room: the unpacked bundle is removed first, and a `.swapping` it cannot rewrite as the files go back no longer stops it ("Could not write …/.swapping as the files went back (a full disk?): they are back all the same."), so the run ends as the disk's, exit 5. Before the twelfth review that ended "did not work either", exit 3, with the old release a rename from back. A rollback cut off after that (killed before it removed `.swapping`) is finished by the next run, which keeps the files it finds put back: the unpacked bundle is gone, so it cannot tell them from the new release's, and before the fourteenth review it removed them, and the install lost the old release's files.
+- **Fix:** fix what the lines above name (free space, a permission, a stuck file), then run what it says: `hatchabot upgrade` on an install, or `scripts/deploy-release.sh vY` for a production checkout. Either one puts vX back first from the record it kept, before anything else (the timers do the same on their next tick).
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/upgrade.sh` — `change_failed`, `REDO`, `undo`, `rollback_bundle`, `restore_prev`; `scripts/deploy-release.sh` — `change_failed`, `REDO`, `rollback`
+
+### The channel timer says "Could not read …/follow-tries.sh: this tick keeps no count of its tries"
+- **Check:** `ls -l scripts/follow-tries.sh` in the install (on the machine that follows the newest tag, beside `follow-latest.sh`): missing, or not readable by the user the timer runs as.
+- **Cause:** both timers keep the count of a release's failed tries through that one file. Missing or unreadable (a checkout cut off part-way, a permission changed by hand), it stopped the timer before it could hand a cut-off upgrade to its repair. Since v2.178.0 the tick goes on without it: it counts nothing and waits for nothing, so it tries the upgrade (or the deploy) every tick, and says so.
+- **Fix:** put it back: on a git install `git checkout -- scripts/follow-tries.sh`, on a bundle install `hatchabot upgrade` (it repairs a cut-off swap first), or fix its permissions.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/follow-channel.sh` — `tries_open`; `scripts/follow-latest.sh` — `TRIES_HELPER`
+
+### An upgrade or deploy says "… is in the way of the upgrade lock"
+- **Check:** `ls -l ~/.local/state/hatchabot/upgrade-*.lock.d`: the named path is a file, a symlink (dangling or not) or another kind of entry, not a folder.
+- **Cause:** the upgrade lock is a folder made there for each run. Something else at that path (a file left by a tool, a link, or one made by hand) could never be taken, and before v2.178.0 every run said "Another upgrade … is running" (or, once the lock read failures as the disk, that the disk was full; a dangling symlink was read that way until the fourth review). Now it is named and the run refuses (exit 2) without changing anything. The same goes for a folder (or anything not a file) where `hatchabot upgrade` writes which channel the machine follows (`data/channel`, `~/.config/hatchabot/channel`) or a pin's record beside the lock, or where it writes them first (the same name with `.tmp`): "… is in the way". It said the disk was full (exit 5). Since the seventh review the same goes for the checkout's record beside the lock (`upgrade-<n>.from`, from `upgrade.sh` and `deploy-release.sh`) and for a file where the lock's folder (`~/.local/state/hatchabot`, or one above it) should be. Since the tenth review a file where a folder above any of these records goes (`~/.config/hatchabot` a file, or this install's `data`) is named the same way: mkdir's failure there read as the disk (exit 5). A link to a file there is written through (the file it names is replaced, the link stays); a link to no file, dangling or to a folder, is in the way.
+- **Fix:** remove it (`rm` the path the message gives), then run the upgrade again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/upgrade.sh` — `take_lock`, `lock_in_way`, `put_line`, `put_dir`, `link_end`, `put_failed`; `scripts/deploy-release.sh` — `take_lock`, `lock_in_way`, `put_line`, `put_dir`, `put_failed`
+
+### With no network, the channel timer leaves an upgrade that was cut off half done
+- **Check:** the install has `.swapping` (a bundle install) or `~/.local/state/hatchabot/upgrade-<number>.from` (a git install), and the machine is offline; `journalctl --user -u hatchabot-follow-channel` shows ticks that do nothing.
+- **Cause:** before v2.178.0 a tick that could not find which release the channel names stopped there, before the repair, so the service stayed half changed until the network came back. Now the tick asks `upgrade.sh` for the repair alone (`HATCHABOT_UPGRADE_REPAIR_ONLY`), which needs nothing from the network; the release waits for a tick that can find it.
+- **Fix:** upgrade. Until then, run `hatchabot upgrade` once the network is back: it repairs first.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/follow-channel.sh` — `repair_due`; `scripts/upgrade.sh` — `REPAIR_ONLY`
+
+### Pinned with `hatchabot upgrade vX.Y.Z`, but the channel timer upgraded the machine again minutes later
+- **Check:** `cat <install>/data/channel` (or `~/.config/hatchabot/channel`) names the pinned version, yet `journalctl --user -u hatchabot-follow-channel` shows a run that started before the pin finished and then upgraded ("Upgrading vX.Y.Z → …").
+- **Cause:** the channel timer reads the channel, finds the release it names, and then runs `upgrade.sh` with that channel. Before v2.178.0 only a run with no channel named read the channel file again under the lock, so a pin (or another channel) set while the timer's run waited for the lock was undone by it, and the machine left the release it was pinned to. Now the timer's run, and any run naming stable, beta or latest, reads it again once the lock is held; when it holds a pinned version or another channel, it changes nothing, says "The channel changed while this waited: this machine now follows …, not …, so nothing was changed." and exits 4, which the timer reads as routine, as it reads a lock another upgrade holds: the tick ends quietly and counts nothing, so the release's tries and a release set aside stay as they were (thirteenth review: an exit 0 read as an upgrade done, and cleared both for a release never tried). The pin itself was kept all along: the next tick sees it and leaves the machine alone.
+- **Fix:** upgrade. Until then, pin again: `hatchabot upgrade vX.Y.Z`.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/upgrade.sh` — `RECHECK`, `remembered_channel`; `scripts/follow-channel.sh` — `HATCHABOT_UPGRADE_BY_TIMER`
+
+### A release whose native module will not compile is retried every hour and never set aside, as if the machine were at fault
+- **Check:** `journalctl --user -u hatchabot-follow-channel` (or `-u hatchabot-follow-latest`): each try ends in the build's own errors (`gyp ERR! build error`, a compiler's `…: error: …`, `make: *** … Error 1`) and then "could not go ahead on this machine" or "This does not count against vX"; above them a warning such as `gyp WARN EACCES current user ("…") does not have permission to access the dev dir "…"`, or another line that says EACCES or "Permission denied" and names no path. The release's tries file (`~/.local/state/hatchabot/follow-channel-tries-<n>`, or `follow-latest-tries`) has a `.disk` beside it with the same count.
+- **Cause:** the upgrade and the deploy judge a failed step by its last lines, and a line that said a permission was the machine's (exit 5, never counted against the release). Before v2.178.0 that held for a warning too, and for a line that names no path (gyp quotes its dev dir in double quotes, which were not read): a build that failed on its own was called the machine's, and the timer tried it again for ever. Now a warning (`WARN`, `npm warn`, `warning:`) decides nothing (its disk words still count: npm says a full disk as `npm WARN tar ENOSPC`), a path in double quotes is read like one in single quotes and judged by where it is, and the step's own words of failure (gyp's `ERR!`, a compiler's `error:` or `fatal error:`, make's `***`) outrank a permission line that names no place, which is the machine's only when nothing else says why (fifteenth review).
+- **Fix:** upgrade. The release's build failure then counts against it: the timer waits longer each time and sets it aside after 8 tries in a row, until the channel's next release.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/upgrade.sh` — `said_kind`, `said_path`, `disk_words`, `own_place`; `scripts/deploy-release.sh` — `said_kind`, `said_path`, `disk_words`
+
+### On a full disk the channel timer runs a failing release again every ten minutes, and never sets it aside
+- **Check:** `journalctl --user -u hatchabot-follow-channel` (or `-u hatchabot-follow-latest`): a tick ends right after "failed and was rolled back" (or "did not complete 8 times in a row" is never reached) with a shell error naming `follow-channel-failed-<n>` (or `follow-latest-failed`): "No space left on device" or "Permission denied"; `df -h ~/.local/state`.
+- **Cause:** before v2.178.0 the timer wrote the release it sets aside with a bare `>`. On a full disk, or a state folder it cannot write, that failed, and under `set -e` it ended the tick before the try was counted: the next tick ran the release again at once (one that did not start was rolled back again each time, the service restarted with it), and a write cut short could leave the record empty. Now the record is written whole (a temporary file, then a rename) and a failure is said: "Could not write … to set vX aside (a full disk?): this try is counted instead, so the next ones wait." The try is counted (in the user's runtime folder when the state folder cannot take it), so the next ticks wait as after any failure, and the first tick that can write sets the release aside. The follow-latest timer's own temporary files (the copy of itself it runs from, the new release's deploy script, GitHub's answer about the release) are the same: one it cannot write is said ("Could not write … (a full disk?), so this tick stops before changing anything."), counted as a try the disk failed, and the next ticks wait (fourteenth review: under `set -e` the tick ended there with no word, and every tick tried again). Its repair of a deploy cut off part-way is the same: one the disk stops (the deploy script says 5) is counted as a try the disk failed and said ("Putting vX back could not go ahead on this machine's disk"), and with a cut-off deploy to repair the next ticks wait on the disk's tries (an hour at most), never on the tag's own (fifteenth review: it was not counted, and a cut-off deploy passed over every wait, so the repair, or the deploy that repairs, ran every ten minutes while the disk stayed full). When git cannot copy the new tag's deploy script, its words are read with the steps' list (`disk_words`: "No space left on device", a disk quota, EDQUOT, ENOSPC) and a write that came up short, where its own list missed EDQUOT and a bare ENOSPC and said "Trying again next time" with no wait.
+- **Fix:** free some space, or give the user back its state folder (`~/.local/state/hatchabot`); then upgrade.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/follow-channel.sh` — `set_aside`; `scripts/follow-latest.sh` — `set_aside`, `FAILED`, `disk_stop`, `NO_COPY`, `repair_cut`, `disk_waiting`, `disk_words`; `scripts/follow-tries.sh` — `note_try`, `HELD`
+
+### The channel timer says "Another upgrade … is running" while `hatchabot upgrade` is only looking for the release
+- **Check:** a hand-run `hatchabot upgrade` (or `hatchabot upgrade beta`) sits before its `Upgrading vA → vB` line, as it does with no network or a slow one, and `journalctl --user -u hatchabot-follow-channel` shows "Another upgrade of … is running" for the same minutes.
+- **Cause:** before v2.178.0 the upgrade took the lock first and then asked which release the channel names, which with the network down can take minutes; all that while the timer's tick found the lock held and did nothing. Now the release is looked for before the lock is taken (only an upgrade that has to put back `scripts/` first looks under the lock). The channel it looked for, when it was read from the install's own file (no channel named on the command line), is read again once the lock is held: if another upgrade named another channel or pinned a release meanwhile, it changes nothing, says "While this looked for the release … another upgrade set this machine to follow …" and exits 4. The channel timer's run, and one with a channel named, read it again too (below).
+- **Fix:** upgrade. Until then it is harmless: the tick that found the lock held runs again ten minutes later. For the message above, run `hatchabot upgrade` again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/upgrade.sh` — `find_target`, `LOOKED`
+
 ### One of two installs under the same user stays on an old release, and its channel timer does nothing
 - **Check:** `ls ~/.local/state/hatchabot/` has `follow-channel-failed` (no number after it) naming the release the channel is on, and `journalctl --user -u hatchabot-follow-channel` shows no upgrade attempt for it.
 - **Cause:** before v2.168.0 every install of the user's shared one record of failed releases and retries: a release that failed on one install was set aside on the others too. Now each install keeps its own, keyed on its folder, as the upgrade lock is; the first install to look takes over the old shared record.
@@ -344,6 +451,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0`
 - **Code:** `scripts/restart.sh` — `LISTENER`
 
+
+### A restart, upgrade or deploy waits for good after the restart, and "Another upgrade … is running" stays
+- **Check:** `ps -ef | grep curl` shows a `curl` started by `scripts/restart.sh` or `scripts/deploy-release.sh` that has run for minutes; the service took the connection but does not answer (`curl -v http://localhost:<PORT>/healthz` connects and then waits).
+- **Cause:** before v2.178.0 the health check's `curl` had no time limit. A listener that took the connection and never answered (a hung service, a stuck proxy) held it for good, so the check never ended, the rollback never came, and the upgrade lock stayed held. Now each request has a connect and a total limit, and the wait a total one.
+- **Fix:** upgrade. Until then, kill that `curl`: the check goes on, and rolls back if the service still does not answer.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/restart.sh` — `DEADLINE`; `scripts/deploy-release.sh` — `DEADLINE`
+
 ### The follow-latest timer says "Not deploying vX.Y.Z" for a new tag
 - **Check:** `journalctl --user -u hatchabot-follow-latest` gives the reason; `curl -s https://api.github.com/repos/hatchabot/hatchabot/releases/tags/vX.Y.Z` shows the release (`"immutable": true`, a `release-manifest.json` asset), and `git -C ~/hatchabot-prod rev-parse vX.Y.Z^{commit}` is the manifest's `commit`.
 - **Cause:** from v2.160.0 the timer deploys a v2.159.0-or-later tag only when it is a published, immutable release whose manifest is for that tag and names its commit. "Not a published release yet" is normal for a few minutes after tagging, while the release workflow runs. A manifest for another commit, a release that is not immutable, or one with no manifest means the tag did not come from the release workflow.
@@ -357,6 +472,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** `rm ~/.local/state/hatchabot/follow-latest-failed`; the next tick deploys it (or deploy by hand: `scripts/deploy-release.sh vX.Y.Z`).
 - **Fixed in:** `v2.168.0`
 - **Code:** `scripts/deploy-release.sh` — `finish`
+
+
+### The follow-latest timer never deploys when the production folder has a space in its name
+- **Check:** `grep HATCHABOT_PROD_DIR ~/.config/systemd/user/hatchabot-follow-latest.service` shows the folder without quotes; `journalctl --user -u hatchabot-follow-latest` says "No production checkout at" a shorter path, or systemd logs "Invalid environment assignment".
+- **Cause:** before v2.178.0 `follow-latest.sh --install` wrote `Environment=HATCHABOT_PROD_DIR=<folder>` bare, and systemd cut it at the first space. `privacy-sync.sh --install` wrote its folder into `ExecStart` unescaped the same way, so a folder with a quote, `%` or `$` in its name ran another path. Now every unit writer quotes through one helper, as systemd reads it: a backslash or quote escaped, `%` doubled, and `$` doubled in `ExecStart`'s arguments.
+- **Fix:** upgrade, then run `scripts/follow-latest.sh --install` (and `scripts/privacy-sync.sh --install`, where it is used) again to write the unit anew.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/systemd-quote.sh` — `systemd_quoted`, `systemd_arg`; `scripts/follow-latest.sh`; `scripts/privacy-sync.sh`
 
 ### `deploy-release.sh` says "Service restarted but is not serving X.Y.Z" and rolls back a release that was serving
 - **Check:** production's `.env` sets `HATCHABOT_BIND` to one address, or sets `PORT` (or `HATCHABOT_TLS_CERT`) on more than one line; `curl -s http://<bind address>:<last PORT>/ | grep HATCHABOT_VERSION` shows the new version.
@@ -392,6 +515,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade to a release with the fix before the next upgrade. To repair an install that lost files: download the old release's bundle (`hatchabot-vX.Y.Z-<platform>.tar.gz` from its release page), unpack it, copy the missing top-level names into the install folder, then `hatchabot upgrade`. `.env` and `data/` are never part of the swap.
 - **Fixed in:** `v2.171.0`
 - **Code:** `scripts/upgrade.sh` — `restore_prev`, `rollback_bundle`
+
+
+### A bundle install has no `scripts/upgrade.sh` after an upgrade's rollback failed, and the channel timer does nothing
+- **Check:** the install has no `.git`; `scripts/` (or `scripts/upgrade.sh`) is missing while `.prev-release/scripts` is there; the upgrade's log says "Rolling back to vX.Y.Z" and then that the previous release could not be put back.
+- **Cause:** before v2.178.0 the rollback removed each name before moving the previous release's copy back. When that move failed (a folder this user cannot write, a file system error), `scripts/` was gone, so neither the timer nor `hatchabot upgrade` had an `upgrade.sh` to run. Now the new release's copy goes aside first and comes back if the move fails. Nothing moves onto a name that is still there: a `.rollback-aside` a failed `rm` left is reported and the rollback stops, where it took the next copy inside itself and a put-back nested `scripts/scripts/`.
+- **Fix:** fix what stopped the move (the log names it), then in the install folder `mv .prev-release/scripts .` and run `./scripts/upgrade.sh`: it puts the rest of the previous release back first.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/upgrade.sh` — `restore_prev`
+
+### A bundle install has no `scripts/` but a `.rollback-scripts` and a `.rollback-aside` folder
+- **Check:** the install has no `.git` and no `scripts/`; `ls -a` shows `.rollback-scripts` (the previous release's scripts) and `.rollback-aside` (the new release's), and `.swapping`.
+- **Cause:** a rollback puts the previous release's `scripts/` back through a name beside it (`.rollback-scripts`) and then two renames back to back: the new one aside, the old one in. Before v2.178.0 more ran between those two (the `.swapping` record was rewritten), and a cut there (a power cut, SIGKILL) left no `scripts/`, so neither the timer nor `hatchabot upgrade` could run the repair. Now a cut anywhere else leaves a `scripts/` whose `upgrade.sh` finishes the job at its next start. Only a cut in the instant between the two renames leaves none: no portable rename swaps two folders at once. A `.rollback-scripts` left beside a `scripts/` (nothing under way: a cut-off swap is put back first) is removed when the next swap starts, under the lock, as `.rollback-aside` is: kept, a swap that then failed could not tell it from the old `scripts/` in `.prev-release`, said "… are both there", and left the install part-way (eighth review).
+- **Fix:** in the install folder, `bash .rollback-aside/upgrade.sh`: once it holds the upgrade lock (a lock still held is left to its holder: exit 4, try again), it moves `.rollback-scripts` back to `scripts/` before it reads anything there, then puts the rest of the previous release back.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/upgrade.sh` — `restore_prev`, `not_ours`
 
 ### A git install is on the new release with half its dependencies after an upgrade was stopped, and every upgrade since says "Already on vX.Y.Z"
 - **Check:** the install has a `.git` folder and a `node_modules.prev` folder; `git describe --tags` names the new release; `node_modules` lacks `.hatchabot-lock-stamp`. The upgrade was stopped while it installed dependencies (Ctrl-C, a closed terminal, `systemctl stop`, a power cut).
@@ -468,7 +606,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the units' PATH line was written unquoted. systemd splits an unquoted assignment at a space, keeps the part before it as the whole PATH, and drops the rest (`/usr/bin:/bin` too), so the service cannot find `bash`. The channel timer's unit had the same line.
 - **Fix:** upgrade, then run `./scripts/install-service.sh` in the install folder (and `./scripts/follow-channel.sh --install <channel>` if the timer is installed): the units are rewritten with the PATH quoted whole. Or by hand: change the line to `Environment="PATH=…"` in `~/.config/systemd/user/hatchabot.service` and `hatchabot-backup.service`, then `systemctl --user daemon-reload && systemctl --user restart hatchabot`.
 - **Fixed in:** `v2.168.0`
-- **Code:** `scripts/install-service.sh` — `systemd_quoted`; `deploy/hatchabot.service`; `scripts/follow-channel.sh` — `UNIT_PATH`
+- **Code:** `scripts/systemd-quote.sh` — `systemd_quoted`; `scripts/install-service.sh`; `deploy/hatchabot.service`; `scripts/follow-channel.sh` — `UNIT_PATH`
 
 ### The channel timer will not install: "node not found on PATH" or "docker not found on PATH"
 - **Check:** `./scripts/follow-channel.sh --install <channel>` (or `follow-latest.sh --install`) stops with that line and writes no unit; `command -v node` or `command -v docker` prints nothing in the same shell.
@@ -643,7 +781,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** systemd reads `%q`, `%h` and the like in a unit as specifiers, and `${NAME}` in a program's arguments as a variable. The installer wrote the folder into the units as it is, so systemd looked in another folder.
 - **Fix:** upgrade and run `./scripts/install-service.sh` again (and `./scripts/follow-channel.sh --install <channel>` if you use it), or move the install to a folder without `%`. The units now carry the folder with `%` doubled, and `$` doubled in a program's arguments.
 - **Fixed in:** `v2.171.0`
-- **Code:** `scripts/install-service.sh` — `systemd_quoted`; `scripts/follow-channel.sh`; read back by `install.sh`, `scripts/uninstall.sh` and `src/ops/autoUpgrade.ts` — `autoUpgradeStatus`
+- **Code:** `scripts/systemd-quote.sh` — `systemd_quoted`, `systemd_arg`; `scripts/install-service.sh`; `scripts/follow-channel.sh`; read back by `install.sh`, `scripts/uninstall.sh` and `src/ops/autoUpgrade.ts` — `autoUpgradeStatus`
 
 ### A new terminal says "hatchabot: command not found" after installing, when the home folder's name has a $ or a backtick in it
 - **Check:** `tail -n 3 ~/.bashrc` (or `~/.zshrc`) shows the `# hatchabot CLI` line with an unescaped `$`, backtick or quote in the path; `echo "$PATH"` in a new terminal lacks your `~/.local/bin`.
@@ -899,6 +1037,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0`
 - **Code:** `src/cli.ts` — `writeConfigValue`
 
+### After `HATCHABOT_URL=… hatchabot login`, other commands go to another server, or say the token was minted for another one
+- **Check:** `~/.config/hatchabot/env` has a `HATCHABOT_URL=` line naming another server than the one you signed in to, and the login was made with `HATCHABOT_URL` set rather than `--url`.
+- **Cause:** login saved the server only when it came from `--url`. Signed in through `HATCHABOT_URL`, the new token was saved beside the old server's address, and later commands sent it there.
+- **Fix:** upgrade, then log in again the same way: the server and its token are saved together. On an older release, use `--url`. If the token may have gone to a server that is not yours, revoke it (⚙ Settings → Security) and make a new one.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/cli.ts` — `doLogin`, `writeConfigValues`
+
+### `hatchabot login --email` says "signed in as …", but commands still act as the account used before
+- **Check:** `~/.config/hatchabot/env` holds both `HATCHABOT_TOKEN=` (or the old spelling, `AGENTCLAW_TOKEN=`) and `HATCHABOT_REFRESH_TOKEN=`, or `HATCHABOT_TOKEN` is set in your shell.
+- **Cause:** a saved access token is used before an email sign-in, and the email sign-in left the old token in place. A line in the old spelling is read as the same setting, and a sign-in took out only the new spelling.
+- **Fix:** upgrade, then sign in again: each login keeps only its own credential, in either spelling. On an older release, take the `HATCHABOT_TOKEN=` and `AGENTCLAW_TOKEN=` lines out of the file. A `HATCHABOT_TOKEN` in your shell still comes first (login now says so, for an email sign-in and for `--token` with another token): unset it.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/cli.ts` — `doLogin`, `envTokenNote`
+
 ### After a sign-in on a shared browser, Settings → AI shows an API key the last person typed, or the plan box their text
 - **Check:** one person's session ended on that page (the sign-in screen appeared by itself) and another account signed in without the page being reloaded. **Add another AI source** still held a key, token or name the first person typed and did not add, or **Plan an agent…** on the home screen held their text.
 - **Cause:** the sign-in cleared dialogs, report text and unsaved source edits, but not these boxes. An unsaved key is a credential: pressing **Add source** would have saved it as the new person's source.
@@ -933,6 +1085,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** nothing to repair: ask the machine's owner. Upgrade and they are hidden from other accounts.
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/index.html` — `paintMachineOwnerOnly`, `renderAiList`
+
+### A request with a damaged session cookie answered 500 instead of asking to sign in
+- **Check:** the service log shows `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH` ("Input buffers must have the same byte length") for a request whose session cookie (or public-address pass) ends in something other than 64 plain hex characters, such as accented letters.
+- **Cause:** the cookie's signature was compared by its number of characters, then byte for byte; a signature of 64 characters that are more than 64 bytes made the comparison throw. Every sign-in mode (password, accounts, Google) and the public-address pass read it that way. Nothing was let in.
+- **Fix:** none needed: sign in again, or clear the site's cookies. Since the fix, such a cookie is read as no sign-in (401).
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/util/safeEqual.ts` — `safeEqual`; `src/api/accountsAuth.ts` — `sessionAccount`; `src/api/auth.ts` — `validSession`, `readSession`; `src/api/publicAccess.ts` — `decodePass`
 
 ## AI sources and Claude login
 
@@ -1090,6 +1249,49 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/api/routes.ts` — `subscriptionRuntimeProblem`, `applyClassToAgent`; `src/orchestrator/modelOptions.ts` — `SUBSCRIPTION_MIN_OPENCLAW`
 
+### Every message fails with "request format rejected, HTTP 400" after clearing an agent's model, giving it a class with only a source, or pinning it to an older image
+- **Check:** the agent is on a Claude subscription source whose default is claude-opus-5-5 (or it is pinned to that model), it now runs OpenClaw older than 2026.9.7 (Settings → Advanced → Runtime images), and its gateway log has `claude_code_version_too_old`. Just before, its model was cleared (back to the source's default), it was given a class that sets only an AI source, or its image was pinned without changing its model.
+- **Cause:** each way of changing an agent checked only the part it changed. Choosing the model itself was refused on such a runtime, but clearing a pin did not check the default it fell back to, a class with only a source skipped the check a source switch makes, and an image pin did not check the model the agent runs.
+- **Fix:** upgrade: every change checks what the agent will run once it is stored (its source, model and image together) and refuses with the reason; a class with only a source drops a pin the new runtime cannot use, as a source switch does. For an agent already failing, pick a model its runtime accepts on its AI tab, or give it a newer runtime image.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `finalModelCheck`, `modelChoiceProblem`, `applyClassToAgent`, `'/v1/agents/:id/model'`, `'/v1/agents/:id'`
+
+### "Switch these agents" dropped a model you had just chosen for one of them
+- **Check:** you chose a model for an agent while "Switch these agents" (or "Migrate all") was moving several agents to another source, the new source offers that model, and after the switch the agent follows the new source's default; its model ledger shows your choice and then the switch clearing it.
+- **Cause:** the switch decided whether to drop each agent's pin from the agent as it read it before the batch began, so a pin set while earlier agents switched was dropped as the old one would have been.
+- **Fix:** upgrade: the pin is read when the agent's switch is written, and one the new source offers stands. Until then, choose the model again after the switch.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `switchAgentToSource`, `sourceSwitchRuntime`
+
+### A class change said every agent took its model, but one that was busy still answers on its old model
+- **Check:** the class change answered with nothing pending, yet the agent's page shows the class's model as waiting, and at that time the agent was busy (a backup, a snapshot, a move). Its Setup log has `model.apply_deferred`.
+- **Cause:** a busy agent's model is only stored, to be applied later, and the class change counted that as applied.
+- **Fix:** upgrade: such an agent is listed as still on its old model. Change the class again once the agent is free, or Rebuild it, which writes the model from its record. One that was being rebuilt is counted as applied: the rebuild, or a model change right after it, puts the class's model on. If neither does (the rebuild failed), its timeline says so and its class's row counts it as still on an old model. One whose model waits for a rebuild it is owed (a source switch, a rebuild due at its next start, or the new image its class's model needs) is counted apart, as "waiting for a rebuild".
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `applyClassToAgent`, `applyModelToRuntime`, `publicAgent`, `modelWaitsImage`; `web/index.html` — `renderClassList`
+
+### Two class changes close together leave some of its agents on the earlier settings
+- **Check:** the class shows what you saved last, but an agent in it runs the model from the change before (its page and `openclaw models status` agree on the older one). Or an agent put in the class just as the class was changed has the class's earlier model. The changes were saved moments apart (the page saves each field as it is picked), and the first set a memory cap, which takes a moment per agent.
+- **Cause:** a class change applies to its agents one at a time, and two changes applied at once. The earlier change, still waiting on a memory update, went on to write its own model over the later change's. An agent joining the class meanwhile was not yet one of its agents, so the later change passed it by.
+- **Fix:** upgrade, then save the class again. Changes to one class (an edit, its deletion, an agent joining or leaving) now run one after another: each starts once the one before has written every agent's record, reads the class as that one left it, and says everything it did. The checks that ask an agent's machine (an image pin, the runtime a model needs) are made before that, never while the change holds the class, and are used only while the class and the agent are still as they were checked (checked again otherwise; after three tries the change is refused with nothing written: "The class or its members kept changing while this applied"); the class and its agents' records are written together, so another change never reads the class before its agents have it; the containers (a model, memory limits) are changed after it, six agents at a time, each agent's in its own turn, which puts on what is stored when it comes. An agent slow to answer or to take a model, or on a runner asleep, no longer holds up another change of the class (a join answers meanwhile), and the last change saved is the one its container ends up with. An agent whose own model, source or image was changed while an edit was applying keeps that change: the edit lists it ("keeps that change"), and when it no longer runs what the class now sets it leaves the class there and then ("it left the class"; `class.detached` in its timeline) rather than stay in it on the class's old settings. A model Hatchabot wrote on its own (a budget's switch to a cheaper model and back, a source's new default holding what an agent runs) is not the agent's change: the edit applies to it as to the rest, and an agent on a budget's cheaper model stays on it, keeps its class meanwhile (a later change of its image does not take it out), and gets the class's new model back when the budget's switch ends, a class change made while that switch was being applied included. Leaving a class with no memory limits of its own does not touch the container's limits, so a model change on a runner asleep answers at once. The change answers at once and says so (`classDetached: 'pending'`; "may leave a class" after "Switch these agents"): whether it leaves is decided once the edits of its class under way (checking or writing its agents) are done, and only those; another agent joining or leaving the class does not make it wait. One whose own model was set while an edit moving its class's source or image checked it leaves the class the same way ("its own model was set while this was checked"). A change made then that looks like leaving the class only because the edit has not reached the agent yet (a source's new default) waits for the edit, and the agent stays in. One taken out of the class meanwhile is no longer one of its agents, and the change leaves it alone. One changed while it joined a class keeps the change too, and the join is refused ("changed while this applied"); a join that waited while its old class was deleted goes ahead, and so does one whose old class's edit wrote the agent meanwhile (checked again). A class's memory limits go only on agents still in it, and a member on a machine that is gone is named ("its machine is not known here") while the others still get them.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `inClassQueue`, `classStep`, `'/v1/agent-classes/:id'`, `checkClassFor`, `writeClassEdit`, `applyClassToAgent`, `classModelOn`, `changedSince`, `classWrote`, `classChangedThrice`, `classEditsUnderWay`, `detachClassIfDrifted`, `'/v1/agents/:id/class'`, `applyCurrentLimits`; `src/store/store.ts` — `setAgentClassIf`, `setAgentModel`, `setCheaperPauseFrom`; `web/index.html` — `updateClass`
+
+### Clearing a class's model from a script or the API answers 500
+- **Check:** `PUT /v1/agent-classes/<id>` with `"model": null` (or `"name": null`) answers HTTP 500 and changes nothing.
+- **Cause:** null was let through as "clear it", then read as text.
+- **Fix:** upgrade: `"model": null` clears the class's model, and `"name": null` is refused with "A class needs a name." Until then, send `"model": ""` to clear it.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agent-classes/:id'`
+
+### Switching an agent's AI source while its move or rebuild waits for you lets the operation go on with the new source
+- **Check:** the agent has a held or interrupted operation (its page and Alerts say "Choose what to do"), and its AI source was changed afterwards on its AI tab or by giving it a class with a source.
+- **Cause:** "Switch these agents" refused such an agent, but a switch of one agent or a class only checked whether it was busy, not for an operation waiting on disk.
+- **Fix:** upgrade: the switch is refused until the operation is settled on its page. If it already happened, settle the operation, then set the source you want and rebuild the agent.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `operationRefuses`, `applyClassToAgent`, `'/v1/agents/:id'`
+
+
 ### After changing a Claude plan source's default model and switching agents to it, some of them fail every message with "request format rejected, HTTP 400"
 - **Check:** the new default is claude-opus-5-5, the source is a Claude subscription, and the failing agents run OpenClaw older than 2026.9.7 (Settings → Advanced → Runtime images); their gateway logs have `claude_code_version_too_old`.
 - **Cause:** "Change the default, and switch these agents" moved every ticked agent without the runtime check a class model or a single agent's model gets.
@@ -1110,6 +1312,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: the agent on the newest OpenClaw is asked, and the answer says which version it came from. On an older version, stop or update the agent on the old image while you pick the model.
 - **Fixed in:** `v2.169.0`
 - **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/orchestrator/runtimeModels.ts` — `runtimeModels`
+
+### A Claude source with more than twelve running agents still leaves models out of its menu
+- **Check:** more than twelve running agents use the source, and the one on the newest runtime image is not among the first twelve on the home screen; the source's model list names an older OpenClaw version than that agent runs.
+- **Cause:** only the first twelve running agents were looked at before the newest was picked.
+- **Fix:** upgrade: every running agent's version is read (one listing of each machine's containers, kept for 20 seconds and listed again once when it lacks one started since, that second listing kept as long, so a container that has exited is not listed again on every look; or, where that listing fails, the first twelve agents inspected; an agent on a machine not known here is left out rather than failing the menu), and the newest is asked for its models.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/providers/localDockerProvider.ts` — `openclawVersions`
+
 
 ### A class saved without complaint, but giving it to an agent fails: the model "isn't one of this source's models"
 - **Check:** the class has an AI source of its own and a model that source's menu does not list (or the source is a local model server).
@@ -1159,6 +1369,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: when any agent is skipped the dialog stays open, with the summary, each skipped agent and its reason, and only the agents still to move, and it keeps your choices for a retry. If you pressed Cancel meanwhile it stays closed, and a toast says what was skipped. If you reopened it, for this source or another, the move answers in a toast and the open list drops what moved, keeping your ticks. On an older release, move the agent alone to read its reason.
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/index.html` — `moveAgentsApply`, `moveAgentsToSource`, `moveSourceRedraw`
+
+### An agent's AI source is gone: switched to a source while it was being deleted
+- **Check:** the agent's page names no AI source, or a rebuild fails because its source cannot be found, and the source it was switched to was deleted at about the same time.
+- **Cause:** deleting a source checked that no agent used it, then deleted its key, and only then the source. An agent switched to it during the key's deletion kept a source that no longer existed. The other way round, a switch (an agent's AI source, Move agents here, a class that brings its source) or an import (Restore, a move from another Hatchabot) that was checking the agent's runtime, applying its memory limit or reading the file when the source went also went ahead.
+- **Fix:** switch the agent to another source. Since the fix, the source is gone the moment it is found unused, and a switch to it is refused ("That AI source was deleted meanwhile") with nothing changed. A switch (an agent's AI source, Move agents here, a class) holds the source until the switch is stored, even if the page that asked was closed; from then on the agent is on it, and a delete says it is in use. While it does, for ten minutes at most, deleting the source is refused with "An agent is switching to it; try again in a moment.", or "Still in use by …" when an agent already uses it. An agent's settings saved with a source switch are stored all at once: when the switch is refused or the save fails, none of them is kept, nothing follows from them or is logged for them, and a memory limit already given to its container is put back as stored. An import is not held, since a large one takes minutes: one whose source is gone by the time its agent is written is refused (409, "That AI source was deleted meanwhile") with no agent made, and so is a template. An agent deleted during its switch is said to be deleted ("It was deleted."), not its source, and one deleted while any of its settings were being saved has none of them stored. A source switch, a class or Move agents here judges each agent as it is when it writes it: one busy by then is skipped as busy, and one moved to a runner meanwhile is not put on this machine's login (an agent's own switch is refused, as it would have been up front).
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id'` (DELETE), `'/v1/agents/:id'` (PATCH), `'/v1/agents/restore'`, `'/v1/agents/import'`, `holdSource`, `withSourceHold`, `switchAgentToSource`, `applyClassToAgent`, `applyCurrentLimits`; `src/store/store.ts` — `setAgentAIProfile`, `insertAgentOnSource`, `SourceGoneError`; `src/orchestrator/transfer.ts` — `importAgent`; `src/orchestrator/template.ts` — `importTemplate`
 
 ## Telegram, Discord and Slack
 
@@ -1498,6 +1715,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.170.0`
 - **Code:** `src/api/routes.ts` — `runPendingApp`, `runPendingOnce`, `/v1/agents/:id/app/pending`; `src/orchestrator/appPending.ts` — `dropAppPending`, `onePendingChange`
 
+### A waiting app install fails after Unarchive: a password or key it was given is missing
+- **Check:** the agent was archived while a second install from a repo was being prepared for it (Install when ready), the second request said "It was deleted or archived meanwhile, so nothing was saved", and the install that was already waiting fails on a secret field once the agent is back.
+- **Cause:** both requests keep a secret field at the same place. The refused one put its own value there and then deleted it, which took the waiting install's value with it.
+- **Fix:** give the install its values again (Install when ready on the agent's page). Since the fix, a refused request puts back what was there.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `/v1/agents/:id/app/pending`; `src/orchestrator/appPending.ts` — `stashPendingSecrets`, `pendingSecretRefs`
+
 ### Installing an app is refused: "Its app changed meanwhile (another install or update finished)"
 - **Check:** another install, update or Stop app of this agent's app finished while this install was still reading its repo.
 - **Cause:** from v2.170.0 an install judges the agent's app as it was when it was asked, as an update does: the later change wins and the older request is refused rather than going in over it.
@@ -1539,6 +1763,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** archive it again (if it is waiting for a bot token, `hatchabot skip-telegram <agent>` first, then archive). From 2.142.0 archiving closes its console and page, and Restore… is not the main button.
 - **Fixed in:** `v2.142.0`
 - **Code:** `web/index.html` — `confirmArchive`, `restoreAgent`
+
+### Archive said "its bot is back in the pool", but the bot is not in the pool
+- **Check:** the agent's bot was one you pasted (not from the pool); its activity says "its bot could not go back to the pool; the token was discarded" (`archive.recycle_failed`) at the archive, and the pool (the machine's Settings → Telegram) does not list the bot.
+- **Cause:** the page wrote what should have happened, not what did: parking a pasted bot in the pool can fail (its token could not be read or stored), and the archive goes on without it.
+- **Fix:** upgrade: the archive's answer says where the bot went, and the page says that ("its bot @… could not be put back in the pool"). To use the bot again, paste its token into an agent, or add it to the pool.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/archive.ts` — `archiveAgent`, `ArchiveOutcome`; `src/api/routes.ts` — `'/v1/agents/:id/archive'`; `web/index.html` — `confirmArchive`
 
 ### An unarchived agent hangs in PROVISIONING: "waiting for a bot token"
 - **Check:** after Restore (`hatchabot unarchive`), the Setup log ends with "waiting for a bot token" and Settings → Messaging → Telegram shows no spare bot. From 2.142.0 the same situation shows instead as an Alerts line on a running agent: "No Telegram bot was free — it is running in the web app; attach a bot later".
@@ -1680,6 +1911,25 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.173.0`
 - **Code:** `src/api/routes.ts` — `'/v1/auth/family-accounts'`, `halfMadeFamilyAccount`; `src/store/store.ts` — `localAccountNeverUsed`
 
+### After turning on accounts, "Only bots I parked" is off again, problem report drafts are gone, or budget and spending alerts stopped
+- **Check:** the install went from the shared password to accounts. The owner's agents moved to the new account, but Settings → Messaging shows **Only bots I parked** off though it was on, Report a problem lists none of the earlier drafts, and an agent's budget or "Tell me every $X" alert no longer sends its message.
+- **Cause:** the first account takes over what the shared-password owner had, from a list of tables kept by hand. The newer ones were missing from it: preferences, problem reports, budgets, spending alerts, usage warnings and a few more stayed with the old owner.
+- **Fix:** upgrade before turning on accounts: every column that names the owner is moved, and a test checks the list against the database. On an install already switched, set the preference again and set each budget or alert again (that saves it under your account); old drafts can be written again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/store/store.ts` — `adoptLocalOwnerData`, `OWNER_COLUMNS`
+
+### After turning on accounts, the owner's first sign-in shows no agents until the service restarts
+- **Check:** the service log has "could not hand this installation's data to the first signed-in account" (from v2.178.0), or, on an older release, the agents came back only after a restart.
+- **Cause:** handing the old owner's agents to the first account failed once (a busy or damaged database), and the process never tried again: it had marked the hand-over done before trying.
+- **Fix:** upgrade: a failed hand-over is tried again on a later request from the same account, after 30 seconds, then 1 minute, 2 minutes and so on, up to an hour between tries. The first failure is logged as an error, the rest as warnings. If it keeps failing, check the disk has room (`df -h`), read the error in the log, then restart the service (`./scripts/restart.sh`). On an older release, restart the service.
+  - Only the account that tried first gets it, even after a restart, so a member who signs in meanwhile does not. In accounts mode only the machine's owner (account #1) can be that account, and what a member made before the owner signed in (an AI source, an agent) does not stop it. Nothing is held on an install that handed its data over long ago. It runs while the old owner has anything it moves, not only an agent, source or machine: with its agents deleted, its Google connections, spare pool bots, peers, command-line tokens and settings still go to that account.
+  - Once everything is handed over, nothing more goes to anyone: an agent a leftover `dev-owner` command-line token makes later stays where it is. A "This machine" host made again at start goes to the install's owner: the host owner with accounts; with Google sign-in, the account the data was handed to, or on an install handed over before v2.178.0, the account that made the first source or agent (recorded then, once the old owner has nothing the hand-over moves, so it does not change).
+  - What you make between tries does not block it: a class with the same name as one of yours comes over as "Name (2)", with its agents. A Google connection to the same account keeps yours (the newer consent), and the old one's agents move to it. They still hold the old sign-in, so its health view says to attach them again: Disconnect and attach each one. One the old connection was never delivered to stays "never delivered". A day's usage or security snapshot you already have stays yours.
+  - An old agent with the same name as one of yours stays behind, with its budget, members and the rest. An AI source, machine or Google connection that only such agents use stays with them; one that any agent of yours uses is yours. The log says "some of this installation's agents stayed with the old owner". Rename or delete yours, then restart the service.
+  - The log says "this installation's data is held for the account that signed in first" when another account (not a member) signs in. That account takes it at its next sign-in. When the log says that account no longer exists, release the hold, then restart the service: `sqlite3 data/hatchabot.sqlite "DELETE FROM first_account"` (or the database `HATCHABOT_DB` names). A member's sign-in logs nothing.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/firstAccount.ts` — `firstAccountAdoption`, `RELEASE_PIN`; `src/store/store.ts` — `pinFirstAccount`, `adoptLocalOwnerData`, `localOwnerHasAnything`, `localOwnerHasData`, `mayTakeOverInstall`, `installOwner`; `src/index.ts`
+
 ### After Google could not be reached, Google sign-in says "Too many failed attempts", even with Google back
 - **Check:** identity mode. Sign-in said "Could not reach Google to verify your login." a few times, then "Too many failed attempts — try again later." (HTTP 429). The machine's network or Google had a fault shortly before.
 - **Cause:** every failed check counted as a wrong guess, even one where Google's keys could not be fetched. After 10 the address waited out the 15 minutes, or longer at the public address, where it also went on the security record as a burst of failures. It needs a fresh start or a rotated key, as keys already fetched keep working.
@@ -1728,6 +1978,62 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** set it again once the service answers. Upgrade: a failed save puts the select back on the saved value.
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/index.html` — `chanAllowKnocks`, `chanRichMessages`, `chanSelectBack`
+
+### A parked Discord or Slack bot left the pool for an agent that was being deleted
+- **Check:** you connected a Discord or Slack bot to an agent and deleted the agent before the connect answered. The bot is no longer parked under ⚙ Settings → Discord (or Slack), and no agent has it.
+- **Cause:** the connect asked whether the agent could take an app only before the platform checked the token. Deleted meanwhile, the deleted agent got the channel and its stored token, and a parked bot taken for it left the pool.
+- **Fix:** park the bot again with its token under ⚙ Settings → Discord or Slack. Since the fix, the connect asks again once it holds the agent and answers "It was deleted.", and a parked bot stays parked.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/channels/:kind'` (POST), `agentGone`
+
+### The Telegram card shows the old bot's name or group warnings after Re-check and Change bot
+- **Check:** the agent's Telegram card shows the old bot's name, or group warnings that are not true of the new bot, and you pressed Re-check just before changing the bot.
+- **Cause:** a re-check that was waiting for Telegram's answer about the old bot wrote it over the new bot's details.
+- **Fix:** press Re-check again. Since the fix, a re-check whose bot was changed meanwhile writes nothing and says "Its Telegram bot changed meanwhile — look again."
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/channels/:kind/recheck'`
+
+### Security → Agent exposure says "low" or "medium" for an agent shared on Discord, Slack or web chat
+- **Check:** ⚙ Settings → Security → Agent exposure names the people on Discord or Slack under "can message it", yet gives no "N people can message it" reason, and an agent that writes a shared folder reads "medium"; people given web chat are marked "invited, not yet linked".
+- **Cause:** the count of who can reach an agent read Telegram only. Discord and Slack members and web chat guests were left out of it, so a powerful agent shared outside Telegram never reached "high".
+- **Fix:** upgrade. The count takes everyone let in on any chat app or given web chat, and the list marks only people who have none of these as not linked yet.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/posture.ts` — `computePosture`
+
+### `hatchabot adopt --reuse-bot` gave the agent a pool bot, and the old bot was not taken over
+- **Check:** adopt printed "already has a bot: @…" (or the web app's adopt took over its bot), but the new agent's Telegram tab names another bot, and Settings → Messaging has one spare fewer.
+- **Cause:** adopt did not ask to skip the pool. With a spare bot there, the agent came up on it, and the step that hands over the old bot never ran.
+- **Fix:** upgrade: `--reuse-bot` skips the pool, hands over the old bot before the workspace is copied, and stops (removing the new agent) if the agent does not wait for that bot. After the hand-over it waits for setup to finish, however long it takes, and counts the bot as refused only when setup asks for a bot again. If the agent fails to start, before the hand-over or after it, adopt says it "could not start" and why, removes it and copies nothing. The web app's adopt with "Take over its bot" does the same, and waits as long as the CLI (15 minutes) for setup; an agent not yet running then (setting up, rebuilding or stopped) is left to finish once its bot was handed over, by the web app and the CLI alike, and they say so (the CLI names `hatchabot setup-log <id>` to watch), rather than removing it. One still setting up before anything was handed over (its old bot, or a pasted token) is removed, as the CLI removes it, and it says so (or that the delete was refused, and why). For an agent already adopted on a pool bot: delete it (its pool bot goes back to the pool), then adopt again with `--reuse-bot`.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/cli.ts` — `'adopt'` (`skipPool`), `pollAgent`; `src/api/routes.ts` — `'/v1/agents/:id/channel-token'`; `web/index.html` — `doAdopt`, `pollAgent`
+
+### `hatchabot create` with a pasted bot token says "is RUNNING" while the agent is still being set up, or `hatchabot adopt` removes the agent it just made
+- **Check:** `hatchabot list` shows the agent PROVISIONING right after create said it was running; or adopt with a pasted token (`HATCHABOT_BOT_TOKEN` or the prompt) failed and removed the agent; or adopt stopped on "Telegram did not answer" and removed the agent.
+- **Cause:** the server took the token and answered while the agent still showed the "waiting for a bot token" step. The CLI's first look after that took the old step as the end: create printed RUNNING, and adopt went on to copy the workspace into an agent still being set up. A first fix waited 30 seconds for setup to take the token up, so a slower setup (a busy machine, a slow Telegram) still read as a refused token. And "Telegram did not answer" (503) was taken as a wrong token.
+- **Fix:** upgrade: the server marks the step answered when the token comes in, and shows the agent as setting up; setup clears the step when it takes the token, and asks again only if it turns the token down. The CLI waits for the agent to run, fail or ask again, however long setup takes. The CLI tells such a server by what its `/v1/config` says (`handover: 2`), not by timing: there, and in the web app's adopt and paste-a-token box (which talk to their own server), a 409 to a post sent again makes it read the agent, and a step still open means the first post never landed, so that 409 is the refusal and the agent is removed; a step answered is watched on. Against a server of v2.177 or before, which shows the step until setup takes the token and does not tell a refusal apart, a step that stays 30 seconds after the hand-over stops the CLI with the agent left to finish (watch `hatchabot setup-log <id>`), not removed; so does a post sent again after no answer that such a server answers 409 (it took the first). When the agent runs on another bot than the one handed over (by the server's name for it, not the workspace's account key), create and adopt say which, and that the pasted bot was not used. "Telegram did not answer" (502, 503 or 504), or a connection refused, reset or dropped before an answer (another error, such as an invalid address, is not), is sent again on its own, with the same token, after 2, 4 and 8 seconds, by the CLI, by the web app's adopt and by its paste-a-token box; the CLI asks for the token again only when the token itself is refused (400 or 422, which includes a spare pool bot's token); a 409 about the agent (it is not waiting for a token, or another token came in already) stops with that message. A post the server took already (a proxy's 504 lost its answer) is answered 202 again when it brings the same token; another token gets 409. "Go on without a bot" sent again is answered 202 again only where the step was answered so; an agent made web-only, that never waited, gets 409. create says RUNNING only once it is, and otherwise says what state the agent is in. adopt copies the workspace only into a running agent: when setup turns the token down, it says the agent "is PROVISIONING and waiting on you", removes it and copies nothing. Check the token with @BotFather and run adopt again. On an older release, wait for `hatchabot list` to show RUNNING before using the agent.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/cli.ts` — `'create'`, `'adopt'`, `pollAgent`, `HANDOVER_SAYS`, `HANDOVER_RETRY_MS`, `STEP_GRACE_MS`, `tokenTurnedDown`, `noAnswer`, `otherBotLine`; `src/api/routes.ts` — `'/v1/agents/:id/channel-token'`, `sameTokenAgain`, `'/v1/config'`; `src/store/store.ts` — `telegramSkippedByOwner`; `web/index.html` — `handOverBot`, `submitToken`
+
+### An agent shows "Setup was interrupted — tap Retry" right after its bot token was pasted
+- **Check:** the token was pasted (in the app, `hatchabot create` or `hatchabot adopt`) and accepted, and the agent's Setup log then has `reconcile.interrupted`, with no `channel.provisioned` after its last `channel.setup_required`. Either a setup or rebuild of that agent was still running when the token came in (a Retry, or setup still ending after it asked for the token), or Hatchabot restarted between the paste and setup.
+- **Cause:** the server cleared the "waiting for a bot token" step when the token came in, outside setup. With a setup still running, the new setup was not started; after a restart, the token was gone, as it was held only in memory. Either way the agent was left setting up, with no step and nothing running, and the health sweep failed it.
+- **Fix:** upgrade: the token is held on disk with the agent until setup takes it, and the step stays, marked answered, until then. A token that comes in while a setup or rebuild runs is taken by a setup right after it; so is "go on without one", which then ends web-only. Two answers at once: the first is taken and the other is refused. When another change holds the agent (an import, a move), setup waits for it, up to 30 minutes, rather than failing. After a restart, setup runs again with the held token; an answer whose token never got stored asks again, and the restart's note in Activity says which happened (or that setup goes on without a bot). Deleting the agent, or going on without a bot, drops a held token; a delete that is refused leaves it to setup, and a token posted while the agent is being deleted is told "It is being deleted." Held tokens are kept in memory and read from the store once, at start, all at once; one let go or taken while that read runs is not brought back by it. Adding a bot whose token cannot be stored, or whose setup then fails, lets the pasted token go, from memory and disk, before it answers. A held token also goes once the agent gets a bot another way (attached from the pool, or setup ends with another bot), so it never wins over the pool later. Adding a bot to an agent checks a pasted token (with Telegram, against other agents' bots and the pool's spares) before it is held, so a refused one is never stored. A step asked again after it was answered shows in Alerts again, even if it was cleared before; one put back because the token could not be stored is not asked again, so a Clear stands. On an older release, tap Retry and paste the token again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `provisionWhenFree`, `sameTokenAgain`, `'/v1/agents/:id/channel-token'`, `'/v1/agents/:id/telegram'`, `resumeOperations`; `src/channels/telegramManual.ts` — `pendingRef`, `loadHeld`, `waitingFor`, `heldBot`, `sameToken`; `src/orchestrator/provision.ts` — `runProvisionSteps`; `src/orchestrator/operationsResume.ts` — `resumeBackground`, `tokenKept`; `src/store/store.ts` — `setAgentPendingAction`
+
+### Adding a bot, pasting a bot token or importing an agent with a bot waits for minutes, or never answers
+- **Check:** Telegram, or a proxy in the way, was slow or down at the time (`curl -m 10 https://api.telegram.org` from the machine).
+- **Cause:** the token is checked with Telegram, and that check had no deadline: a Telegram that did not answer, or answered slowly, held the request.
+- **Fix:** upgrade: the check gives up after 10 seconds with "Telegram did not answer, so the token could not be checked. Try again in a moment." The token may be fine: try again once Telegram answers.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/channels/telegramManual.ts` — `verifyBotToken`, `TelegramUnavailableError`
+
+### "That token didn't work" or "Too many token checks" while Telegram was down, for a token that is fine
+- **Check:** the same token works a few minutes later, or `curl -m 10 https://api.telegram.org` from the machine failed or showed a proxy's error page at the time.
+- **Cause:** any answer to the token check that was not a good bot counted as a wrong token: a proxy's 502 page, Telegram's own 5xx or its 429 (too many requests). Adding a bot to the pool also counted a check Telegram never answered as a failed try, so a few tries during an outage locked the person out of token checks for a while. Importing an agent said "Telegram rejected the bot token".
+- **Fix:** upgrade: only Telegram's own "no" (401 or 404) means a wrong token. Anything else answers 503 with "Telegram did not answer, so the token could not be checked. Try again in a moment.", does not count against the person, and an import says to try it again. On an older release, wait until Telegram answers, and wait out "Too many token checks" if it shows.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/channels/telegramManual.ts` — `verifyBotToken`; `src/api/errorHandler.ts` — `installErrorHandler`; `src/api/routes.ts` — `/v1/pool`; `src/orchestrator/transfer.ts` — `importAgent`
 
 ## Agents, builds and rebuilds
 
@@ -2153,6 +2459,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.162.0` (#202)
 - **Code:** `src/orchestrator/gitSource.ts` — `hostKeyTrustLine`, `gitSyncReason`
 
+### Text at the end of an agent's AGENTS.md is gone after a rebuild, below a code example that quotes "## Data sources" (or another managed heading)
+- **Check:** the agent's AGENTS.md has a code block that is never closed (a ```` ```bash ```` with no closing line), and later a ```` ```` ```` example that shows one of Hatchabot's headings (`## Data sources`, `## Peers`, `## Installing tools (managed by Hatchabot)`…). A snapshot (Files → Snapshots) or a backup from before may still have the text that went.
+- **Cause:** code fences that do not balance are read two ways. Taken as closed, the quoted heading looked real, and Hatchabot rewrote "its" section from there to the next heading, which could be the end of the file.
+- **Fix:** upgrade, then put the lost text back (from a snapshot or a backup) and close the code block. Now a heading the two readings disagree on leaves the file as it is, and a section ends at the first code fence after its heading too, so it never runs into the agent's code. Removing a section no longer changes blank lines anywhere else in the file. A ```` ``` ```` indented 4 spaces or more is read as text in an indented code block, not as a fence, as Markdown readers do. A template export (Share) still takes out every copy of Hatchabot's sections that either reading calls real, so the owner's details never travel because of the agent's fences.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/openclaw/workspace.ts` — `managedSection`, `fenceMask`, `FENCE_LINE`, `readFences`, `replaceSection`, `removeSection`, `removeSectionEverywhere`, `extractSection`, `withInstallSection`, `installBlocks`; `src/orchestrator/template.ts` — `stripManagedSections`
+
+### An agent's AGENTS.md still lists a Google account, a peer or a folder that was taken away
+- **Check:** the agent's activity says "AGENTS.md line N: some Markdown readers take it to close the code fence opened on line M and others do not, so … was left as it was", naming the section (once for each version of the file, not on every rebuild). Its AGENTS.md has a code block at line M that opens with one run of backticks and is closed at line N by a longer one, or never closed. Or it says "… left as it was, since a code fence above it does not close the way it opens", and a code block indented 4 spaces or a tab (in a numbered or bulleted list) quotes the section's heading at the start of a line.
+- **Cause:** where the agent's code fences do not balance, Hatchabot cannot tell whether the section's heading is real or quoted in an example, so it leaves that section as it is rather than risk the agent's own text. Before the fix it did this without saying so.
+- **Fix:** close the code block in AGENTS.md at the line it names (the same backticks it opened with, on a line of their own), or indent the quoted lines of an indented block as far as its fences, then rebuild the agent. The section is then brought up to date. A template export (Share) takes Hatchabot's sections out either way. Pushing a master's definition skips such a child, before any copy is taken, and reports "its AGENTS.md has a code fence that doesn't close above "Data sources"; fix it and push again" (or "Google accounts"): fix it the same way and push again. When it is the master's own AGENTS.md, a child with its own section of that name reports "<the master>'s AGENTS.md has a code fence that doesn't close above …; fix it there and push again"; one without gets the push with every copy of the master's Google accounts taken out.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/openclaw/workspace.ts` — `unsureSections`, `fenceDisagreement`, `readFences`, `fenceMask`, `readSection`, `managedSection`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`; `src/api/routes.ts` — `push-definition`
+
+### An agent's AGENTS.md changes on the rebuild after a section was added, with only a blank line removed
+- **Check:** after a section was added to the agent's AGENTS.md (say `## Peers`, when it got its first peer), the next sync wrote the file again, and the only change was the blank line before that section taken out.
+- **Cause:** a section was appended with a blank line before it, and the next sync replaced the section above it together with that blank line.
+- **Fix:** none needed; it happens once. Since the fix a section keeps the blank lines that ended it, so a second sync writes nothing.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/openclaw/workspace.ts` — `replaceSection`
+
 ### An AGENTS.md edit saved just after adding a public repo is gone, and no snapshot has it
 - **Check:** a public repo was added to the running agent shortly before the save; the saved text is not in AGENTS.md, which has the text from before the save plus a "## Data sources" section naming the new repo, and no snapshot holds the saved version (the save's own `pre-edit` snapshot has the text from before it).
 - **Cause:** before v2.168.0 adding a public repo cloned it and then rewrote AGENTS.md's data-sources section in the background without holding the agent, unlike every other change to its files. The rewrite read AGENTS.md, and a save made before it wrote back was written over with the older text.
@@ -2417,6 +2744,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.160.0` (#162, #141)
 - **Code:** `src/orchestrator/transfer.ts` — `ManifestSchema`; `src/orchestrator/envPolicy.ts` — `MAX_AGENT_ENV_VARS`, `MAX_IMPORTED_ENV_VARS`
 
+
+### A downloaded copy of a large agent will not import: "That file isn't a Hatchabot export (or is too large)", though the download worked
+- **Check:** the agent's saved state is close to the limit (about 201 MB compressed) and it has large environment values (its Environment tab: many, or values of several KB).
+- **Cause:** the export set aside 8 KB for everything but the state, but an agent may have 64 environment values of 8 KB each. Near the limit, the file came out over the 256 MB an import reads back. Since v2.178.0 the export builds the rest of the file (environment values, bot token, settings) before it stops the agent and measures it, so a state that would not fit beside it is refused while the agent keeps running, and the state is held to the same measure after the copy.
+- **Fix:** upgrade the machine you export from, then trim old sessions or move bulk data to a shared folder, and export again. A file made before cannot be imported. When the environment values alone come near the 268 MB a file can hold, the refusal says so, with their size ("settings and environment values alone come to about … MB"): remove the largest of them. Before the eleventh review it said "the limit is about 0 MB". With no room left at all (under 1 MB) it is refused at once, before the agent's volume is measured (twelfth review: it ran a trial compress of the whole volume only to refuse it).
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/transfer.ts` — `stateAllowance`, `estimateStateBytes`, `exportAgent`, `tooLarge`, `NO_ROOM_BYTES`
+
 ### An agent fails to build after an environment variable was saved ("must be a string without null bytes")
 - **Check:** the build error says an argument "must be a string without null bytes" (ERR_INVALID_ARG_VALUE); a variable's value was pasted from a file or a program.
 - **Cause:** the value held a NUL character, which a program's environment cannot carry. The setting stored it; the next build could not hand it to Docker.
@@ -2472,6 +2807,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade, then press Connect for the account again and leave the service ticked. The connection now lists only what was granted, and the page after consent names any service that was not.
 - **Fixed in:** `v2.160.0` (#174)
 - **Code:** `src/orchestrator/googleConnections.ts` — `grantedServices`, `exchangeGoogleCode`, `isGoogleService`
+
+### Security → Agent exposure says an agent can "send email as" an account that has only Calendar
+- **Check:** the agent's Google account was connected without Gmail (Settings → Connections lists its services); the Security tab still lists "send email as …" under "can", and counts it as a powerful capability.
+- **Cause:** the check looked only at the "block sending" switch, not at whether the connection holds Gmail.
+- **Fix:** upgrade. Sending mail is listed only for a connection with Gmail and sending not blocked.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/posture.ts` — `computePosture`
 
 ### An agent says it cannot read Gmail, and you need to know why
 - **Check:** the agent's Connections → **Test Gmail** beside the account, with the agent running. It checks the sign-in, then asks Gmail for the inbox's counts, and says which failed: the sign-in expired or was revoked, the OAuth client, an administrator's block, the Gmail API off in your Google Cloud project, Gmail unticked at consent, no mailbox, Google limiting or down, or no way out to Google.
@@ -2681,6 +3023,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade, then set the cap again: a class edit that names the cap or swap applies it to every member that takes it from the class. The limits check also puts it right within its next pass.
 - **Fixed in:** `v2.162.0`
 - **Code:** `src/api/routes.ts` — `/v1/agent-classes/:id`
+
+
+### After changing an agent's model, source or image, it keeps its old class's memory cap
+- **Check:** the change said the agent left its class (`classDetached`), but `docker inspect -f '{{.HostConfig.Memory}}' <container>` still shows the class's cap, while its Overview shows the machine's default or its own.
+- **Cause:** a change that drops the class by itself left the container on the class's memory cap and swap until a rebuild. Taking the class away by hand applied the new limits.
+- **Fix:** upgrade: when the class it left sets a memory cap or a swap allowance, the limits that now apply (its own or the machine's default, whatever its old class says by then) go on the container at once (a class with neither leaves the container alone), or, when a rebuild is under way ("Switch these agents" with a rebuild), on the container it makes. A container that refuses them is said: the app names the agent after a model change, "Switch these agents", "Move agents here", "Migrate all" and a source's new default, and the manager's `set_model` receipt says it too (`memoryPending`), a refused model included; its timeline has `memory.limits_kept` with the container's own reason, the same from every class path (leaving, joining, a class edited or deleted). An agent with both a cap and a swap allowance of its own is left alone: its limits never came from the class, so there is nothing to put on and no warning. In "Switch these agents", "Migrate all" and a source's new default, each agent's limits go on in its own turn, all at once rather than one after another, so a runner asleep does not make a batch wait for each in turn. Setting the agent's own cap or swap goes through the same step: when its machine is gone or not answering (a runner asleep), the value is kept as its own and that is said the same way (the app: "kept for its next start"); when its machine answers but the value does not go on (docker refuses it, a cap below what it uses now, or any other error there), the change answers an error and nothing is stored, so no later rebuild puts it on. A save of both whose swap allowance is refused after the cap went on stores neither, and puts the container back on the limits it had: an agent's settings saved together are stored all at once (HB-0570). Until then, rebuild the agent or set its memory cap.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `detachClassIfDrifted`, `limitsAfterDetach`, `applyCurrentLimits`, `setMemoryCap`, `setSwapAllowance`, `switchAgentToSource`, `limitsSaid`; `web/index.html` — `leftClassKeptLimits`, `applyModelToSelected`, `saveMemoryCap`, `saveSwapAllowance`; `src/mgmt/apiClient.ts` — `setModel`
+
+### An agent sizes its jobs to its old memory cap after a class changed it
+- **Check:** the agent's AGENTS.md "Memory budget" section names a cap other than the one on its Overview, after it was put in a class, taken out of one (by hand, or by a change of its model or source, one agent or many, or a source's new default), or its class's cap was changed or the class deleted.
+- **Cause:** a class applied the new cap to the container but did not tell the agent; setting its own cap did.
+- **Fix:** upgrade: a running agent whose cap a class moved has its Memory budget section rewritten, and nothing else, without holding up a Rebuild or a model change asked for meanwhile; a save of AGENTS.md made while it works is kept, and the budget is written into the saved file (staged beside it only in the turn a save takes, never left waiting there), every byte outside the section as it was, one that is not UTF-8 included. Written for a change of its cap while it runs, the section says the cap it has now, and that `HATCHABOT_MEMORY_CAP` in its environment keeps the value from its container's last start until a rebuild; a section that already says its cap, in either wording, is left as it is, by this and by other updates of AGENTS.md, and one that does not is written in those live words by any update made while it runs (only a fresh start or a rebuild writes "also in the environment"). One stopped or asleep when its cap changed is told once Start, or a wake, has it up. It is told only when the new limits went on its container, its own cap set by hand included: a cap stored while its container kept the old one (a runner asleep) is not told as its budget. Each agent is told on its own: one busy at the time (a backup, a move) once it is free, for up to 30 minutes (past that, `memory.budget_not_told` in its timeline, and the next change of its cap tells it; one asked while it waited is not dropped), one being rebuilt once the rebuild is done, one waiting to switch source now (the budget is its container's). One that could not be told (its machine gone) has `memory.budget_not_told` in its timeline, and the next change of its cap tells it. Until then, rebuild it, or set and clear its own cap.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `tellMemoryBudget`, `limitsTold`, `capMovedFrom`, `withAgentsMdTurn`, `detachClassIfDrifted`, `startStopped`; `src/orchestrator/busy.ts` — `busyDone`; `src/orchestrator/provision.ts` — `syncMemoryBudget`, `syncDataSourceDocs`; `src/orchestrator/snapshots.ts` — `writeFileInAgent`; `src/orchestrator/memoryCap.ts` — `memoryBudgetSection`
 
 
 ### A restored or moved agent has less memory than it had: its class gave it more
@@ -2948,12 +3305,19 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/index.html` — `reportOpenIssue`, `reportLoadDrafts`
 
+### Report a problem replaced text typed while it saved, or closed a draft opened meanwhile
+- **Check:** in Report a problem, you kept typing while Copy, Save as a file or Open on GitHub was saving, and your last words disappeared. Or you pressed Discard and opened another draft before it finished, and that draft closed.
+- **Cause:** when the save answered, its masked text replaced the fields as they were at that moment. The discard closed whichever draft was open when it finished.
+- **Fix:** type the lost words again, or open the draft again from the list. Since the fix, a field typed in during the save keeps what you typed, and that is saved too (and masked) before Copy, the file or GitHub goes on. If you are still typing through that second save, nothing goes out, and a note asks you to press the button again. A discard closes the draft only if it is still the one shown; if you opened that same draft again while it was being discarded, it closes once it is gone, and is not drawn when its load comes.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `reportSaveEdits`, `reportDiscard`, `reportLoading`
+
 ### The Schedule tab still says "It is stopped — start it" after pressing Start
 - **Check:** the bar shows the agent running; another tab and back shows the tasks.
 - **Cause:** the agent page's tabs of edit sections (Personality, AI, Data, Telegram, Sharing, Schedule, Advanced) were drawn once for the state they opened in, and the poll repainted only the bar.
-- **Fix:** upgrade: the tab redraws when the state changes. It waits while a field is in use, and stays as it is once you have changed something in the page's forms, a × on a setup field and Edit on a task included, until the page is closed or you change tab, so an unsaved edit is not lost. On an older release, change tab and back.
-- **Fixed in:** `v2.173.0`
-- **Code:** `web/index.html` — `v2RefreshSheet`, `v2RenderSheet`, `removeSetupField`, `editCronJob`
+- **Fix:** upgrade: the tab redraws when the state changes. It waits while a field is in use, and while a control in the page's forms holds something other than what it held when it was filled or last saved, a setup field added or removed and a task being edited included, so an unsaved edit is not lost. Before `v2.178.0` a change that was saved (a Telegram token Connect used, or a setting that saves itself, such as the memory limit) held it too, until the page was closed; so did an edit left on another agent's page before this agent's Schedule tab was opened, a file in the Personality tab's editor that would not load, and a save answered after the page was closed and opened again. On an older release, change tab and back.
+- **Fixed in:** `v2.173.0`; a saved change no longer holds it: `v2.178.0`
+- **Code:** `web/index.html` — `v2RefreshSheet`, `v2RenderSheet`, `v2EmbedPanes`, `v2SheetNotes`, `v2SheetBaseline`, `v2SheetSaving`, `v2SheetUnsaved`, `editParamsSaved`, `loadEditFile`
 
 ### Planned: pressing Add clears the box and nothing appears
 - **Check:** an agent you can see already has that name, in any capitalisation, including an archived one or one shared with you.
@@ -2975,6 +3339,111 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: these rebuilds ask the server to leave a stopped agent down, and it takes the change at its next start. On an older release, stop it again; what it was to carry is already in place.
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/index.html` — `saveImagePin`, `faApply`, `rebuildAll`; `src/api/routes.ts` — `'/v1/agents/:id/rebuild'`
+
+### Apply values brought back an old description (persona) after a file was saved
+- **Check:** the agent's description went back to an older one after Apply values, and you had changed the description while a SOUL.md or AGENTS.md save, a merge of a learning, a push of its master's definition, or Apply values itself was under way.
+- **Cause:** each of those wrote the whole setup layer back as it had read it before its wait, which put the old description back into the layer; Apply values also rendered the description from the layer it read at the start. Apply values renders from the layer.
+- **Fix:** set the description again. Since the fix, each writes only its own file into the layer, in one step, and Apply values renders the description from the layer as it is then. A description changed meanwhile that the new values would make too long is left as it is, and Apply values says so ("Values applied, but ⚠ …").
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/store/store.ts` — `setAgentParamFile`; `src/api/routes.ts` — `'/v1/agents/:id/files/:name'` (PUT), `'/v1/agents/:id'` (PATCH), `'/v1/agents/:id/params'`, `'/v1/agents/:id/proposals/:pid/resolve'`, `'/v1/agents/:id/push-definition'`; `web/index.html` — `saveSetupValues`, `resetSetupValues`
+
+### A snapshot holds a SOUL.md and an AGENTS.md that never went together
+- **Check:** a named snapshot's files read as part old setup values and part new ones; it was taken while setup values were applied or a snapshot was restored.
+- **Cause:** taking a snapshot reads the files one at a time and did not wait for an edit that writes several.
+- **Fix:** take the snapshot again, and don't restore the mixed one. Since the fix, a snapshot taken by hand and a change that writes core files (setup values applied, a definition pushed to the agent, a snapshot restored, a file saved, a proposal merged into a master's playbook) take turns: each waits for the other to finish, and a snapshot after such a change holds its setup values and layer with its files. A snapshot that waited looks at the agent again: one archived, stopped or deleted meanwhile is refused in those words. The changes that waited do too: Apply values renders from the files, fields and values as they are when its turn comes (a SOUL.md saved meanwhile is kept, and a field a push added meanwhile keeps its value, a reset too: a reset puts back only the fields it showed), a pushed definition keeps the values a child was given meanwhile, and a restore of an agent moved meanwhile is refused ("It moved while this waited; restore again."). One that waits more than two minutes is refused ("Another change to its files is still running; try again when it ends.") and does not run later; a push works on four children at a time, waits for their turns until one deadline two minutes from its start, and reports a child it could not reach as not pushed; a child waiting for one of the four does not hold its files up meanwhile. A snapshot asked for during a change that replaces its files (a rebuild, a move, an archive, a restore, an app update or rollback), when they may be half replaced, is refused ("It is busy (a rebuild); take the snapshot when that ends.", or the change's own words) and takes nothing. Other work on the agent, such as a backup, a task switched on or an app install, does not hold a snapshot up. A change that replaces the files and begins while a snapshot taken by hand reads them (a Rebuild pressed then) goes ahead, and the snapshot is not stored ("A rebuild or restore started while the snapshot read its files; take it again."). One started again after a restart counts the same. A file saved while a snapshot reads waits for it, so the snapshot keeps each file with the layer it goes with.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `withCoreFilesTurn`, `'/v1/agents/:id/snapshots'` (POST), `'/v1/agents/:id/files/:name'` (PUT), `'/v1/agents/:id/params'`, `'/v1/agents/:id/push-definition'`, `'/v1/agents/:id/snapshots/:snapId/restore'`, `'/v1/agents/:id/proposals/:pid/resolve'`, `freshRunning`; `src/orchestrator/operations.ts` — `FILES_REPLACED_BY`, `noteFilesReplacing`, `filesReplacingCount`; `src/orchestrator/operationsResume.ts` — `runKind`; `src/orchestrator/snapshots.ts` — `captureSnapshot`
+
+### A stopped agent connected to others still cannot consult them after Start
+- **Check:** you connected agents to each other (the bulk Connect, or an agent's Peers tab without its Rebuild), or deleted one it could consult, while it was stopped or asleep, and after you started it its icon still says it needs a rebuild for its peers.
+- **Cause:** the page promised that a stopped agent picks the change up when it next starts, but nothing marked its next start as the rebuild that installs it.
+- **Fix:** rebuild that agent. Since the fix, when you press Start it rebuilds any agent whose peers are not the ones it has installed, however they changed (connected or removed while it was stopped, a peer deleted, a change made during an operation); peers put back as they were mean a plain start. A sleeping agent is different, by design: it wakes for a message as it was, so the message is answered at once, and an agent a budget pause lets go of starts as it was too. It takes new peers at its next Start or Rebuild; until then its card says its peers changed, and the bulk Connect's answer names it as asleep. An agent deleted, or being deleted, while the bulk Connect works is not named at all.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `peersNotInstalled`, `rebuildOwedAtStart`, `startStopped`, `'/v1/agent-peers/mesh'`, `'/v1/agents/:id/peers'`; `src/store/store.ts` — `peersCsv`, `agentsWithPeersPending`
+
+### A master's playbook has the same distilled learning twice
+- **Check:** the master's AGENTS.md has two `<!-- distilled from … -->` blocks with the same text. The first merge failed with an error (its machine was slow, or its link dropped), and the merge was tried again.
+- **Cause:** the write landed but its answer was lost, so the proposal went back to waiting, and the retry appended it again.
+- **Fix:** delete the second block (Files, or ask the agent). Since the fix, each block carries its proposal's id, and a merge whose block is already there does not write it again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`
+
+### `hatchabot adopt` timed out or failed, and the agent it made is still there
+- **Check:** `hatchabot list` shows the agent named in the failed adopt. The adopt ended with "still PROVISIONING after N min", or said the agent "was cleaned up".
+- **Cause:** running out of `--timeout` ended the command before its clean-up, and a removal the server refused (the agent was still being set up, or the server was gone) was not checked: adopt said the agent was cleaned up anyway. Running adopt again then collided with it.
+- **Fix:** upgrade: a timeout removes the half-made agent too, and a removal that fails is said, with the agent's id and `hatchabot delete <id> --yes`. On an older release, delete it yourself, then run adopt again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/cli.ts` — `'adopt'`, `pollAgent`, `StillWaiting`
+
+### `hatchabot archive` said "its bot is back in the pool", but the bot is not in the pool
+- **Check:** the agent's bot was one you pasted, or a copy of the agent was downloaded while it was stopped; the pool (`hatchabot bots`, or Settings → Telegram) does not list the bot.
+- **Cause:** the CLI printed the same line after every archive, whatever happened to the bot: parking a pasted bot can fail, a bot can be left to a downloaded copy, and a web-only agent has none.
+- **Fix:** upgrade the server and the CLI: the CLI prints what the server says happened ("its bot @… could not be put back in the pool; to use it again, paste its token into an agent"). Against an older server it still prints the old line.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/cli.ts` — `'archive'`, `archivedBotLine`
+
+### Every new agent fails to start, and rebuilds fail too, after `HATCHABOT_GATEWAY_PORT_BASE` was set near 65535
+- **Check:** `HATCHABOT_GATEWAY_PORT_BASE` in `.env` is close to 65535, or many agents have been made; `sqlite3 <database> "SELECT name, gateway_port FROM agents WHERE gateway_port > 65535"` lists agents.
+- **Cause:** each agent's gateway port counted up from the highest one ever given, with no check against the top of the range, so a port past 65535 was saved, and kept even after the base was set lower.
+- **Fix:** upgrade: ports stay from the base to 65535. Past the top, the first port from the base that no agent holds is taken (a deleted agent's is free again), and when none is left the error says so. A port past 65535 saved before is given again at the agent's next provision or rebuild. Set the base lower if the range is full.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/store/store.ts` — `ensureGatewayAccess`
+
+### After Rebuild all, a stopped agent started on its old image
+- **Check:** you pressed **Rebuild all** (Bulk actions) while an agent was stopped or asleep. Its note said it would be rebuilt when it next starts, but after Start it still ran the old image (Overview → Runtime) or the old OpenClaw version.
+- **Cause:** Rebuild all sent rebuilds to running agents only. Nothing marked the stopped ones, so their next start reused the old container.
+- **Fix:** press **Rebuild** on that agent (this starts it). Since the fix, Rebuild all, and Bulk actions → **Rebuild** the same way, asks the server to rebuild each stopped or sleeping agent that a rebuild would change when it next starts. That is the same rule as Bulk actions' **Needs rebuild** chip: the server's "Needs a rebuild" (an image older than the fleet default among its reasons), a model waiting for a rebuild, or peer changes waiting for one. The agent stays down until then, and the result counts these agents separately. One already current is left as it is; one pinned to an image it does not run yet is rebuilt by its start in any case. Rebuild all's result also counts a request that failed as failed, naming the first three agents with their reasons; only an agent busy or already being changed is counted as skipped. Bulk actions → **Rebuild** skips an agent never built (no container yet) or moved to another machine, as Rebuild all does, instead of sending it a rebuild, and counts one turned away as busy or already changing as skipped, as Rebuild all does.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `rebuildAll`, `rebuildPlan`, `rebuildOrMark`, `rebuildChangesIt`, `faApply`, `reasonsSaid`; `src/api/routes.ts` — `stoppedWaits`
+
+### Bulk actions said a model or class change was done, but the agent kept its old model
+- **Check:** after Bulk actions → **Model** or **Class**, the result said "✓ N done", yet an agent's AI tab shows the old model, or it still answers on it.
+- **Cause:** the result counted every saved change as done. The server's answer also says whether the running agent took the change. It may have refused it, left a model or memory limit pending, or need a rebuild for a source change. The page did not read that part.
+- **Fix:** open the agent and choose the model again, or press **Rebuild**. Since the fix, the result counts what was applied, what waits for the next rebuild, and what was saved but not applied, naming every agent saved but not applied with its own reason; the failures' reasons, the first three, are above it. A class whose model applied while only the container's memory limits wait is counted as done, with a note that the limits come at the next rebuild.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `faApply`, `switchModel`
+
+### After switching agents, one showed another's image pin, folders, variables, model menu or update form, or an error was never shown
+- **Check:** you started a change on agent A (its image list loading, a folder, repo or variable added or removed, a class set, its app updated, a rename, a web search test) and opened agent B before it finished. Then B's image menu showed A's pin, or B's folder or variable list showed A's, or B's model menu was redrawn for A, or B's page asked for a value for A's app, or B's settings header showed A's new name, or B's Test web search or a folder's Test showed A's result, or B's Telegram tab offered people to add who were A's. Or, back on A while B's image list loaded, A's image menu showed B's pin, and Pin & rebuild pinned it to A. Or a change on A failed while B's Overview, or no page, was open, and nothing said so.
+- **Cause:** the answer for A was drawn into whichever agent's page was open when it came back. With A's folders in B's list, removing an old-style folder from B sent A's folder list to B. An error was written under A's forms, which were out of sight.
+- **Fix:** close the page and open the agent again. Check its folders (Knowledge), its variables (Advanced) and its image pin, and remove anything that is not its own; make again a change that may have failed. Since the fix, an answer for an agent whose forms are not on screen appears in a toast with that agent's name, and the page shown is left alone.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `forAgent`, `agentPrefix`, `populateImagePicker`, `addDataSource`, `removeDataSource`, `removeEnvVar`, `saveImagePin`, `assignClass`, `v2AppUpdate`, `renameAgent`, `testAgentSearch`, `checkDataSource`, `renderKnownPeople`, `addKnownPerson`
+
+### After saving setup fields or adding a variable, folder or repo, the agent's page kept saying something was unsaved
+- **Check:** the agent's page held back its redraw after Start or Stop, as if an edit were unsaved, until you closed it. Before that, either you pressed Save fields on its Personality tab and closed and reopened the page before the save finished; or you typed a variable (Advanced), a folder or a repo address (Knowledge), closed and reopened the page, and then pressed Add.
+- **Cause:** the setup fields' save marked the list it sent as saved, while the page showed the list the reopening filled in. An Add emptied its box, while the page still took the text kept from before the reopening as the box's filled value. Either way the page counted an edit that was not there.
+- **Fix:** close the agent's page and open it again. Since the fix, a save answered after the forms were filled again leaves the new fill as the saved list, as every other save in the page does, and an Add takes its emptied box as filled.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `saveSetupFields`, `prepareEdit`, `v2SheetSaving`, `addEnvVar`, `addDataSource`, `addGitSource`
+
+### An image or memory setting chosen on Advanced was gone after looking at another tab
+- **Check:** on an agent's Advanced tab you chose an image under Runtime and did not press Pin & rebuild, or chose a memory search engine, a memory cap or a swap allowance and did not press its Save. You opened another tab of the same agent and came back: the menu showed the saved value again, and leaving said nothing was unsaved.
+- **Cause:** each time Advanced was drawn, the page filled these menus from the agent's saved values (and read the machine's images again).
+- **Fix:** choose again and press Pin & rebuild, or Save. Since the fix, these menus are filled when the agent's forms are (opening its page), and again only for another agent, an image list that never loaded, or a value changed elsewhere (Bulk actions) while nothing else is chosen there. A choice stays, counted as unsaved, and the menu's other wording (what the agent inherits from its class or the fleet) is brought up to date around it. Saving the memory cap no longer resets a swap allowance chosen and not saved yet, or the reverse. While the image list loads (again, after a pin changed elsewhere, too), only the pin is offered and Pin & rebuild waits for it.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `v2EmbedPanes`, `populateImagePicker`, `prepareEdit`, `v2KeepsChoice`, `fillMemoryCapRow`, `fillSwapRow`
+
+### Saving an edited scheduled task after looking at another tab added it a second time
+- **Check:** on an agent's Schedule tab you pressed **Edit** on a task, looked at another tab of the same agent (Overview, say), came back and pressed the button under the form: the list then held the old task and a new one with your change.
+- **Cause:** drawing the Schedule tab again ended the edit, but left the task's details in the form, so the button was **Add task** again and made a new task from them.
+- **Fix:** delete the extra task (or the old one). Since the fix, an edit under way stays one when the same agent's Schedule tab is drawn again, with its **Save changes** button and its "Editing" note, until you save or cancel it; opening another agent's Schedule tab, or closing the agent's page, ends it. Save sends only what you changed from what Edit put in the form, so a change made to the task elsewhere since (by the agent, or on another page) is not put back.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `prepareCrons`, `cancelCronEdit`, `editCronJob`, `endCronEdit`, `cronFormOf`, `clearCronForm`, `addCronJob`
+
+### A Group chats choice on the Telegram tab was gone before pressing Save
+- **Check:** on an agent's Telegram tab you changed **Group chats** (or picked a group or server under it) and had not pressed its **Save** yet. The agent started or stopped meanwhile, and the tab was drawn again with the saved choice.
+- **Cause:** the page took every menu on that tab that acts on its own as one that saves itself, so a change in Group chats or the room picker did not count as unsaved, and the redraw after a state change went ahead over it.
+- **Fix:** choose again and press Save. Since the fix, only a menu whose change saves it (Who can reach it, Rich messages, and the group, class, sleep, files limit and browser menus) is left out; a change in Group chats or the room picker counts as unsaved until Save, and the tab waits for it.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `v2SheetCounts`, `data-saves`, `v2LoadChans`
+
+### A value typed for one agent's environment variable, folder, repo or task was added to another
+- **Check:** you typed a variable's name and value (or a folder path, a repo address, or a scheduled task) on one agent's page without pressing Add. Then you opened another agent and pressed Add there, and the value went to the second agent. Or a folder or repo was added to the second agent with write access, or as a public repo, chosen on the first agent's page. Or a setup field half-declared on the first agent (its key, label, type, default or options) was added to the second.
+- **Cause:** those boxes, and the access and "public repo" choices beside them, kept what was set when the page switched agents.
+- **Fix:** remove the variable, folder, repo, task or setup field from the second agent (Advanced → Environment, Knowledge → Folders, Schedule, or Personality → Setup fields), or set its access back to read-only there. Since the fix, those boxes are emptied, and the choices go back to read-only and not public, when another agent is opened.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `prepareEdit`, `prepareCrons`
 
 ## Memory and conversations
 
@@ -3238,12 +3707,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.3`
 - **Code:** `src/api/guestConsoleLog.ts` — `GuestConsoleLog`
 
-### A web chat guest's page says "… was not sent: too many requests are waiting for an answer, or its id is already in use"
-- **Check:** the guest's browser has many requests open on one connection (a stuck tab, a script), or sends two requests under one id.
-- **Cause:** a guest's health and agent-list replies are rewritten to leave other people out, and found by their request's id. Before `v2.168.0` a request the proxy could not follow (past 1,000 waiting, with no id, or under an id still waiting) went through, and its reply reached the guest unrewritten. Now it is answered at once and not sent.
-- **Fix:** reload the page; the console sends one id per request.
-- **Fixed in:** `v2.168.0`
-- **Code:** `src/api/consoleProxy.ts` — `spliceGuest`, `guestUntracked`, `MAX_GUEST_PENDING`
+### A web chat guest's page says "… was not sent: too many requests are waiting for an answer" (or "it has no id", "its id is too long", "got no answer: the agent took too long to answer")
+- **Check:** the guest's browser has many requests open on one connection (a stuck tab, a script), or the agent is not answering (its status, `hatchabot doctor`). The message names `health` or `agents.list`. Before `v2.178.0` it could also say "its id is already in use", and name any request sent under an id still waiting.
+- **Cause:** a guest's health and agent-list replies are rewritten to leave other people out, so each must be matched to its request. Before `v2.168.0` a request the proxy could not follow (past 1,000 waiting, with no id, or under an id still waiting) went through, and its reply reached the guest unrewritten. Before `v2.178.0` the match was by the guest's own id, so another reply under that id (a request sent under it, or the second answer to an `agent` request) could take the health reply's place, and the health reply then passed unrewritten. Now a health or agent-list request goes to the agent under an id the proxy makes, and its reply gets the guest's id back; a reply under such an id that nothing waits for is dropped, the reply keeps the agent's other fields but a refusal loses any payload it carried, and a reply in a form a guest's copy cannot be made from (or that Hatchabot fails to rewrite: `console.guest_scrub_failed` in the service log) is answered with an error. A message from the agent that is not a JSON object (not JSON, binary, an array or a bare value) is never passed on as it came: it is logged the same way and the guest's chat is closed with "Hatchabot could not read the agent's answer", as a request it may have answered would otherwise wait for ever. This is deliberate: OpenClaw sends only JSON objects in text frames, so anything else is refused rather than passed on unscrubbed. Such a request is refused (and not sent) past 1,000 waiting, with no id, or with an id longer than 256 characters; one not answered within 2 minutes is answered here ("took too long"), and a later answer to it is dropped. The 2 minutes are timed by a clock that only goes forward, so setting the machine's clock does not cut them short or stretch them. Other requests are not counted.
+- **Fix:** reload the page; the console's requests always have short ids.
+- **Fixed in:** `v2.168.0`; `v2.178.0` for a reply taken for another's under the same id
+- **Code:** `src/api/consoleProxy.ts` — `spliceGuest`, `guestUntracked`, `guestError`, `MAX_GUEST_PENDING`, `MAX_GUEST_ID_LENGTH`, `GUEST_REPLY_WAIT_MS`, `GuestReplies`, `onScrubError`
+
 ### An agent's icon shows unread after a Telegram chat, with nothing new in its console
 - **Check:** the conversation's record (the agent's session records) names Telegram only as its `origin.provider`, with no `lastChannel` or `lastTo`.
 - **Cause:** the unread check gave up on the record before reading its origin, and counted it as the console's.
@@ -3292,6 +3762,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: on a phone (640 px wide or less) the sheet stops short of the top, so a strip of the home screen shows above it and a tap there goes back, and ‹ Back sits at the sheet's top left, where every other panel has it, staying there while the tab scrolls. Esc still closes it; a desktop keeps its ✕.
 - **Fixed in:** `v2.176.0`
 - **Code:** `web/index.html` — `v2RenderSheetBar`, `.v2sback`, `.v2sheet`; `scripts/ui-clickthrough.mjs` — `phoneSheetHasAWayBack`
+
+### On a phone, the Schedule tab runs off the right of the screen
+- **Check:** on a phone, an agent's Schedule tab is wider than the screen: each task's words wrap one to a line, and **Delete**, the right of the New task form and **Add task** are cut off.
+- **Cause:** a task's four buttons sat in one line beside its words, so the tab could not be narrower than about 400 px.
+- **Fix:** upgrade: on a phone (640 px wide or less) the buttons go under the task's words, and the tab fits the screen.
+- **Fixed in:** `v2.177.0`
+- **Code:** `web/index.html` — `renderCrons`, `cronList`; `scripts/ui-clickthrough.mjs` — `phoneTasksFit`
+
+### On a phone, a screen runs off the right edge, squeezes its words into a narrow column, or cuts a dropdown's choice short
+- **Check:** on a phone (most Android phones are 360 px wide, an iPhone about 390), one of these: with an agent waiting in your Inbox, the round account button at the top right is cut off and every screen scrolls sideways a little; an agent's Data tab is wider than the screen; the Audit log's count and Refresh are off to the right; a member's name (Sharing), a share in the Inbox, a draft in Report a problem or a file in an archived agent's inspector runs a few words a line beside its buttons; a dropdown shows only the start of its choice ("No cap o" for Memory cap, "— model: leav" in Settings → Classes); a long image name in the Setup log is cut off; the tables in Usage (Context now, Saved by cheaper models) and in Settings → AI (Budgets, Model prices) show only their first columns; the cost chart's labels are too small to read (in Usage, or an AI source's Costs); a long file name in Files runs five lines; in Settings → Advanced a capability's name runs into its version.
+- **Cause:** rows laid out for a desktop: buttons kept on the line beside their words, a dropdown kept beside its buttons and shrunk instead of given a line of its own, rows that did not wrap, wide tables scrolling sideways inside their box with nothing to say so, and a chart drawn 640 px wide and scaled down to the phone.
+- **Fix:** upgrade: on a phone (640 px wide or less) the header's buttons narrow a little so all of them fit with Inbox showing (below 360 px, Resources moves to the account menu only); buttons go under the words they belong to; a dropdown with buttons beside it, a folder's path and the Audit log's filters wrap onto lines of their own, and the longest choices are shorter; long words break; each wide table becomes a card per row, every value named after its column; Files puts a name across the width with its size and age under it; a capability's name and version wrap rather than overlap; a file tapped in the inspector is brought into view when it starts out of sight; the cost chart is drawn at the width of its box, and again when that changes (the phone turned, or a Settings tab shown), its range buttons wrapping as a row. A computer draws the chart the same way, at its box's width up to 640 px: in a usual window its boxes are wider than that (an agent's Usage panel gives it about 750 px), so it looks as before, and in a window narrow enough to make a box narrower its words stay full size instead of shrinking. Nothing else on a desktop changed. Until then, turn the phone sideways or use a computer for those screens.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `phoneQuery`, `isPhone`, `.v2hubactions`, `#v2ResBtn`, `.pair`, `.phone-stack`, `.phone-wrap`, `.phone-flow`, `.reportdraft`, `#inspFileList`, `loadInspectFile`, `#setupLogBody`, `.cap-table`, `mpRow`, `spendChartWidth`, `spendChartSVG`, `spendChartFit`, `spendChartResized`, `spendChartsRefit`; `scripts/ui-clickthrough.mjs` — `phoneEveryScreenFits`, `phoneInspectorShowsTheFile`
 
 ### A file opened from Files on a phone has no way back
 - **Check:** the app was opened from the phone's home screen (installed), a sound, video or PDF file was tapped in an agent's Files tab, and it filled the screen with no Back: the installed app has no browser bar.
@@ -3348,6 +3832,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: a refusal removes only that send's own bubble. On an older release, reopen the chat.
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/index.html` — `webChatSend`
+
+### Web chat put a message that had arrived back in the box, saying it may not have been delivered
+- **Check:** a message you sent got no answer in time (or a 502). When you reopened the chat, it came back in the box with "may not have been delivered", although the conversation shows it. It happens when the same words (an "ok", a "thanks") appear earlier in a long conversation.
+- **Cause:** the page counted the same words across the whole log. The log holds only the last 100 messages, so when an older copy dropped off the top the count stayed the same, and the new message looked missing.
+- **Fix:** clear the box rather than send it again. Since the fix, the page counts only the messages after the conversation it last read, by their times, against every message sent since that read, answered or not. A message sent before the conversation has loaded (Send does not wait for it), or after a read that failed, is counted only against copies the conversation times after it was sent, in the server's time when the page has had an answer saying what that is (so a browser clock that is off does not matter); with no times, it comes back. The same words sent again after the conversation loads are counted with it, by time, so one answered before the load is not counted twice. Its bubble and answer stay when the conversation loads. A message the log gives no time is counted by its words, against those that had no time when the page read the log. One still waiting for its answer when the chat is opened again is counted, with those sent after the same read, at the next open after its answer. An answered message with nothing in doubt beside it is not kept: the next message of the same words counts it from its bubble. When the conversation cannot be read (rebuilt, moved or busy), a message that may not have arrived waits for the next open that can read it.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `webChatSend`, `webChatOfferUnsure`, `webChatAnswered`, `webChatCanSend`, `openWebChatPanel`, `serverAheadMs`; `src/orchestrator/webChat.ts`
+
+### A web chat guest's console disconnects with "took nothing it was sent for 60 s", "stopped sending", "took over 10 minutes to send one message", "too much waiting to be sent", "too many answers waiting to be sent", "message in too many frames", "a control frame over 125 bytes", "a control frame in fragments", "your open chats hold too much at once", "opened in another tab", "you have 8 chats open; close one", "Hatchabot could not prepare this chat" or "Hatchabot could not read the agent's answer", or Hatchabot's memory grows while a guest's chat is open
+- **Check:** the guest's browser console shows the WebSocket closed with one of those reasons. A reason that starts `gateway:` (code 1011) is the agent's side: its container was busy, stopped or unreachable (`hatchabot doctor`, the agent's status); one that starts `refused:` (code 1008) is the browser's: it stopped reading or sending, or sent what no console sends. "opened in another tab" (code 1001) is not a fault: the guest opened one chat more than they may have, and their least recently used one was closed to make room (`console.guest_oldest_closed` in the service log). A new chat that does not open, or closes with "you have 8 chats open; close one", met the same limit with none of the 8 unused for 2 minutes, or with one already closed to make room in the last 10 and none unused for 10, or (rarely, code 1008 just after it opens) the one set aside for it was used again while it connected (`console.guest_too_many`). "Hatchabot could not prepare this chat" (code 1011) is Hatchabot's own failure to make a guest's copy of the agent's first reply; "Hatchabot could not read the agent's answer" (code 1011) is the agent sending something that is not a JSON object (both `console.guest_scrub_failed` in the service log, with what was sent and its size). "a control frame over 125 bytes" or "a control frame in fragments" (code 1002) is a ping, pong or close that RFC 6455 forbids, from the side the reason names; it is not passed on. A chat closed while a message to the browser was part sent ends with no close frame there (code 1006, no reason): the rest of that message could not be read. Before `v2.178.0`: the Hatchabot service's memory climbed while a guest's tab sat open on a slow or stalled connection.
+- **Cause:** a guest's console connection goes through Hatchabot's filter, which used to write to a side that was not reading while it kept reading the other, so the unsent bytes piled up in Hatchabot's memory without limit; and a message's size was capped but not the number of frames it came in, so a client could leave any number of empty ones waiting. Now the agent is not read while more than 64 KB waits for the browser. The browser is still read then: its pings and pongs reach the agent at once, and so does a stop (`chat.abort`, `sessions.abort`) unless requests are kept ahead of it, while its other requests are kept and sent, in order, once it catches up, so a guest who is not taking replies sends nothing new to the agent meanwhile; once 64 KB of them are kept, the browser is not read until it catches up. Its close goes at once, what is kept is dropped, and nothing it sends after its close is passed on. The browser is not read while more than 64 KB waits for the agent either. The refusals waiting for the browser may not pass 256 KB. What waits for a side is handed over 16 KB at a time; a side that takes nothing for 60 seconds closes the connection, so does more than the largest message and 4 MB waiting for one side. When the agent closes the chat, its close is answered at once, and what waits for the browser still goes first, then the agent's own close code and reason; the browser has 30 seconds to take it, after which the connection is ended; meanwhile it is read again, if it was held back, so its leaving is seen, and what it sends is dropped. Until the browser's connection ends, the chat still counts toward the guest's limits and is closed like any other (access removed, sign-out, the idle limit, one chat more), and what it holds counts down as the browser takes it. When the browser closes it, what waits for the browser is dropped (but for the rest of a message part sent), its close goes to the agent once (if the chat ends before the agent has taken it, it is written then), and the agent's answer comes back to it next. A message may come in at most 1,024 frames, and must keep coming: a side that sends part of one and then none of it for 60 seconds while it is read (counted from when it is read again, if Hatchabot held it back; pings and pongs do not count) closes the connection ("stopped sending"), and so does one not whole within 10 minutes of its first bytes, however they come ("took over 10 minutes to send one message": a 32 MB attachment needs about 55 KB/s). Only time the side is read counts toward those 10 minutes: an agent held back while a phone slowly downloads a long history does not use them up. So a message never finished is not held for ever. A frame's header is read once, however many pieces it comes in, and its bytes are copied once, when it is whole; a message in several frames is held as it came and unmasked once, when it is whole. Each piece Hatchabot holds counts for 64 bytes more than its size, so many tiny ones count as more. A guest's open chats together may hold at most 160 MB (messages begun and not finished, and what waits to be sent): more than one chat can hold on its own, so the chat whose bytes push past it is closed ("your open chats hold too much at once") only when others hold some too. A guest may have 8 chats open at once (all agents together). Chats still connecting count too. One more is let in only if one of theirs that is connected has gone unused for 2 minutes (timed by a clock that only goes forward, so a wall clock set forward makes none idle) and is not being answered (a reply or the agent's work for a run that chat started streaming to it in the last 2 minutes, or a message sent from it, by the chat or the `agent` request, whose run has not ended: the agent saying it started or accepted the run is not its end, the run's last reply or result is; for up to 10 minutes from the last of these; another chat of theirs on the same conversation does not keep it from being idle): as it is let in, the one they used least recently is set aside for it and counted as gone, so two opened at once cannot both take the same place, and once it connects, that one is closed ("opened in another tab"). If it fails to connect, or the guest leaves first, nothing is closed. One unused for 10 minutes or more (a tab whose phone slept without closing its connection) can always be closed this way, so those never lock them out; one unused for less, only once in 10 minutes, so idle tabs that reconnect cannot close each other in turn. Otherwise one more is refused at the door ("you have 8 chats open; close one"), so tabs in use cannot close each other either. At most 8 of a guest's chats may be connecting at once (one more is not let in: `console.guest_too_many_connecting`); one the agent has not accepted within 30 seconds is closed (`console.guest_connect_timeout` in the service log) and stops counting. A reply the chat waits for that Hatchabot fails to make a guest's copy of (the agent's first reply) closes it ("Hatchabot could not prepare this chat"), and so does anything from the agent that is not a JSON object ("Hatchabot could not read the agent's answer"): passed on as it came, either could show other people's sessions. At the public address, a guest's console stays active (the idle limit) only by what the guest sends: each message, each piece of an upload (a message of 16 KB or more still arriving; once whole, one that does not count, refused or a poll, puts back what its pieces marked, but not a message of theirs the agent took meanwhile), and a message waiting for the agent each time the agent takes some of it (any frame of it); not pings or pongs, the console's own `health` and `agents.list` polls, requests refused here, or the agent streaming to a slow browser.
+- **Fix:** reload the page. "opened in another tab" needs nothing: use the newer tab, and close tabs the guest no longer uses. For "you have 8 chats open; close one", close a chat tab first. For "your open chats hold too much at once", close the guest's other chat tabs first. "Hatchabot could not prepare this chat" or "Hatchabot could not read the agent's answer" that keeps happening is worth a report, with the `console.guest_scrub_failed` line. For a `gateway:` reason, check that the agent is running and not overloaded, then reload. A browser on a slow connection is not closed while it keeps taking what it is sent. A `refused:` close that keeps happening with a normal browser is worth a report; one from something that is not a normal browser can be ended by removing that member's web chat on the agent's Sharing tab.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/consoleProxy.ts` — `spliceGuest`, `Outbox`, `BEHIND`, `GUEST_KEEP_LIMIT`, `GUEST_CANCELS`, `GUEST_QUEUE_SLACK`, `GUEST_REFUSAL_BUDGET`, `GUEST_STALL_MS`, `MESSAGE_DEADLINE_MS`, `GUEST_HELD_LIMIT`, `GUEST_DRAIN_MS`, `ProtocolFault`, `GuestActivity`, `MAX_MESSAGE_FRAMES`, `CONSOLE_POLLS`, `MAX_GUEST_CONSOLES`, `GUEST_IDLE_TO_CLOSE_MS`, `GUEST_ROOM_EVERY_MS`, `GUEST_CONNECT_TIMEOUT_MS`, `FrameReader`, `WsFrame`; `src/api/routes.ts` — `onActive`, `console.guest_oldest_closed`, `console.guest_too_many`, `console.guest_too_many_connecting`, `console.guest_connect_timeout`; `src/orchestrator/consoleAccess.ts` — `trackGuest`, `promiseRoom`, `RoomPromise`, `addGuestHeld`
 
 ## Runners
 
@@ -3602,6 +4100,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.171.0` (listed as a setting for tests)
 - **Code:** `src/orchestrator/runnerSetup.ts` — `sshDir`; `src/config/envCatalog.ts` — `HATCHABOT_SSH_DIR`
 
+### A removed runner still has a stopped `hatchabot-io-…` container, holding an agent's archive
+- **Check:** on the machine that was a runner, `docker ps -a --filter label=hatchabot.oneshot` lists an exited `…-io-…` container. It was stopped by Docker (a `docker stop`, a daemon restart, the machine powering off) during a restore or a move, and the runner was removed from Hatchabot before the next sweep.
+- **Cause:** such a one-shot keeps its copy of the agent's archive (`/tmp/s.tgz`). The sweep that removes finished one-shots every 10 minutes visits only the runners Hatchabot knows, and removing a runner did not sweep it first.
+- **Fix:** `docker rm -f` it on that machine. Since the fix, removing a runner that answers removes its finished one-shots, and says so when it cannot.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `'/v1/hosts/:id'` (DELETE); `src/providers/localDockerProvider.ts` — `sweepOneShots`
+
+### Adding two runners at once on a new install: one setup never finishes
+- **Check:** this machine had no runner key yet (`~/.ssh/agentclaw_runner` absent), and two runners were added at the same moment (two tabs, or the Hatchabot agent and the page); one of them stays on its first step, and `ps` shows an `ssh-keygen` for `agentclaw_runner` waiting.
+- **Cause:** each setup saw no key and ran `ssh-keygen` on the same file. The second one found the first's key and asked whether to overwrite it, with nobody to answer.
+- **Fix:** upgrade; on an older version restart the service, then add the runner again (the key the first made is used). Since the fix one setup makes the key and the other waits for it; the key is made under another name and moved into place, and `ssh-keygen` is stopped after a minute. Two Hatchabot processes making it at once (a service and `hatchabot` on the command line) keep the first key put in place; the one that finds the other's key there reads the public half out of that private key, and writes `agentclaw_runner.pub` again when it does not match. Otherwise `agentclaw_runner.pub` is used as it is, and read out of the private key only when it is missing (if `ssh-keygen -y` fails then with the file there, the file is used and the journal says `runner_key.public_unchecked`). The key is written to the disk before it is put in place, so the one there is never cut short; on a filesystem with no hard links it is renamed into place under `agentclaw_runner.lock`, only if no key is there (a lock left over 10 seconds by a stopped process is taken over; one taken by mistake is put back only where no other lock is, and a setup whose lock was taken starts over rather than put its key beside another's). A key there that does not read, with no `agentclaw_runner.pub` beside it, fails with "the runner key … cannot be read … remove … and add the runner again": do that, and give runners set up with the old key the new public key.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/runnerSetup.ts` — `ensureRunnerKey`, `makeRunnerKey`, `renameIfAbsent`, `publicHalf`, `readPublic`
+
+### A move or a restore resumed after a restart failed on a runner, and its one-shot was gone
+- **Check:** the service had just restarted, the operation was on a runner, and that runner's clock is behind this machine's (`date -u` on both). The failure names a one-shot (`hatchabot-io-…`, `hatchabot-vx-…`) that no longer exists.
+- **Cause:** at start the app removes leftover one-shots that never ran, and told them apart by when they were made: before this process started. That compared the runner's clock with this machine's, so on a runner running behind, one the restarted process had just made looked older and was removed. On a runner running ahead, a real leftover was kept.
+- **Fix:** upgrade: each one-shot carries a label naming the process that made it. Only those another process made over 5 minutes ago are removed, timed by the Docker daemon's own clock, so another process (a CLI command) can be making one meanwhile. Every one stays, whatever their state (made, finished or dead) and whichever process made it, until 5 minutes after it finished (or, never run, was made): a call may still be reading what one left, however long it ran. This runs at start and every 10 minutes, so a crashed process's are gone within minutes. A nightly backup's, while that run is going, is left alone. On an older release, keep the runners' clocks right (NTP), then run the operation again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `sweepOneShots`, `ONESHOT_PROCESS_LABEL`, `ONESHOT_STALE_MS`, `#idleLongAgo`; `src/index.ts` — `sweepOneShots`
+
 ## Backups and restore
 
 ### `hatchabot backup --out <folder>` stopped the agent and saved nothing ("EISDIR")
@@ -3722,6 +4241,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `scripts/backup-volumes.sh` — `orphans`
 
+### Settings → Backups lists a set from today as complete, but its folder is empty
+- **Check:** `ls -la <backups>/<today's date>`: no `hatchabot.sqlite`, no archives, no `backup-status.json`; `journalctl -u hatchabot-backup` (or `--user`): the run ended with "scripts/backup-owner.sh: No such file or directory" or "key_owner: command not found"; `ls -l scripts/backup-owner.sh` in the install.
+- **Cause:** the nightly run reads whose a set is through `scripts/backup-owner.sh`. Before v2.178.0 it read that file only after it had made the day's folder, and a missing or unreadable one (a checkout cut off part-way, a permission changed by hand) ended the run there under `set -e`: the empty dated folder, with no record, was listed as a complete set from today. Now the file is read before anything is written, and a run that cannot read it stops there: "✗ Could not read …/scripts/backup-owner.sh: without it this run cannot tell whose the sets in … are, so it stops before writing anything." It does not go on without it, as the restore drill does: the run writes into a set that may be another install's, and could not tell (fifteenth review).
+- **Fix:** put it back: on a git install `git checkout -- scripts/backup-owner.sh`, on a bundle install `hatchabot upgrade`, or fix its permissions; remove the empty folder; then "Back up now".
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/backup-volumes.sh` — `key_owner`, `owner`, `OWNER_FILE`
+
+### A restore drill stops at once with "scripts/backup-owner.sh: No such file or directory", and leaves no record
+- **Check:** `ls -l scripts/backup-owner.sh` in the install: missing, or not readable by the user the service runs as; Activity shows the drill failed with that line, and no new record is in `<backups>/drills/`.
+- **Cause:** the drill reads whose a backup set is through that file. Missing or unreadable (a checkout cut off part-way, a permission changed by hand), it ended the drill before its record could be written. Since v2.178.0 the drill says "Could not read …/scripts/backup-owner.sh: this drill cannot tell whose sets are whose, so it takes the newest complete set and its record names no install." and goes on as an install with no key does, with a record as always.
+- **Fix:** put it back: on a git install `git checkout -- scripts/backup-owner.sh`, on a bundle install `hatchabot upgrade`, or fix its permissions; then drill again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/restore-drill.sh` — `DRILL_BY`, `key_owner`, `set_owner`
+
 ### `restore-drill.sh` fails with only "find: … No such file or directory", or passes on a partial set
 - **Check:** `ls "$HATCHABOT_BACKUP_DIR"`; the newest set's `backup-status.json` state.
 - **Cause:** before v2.153.0 the drill ran find on a missing folder under pipefail, and drilled the newest set even when its run was incomplete.
@@ -3763,6 +4296,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** wait for it; a lock left by a killed drill is taken over by the next one.
 - **Fixed in:** `v2.157.0`
 - **Code:** `scripts/restore-drill.sh` — `take_lock`
+
+### A restore drill leaves its container, volume and scratch folder behind, and its lock, in a drills folder another user shares
+- **Check:** `docker ps -a --filter label=hatchabot.restore-drill` and `docker volume ls --filter label=hatchabot.restore-drill` list drills that are over; `<backups>/drills/.lock` is there with no drill running; `ls -l <backups>/drills` shows a record this user cannot read (another user's install, mode 600).
+- **Cause:** before v2.178.0 the drill's last step (the EXIT trap) kept the newest 30 records by reading every one, under `set -e`. A record it could not read failed that step and ended the trap before the cleanup: the container, the volume and the scratch folder stayed, and so did the lock until the next drill took it over. Now the trap cannot stop part-way: the record is written, then the cleanup runs, and only then the pruning, which reads only the records it can and cannot fail.
+- **Fix:** upgrade; the next drill clears what a killed drill left. Give each install a `HATCHABOT_BACKUP_DIR` of its own.
+- **Fixed in:** `v2.178.0`
+- **Code:** `scripts/restore-drill.sh` — `finish`, `cleanup`, `prune_records`
 
 ### Restore from a backup: "Its runtime could not be confirmed stopped … nothing was changed"
 - **Check:** the agent's operation says the restore was rolled back with this message; `docker inspect <agent container>` hangs or errors, or its runner is asleep or off.
@@ -3853,7 +4393,22 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** each dated set holds one install's registry and key. Before v2.171.0 the second install to run on a day replaced the first one's `hatchabot.sqlite` and `secret-key.env`, beside the first one's archives, so that set no longer restored the first install; and each install's retention pruned the other's old sets.
 - **Fix:** give each install a `HATCHABOT_BACKUP_DIR` of its own (a subfolder each on the NAS), then run **Back up now**. Until then the install whose run comes second each day makes no backup at all: its run stops with this line every time, and Alerts soon shows its agents' backups as stale. Sets of another install, or of a former install of this machine with another key, are left for you to delete in Settings → Backups; a set from before v2.171.0 counts as the install's whose key its `secret-key.env` holds, so the second install's older sets are not pruned by the first.
 - **Fixed in:** `v2.171.0`
-- **Code:** `scripts/backup-volumes.sh` — `OWNER_FILE`, `key_owner`
+- **Code:** `scripts/backup-volumes.sh` — `OWNER_FILE`; `scripts/backup-owner.sh` — `key_owner`
+
+
+### Two installs that share a backup folder list, delete and restore from each other's sets
+- **Check:** both installs have the same `HATCHABOT_BACKUP_DIR`; `cat <backups>/<date>/.backup-owner` differs between dates; Settings → Backups lists a date this install did not make, or its restore drill passed on one.
+- **Cause:** each set is marked with its install in `.backup-owner`, and the nightly run leaves the other install's sets alone. Before v2.178.0 the Backups list, Delete, an agent's Restore, the restore drill and the Recovery row did not look at the mark: one install could delete the other's sets, restore an agent from the other's archive of the same name, and prove its readiness with the other's set or drill record. Now each reads the owner as the nightly run does (the mark, or for a set from before it, the key the set saved). Such a set is listed labelled "made by another install, or under an earlier key", never deleted from here, never this install's newest set (nor the one the home screen's backup line or `hatchabot doctor` judges), and restored only on a yes; drill records carry their install's mark, the folder keeps the newest 30 of each install's (each install prunes only its own: a drill of another install's set from here is recorded as that install's and never prunes its records), and the Recovery row reads this install's own. An agent's readiness (ready, stale, not covered, never drilled) comes from this install's sets only: another install's newer set holding an archive of the same name is offered in Restore…, labelled, and named in the row ("A newer copy made by another install, or under an earlier key, is from …"), but it no longer makes the agent ready or covered when this install's own newest set left it out. Settings → Backups' "Latest usable" column shows this install's own newest too, with another install's newer copy named beside it. Restore… chooses this install's own newest set (`ownLatest`) first, and another install's only when there is none of its own (restoring from it still asks). Its list of choices (14 at most) keeps this install's own sets first and fills the rest with the other install's newest: before the tenth review it was the 14 newest of all, and 15 newer sets of another install's left the own one out, so Restore… could not choose it. A drill asked for another install's set by path says so, goes on, and records it as that install's. A set from before the mark whose saved `secret-key.env` holds no key names no install, in the app as in the scripts (fifteenth review: the app took it for the running service's own key's).
+- **Fix:** upgrade, and give each install a `HATCHABOT_BACKUP_DIR` of its own.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/backups.ts` — `foreignSet`, `setOwner`, `listBackups`, `pruneBackup`, `restoreAgentFromBackup`; `src/orchestrator/recoveryReadiness.ts` — `computeReadiness`, `ownLatest`; `web/index.html` — `v2RecoveryToggle`, `loadReadiness`; `src/orchestrator/drills.ts` — `listDrills`; `src/doctor.ts` — `backupFacts`; `scripts/restore-drill.sh` — `foreign_owner`, `RECORD_OWNER`, `DRILL_BY`, `write_record`, `prune_records`; `scripts/backup-owner.sh` — `key_owner`, `set_owner`; `web/index.html` — `v2LoadMachine`
+
+### After a reinstall, Backups says the older sets were "made by another install, or under an earlier key"
+- **Check:** the sets before the reinstall (or before `HATCHABOT_SECRET_KEY` was changed by hand) carry that label in Settings → Backups and have no Delete; an agent's Restore from one says why and asks first; `cat <backups>/<date>/.backup-owner` differs from a set made since.
+- **Cause:** a set is marked with a fingerprint of the key it was made under, and nothing tells another install from this one under its earlier key. The label is expected: the nightly clean-up and Delete leave such a set alone, so another install's sets are never removed from here. For the same reason an agent backed up only before the reinstall shows "None of this install's backups holds it. A copy made by another install, or under an earlier key, is from …" (not covered) until the next nightly backup takes it; Restore… still offers that copy.
+- **Fix:** nothing to fix. Restore an agent from one when asked to confirm (`hatchabot backups restore <agent> <date> --yes --other-key` from the command line): the agent's memory and files come back and its current bot, members and model go back over them, so the earlier key does not matter for it. A whole-install restore takes the set's own `secret-key.env` (README, "Restoring from backup"). Once you no longer want the old sets, delete their dated folders by hand.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/backups.ts` — `foreignSet`, `RESTORE_ASKS`, `NOT_DELETED_HERE`; `src/orchestrator/recoveryReadiness.ts` — `computeReadiness`; `web/index.html` — `restoreFromBackup`
 
 ### `restore-drill.sh` run by hand says "No backups directory at ~/hatchabot-backups" though backups run elsewhere
 - **Check:** `HATCHABOT_BACKUP_DIR` is set in the install's `.env` but not in your shell; Settings → Backups lists sets.
@@ -3981,6 +4536,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** fix what the refusal names, then press Start. Left alone, a pause is tried again about every six hours, and closes once the agent is up.
 - **Fixed in:** `v2.173.0`
 - **Code:** `src/orchestrator/budgets.ts` — `runBudgets`; `src/api/routes.ts` — `runBudgetPass`, `startStopped`
+
+### 100 messages wait for an agent paused by its budget, and whoever writes after them gets no paused reply
+- **Check:** the agent's Activity says "100 messages wait for it on Telegram: whoever writes after them gets no paused reply until it is back" (from v2.178.0).
+- **Cause:** a limit of Telegram. One look at a bot's waiting messages shows the first 100, and the only way to see more is to confirm those, which takes them from the agent for good. Hatchabot never confirms them, so the agent reads them all when it is back; whoever wrote after the first 100 gets no paused reply.
+- **Fix:** raise the budget or Start the agent, and it answers everyone in turn. A group chat or a busy chat can fill the 100 alone.
+- **Fixed in:** — (a limit; from `v2.178.0` the agent's Activity says when it is reached)
+- **Code:** `src/orchestrator/budgets.ts` — `pausedReplySweep`
+
+### A budget raised, removed or set to warn while agents were being paused, and the rest were paused anyway
+- **Check:** the machine's budget (or an agent's) was changed while a budget check was stopping agents or moving them to a cheaper model; agents after the change were still stopped or moved, and the 100% message came for the old budget. With the fix the service log shows `budget.revised_during_pass`.
+- **Cause:** a budget check read the budgets once and acted on that reading for every agent, though each stop can take a while.
+- **Fix:** upgrade, then Start the agents that were stopped (or raise the budget, and the next check starts them). Now the budget is read again before each stop and each switch; a budget that changed is left to the check its change starts. An agent whose own model was being put back for the pause when the budget changed says "back on its own model: its budget was changed". A pause that fails after an agent's own model was put back for it puts the cheaper model back, logged in its model history as the budget's switch (or, if its runtime does not take it, ends the switch the same way), so the next check does not take its own model for the owner's choice and leave it there until the 1st.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`, `putCheaperBackOrClose`; `src/api/routes.ts` — `reapplyCheaper`
 
 ### You pressed Stop on an agent whose budget pause had just ended, and the next budget check started it
 - **Check:** its Activity shows a rebuild that brought it up, your Stop, then within about 10 minutes "started again: its budget was raised" (or "a new month"), on a release before the fix. With the fix it shows `budget.pause_disowned` at the Stop and then `budget.pause_closed`, and it stays stopped.
@@ -4149,7 +4718,56 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.171.0`
 - **Code:** `src/api/routes.ts` — `runTokenSteward`; `src/orchestrator/compaction.ts` — `syncContextCap`; `src/store/store.ts` — `markContextCapApplied`
 
+### A budget's switch to a cheaper model fails, and the model you chose meanwhile is lost
+- **Check:** the agent's monthly budget is set to "switch to a cheaper model", its Setup log has `model.live_set_failed` for the cheaper model, and a model you chose about then said it applied live, yet the agent's page shows its earlier model (or its source's default).
+- **Cause:** when the runtime refused the cheaper model, the budget put back the model it had read before, over the one chosen while it waited. That choice was then applied as the old model.
+- **Fix:** upgrade: the budget puts back only its own change, so a model chosen meanwhile stands and goes on, even the same cheaper model, as does a source switched meanwhile. A source's new default that held the agent on the cheaper model meanwhile is not a choice: the budget's change goes back then too, and an agent that followed the old default is held on it. A class's model written while the switch applied (the switch's pause is open from the start) is the one put back. Until then, choose the model again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `runBudgetPass`, `applyModelToRuntime`, `driftedFrom`; `src/orchestrator/budgets.ts` — `runBudgets`; `src/store/store.ts` — `modelGeneration`, `setAgentModel`, `openCheaperPause`, `dropCheaperPause`
+
+### Brave searches this month leaves out the first days, on a plan that resets on the 29th, 30th or 31st
+- **Check:** Settings → AI → Fleet search key → Brave searches this month says the month runs from the 1st to the 3rd (say "3 March to 31 March") when Brave's plan resets on the 31st, and the days before it are missing from the bars.
+- **Cause:** the month before the reset was found by taking one off the month and keeping the day. A day the month before does not have (31 February) ran on into the next month.
+- **Fix:** upgrade. The month starts on the same day of the month before, or on its last day when it is shorter (28 February for a reset on 31 March).
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/searchUsage.ts` — `monthBefore`, `searchPeriod`
+
+### Brave searches this month counts an agent's own Brave key against the fleet's free credit
+- **Check:** the agent has `BRAVE_API_KEY` in its Environment tab, and its searches show in the Brave column, the credit used and the estimated cost, though its key is billed on its own.
+- **Cause:** searches were stored by the provider that answered, without which key made them, so every Brave search counted as the fleet key's.
+- **Fix:** upgrade. Searches an agent makes with its own key are stored apart from when they are counted, and listed as its other searches. The split starts at the upgrade: searches counted before it stay in the Brave column, against the fleet's credit, so the month of the upgrade still shows some of an agent's own-key searches there. The key that counts is the one its container was built with: a key saved or taken off in the Environment tab counts from the agent's next rebuild, when it reaches the agent. Until an agent's first rebuild after the upgrade, its saved key is used, and one equal to the fleet's key counts as the fleet's, as the build does. Searches already counted keep the key they were counted under: in an hour a rebuild changed the key in, only the searches after it go under the new key.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/sourceUsage.ts` — `attributeBrave`, `ownSearchKey`, `storeSearchHours`; `src/orchestrator/searchUsage.ts` — `OWN_BRAVE`, `searchUsageReport`; `src/orchestrator/provision.ts` — `recordApplied`
+
+### Brave searches this month misses the 1st of a 31-day month, just after upgrading
+- **Check:** search counting was new (an upgrade to v2.177.0, or an agent counted for the first time) on the 31st; the bar for the 1st is empty though the agent searched that day.
+- **Cause:** the first reading went back 30 days. On the 31st that does not reach the start of the month, and nothing before it was stored.
+- **Fix:** upgrade. The reading goes back 32 days, so a month of any length is covered. No reading lowers a stored hour: each hour keeps the larger of its stored count and the reading's, so searches counted before a session was reset, deleted or pruned stay counted.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/usage.ts` — `USAGE_READER_SCRIPT` (`SW`, `srch`, `seenFrom`); `src/orchestrator/sourceUsage.ts` — `storeSearchHours`
+
+### Token health says AGENTS.md is cut off, or its instructions are too big, for an agent that writes in Chinese, Japanese or another script
+- **Check:** the agent's instruction files hold text outside plain English letters; the Hatchabot agent's token review (or `GET /v1/token-health`) gives sizes up to three times what the file holds, and says a file is over 20,000 characters when it is not. Or `TOOLS.md` is counted in every turn on OpenClaw 2026.9.6 or later, which does not load it.
+- **Cause:** the reader measured each file in bytes, while OpenClaw's limits count characters, and it counted `TOOLS.md` on every OpenClaw version.
+- **Fix:** upgrade. Files are measured in characters, and `TOOLS.md` is left out on an OpenClaw that does not put it in the prompt. The next usage pass (every 10 minutes) puts the figures right. Each count is kept by the file's size and time in `/home/node/.openclaw/tmp/hatchabot-instruction-sizes.json` inside the agent (left out of snapshots), so a file is read again only once it changes; removing that file only makes the next pass read them all.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/usage.ts` — `USAGE_READER_SCRIPT` (`files`, `knownSizes`, `ocv`); `src/orchestrator/tokenHealth.ts` — `promptFiles`, `injectedSize`
+
+### The Costs chart under an AI source stayed the same while Settings was open
+- **Check:** Settings → AI sources stayed open while agents worked. The Costs chart under a source did not change, though Usage showed new spend. Closing and opening Settings updated it.
+- **Cause:** the regular poll updated each source's status line only. The chart was read only when the list was drawn.
+- **Fix:** close and open Settings. Since the fix, the poll reads a chart again at most once a minute while its Costs drawer is open and on screen. If that read fails, the chart stays as drawn with a short note under it.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `loadSourceUsage`, `loadSpendChart`
+
 ## Scheduled tasks
+
+### No note on your phone when a scheduled task has run
+- **Check:** on the agent's Schedule tab, the task has **📱 Tell me on Telegram when it runs** ticked, and the tab says nothing above the tasks about your Hatchabot agent's bot (it does while no bot can reach you). The agent's activity log says "told you on your phone that "…" ran" or "could not tell you on your phone …" for each run it looked at.
+- **Cause:** the note comes from your Hatchabot agent's own Telegram bot (or its Discord bot), not from the agent that ran the task: with no bot there, or one you have never messaged (it does not know where you are), there is nowhere to send it. Runs are looked at every 5 minutes while the agent is running, so a run made just before it went to sleep is told when it next runs, saying how long ago. A skipped run is not told. At most 10 notes an hour reach you; the tenth says it is the last for the hour. The run is read from OpenClaw's task store, which needs OpenClaw 2026.9 or later in the agent.
+- **Fix:** give the Hatchabot agent a Telegram bot (its Telegram tab, **Connect**) and send it a message, then tick the box on each task to be told about, or tick it in the form when adding one. The note holds the task's name, the agent's and a link that opens the agent's console; the result stays in Hatchabot.
+- **Fixed in:** `v2.177.0` (new: before it, only an agent's own bot brought a task's result to a phone)
+- **Code:** `src/orchestrator/taskNotes.ts` — `dueTaskNotes`, `taskNoteText`, `TASK_NOTES_PER_HOUR`; `src/orchestrator/crons.ts` — `readCronStore`, `cronStoreReadShell`; `src/api/routes.ts` — `noteFinishedTasks`, `quickCronRetarget`, `ownerNoteReach`; `src/store/store.ts` — `cronNotes`, `setCronNote`, `markCronNoted`; `web/index.html` — `cronNoteBox`, `setCronNote`, `cronNoteHint`
 
 ### A scheduled task runs "ok" every day but its result reaches nobody
 - **Check:** the agent runs OpenClaw 2026.9; the task's delivery names no chat or recipient ("Refusing implicit isolated cron delivery" in the gateway log).
@@ -4298,7 +4916,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/api/routes.ts` — `'/v1/agents/:id/push-definition'`
 
 ### After merging a child's proposal, the master's AGENTS.md holds only that proposal
-- **Check:** the master's AGENTS.md is just a `<!-- distilled from <child>, <date> -->` block and the lesson under it; its Snapshots have no `pre-edit` from that merge, or one that is missing AGENTS.md. The master's machine was struggling (a runner asleep, Docker slow) at the time.
+- **Check:** the master's AGENTS.md is just a `<!-- distilled from <child>, <date> (proposal <id>) -->` block (no `(proposal …)` before v2.178.0) and the lesson under it; its Snapshots have no `pre-edit` from that merge, or one that is missing AGENTS.md. The master's machine was struggling (a runner asleep, Docker slow) at the time.
 - **Cause:** before v2.168.0 the merge read AGENTS.md with `head … || true`, so a file that was there but could not be read was taken as empty, and the merge wrote the proposal alone over the playbook.
 - **Fix:** upgrade: a read that fails refuses the merge ("Couldn't read the master's playbook: … Nothing was merged; the proposal is still waiting."). On an agent already affected, restore the newest snapshot that has the full AGENTS.md, merge the proposal again, and only then push to the children.
 - **Fixed in:** `v2.168.0`
@@ -4388,6 +5006,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.173.0`
 - **Code:** `src/api/routes.ts` — `pushClientSecret`; `src/orchestrator/googleConnections.ts` — `materializeConnection`, `syncConnections`; `src/store/store.ts` — `markClientSecretChanged`
 
+### An agent stays marked "still has the old client secret" after you saved a new Google client secret
+- **Check:** ⚙ Settings → Connections still marks a running agent after the save, and that agent was busy (a rebuild, a backup, a move) when you saved, or its import of the account failed then.
+- **Cause:** the save sent the secret only to the agents running and free at that moment, once. Nothing asked the others again until their next start or rebuild, and saving the same secret again sent nothing.
+- **Fix:** upgrade. Every 10 minutes, running agents still owed it are asked again, one account at a time (a restart loses nothing: who is owed is on record). One whose import keeps failing is asked less often, from 10 minutes doubling up to once a day; its Setup log says why. An account it never held before goes into its AGENTS.md too, as after an attach. Saving the client again, changed or not, asks every one at once. A stopped one gets it at its next start. An account made with another client is not marked: only connecting it again mends it. A connection detached or deleted while it was being imported is taken off the agent again. An agent owed several accounts gets them in one go (one exec with a minute for each account, ten at most; each account with its own result, back-off and error, from what gog printed on stderr or else on stdout; an import whose output ends without a newline still counts as done), and its AGENTS.md is written once. A failed account is asked again at the first pass 10 minutes after the one that tried it.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `pushClientSecret`, `deliverClientSecret`, `deliverSecretTo`, `clientSecretSweep`, `'/v1/connections'`; `src/store/store.ts` — `connectionsOwedClientSecret`, `connectionOwedClientSecret`; `src/orchestrator/googleConnections.ts` — `materializeConnections`
+
 ### A task's schedule reads "every 0m", or a slightly wrong number of minutes
 - **Check:** the task runs on an interval that is not whole minutes (`openclaw cron list --json` in the agent: `schedule.everyMs` such as 15000 or 90000).
 - **Cause:** the Schedule tab rounded intervals to whole minutes; the task itself ran on its real interval.
@@ -4449,6 +5074,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: it is taken as added only when the task of that name has its schedule and prompt. Otherwise it stays waiting with "another task already has this name": rename or remove that task, then Try again. A task dropped this way before the upgrade is not waiting any more: add it by hand in the Schedule tab.
 - **Fixed in:** `v2.171.0`
 - **Code:** `src/orchestrator/provision.ts` — `applyPendingSchedules`, `sameSchedule`
+
+### Turning a task's phone note on or off took although the edit with it was refused
+- **Check:** a task's "tell me on my phone" changed, although the edit sent with it was refused (a blank name, a task that no longer exists) or failed.
+- **Cause:** the note was saved before the rest of the request was checked or done.
+- **Fix:** set the note again. Since the fix, it is saved only once the rest of the request took, and with an edit that took even when turning the task on or off then failed.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/crons/:jobId'` (PATCH)
+
+### A task made elsewhere that runs more often than every 15 seconds could not be renamed
+- **Check:** a scheduled task made by the agent (or with `openclaw cron add`) runs every few seconds. On the Schedule tab, Edit then Save changes says an interval of 0.25 min or more is needed, whatever you changed.
+- **Cause:** the page held every save to its 0.25-minute floor, including an interval the task already had.
+- **Fix:** ask the agent to change it. Since the fix, a task keeps its own interval through a new name or message while the interval box still shows the number Edit put in it (1.670 for 1.67 is the same). Any other number, an emptied box included, is an interval set on the page and must be 0.25 minutes or more.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `editCronJob`, `addCronJob`
 
 ## Tailscale and public access
 
@@ -4514,6 +5153,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** run the command the warning gives: `tailscale funnel --https=<its port> off`, with the port the status shows. Hatchabot tries again each time the page reads the status. Upgrade to see the warning.
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/index.html` — `reachTurnOn`, `reachRender`; `src/api/reachRoutes.ts` — `funnelLeft`
+
+### At the public address, pictures, sound, video and PDFs in Files showed broken
+- **Check:** at the public address, with a second factor on the account, a picture in Files showed broken, or a player or reader stayed empty. Text files worked, and Open in a tab asked for the second factor.
+- **Cause:** a file there needs a fresh second factor, and a picture, player or reader cannot ask for one: its request was refused, which broke it.
+- **Fix:** press Open in a tab, give the second factor, then go back. Since the fix, a picture, sound or video whose load fails there asks the server whether the file may be read (a check that reads nothing of the file), which asks for the second factor when it has lapsed, and then loads once more. A PDF, and Open in a tab, are checked the same way first, and then the reader or the tab loads it from the server as before. The check asks what a download checks first: a file gone, or one over the size limit (`HATCHABOT_FILE_MAX_MB`), is said there, not shown as an empty reader. Its folder is not read, and the file is not downloaded twice. If it still cannot load, the page says so: open it in a tab or download it.
+- **Fixed in:** `v2.178.0`
+- **Code:** `web/index.html` — `v2OpenFile`, `sfOpen`; `src/api/routes.ts` — `req.query.check`, `fsReadable`
 
 ## The Hatchabot agent
 
@@ -4674,7 +5320,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### The Hatchabot agent said ✅ for a model change, but the agent still answers on its old model
 - **Check:** the confirmed `set_model` card shows ✅, the agent's page shows the new model as waiting (not yet on the runtime), and its Setup log has `model.live_set_failed`.
 - **Cause:** the tool did not read the answer of the model change, which says whether it reached the running agent, was written to a stopped one, waits for a rebuild, or was refused.
-- **Fix:** upgrade: a refused change now reads "⚠ Failed — its runtime did not take …", and the others say how it applies. The change is recorded either way: confirm a `rebuild_agent` card, or ask for the model again when the agent answers.
+- **Fix:** upgrade: a refused change now reads "⚠ Failed — its runtime did not take …", and the others say how it applies. The change is recorded either way: confirm a `rebuild_agent` card, or ask for the model again when the agent answers. Since `v2.178.0` the receipt also says when its class is still applying a change (whether it leaves the class is decided after), and the memory limits its container kept, a refusal included.
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/mgmt/apiClient.ts` — `setModel`; `src/api/routes.ts` — `'/v1/agents/:id/model'`
 
@@ -4698,6 +5344,41 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: every waiting card is listed, and the answered ones are limited on their own. Until then, ask the Hatchabot agent to propose the change again.
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/store/store.ts` — `listMgmtProposals`; `src/api/mgmtChat.ts` — `'/v1/proposals'`, `OPEN_PROPOSALS_CAP`
+
+### The Hatchabot agent said an agent started, but it was being rebuilt, or the rebuild failed
+- **Check:** you confirmed start_agent for a stopped agent that had a change waiting for its start (or needed a rebuild), and it said ✅ at once, while the agent's page showed it rebuilding or failed.
+- **Cause:** such a start answers "accepted" and rebuilds in the background; the manager did not follow it, as it does for rebuild_agent.
+- **Fix:** upgrade. The manager now follows that rebuild and says how it ended, or why it failed.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/mgmt/broker.ts` — `start_agent`, `followOperation`; `src/mgmt/apiClient.ts` — `startAgent`
+
+### The Hatchabot agent said a backup started, but none ran
+- **Check:** you confirmed run_backup and it said ✅, but list_backups shows no run and Activity shows the backup failed at once (no backup script, or it could not be started).
+- **Cause:** the manager took any answer as started, without reading the run's status.
+- **Fix:** upgrade, then look at why it could not start (`hatchabot doctor`). The manager now says "⚠ Failed" with the reason, and for a run under way that list_backups shows when it ends.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/mgmt/restTools.ts` — `run_backup`
+
+### A clone made through the Hatchabot agent is missing credentials, data sources or daily notes
+- **Check:** you cloned an agent with clone_agent and it said ✅ "Set up and running", but the copy lacks some of the original's Extra credentials, Data sources, or memory files.
+- **Cause:** the manager followed the copy's setup and dropped the rest of the answer, which named what was not copied.
+- **Fix:** add them to the copy (Data, Advanced → Extra credentials). Since the fix, the manager names each one, as the page does.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/mgmt/restTools.ts` — `clone_agent`; `src/mgmt/broker.ts` — `#execMutate`
+
+### The Hatchabot agent prepares a model change that fails on Confirm: "isn't one of this source's models"
+- **Check:** the model is not in the agent's AI source's switchable list (Settings → AI sources), though the vendor offers it; or it is in the list but the agent's card was refused with "isn't offered by this agent's source".
+- **Cause:** the manager checked the model against the vendor's catalogue, while Confirm checks the source's own list and the agent's runtime.
+- **Fix:** upgrade: the manager checks the change as Confirm will, and says the source's models when it is refused. To use a model the vendor offers, add it to the source's switchable list first.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/mgmt/broker.ts` — `set_model`; `src/api/routes.ts` — `'/v1/agents/:id/model-check'`, `modelChoiceProblem`
+
+### A set_class card said ✅, but the agent still answers on its old model, or took a swap allowance the card did not show
+- **Check:** the class's model is shown as waiting on the agent's page, or its container has the class's swap allowance (`docker inspect -f '{{.HostConfig.MemorySwap}}' <container>`), after a "Put … in the class" card from the Hatchabot agent was confirmed.
+- **Cause:** the receipt left out what the class change said had not taken (a model the runtime refused, memory limits the container kept, a rebuild still owed). The card also did not show the class's swap allowance, so a swap allowance changed after the card was shown still applied.
+- **Fix:** upgrade: the receipt says what did not take, the card shows the swap allowance, and a class whose swap allowance changed after the card was shown is refused. For an agent on its old model, Rebuild it or put it in the class again.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/mgmt/restTools.ts` — `set_class`; `src/api/routes.ts` — `'/v1/agents/:id/class'`
 
 ## Docker, disk and memory
 
@@ -5557,6 +6238,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.164.2`
 - **Code:** `src/orchestrator/claim.ts` — `claimFirstContact`, `listPairingRequests`
 
+### Telegram attached to a stopped agent: the owner's first message was not claimed, and a "That's me" card came instead
+- **Check:** Telegram was attached (or a guest invited) while the agent was stopped, rebuilding or starting; its activity shows "the first-contact window closed" about 30 minutes later, before or soon after it started.
+- **Cause:** the 30 minutes of the window ran from the attach, with the agent down, and nothing could be claimed until it ran.
+- **Fix:** tap **That's me** on the card, or **Let them in again** under Members. Since the fix the window's time runs only while the agent is up: down, a window for a named guest waits for it (a week at most, then it ends with "the first-contact window was given up"). A window open to anyone (a new bot waiting for its owner's first message) waits at most an hour from when it opened, so a stranger writing days later never becomes the owner; it ends with "the first-contact window ended: the agent was down past the hour…", and the owner opens a new one once the agent is up. While it is down the stored window is kept open past the next look, so a rebuild that ends between two looks still opens the door; once it is up the door is opened again, and the stored window runs to the same end, so another guest's window closing does not shut the door early. A window closed by hand while the agent is down ends there ("the first-contact window was closed elsewhere"). A move while the window waits is waited out like a rebuild: a move that is undone leaves the window as it was. Once a move has finished and the agent is up on the new machine, the window ends there ("the agent moved to another machine") and the door on the new machine is put back to rest (members only): open a new window, which watches the new machine.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/orchestrator/claim.ts` — `claimFirstContact`, `followDeadline`, `restoreDoor`; `src/store/store.ts` — `activeOperationFor`
+
 ### An agent went to sleep just after it answered
 - **Check:** sleep (`HATCHABOT_HIBERNATE_AFTER`) is on. The agent's timeline shows `agent.hibernated` within seconds of a reply it sent, and its next message had to wake it.
 - **Cause:** the idle sweep read the agent's activity, then its scheduled tasks; a conversation that finished in between was not seen, and under the lock only the settings were judged again.
@@ -5623,8 +6311,8 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### Update says "Needs a value for: …" and the page gives nowhere to type it
 - **Check:** the app's newest release has a required setup field the installed copy has no value for (a field made required, or one an older version left blank); Update on the agent's page fails with "Needs a value for".
 - **Cause:** the page's Update sent no values, and the message asked for them as `key=value`, which only the CLI takes.
-- **Fix:** upgrade: Update asks for the missing values under the app's row ("Update with these"). Meanwhile, `hatchabot app update <agent> key=value`.
-- **Fixed in:** `v2.164.2`
+- **Fix:** upgrade: Update asks for the missing values under the app's row ("Update with these"). Meanwhile, `hatchabot app update <agent> key=value`. If the agent's page was on another tab, or another agent's page was open, when the answer came, a message names the agent and says to give the value on its Overview, under App, and press Update again (since `v2.178.0`).
+- **Fixed in:** `v2.164.2`; the message when the App row is not on screen: `v2.178.0`
 - **Code:** `src/orchestrator/apps.ts` — `mergeConfig`, `installRelease`; `web/index.html` — `v2AppUpdate`, `v2AppAskValues`
 
 ### Raising an agent's "cheaper model" budget switched it back, then the next pass switched it down again
@@ -5668,6 +6356,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: a failed one-shot is now removed and confirmed gone, or seen finished, before anything else writes the volume; Docker is asked three times a few seconds apart, each time checking afresh that a runner answers. If it cannot be shown gone, the restore does not put the copy back: the agent stays stopped and FAILED and the copy is kept. Every later restore, Put back, Finish and import first looks for this install's one-shots still writing that volume and removes them, or does not begin and names the one left; read-only ones (the nightly backup, a Download) are left running. A restore, Put back or Finish also waits while a backup is being made: "A backup is being made right now … Try again once it finishes." Only a live run's lock on today's or yesterday's set of this install counts, and not one over 12 hours old. By hand: remove that container (`docker rm -f <name>`, as the failure says) before putting the copy back yourself.
 - **Fixed in:** `v2.174.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `importStateFromFile`, `stopVolumeWriters`, `#clearVolumeWriters`, `#settleOneShot`, `sweepOneShots`; `src/orchestrator/backups.ts` — `rollBack`, `confirmStopped`, `backupRunning`; `src/providers/provider.ts` — `OneShotNotGoneError`; `src/index.ts` — `sweepOneShots`
+
+### A Files edit, a setting or an adopt fails with "an earlier copy is still writing to the agent's files"
+- **Check:** `docker ps --filter label=hatchabot.oneshot --filter volume=<the agent's volume>` on its machine lists a one-shot still running, usually after a copy timed out, the service restarted mid-copy, or a runner's link dropped.
+- **Cause:** a one-shot whose call had ended (a timeout, a restart) went on writing the agent's files. Before the fix, edits, config writes and an adopt's copy wrote alongside it, so the two could interleave; only a restore looked for one first.
+- **Fix:** upgrade. A write now removes such a one-shot first. Only one Docker says writes there is removed: readers (the nightly backup, a copy being taken, a Download) are left alone, and so are this service's own writes under way. A one-shot Docker does not say how it mounts the volume is left alone too: when the look at the mounts fails or runs out of time, the write goes ahead as for a listing that failed (below, "how … mount its files could not be read"); when Docker answers without it, see "couldn't check what else is writing to its files" below. It looks the first time it writes to an agent after the service starts, and again only after a write there timed out, was cut off, or ended in an error with its one-shot still there (a dropped link to a runner exits 255), so most writes cost no extra docker call. When the one-shot cannot be removed, nothing is written and the message names it: wait a few minutes and try again, or remove it with `docker rm -f <name>`. When the list of containers cannot be read, the write goes ahead, the agent's activity says "the copies that might still be writing there could not be listed; written anyway", and writes there go ahead without asking for five minutes (or until a write there is given up), then ask again (said once until a listing works).
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `#clearVolumeWriters`, `#everydayWrite`, `#runOneShot`, `#runStdin`, `#oneShotExit`, `#track`, `#gaveUpOn`, `#endedBadly`, `setVolumeEventSink`, `execShellOnVolume`, `writeToVolume`, `importWorkspace`, `#seed`; `src/orchestrator/operations.ts` — `runtimeEventLog`
+
+### A Files edit, a setting or an adopt fails with "a restore is running on this agent's files; try again when it ends"
+- **Check:** the agent is being restored from a snapshot or a backup, or brought in by a move or an import, right now: its activity shows the restore under way.
+- **Cause:** a restore empties the agent's files and unpacks the copy in their place. A write made meanwhile would land in the middle of that, or be wiped by it. So the agent's files are locked: each write holds the lock, shared with other writes, from its check for earlier copies until it has ended, and a restore takes it for itself. From the moment a restore asks for it until it ends, however long that takes, a new write is refused; writes already under way finish first, and the restore waits for them. A restore that failed with its copy still unpacking counts as running until that copy is removed.
+- **Fix:** wait for the restore to finish, then try again. Nothing was written.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `#everydayWrite`, `shareVolume`, `holdVolume`, `stopVolumeWriters`, `importStateFromFile`, `#importVolume`, `#oneShotExit`
+
+### A Files edit, a setting or an adopt fails with "couldn't check what else is writing to its files; try again"
+- **Check:** on the agent's machine, `docker ps --filter label=hatchabot.oneshot --filter volume=<the agent's volume>` lists a one-shot whose name is not a reader's (`-bk-`, `-ex-`, `-fs-`, `-ro-`), and `docker container inspect <name>` answers without that volume among its mounts. It comes only when a write there was cut off or timed out earlier, or on the first write after the service started.
+- **Cause:** before a write, Hatchabot removes any one-shot left writing that agent's files. Docker answered without saying whether this one writes there or only reads, so it was neither removed nor written beside. (One Docker says is gone by then, having ended since it was listed, does not count; and when the inspect itself fails or runs out of time, the write goes ahead, the agent's activity saying "written anyway: how … mount its files could not be read", and the look waits five minutes.) Before the fix it was taken for a writer and removed, and when it was the nightly backup's copy that night's set failed.
+- **Fix:** try again in a minute. If it keeps happening, Docker on that machine is not answering: check it with `docker info`, or remove the one-shot named by `docker ps` with `docker rm -f <name>` once you know it is not a backup still running.
+- **Fixed in:** `v2.178.0`
+- **Code:** `src/providers/localDockerProvider.ts` — `#clearVolumeWriters`, `#reads`, `#everydayWrite`, `importWorkspace`
 
 ### A move was cancelled with "Couldn't read the agent's state ... ENOENT ... .tgz.part"
 - **Check:** the message or the log names a `.tgz.part` under `move-copies` or `restore-safety`, and another move or restore ended around that time, or, for `restore-safety`, another Hatchabot install shares this backup folder and started then. The source agent is untouched; a retry works.
@@ -5716,14 +6425,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** uninstall read `.env` one way, and the nightly backup got it another, so such a key gave two different owner fingerprints. On Linux the backup gets `.env` from systemd (no expansion; a `#` inside a value is kept), on a Mac from the launchd job, which sources it (a `$` expands), and by hand from Node's dotenv parser (a `#` starts a comment). Generated keys are not affected. The same difference could hide a `HATCHABOT_DB` or `HATCHABOT_BACKUP_DIR`: a hand-edited Mac `.env` with `$HOME/...` read as no database, and `--purge` removed `.env` and said the agents were gone while they ran on.
 - **Fix:** upgrade, then run it again; `.env` is now read the way the service reads it on that machine, and a set made under Node's reading by a backup run by hand also counts as this install's. Without upgrading, delete those dated sets by hand if you are sure they are this install's.
 - **Fixed in:** `v2.172.0`
-- **Code:** `scripts/uninstall.sh` — `key_owner`, `ENV_READ`, `ENV_ALT_KEY`; `scripts/backup-volumes.sh` — `key_owner`; `scripts/launchd-plist.sh`
+- **Code:** `scripts/uninstall.sh` — `OWNER`, `ALT_OWNER`, `ENV_READ`, `ENV_ALT_KEY`; `scripts/backup-owner.sh` — `key_owner`; `scripts/launchd-plist.sh`
 
 ### After `uninstall.sh --purge`, a `restore-safety` folder is left in the backup folder, with an agent's whole volume in it
 - **Check:** `ls <backup folder>` shows `restore-safety` or `restore-safety-<16 hex>` holding a `.tgz`, and the purge printed `kept <that folder>: a restore's safety copies`.
 - **Cause:** a restore held, or one that could not be undone, keeps a copy that may be an agent's only good state. It is unencrypted and holds the agent's tokens. A purge without `--backups` keeps it. Even with `--backups`, a purge can only recognise this install's folder by its key: not a folder from before folders were per install, one made under an old key, or a second purge after the first removed `.env`.
 - **Fix:** if you may still need the agent, restore from that copy first. Otherwise delete the folder, after checking it is not another install's, and rotate the tokens that agent held if the disk may have been read.
 - **Fixed in:** —
-- **Code:** `scripts/uninstall.sh` — `key_owner`; `src/orchestrator/backups.ts` — `restoreSafetyDir`
+- **Code:** `scripts/uninstall.sh` — `OWNER`; `scripts/backup-owner.sh` — `key_owner`; `src/orchestrator/backups.ts` — `restoreSafetyDir`
 
 ### After `uninstall.sh --purge`, a `move-copies` folder is left behind, with an agent's whole volume in it
 - **Check:** `ls <data folder>` shows a `move-copies` folder holding a `.tgz` or `.tgz.part`, and the data folder stayed because it is not Hatchabot's own or is also the backup folder. The service was killed during a move (uninstall stopping it is one way).

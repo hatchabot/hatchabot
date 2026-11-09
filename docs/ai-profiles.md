@@ -42,8 +42,16 @@ the Keychain on macOS). Two consequences:
    they can judge. For Hatchabot hosting agents on their behalf it becomes our
    reliability problem, with no per-agent attribution.
 
-So: the subscription is cheaper, and it should absolutely be usable. There are two
-supported shapes:
+Anthropic's terms for Claude Code now say the same in plain words
+([code.claude.com](https://code.claude.com/docs/en/legal-and-compliance), read
+2026-11-08): a plan's sign-in is for ordinary use of Claude Code and Anthropic's
+own apps; software from other developers must use an API key, and may not send
+requests through a Free, Pro, Max or Ultra plan's credentials for its users or
+store them; and the plans' limits assume ordinary, individual use. So an API key
+is the dependable source (a Max or Ultra plan's monthly API credits come as an
+ordinary Anthropic key from a Claude Console organization), and a subscription
+source is kept for those who have checked the current terms. There are two
+shapes:
 
 - **`kind: 'subscription'` machine login + `host.kind: 'local'`** — the agent runs
   on the machine where the login already exists and reuses `~/.claude` in place;

@@ -32,8 +32,9 @@ export class CompositeTelegramProvisioner implements ChannelProvisioner {
     // agent that has since been re-stocked) MUST win over an available pool
     // bot — otherwise resume silently binds the agent to a pool identity the
     // user declined and strands their bespoke token. skipPool is one-shot so
-    // it's gone by resume; hasPending is the durable signal.
-    if (req.skipPool || this.manual.hasPending(req.agentId)) {
+    // it's gone by resume; a token waiting (held in memory, and read back
+    // from disk at boot: loadHeld) is the durable signal.
+    if (req.skipPool || await this.manual.waitingFor(req.agentId)) {
       return this.manual.provision(req); // throws ChannelSetupRequired if no token yet
     }
     try {
@@ -44,12 +45,24 @@ export class CompositeTelegramProvisioner implements ChannelProvisioner {
     }
   }
 
-  async submitToken(agentId: string, botToken: string): Promise<{ username: string }> {
-    return this.manual.submitToken(agentId, botToken);
+  async submitToken(agentId: string, botToken: string, checked?: string): Promise<{ username: string }> {
+    return this.manual.submitToken(agentId, botToken, checked);
   }
 
-  discardPending(agentId: string): void {
-    this.manual.discardPending(agentId);
+  discardPending(agentId: string): Promise<void> {
+    return this.manual.discardPending(agentId);
+  }
+
+  waitingFor(agentId: string): Promise<boolean> {
+    return this.manual.waitingFor(agentId);
+  }
+
+  loadHeld(agentIds: string[]): void {
+    this.manual.loadHeld(agentIds);
+  }
+
+  heldBot(agentId: string, token: string): Promise<string | undefined> {
+    return this.manual.heldBot(agentId, token);
   }
 
   /** Only pool bots are ours to rename; a user's own bot is left alone. */

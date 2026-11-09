@@ -9,7 +9,7 @@ import { recoverBackupRestore, resumeBackupRestore } from './backups.js';
 import { AgentBusyError, whileBusy } from './busy.js';
 import { recoverMigrate, resumeMigrate, type MigrateDeps } from './migrate.js';
 import { recoverMoveHost, resumeMoveHost } from './moveHost.js';
-import { BACKGROUND_KINDS, currentBootId, handleFor, markInterrupted, rethrowIfCrash, type Operation } from './operations.js';
+import { BACKGROUND_KINDS, currentBootId, FILES_REPLACED_BY, handleFor, markInterrupted, noteFilesReplacing, rethrowIfCrash, type Operation } from './operations.js';
 import { finishInterruptedRebuild, reapplyCurrentSettings, runProvisionSteps, type ProvisionDeps } from './provision.js';
 import { applyReconcileRule } from './reconcile.js';
 import { recoverSnapshotRestore, resumeSnapshotRestore } from './snapshots.js';
@@ -78,6 +78,10 @@ function depsFor(ctx: ResumeContext, op: Operation): MigrateDeps | undefined {
 /** `busyHeld`: the caller holds the agent's busy flag already (the owner's choice runs under it). */
 async function runKind(ctx: ResumeContext, op: Operation, action: string | undefined, askAttempts?: number, busyHeld = false): Promise<void> {
   const log = ctx.logFor?.(op.agentId);
+  // Started again: a snapshot by hand reading its files meanwhile is not
+  // kept, as when it first began. A rebuild or setup counts where it runs
+  // its steps again, or at its start once queued again (resumeBackground).
+  if (op.agentId && FILES_REPLACED_BY.has(op.kind) && !BACKGROUND_KINDS.includes(op.kind)) noteFilesReplacing(op.agentId);
   switch (op.kind) {
     case 'move-host': {
       const deps = {
@@ -191,6 +195,7 @@ async function resumeBackground(ctx: ResumeContext, op: Operation, busyHeld = fa
   // Its steps run again, as Retry runs them: the volume is kept, and each
   // step leaves what is done as it is.
   if (op.kind === 'provision' && !agent.pendingAction && status?.phase === 'running' && status.healthy) {
+    noteFilesReplacing(agent.id);
     const r = await runProvisionSteps({
       store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
       ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
@@ -204,6 +209,7 @@ async function resumeBackground(ctx: ResumeContext, op: Operation, busyHeld = fa
   // A rebuild likewise: up after its new container was made, its steps after
   // health (sources, hook, parked schedules) had not run (HB-0301).
   if (op.kind === 'rebuild' && status?.phase === 'running' && status.healthy) {
+    noteFilesReplacing(agent.id);
     const r = await finishInterruptedRebuild({
       store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
       ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
@@ -216,8 +222,20 @@ async function resumeBackground(ctx: ResumeContext, op: Operation, busyHeld = fa
   const after = ctx.store.getAgent(agent.id)!;
   if (after.state === 'RUNNING') h.done(`Interrupted by a restart; it was running again, so it is marked running.`);
   else if (after.state === 'FAILED') h.fail(after.stateReason ?? `The ${what} was interrupted by a restart — tap Retry.`);
+  // A bot-token step answered before the restart: said by what it holds, by
+  // the rule the routes' boot pass then acts on (routes.ts, resumeOperations).
+  else if (after.pendingAction?.received) {
+    if (after.webOnly) h.rolledBack('Interrupted by a restart after it was set to go on without a Telegram bot; setup goes on without one.');
+    else if (await tokenKept(ctx, after.id)) h.rolledBack('Interrupted by a restart after its bot token came in; the token was kept, and setup starts again with it.');
+    else h.fail('Interrupted by a restart as its bot token came in, before it was kept: the agent asks for the token again — paste it on its page.');
+  }
   else if (after.pendingAction) h.fail('Setup was interrupted by a restart while it waited for a step from you — finish that step on its page.');
   else h.fail(`The ${what} was interrupted by a restart.`);
+}
+
+/** Whether a bot token pasted before the restart is held for this agent (telegramManual.ts, on disk). */
+async function tokenKept(ctx: ResumeContext, agentId: string): Promise<boolean> {
+  return !ctx.channel.waitingFor || await ctx.channel.waitingFor(agentId).catch(() => false);
 }
 
 /** Settle one interrupted operation; a recovery that itself fails is held with [Try again]. */

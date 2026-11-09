@@ -3,10 +3,10 @@ import { MAX_DATA_SOURCES, MAX_MOUNT_NAME } from './dataSourceLimits.js';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import type { Agent, TemplateParam } from '../domain/types.js';
-import type { Store } from '../store/store.js';
+import { SourceGoneError, type Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { CORE_FILES, CoreFileTooBigError, MAX_FILE_BYTES, readCoreFile, SnapshotError, workspacePath } from './snapshots.js';
-import { DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSection, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
+import { DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSectionEverywhere, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
 import { scanPersonalData, type PersonalScan } from '../domain/personalData.js';
 
 /**
@@ -21,8 +21,10 @@ import { scanPersonalData, type PersonalScan } from '../domain/personalData.js';
 // The install notes' pre-rename heading too: agents built before v1.0.0
 // still carry it (2026-09-30).
 const MANAGED_HEADINGS = [OPERATOR_HEADING, DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING, PEERS_HEADING, INSTALL_HEADING, '## Installing tools (managed by AgentClaw)', '## Memory policy', '## Memory budget'];
+// Every copy, under either reading of the agent's fences: one its fences make
+// look quoted to one reader still carries the owner's details (HB-0520 review).
 export function stripManagedSections(agentsMd: string): string {
-  return MANAGED_HEADINGS.reduce((s, h) => removeSection(s, h), agentsMd);
+  return MANAGED_HEADINGS.reduce((s, h) => removeSectionEverywhere(s, h), agentsMd);
 }
 import { listCrons } from './crons.js';
 import { createAgentRecord } from './provision.js';
@@ -337,7 +339,9 @@ export async function exportTemplate(
  * or runs of blank lines. Two files the same here differ in nothing anyone wrote.
  */
 function comparable(text: string): string {
-  return removeSection(stripManagedSections(text), SCHEDULED_RESULTS_HEADING)
+  // Every copy, as for the other managed sections: removeSection leaves one
+  // its fences make unsure where it is (ninth review).
+  return removeSectionEverywhere(stripManagedSections(text), SCHEDULED_RESULTS_HEADING)
     .split('\n').map((l) => l.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -773,7 +777,9 @@ export function importTemplate(
       aiProfileId: profile.id,
       hostId: host.id,
     });
-  } catch {
+  } catch (err) {
+    // Its source deleted meanwhile is that, not a name taken: 409, in its own words.
+    if (err instanceof SourceGoneError) throw err;
     throw new TransferError(`Couldn't create "${name}" — an agent with that name may already exist here. Import under a different name.`);
   }
   if (validIcon(manifest.agent.icon)) {

@@ -4,10 +4,11 @@
  * accounts are added. Distinct from the deep CODE audit: this finds risky
  * CONFIGURATION and drift, not bugs.
  *
- * The centrepiece is the per-agent Telegram EXPOSURE score — audience (how many
- * people can reach an agent) crossed with capability (what it can do) — because
- * Telegram is the one surface exposed to other people, and a hostile message to
- * a high-capability, wide-audience agent is where real damage happens.
+ * The centrepiece is the per-agent EXPOSURE score — audience (how many people
+ * can reach an agent, on a chat app or in its web chat) crossed with capability
+ * (what it can do) — because those are the surfaces exposed to other people,
+ * and a hostile message to a high-capability, wide-audience agent is where real
+ * damage happens.
  *
  * Pure DB reads (no Docker), so it's cheap enough to run on demand. The one
  * Docker-backed input — each agent's storage — is measured by the daily sweep
@@ -176,24 +177,41 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
     }
   }
 
-  // Per-agent Telegram exposure (the caller's own agents).
+  // Per-agent exposure (the caller's own agents).
   const agents: AgentExposure[] = [];
   const disks = store.agentDiskBytes();
   const warnBytes = diskWarnBytes();
   const overDisk: NonNullable<PostureReport['limits']['overDisk']> = [];
   for (const a of store.listAgents(ownerId)) {
     if (a.state === 'ARCHIVED') continue;
-    const audienceCount = store.listAllowedChannelUserIds(a.id).length;
+    // Who can reach it, on any chat app or in its web chat (HB-0575): counting
+    // Telegram alone left four Discord guests out, so a powerful agent shared
+    // there read "medium". The list below names them by the same rule.
+    const reach = store.listMemberships(a.id)
+      .filter((m) => m.status === 'active')
+      .map((m) => {
+        const ids = store.memberIdentities(a.id, m.userId);
+        const channels = [
+          ...(m.channelUserId ? ['telegram'] : []),
+          ...Object.keys(ids).filter((k) => k !== 'telegram'),
+          ...(m.webChat ? ['web chat'] : []),
+        ];
+        return { m, channels };
+      });
+    const audienceCount = reach.filter((r) => r.channels.length).length;
     const group = a.groupAccess?.mode ?? 'off';
     const wideAudience = audienceCount >= 3 || group === 'room' || group === 'members';
 
     const capabilities: string[] = [];
-    // Send-email capability: a connection attached with sending NOT blocked.
+    // Send-email capability: a connection attached with sending NOT blocked,
+    // that holds Gmail (HB-0600). A calendar-only one sends nothing. One with no
+    // services recorded is taken as able to: this page must not understate.
     for (const c of store.listAgentConnections(a.id)) {
-      if (!c.gmailNoSend) {
-        const email = store.getConnection(c.connectionId)?.email;
-        if (email) capabilities.push(`send email as ${email}`);
-      }
+      if (c.gmailNoSend) continue;
+      const conn = store.getConnection(c.connectionId);
+      if (!conn?.email) continue;
+      if (conn.services.length && !conn.services.includes('gmail')) continue;
+      capabilities.push(`send email as ${conn.email}`);
     }
     const rwMount = store.listDataSources(a.id).some((d) => d.kind === 'folder' && d.access === 'rw');
     if (rwMount) capabilities.push('read-write host folder');
@@ -207,24 +225,16 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
     if (wideAudience && powerful) exposure = 'high';
     else if (wideAudience || powerful) exposure = 'medium';
 
-    // Name them. An active membership with no channel id bound yet is someone
-    // invited who has not messaged the bot — worth showing as pending rather
-    // than counting as access they do not have.
-    const audience = store.listMemberships(a.id)
-      .filter((m) => m.status === 'active')
-      .map((m) => {
-        const ids = store.memberIdentities(a.id, m.userId);
-        const channels = [
-          ...(m.channelUserId ? ['telegram'] : []),
-          ...Object.keys(ids).filter((k) => k !== 'telegram'),
-        ];
-        return {
-          name: m.displayName || (m.role === 'owner' ? 'You' : m.userId),
-          role: m.role,
-          channels,
-          ...(channels.length ? {} : { pending: true }),
-        };
-      })
+    // Name them. An active membership with no chat app bound yet and no web
+    // chat is someone invited who has not messaged the bot — worth showing as
+    // pending rather than counting as access they do not have.
+    const audience = reach
+      .map(({ m, channels }) => ({
+        name: m.displayName || (m.role === 'owner' ? 'You' : m.userId),
+        role: m.role,
+        channels,
+        ...(channels.length ? {} : { pending: true }),
+      }))
       .sort((x, y) => (x.role === 'owner' ? -1 : y.role === 'owner' ? 1 : x.name.localeCompare(y.name)));
 
     // The storage warning the Limits line has always promised, backed by the

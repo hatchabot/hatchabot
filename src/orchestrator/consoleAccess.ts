@@ -184,6 +184,36 @@ export type ConsoleReady =
  */
 export type ConsoleSyncReason = 'open' | 'grant' | 'removal' | 'start';
 
+/** A guest's open console (trackGuest). */
+interface GuestConsole {
+  userId: string;
+  /** Close it at once (dropGuests, the sweep). */
+  destroy: () => void;
+  /** Still waiting for the gateway to answer its connect. */
+  connecting?: () => boolean;
+  /** When the person was last active there (performance.now()); while it connects, when that began. */
+  lastActive?: () => number;
+  /** Close it to make room for a newer one (promiseRoom); destroy when not given. */
+  evict?: () => void;
+  /** Its forget function (trackGuest's). */
+  forget?: () => void;
+  /** Promised as the room a new console takes (promiseRoom): counted as gone, though not closed yet. */
+  promised?: boolean;
+}
+
+/** Room promised to a guest's new console at the door (ConsoleAccess.promiseRoom). */
+export interface RoomPromise {
+  /**
+   * The new one has connected: the console promised is closed, and the
+   * agent it was on returned (`closed`). Nothing is closed when it has gone
+   * meanwhile (its place is free), nor when it has been used since or is
+   * being answered: then `refused`, and the new one should give way.
+   */
+  keep(): { closed?: string; refused?: boolean };
+  /** The new one did not connect (it failed, timed out, or the guest left): nothing is closed, and the room goes back. */
+  release(): void;
+}
+
 /**
  * Per process: what each agent's gateway runs, and whether it has been
  * brought in step. Cheap to ask: a state read is cached for 15 s, a
@@ -197,7 +227,9 @@ export class ConsoleAccess {
   readonly #inflight = new Map<string, { key: string; p: Promise<ConsoleReady> }>();
   readonly #named = new Map<string, number>();
   /** Open guest consoles, so a removal ends them at once. */
-  readonly #sockets = new Map<string, Set<{ userId: string; destroy: () => void }>>();
+  readonly #sockets = new Map<string, Set<GuestConsole>>();
+  /** What each guest's open consoles hold together, kept by their changes (addGuestHeld). */
+  readonly #held = new Map<string, number>();
   #sweep?: NodeJS.Timeout;
 
   constructor(deps: ConsoleAccessDeps) {
@@ -410,20 +442,135 @@ export class ConsoleAccess {
     return guestConsoleSessionKey(agent.gatewayToken ?? '', agent.slug, userId);
   }
 
-  /** Remember an open guest console; returns its forget function. */
-  trackGuest(agentId: string, userId: string, destroy: () => void): () => void {
+  /**
+   * Remember an open guest console; returns its forget function. It works
+   * once, and on the set it was added to: a second call (a socket and its
+   * upstream both closing) must not drop a newer set, other consoles and all.
+   */
+  trackGuest(agentId: string, userId: string, destroy: () => void, more: Omit<GuestConsole, 'userId' | 'destroy' | 'forget'> = {}): () => void {
     let set = this.#sockets.get(agentId);
     if (!set) { set = new Set(); this.#sockets.set(agentId, set); }
-    const entry = { userId, destroy };
-    set.add(entry);
+    const mine = set;
+    const entry: GuestConsole = { userId, destroy, ...more };
+    mine.add(entry);
     this.#ensureSweep();
-    return () => { set!.delete(entry); if (!set!.size) this.#sockets.delete(agentId); };
+    let done = false;
+    entry.forget = () => {
+      if (done) return;
+      done = true;
+      mine.delete(entry);
+      if (!mine.size && this.#sockets.get(agentId) === mine) this.#sockets.delete(agentId);
+    };
+    return entry.forget;
   }
 
-  /** How many guest consoles are open (for tests and the sweep). */
-  openGuests(agentId?: string): number {
-    if (agentId) return this.#sockets.get(agentId)?.size ?? 0;
-    let n = 0; for (const s of this.#sockets.values()) n += s.size; return n;
+  /** A guest's least recently active connected console, unused for `idleFor` ms at least, and not promised already. */
+  #idlest(userId: string, idleFor: number): { agentId: string; e: GuestConsole; at: number } | undefined {
+    const before = performance.now() - idleFor;
+    let oldest: { agentId: string; e: GuestConsole; at: number } | undefined;
+    for (const [agentId, set] of this.#sockets) {
+      for (const e of set) {
+        if (e.userId !== userId || e.promised || e.connecting?.()) continue;
+        const at = e.lastActive?.() ?? 0;
+        if (at <= before && (!oldest || at < oldest.at)) oldest = { agentId, e, at };
+      }
+    }
+    return oldest;
+  }
+
+  /** When room was last promised from one of each guest's consoles unused for under the window (performance.now()). */
+  readonly #roomMade = new Map<string, number>();
+  /** Whether a guest may have room made from one unused for under `every` ms: none was in the last `every`. */
+  #roomDue(userId: string, every: number): boolean {
+    const at = this.#roomMade.get(userId);
+    return at === undefined || performance.now() - at >= every;
+  }
+
+  /**
+   * The console promiseRoom would set aside: the least recently active,
+   * unused for `idleFor` ms. Unused for `every` or more (a phone that
+   * slept), it may always go; for less, only when none such went in the last
+   * `every`, so idle tabs that reconnect cannot close each other in turn.
+   */
+  #closable(userId: string, idleFor: number, every: number): { agentId: string; e: GuestConsole; at: number; dead: boolean } | undefined {
+    const oldest = this.#idlest(userId, idleFor);
+    if (!oldest) return undefined;
+    const dead = performance.now() - oldest.at >= every;
+    return dead || this.#roomDue(userId, every) ? { ...oldest, dead } : undefined;
+  }
+
+  /**
+   * Room for a guest's new console (MAX_GUEST_CONSOLES), promised at the
+   * door: their least recently active connected console, on any agent, unused
+   * for `idleFor` ms (#closable), is set aside, counted as gone from now on,
+   * so a second new one cannot be let in on it too. It is closed only once
+   * the new one has connected (RoomPromise.keep); if that fails, nothing is
+   * (release). Undefined when there is none to promise.
+   */
+  promiseRoom(userId: string, how: { idleFor: number; every: number }): RoomPromise | undefined {
+    const now = performance.now();
+    for (const [u, at] of this.#roomMade) if (now - at >= how.every) this.#roomMade.delete(u); // expired ones go
+    const c = this.#closable(userId, how.idleFor, how.every);
+    if (!c) return undefined;
+    const { agentId, e, dead } = c;
+    e.promised = true;
+    const had = this.#roomMade.get(userId); // what the window was before this promise
+    if (!dead) this.#roomMade.set(userId, now);
+    let settled = false;
+    /** Nothing closed: it is no longer promised, and the window is as it was before. */
+    const giveBack = () => {
+      e.promised = false;
+      if (dead) return;
+      if (had === undefined) this.#roomMade.delete(userId);
+      else this.#roomMade.set(userId, had);
+    };
+    return {
+      keep: () => {
+        if (settled) return {};
+        settled = true;
+        if (!this.#sockets.get(agentId)?.has(e)) return {}; // gone meanwhile: its place is free
+        if ((e.lastActive?.() ?? 0) > performance.now() - how.idleFor) { giveBack(); return { refused: true }; }
+        e.promised = false;
+        e.forget?.();
+        try { (e.evict ?? e.destroy)(); } catch { /* already gone */ }
+        return { closed: agentId };
+      },
+      release: () => {
+        if (settled) return;
+        settled = true;
+        giveBack();
+      },
+    };
+  }
+
+  /**
+   * A guest's console holds `change` bytes more (less, when negative) than it
+   * last said; returns what all their open consoles hold together
+   * (GUEST_HELD_LIMIT). Each console gives all of it back when it closes.
+   */
+  addGuestHeld(userId: string, change: number): number {
+    const n = Math.max(0, (this.#held.get(userId) ?? 0) + change);
+    if (n) this.#held.set(userId, n); else this.#held.delete(userId);
+    return n;
+  }
+
+  /**
+   * How many guest consoles are open (for tests and the sweep); with
+   * `userId`, that guest's (MAX_GUEST_CONSOLES). One promised as room for a
+   * new one (promiseRoom) is not counted. `which`: all of them, or only those
+   * still connecting.
+   */
+  openGuests(agentId?: string, userId?: string, which: 'all' | 'connecting' = 'all'): number {
+    const sets = agentId ? [this.#sockets.get(agentId)] : [...this.#sockets.values()];
+    let n = 0;
+    for (const s of sets) {
+      for (const e of s ?? []) {
+        if (userId !== undefined && e.userId !== userId) continue;
+        if (e.promised || (which === 'connecting' && !e.connecting?.())) continue;
+        n++;
+      }
+    }
+    return n;
   }
 
   /**

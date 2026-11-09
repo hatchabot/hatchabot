@@ -15,7 +15,7 @@ describe('owner adoption carries the newer owner-keyed tables (audit 2026-09-11)
   it('moves agent_classes, operator_profile and posture_snapshots to the signed-in owner', () => {
     const store = fresh();
     store.upsertAgentClass({ id: 'c1', ownerId: LOCAL_OWNER, name: 'Heavy', model: 'm' });
-    store.setAgentClass('a1', 'c1');
+    store.setAgentClassIf('a1', store.getAgent('a1')?.classId ?? null, 'c1');
     store.setOperatorProfile(LOCAL_OWNER, 'I am Chris');
     store.upsertPostureSnapshot(LOCAL_OWNER, '2026-09-10', ['x']);
     expect(store.adoptLocalOwnerData('user-real')).toBeGreaterThan(0);
@@ -43,7 +43,7 @@ describe('peer / class store helpers', () => {
     store.upsertAgentClass({ id: 'c1', ownerId: LOCAL_OWNER, name: 'Heavy' });
     expect(store.agentClassByName(LOCAL_OWNER, 'heavy')?.id).toBe('c1');
     expect(store.agentClassByName('someone-else', 'Heavy')).toBeUndefined();
-    store.setAgentClass('a1', 'c1');
+    store.setAgentClassIf('a1', store.getAgent('a1')?.classId ?? null, 'c1');
     store.scrubAgentResidue('a1');
     expect(store.getAgent('a1')!.classId).toBeUndefined();
   });

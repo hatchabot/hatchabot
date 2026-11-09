@@ -93,6 +93,29 @@ describe('archiving frees the bot and keeps the agent', () => {
     expect(pool.availableCount()).toBe(1); // the whole point: leasable again
   });
 
+  it('says where the bot went, as it happened: the pool, or not parked when that failed (HB-0476)', async () => {
+    const pooled = await world();
+    expect(await archiveAgent(pooled.deps as any, 'a1')).toEqual({ bot: { username: 'poolbot', outcome: 'pool' } });
+    expect(await archiveAgent(pooled.deps as any, 'a1')).toEqual({}); // already archived: nothing happened to a bot
+
+    const pasted = await world({ pasted: true });
+    expect(await archiveAgent(pasted.deps as any, 'a1')).toEqual({ bot: { username: 'pastedbot', outcome: 'pool' } });
+    expect(pasted.pool.availableCount()).toBe(1);
+
+    const failed = await world({ pasted: true });
+    const events: string[] = [];
+    failed.pool.addToPool = async () => { throw new Error('the pool could not store the token'); };
+    const r = await archiveAgent({ ...failed.deps, log: (e: string) => events.push(e) } as any, 'a1');
+    expect(r).toEqual({ bot: { username: 'pastedbot', outcome: 'not-parked' } });
+    expect(events).toContain('archive.recycle_failed');
+    expect(failed.store.getAgent('a1')!.state).toBe('ARCHIVED');
+
+    const copied = await world();
+    copied.store.setAgentState('a1', 'STOPPED');
+    copied.store.setAgentExportedAt('a1', new Date().toISOString());
+    expect(await archiveAgent(copied.deps as any, 'a1')).toEqual({ bot: { username: 'poolbot', outcome: 'left-to-copy' } });
+  });
+
   it('tells the members while the bot still wears the agent\'s name', async () => {
     const { calls, deps } = await world();
     await archiveAgent(deps as any, 'a1');

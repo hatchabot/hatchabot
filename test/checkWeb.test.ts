@@ -39,4 +39,11 @@ describe('check-web sees handlers built by helpers', () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('handler references undefined function "openChanSetup"');
   });
+  it('a script tag that is not a bare <script> fails it, with the line named (HB-0620)', () => {
+    for (const [from, to] of [['<script>', '<script type="module">'], ['<script>', '<script src="x.js">'], ['</script>', '</script >']] as const) {
+      const r = check(from, to);
+      expect(r.status, to).toBe(1);
+      expect(r.stderr, to).toMatch(/✗ web\/index\.html: inline-scripts: line \d+: a script (end )?tag that is not a bare/);
+    }
+  });
 });

@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { createHash } from 'node:crypto';
 import { Store } from '../src/store/store.js';
-import { MockProvider } from '../src/providers/mockProvider.js';
+import { MockProvider, importsTook } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { Agent } from '../src/domain/types.js';
@@ -150,7 +150,7 @@ async function world() {
     if (script.includes('gog auth import')) {
       const email = /--email "([^"]+)"/.exec(script)![1]!;
       if (inside.gog && !inside.gog.includes(email)) inside.gog.push(email);
-      return { code: 0, stdout: '', stderr: '' };
+      return { code: 0, stdout: importsTook(script), stderr: '' };
     }
     if (script.startsWith('HB_ACCESS_PROBE=')) {
       if (inside.probeFails) return { code: 1, stdout: '', stderr: 'boom' };

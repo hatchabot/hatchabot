@@ -43,7 +43,7 @@ class SlowTurnProvider extends MockProvider {
 const OWNER = 'owner-example';
 const as = { 'x-hatchabot-owner': OWNER };
 
-async function world() {
+async function world(channel: unknown = { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 }, release: async () => {}, discardPending: () => {} }) {
   const store = new Store(new Database(':memory:'));
   const provider = new SlowTurnProvider();
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
@@ -62,10 +62,32 @@ async function world() {
     store,
     secrets: new MemSecrets(),
     providers: new Map([['mock', provider]]),
-    channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0 }, release: async () => {}, discardPending: () => {} } as any,
+    channel: channel as any,
   });
   return { f, store, provider };
 }
+
+describe('the archive answer says where the bot went (HB-0476)', () => {
+  it('a pasted bot the pool could not take: "not-parked", not "back in the pool"; no bot: null', async () => {
+    const released: string[] = [];
+    const channel = {
+      kind: 'telegram',
+      pool: { owns: () => false, availableCount: () => 0, addToPool: async () => { throw new Error('the pool could not store the token'); } },
+      release: async (accountId: string) => { released.push(accountId); },
+      discardPending: () => {},
+    };
+    const { f, store } = await world(channel);
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'garden_example_bot', secretRef: 'telegram/bot/garden_example_bot', deepLink: 'https://t.me/garden_example_bot', createdAt: 'now' } as never);
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/archive', headers: as, payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ state: 'ARCHIVED', botReturn: { username: 'garden_example_bot', outcome: 'not-parked' } });
+    expect(released).toEqual(['garden_example_bot']);
+
+    const web = await world();
+    const plain = await web.f.inject({ method: 'POST', url: '/v1/agents/a1/archive', headers: as, payload: {} });
+    expect(plain.json()).toMatchObject({ state: 'ARCHIVED', botReturn: null });
+  });
+});
 
 describe('archiving shows from the click, not from the end', () => {
   it('says "saving its conversation" while the checkpoint runs, then archives', async () => {

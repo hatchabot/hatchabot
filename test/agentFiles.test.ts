@@ -110,6 +110,31 @@ describe('downloads', () => {
     expect(r.body).toBe('hello');
     expect(provider.execLog.at(-1)![1]).toContain('exec head -c 5');
   });
+  it('check=1 says whether it may be read, by what the download checks first: 204, and none of its bytes', async () => {
+    const { f, provider } = await world();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: 'regular file\t5\n', stderr: '' });
+    provider.streamBytes = Buffer.from('hello');
+    const before = provider.execLog.length;
+    const r = await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=out/report.pdf&inline=1&check=1', headers: as });
+    expect([r.statusCode, r.body]).toEqual([204, '']);
+    // Its size and kind asked, as a download's are; nothing streamed.
+    expect(provider.execLog.slice(before).map(([kind]) => kind)).toEqual(['sh-volume']);
+    // Gone: the download's 404. Over HATCHABOT_FILE_MAX_MB: the download's own refusal, which the page says.
+    provider.execResponses.set('sh-volume', { code: 2, stdout: '', stderr: '' });
+    const gone = await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=out/gone.pdf&check=1', headers: as });
+    expect([gone.statusCode, gone.json().error]).toEqual([404, 'No such file or folder.']);
+    provider.execResponses.set('sh-volume', { code: 0, stdout: `regular file\t${600 * 1024 * 1024}\n`, stderr: '' });
+    const big = await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=out/huge.pdf&inline=1&check=1', headers: as });
+    expect(big.statusCode).toBe(413);
+    expect(big.json().error).toMatch(/^Too big to download here \(600 MB; the limit is 512 MB — HATCHABOT_FILE_MAX_MB\)\.$/);
+    expect(provider.execLog.filter(([kind]) => kind === 'stream')).toEqual([]);
+    provider.execResponses.set('sh-volume', { code: 0, stdout: 'regular file\t5\n', stderr: '' });
+    // Still the owner's alone, and still a path inside the agent.
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=out/report.pdf&check=1', headers: { 'x-hatchabot-owner': 'someone-else' } })).statusCode).toBe(404);
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=../x&check=1', headers: as })).statusCode).toBe(400);
+    // Without it, the same path reads the file.
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=out/report.pdf&inline=1', headers: as })).body).toBe('hello');
+  });
   it('a file that shrank between its size and its bytes does not end a short body as if complete (review R23)', async () => {
     const { f, provider } = await world();
     provider.execResponses.set('sh-volume', { code: 0, stdout: 'regular file\t100\n', stderr: '' });

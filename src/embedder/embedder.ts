@@ -24,6 +24,7 @@ import { Readable } from 'node:stream';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
+import { processAlive } from '../domain/processAlive.js';
 
 /** llama.cpp's server image, by digest (proven 2026-09-18 on arm64 and amd64). */
 export const EMBEDDER_IMAGE = 'ghcr.io/ggml-org/llama.cpp:server@sha256:f26a6403915b6131b903717458aeeadd2527d2a6b8bf64bc9264bc6d16a40474';
@@ -138,9 +139,8 @@ function clearStaleParts(dest: string): void {
     if (!n.startsWith(`${base}.`) || !n.endsWith('.part')) continue;
     const pid = Number(/^\.(\d+)\.[0-9a-f]+\.part$/.exec(n.slice(base.length))?.[1]);
     if (!pid) continue;
-    let alive = pid !== process.pid;
-    if (alive) try { process.kill(pid, 0); } catch (err) { alive = (err as NodeJS.ErrnoException).code === 'EPERM'; }
-    if (!alive) rmSync(join(dir, n), { force: true });
+    // This process's own is left over: the caller holds the file's turn.
+    if (pid === process.pid || !processAlive(pid)) rmSync(join(dir, n), { force: true });
   }
 }
 

@@ -5,6 +5,8 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { canTransition } from '../src/domain/stateMachine.js';
 import { DISCORD_ID } from './support/fixtures.js';
+import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { beginOperation } from '../src/orchestrator/operations.js';
 
 describe('parsePairingList', () => {
   it('parses the 2026.6.11 pairing file shape', () => {
@@ -176,6 +178,413 @@ describe('claimFirstContact', () => {
       { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 50, pollIntervalMs: 1 },
     );
     expect(claimed).toBe('777');
+  });
+
+  it('the window\'s time runs only while the agent is up: stopped at attach, a window for a named person is all there when it starts, door open (HB-0468)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'STOPPED',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: '555', code: 'BBBB' }] }), stderr: '' });
+    provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
+    const real = Date.now;
+    let clock = real();
+    Date.now = () => clock;
+    const MIN = 60_000;
+    const start = clock;
+    const events: string[] = [];
+    let windowWhileDown: string | undefined;
+    const opened = () => provider.execLog.filter((c) => c[0] === 'sh-volume' && c[1]!.includes('"policy":"pairing"')).length;
+    let openedWhileDown = 0;
+    try {
+      const claimed = await claimFirstContact({
+        store, provider, log: (e) => events.push(e),
+        sleep: async (ms) => {
+          clock += ms;
+          // Two hours down, far past the 30-minute window; then it starts.
+          if (clock - start >= 2 * 60 * MIN && store.getAgent('a1')!.state === 'STOPPED') {
+            windowWhileDown = store.pairingWindow('a1', new Date(clock))?.until;
+            openedWhileDown = opened();
+            store.setAgentState('a1', 'RUNNING');
+          }
+        },
+      }, { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', expect: '555', timeoutMs: 30 * MIN, pollIntervalMs: 3000 });
+      expect(claimed).toBe('555');
+    } finally { Date.now = real; }
+    // Up again: the door is asserted open once more.
+    expect(opened()).toBe(openedWhileDown + 1);
+    // While it was down the stored window kept ahead of the clock, so the build that starts it opens the door.
+    expect(windowWhileDown && Date.parse(windowWhileDown) > start + 2 * 60 * MIN).toBe(true);
+    expect(events).toContain('claim.bound');
+    expect(events).not.toContain('claim.window_closed');
+  });
+
+  it('a window waits for a stopped agent a while at most, and a later watcher still takes the seat over (HB-0468)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'STOPPED',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    const real = Date.now;
+    let clock = real();
+    Date.now = () => clock;
+    const HOUR = 3_600_000;
+    const start = clock;
+    try {
+      const events: string[] = [];
+      let looks = 0;
+      const r = await claimFirstContact({ store, provider, log: (e) => events.push(e), sleep: async (ms) => { looks++; clock += ms; } },
+        { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', expect: '@pat_example', timeoutMs: 30 * 60_000, pollIntervalMs: 3000, maxDownMs: 5 * HOUR });
+      expect(r).toBeNull();
+      expect(events.filter((e) => e.startsWith('claim.'))).toEqual(['claim.window_abandoned']);
+      expect(clock - start).toBeGreaterThan(5 * HOUR);
+      expect(clock - start).toBeLessThan(5 * HOUR + 60_000);
+      expect(looks).toBeLessThan(5 * 240 + 5); // a look every 15 s while it is down, not every 3 s
+      expect(store.pairingWindows('a1', new Date(0))).toEqual([]);
+
+      // Reopened while the first watcher waits: the later one owns the seat, though its deadline is the sooner.
+      clock = real();
+      const first: string[] = [];
+      let second: Promise<string | null> | undefined;
+      let n = 0;
+      const one = claimFirstContact({ store, provider, log: (e) => first.push(e), sleep: async (ms) => {
+        clock += ms;
+        if (++n === 200) {
+          second = claimFirstContact({ store, provider, sleep: async (ms2) => { clock += ms2; } },
+            { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 1, pollIntervalMs: 1, maxDownMs: HOUR });
+        }
+      } }, { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', expect: '@pat_example', timeoutMs: 30 * 60_000, pollIntervalMs: 3000 });
+      expect(await one).toBeNull();
+      expect(first).toContain('claim.window_superseded');
+      expect(await second).toBeNull();
+    } finally { Date.now = real; }
+  });
+
+  it('back up after a stop, the stored window runs to the watcher\'s own deadline, its last minute too (HB-0468 review)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'STOPPED',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [] }), stderr: '' });
+    const real = Date.now;
+    let clock = real();
+    Date.now = () => clock;
+    const MIN = 60_000;
+    const start = clock;
+    const events: string[] = [];
+    // While it is up: is its window listed, at each look?
+    const looks: Array<{ at: number; listed: boolean }> = [];
+    try {
+      const r = await claimFirstContact({
+        store, provider, log: (e) => events.push(e),
+        sleep: async (ms) => {
+          clock += ms;
+          if (store.getAgent('a1')!.state === 'RUNNING') looks.push({ at: clock, listed: store.pairingWindows('a1', new Date(clock)).length > 0 });
+          // Down 10 minutes and a bit (a stretch the minute-by-minute renewal falls behind), then up.
+          else if (clock - start >= 10 * MIN + 20_000) store.setAgentState('a1', 'RUNNING');
+        },
+      }, { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 30 * MIN, pollIntervalMs: 3000 });
+      expect(r).toBeNull();
+    } finally { Date.now = real; }
+    expect(events.filter((e) => e.startsWith('claim.'))).toEqual(['claim.window_closed']);
+    // Every look but the one that found its time up saw the window.
+    expect(looks.length).toBeGreaterThan(300);
+    expect(looks.slice(0, -1).filter((l) => !l.listed)).toEqual([]);
+  });
+
+  it('an agent moved to another machine while its window waits: the window ends, and nothing more is done on the old machine (HB-0468, fifth review)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'STOPPED',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    const real = Date.now;
+    let clock = real();
+    Date.now = () => clock;
+    const MIN = 60_000;
+    const start = clock;
+    const events: Array<{ e: string; d: Record<string, unknown> }> = [];
+    let atMove = -1;
+    try {
+      const r = await claimFirstContact({
+        store, provider, log: (e, d) => events.push({ e, d }),
+        sleep: async (ms) => {
+          clock += ms;
+          // Ten minutes down, then moved: up on another machine.
+          if (clock - start >= 10 * MIN && atMove < 0) {
+            store.setAgentHost('a1', 'h2');
+            store.setAgentState('a1', 'RUNNING');
+            atMove = provider.execLog.length;
+          }
+        },
+      }, { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', expect: '@pat_example', timeoutMs: 30 * MIN, pollIntervalMs: 3000 });
+      expect(r).toBeNull();
+    } finally { Date.now = real; }
+    const ended = events.filter((x) => x.e === 'claim.window_abandoned');
+    expect(ended).toEqual([{ e: 'claim.window_abandoned', d: { agentId: 'a1', reason: 'moved' } }]);
+    expect(eventLabel('claim.window_abandoned', ended[0]!.d)).toMatch(/moved to another machine.*Open a new one/);
+    expect(store.pairingWindows('a1', new Date(0))).toEqual([]);
+    // Nothing more on the old machine: no door opened, no knocks read.
+    expect(atMove).toBeGreaterThan(0);
+    expect(provider.execLog.slice(atMove)).toEqual([]);
+    // Ended at the first look after the move, not days later.
+    expect(clock - start).toBeLessThan(11 * MIN);
+  });
+
+  /**
+   * A move while the window waits, as moveHost does it: the operation begins
+   * and the agent stops, the record is pointed at the new machine before the
+   * move has succeeded, and then the move is undone (the old machine put
+   * back) or finishes (up there, the operation done a little later).
+   */
+  async function moveWorld(outcome: 'undone' | 'done', reopenAtMin?: number) {
+    const store = new Store(new Database(':memory:'));
+    const [oldMachine, newMachine] = [new MockProvider(), new MockProvider()];
+    const spec = { agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' as const } }, env: {} };
+    const { runtimeRef } = await oldMachine.provision(spec);
+    await newMachine.provision(spec);
+    for (const m of [oldMachine, newMachine]) m.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [] }), stderr: '' });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'RUNNING', runtimeRef,
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    // Somebody already let in, so a door at rest is an allowlist.
+    store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'u2', role: 'user', status: 'active' });
+    store.bindMembershipChannelUser('a1', 'u2', '4242');
+    const real = Date.now;
+    let clock = real();
+    Date.now = () => clock;
+    const MIN = 60_000;
+    const start = clock;
+    const events: Array<{ e: string; d: Record<string, unknown> }> = [];
+    let op: ReturnType<typeof beginOperation> | undefined;
+    let atMove = -1, upThere = false, ended = -1;
+    const windowAt: Array<{ min: number; open: boolean }> = [];
+    try {
+      const r = await claimFirstContact({
+        store, provider: oldMachine, providerFor: (h) => (h === 'h2' ? newMachine : oldMachine),
+        log: (e, d) => { events.push({ e, d }); if (e === 'claim.window_abandoned') ended = clock - start; },
+        sleep: async (ms) => {
+          clock += ms;
+          const at = clock - start;
+          windowAt.push({ min: at / MIN, open: store.pairingWindows('a1', new Date(0)).length > 0 });
+          if (reopenAtMin !== undefined && at >= reopenAtMin * MIN && at < reopenAtMin * MIN + ms) {
+            // The owner opens the window again (Reopen): a later watcher has the seat.
+            store.openPairingWindow('a1', new Date(clock + 45 * MIN).toISOString(), 'u1', { expect: '@pat_example', kind: 'telegram' });
+          }
+          if (at >= 1 * MIN && !op) {
+            op = beginOperation(store, 'move-host', 'a1', { from: 'h', to: 'h2' }, { hostId: 'h2' });
+            store.setAgentState('a1', 'STOPPED');
+            atMove = oldMachine.execLog.length;
+          }
+          if (at >= 2 * MIN && op && store.getAgent('a1')!.hostId === 'h' && !upThere && outcome === 'done') store.setAgentHost('a1', 'h2');
+          if (outcome === 'undone') {
+            if (at >= 2 * MIN && at < 3 * MIN) store.setAgentHost('a1', 'h2');
+            if (at >= 3 * MIN && store.getAgent('a1')!.state === 'STOPPED') {
+              store.setAgentHost('a1', 'h');
+              store.setAgentState('a1', 'RUNNING');
+              op!.rolledBack('The move failed and was undone.');
+            }
+          } else {
+            // Up on the new machine while the move still finishes there.
+            if (at >= 3 * MIN && !upThere) { store.setAgentState('a1', 'RUNNING'); upThere = true; }
+            if (at >= 4 * MIN && op && store.activeOperationFor('a1')) op.done('Moved.');
+          }
+        },
+      }, { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', expect: '@pat_example', timeoutMs: 30 * MIN, pollIntervalMs: 3000 });
+      expect(r).toBeNull();
+    } finally { Date.now = real; }
+    return { store, oldMachine, newMachine, events, atMove, ended, windowAt, MIN };
+  }
+  const door = (p: MockProvider) => p.execLog.filter((c) => c[0] === 'sh-volume' && c[1]!.includes('"policy":')).map((c) => /"policy":"(\w+)"/.exec(c[1]!)![1]);
+
+  it('a move that is undone keeps the window: nothing is decided while the record points at the new machine (HB-0468, sixth review)', async () => {
+    const w = await moveWorld('undone');
+    expect(w.events.filter((x) => x.e === 'claim.window_abandoned')).toEqual([]);
+    expect(w.events.map((x) => x.e)).toContain('claim.window_closed');
+    // Open all through the move, and long after it.
+    expect(w.windowAt.filter((l) => l.min > 1 && l.min < 20 && !l.open)).toEqual([]);
+    // Nothing on the new machine; back on the old one, the door is opened again for the person still awaited.
+    expect(w.newMachine.execLog).toEqual([]);
+    expect(door(w.oldMachine).slice(-2)).toEqual(['pairing', 'allowlist']);
+  });
+
+  it('a move that succeeds ends the window once the move is over, and puts the new machine\'s door back to its allowlist (HB-0468, sixth review)', async () => {
+    const w = await moveWorld('done');
+    expect(w.events.filter((x) => x.e === 'claim.window_abandoned')).toEqual([{ e: 'claim.window_abandoned', d: { agentId: 'a1', reason: 'moved' } }]);
+    // Not while the move was still under way, though the agent was up there already.
+    expect(w.ended).toBeGreaterThanOrEqual(4 * w.MIN);
+    expect(w.ended).toBeLessThan(5 * w.MIN);
+    expect(w.store.pairingWindows('a1', new Date(0))).toEqual([]);
+    expect(door(w.newMachine)).toEqual(['allowlist']);
+    // Nothing more on the old machine once the move began: no knocks read, no door.
+    expect(w.atMove).toBeGreaterThan(0);
+    expect(w.oldMachine.execLog.slice(w.atMove)).toEqual([]);
+  });
+
+  it('reopened on the new machine while the move finished: the older watcher leaves the window and the door to the later one (HB-0468, sixth review)', async () => {
+    const w = await moveWorld('done', 4); // in the same moment the move finishes
+    expect(w.events.map((x) => x.e).filter((e) => e.startsWith('claim.'))).toEqual(['claim.window_superseded']);
+    expect(w.store.pairingWindows('a1', new Date(0))).toHaveLength(1);
+    expect(door(w.newMachine)).toEqual([]);
+  });
+
+  it('a window open to anyone ends after an hour with the agent down, and its door is not opened again when it comes up (HB-0468 review)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'STOPPED',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    // Someone already let in: the door's rest is the allowlist.
+    store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'u2', role: 'user', status: 'active', channelUserId: '4242' });
+    // A stranger is first to write once it is up.
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: '777', code: 'CCCC' }] }), stderr: '' });
+    provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
+    const real = Date.now;
+    let clock = real();
+    Date.now = () => clock;
+    const MIN = 60_000;
+    const start = clock;
+    const events: Array<{ e: string; d: Record<string, unknown> }> = [];
+    const policies = () => provider.execLog.filter((c) => c[0] === 'sh-volume' && c[1]!.includes('"policy":')).map((c) => /"policy":"(\w+)"/.exec(c[1]!)![1]);
+    try {
+      const r = await claimFirstContact({
+        store, provider, log: (e, d) => events.push({ e, d }),
+        sleep: async (ms) => {
+          clock += ms;
+          // Two hours down, then it starts.
+          if (clock - start >= 2 * 60 * MIN && store.getAgent('a1')!.state === 'STOPPED') store.setAgentState('a1', 'RUNNING');
+        },
+      }, { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 30 * MIN, pollIntervalMs: 3000 });
+      expect(r).toBeNull();
+    } finally { Date.now = real; }
+    const claimEvents = events.filter((x) => x.e.startsWith('claim.'));
+    expect(claimEvents).toEqual([{ e: 'claim.window_abandoned', d: { agentId: 'a1', reason: 'open-to-anyone' } }]);
+    expect(eventLabel('claim.window_abandoned', claimEvents[0]!.d)).toMatch(/open a new one/);
+    // Ended an hour after it opened, while it was still down.
+    expect(clock - start).toBeGreaterThanOrEqual(60 * MIN);
+    expect(clock - start).toBeLessThan(61 * MIN);
+    // No window left for the build that starts it to open the door for.
+    expect(store.pairingWindows('a1', new Date(0))).toEqual([]);
+    // Opened when it began, back to the allowlist when it ended: never opened again.
+    expect(policies()).toEqual(['pairing', 'allowlist']);
+    expect(store.getMembership('a1', 'u1')?.channelUserId).toBeUndefined();
+  });
+
+  it('a rebuild with 10 s of the window left: the stored window never lapses while it is down, and the door is open again once it is up (HB-0468 review)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [] }), stderr: '' });
+    const real = Date.now;
+    let clock = real();
+    Date.now = () => clock;
+    const MIN = 60_000;
+    const start = clock;
+    const opened = () => provider.execLog.filter((c) => c[0] === 'sh-volume' && c[1]!.includes('"policy":"pairing"')).length;
+    let rebuildAt: number | undefined;
+    let upAt: number | undefined;
+    let openedBeforeUp = 0;
+    const lapsed: number[] = [];
+    let listedWhenUp = false;
+    try {
+      const r = await claimFirstContact({
+        store, provider,
+        sleep: async (ms) => {
+          clock += ms;
+          const state = store.getAgent('a1')!.state;
+          if (state === 'REBUILDING') {
+            // What the build that brings it up sees, between two looks.
+            if (!store.pairingWindows('a1', new Date(clock)).length) lapsed.push(clock - rebuildAt!);
+            if (clock - rebuildAt! >= 47_000) {
+              listedWhenUp = store.pairingWindows('a1', new Date(clock)).length > 0;
+              openedBeforeUp = opened();
+              store.setAgentState('a1', 'RUNNING');
+              upAt = clock;
+            }
+          } else if (rebuildAt === undefined && clock - start >= 30 * MIN - 10_000) {
+            store.setAgentState('a1', 'REBUILDING');
+            rebuildAt = clock;
+          }
+        },
+      }, { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 30 * MIN, pollIntervalMs: 3000 });
+      expect(r).toBeNull();
+    } finally { Date.now = real; }
+    expect(rebuildAt).toBeDefined();
+    expect(upAt).toBeDefined();
+    expect(lapsed).toEqual([]);
+    expect(listedWhenUp).toBe(true);
+    // Up again with time left: the door is asserted open once more.
+    expect(opened()).toBe(openedBeforeUp + 1);
+    // And the window still runs the 10 s it had left, after the build.
+    expect(clock - upAt!).toBeGreaterThanOrEqual(5_000);
+  });
+
+  it('a window closed elsewhere while the agent is stopped ends its watcher, not days of looks (HB-0468 review)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'STOPPED',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
+    const real = Date.now;
+    let clock = real();
+    Date.now = () => clock;
+    const events: string[] = [];
+    let looks = 0;
+    try {
+      const r = await claimFirstContact({
+        store, provider, log: (e) => events.push(e),
+        sleep: async (ms) => {
+          clock += ms;
+          // Its person let in by hand, which closes the window.
+          if (++looks === 5) store.closePairingWindow('a1', Store.pairingSeat('telegram', 'u1'));
+        },
+      }, { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 30 * 60_000, pollIntervalMs: 3000, maxDownMs: 24 * 3_600_000 });
+      expect(r).toBeNull();
+    } finally { Date.now = real; }
+    expect(events.filter((e) => e.startsWith('claim.'))).toEqual(['claim.window_gone']);
+    expect(looks).toBe(5);
+    expect(store.pairingWindows('a1', new Date(0))).toEqual([]);
   });
 
   it('abandons the window when the agent is deleted or failed', async () => {

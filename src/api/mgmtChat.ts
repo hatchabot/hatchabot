@@ -8,7 +8,7 @@ import { Broker } from '../mgmt/broker.js';
 import { PendingStore, type PendingConfirm } from '../mgmt/pendingStore.js';
 import { HttpApiClient, type Requester } from '../mgmt/apiClient.js';
 import { toolDef } from '../mgmt/tools.js';
-import { timingSafeEqual } from 'node:crypto';
+import { safeEqual } from '../util/safeEqual.js';
 import { internalHeaders, ownerIdOf } from './principal.js';
 import { OpsAuthError, setOpsHandlers } from '../ops/opsServer.js';
 import { makeOpsWeb, type OpsWebDeps } from '../ops/opsWeb.js';
@@ -308,8 +308,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   };
   // A doorman's key, compared in constant time against every live doorman's.
   const doormanKeyOk = (key: string): boolean => {
-    const kb = Buffer.from(key);
-    return store.listDoormanKeys().some((x) => { const xb = Buffer.from(x); return xb.length === kb.length && timingSafeEqual(xb, kb); });
+    return store.listDoormanKeys().some((x) => safeEqual(x, key));
   };
   setOpsHandlers({ mcp: opsMcp, allowedHosts: opsAllowedHosts, peerOk: deps.opsPeerOk, doormanKeyOk, log: (event, detail) => app.log.info(detail, event) });
 

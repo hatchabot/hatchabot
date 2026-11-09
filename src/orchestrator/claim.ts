@@ -31,6 +31,8 @@ export interface PairingRequest {
 export interface ClaimDeps {
   store: Store;
   provider: RuntimeProvider;
+  /** Each machine's provider: the door is put back on the machine an agent moved to while its window waited (HB-0468, sixth review). */
+  providerFor?: (hostId: string) => RuntimeProvider;
   sleep?: (ms: number) => Promise<void>;
   log?: (event: string, detail: Record<string, unknown>) => void;
 }
@@ -44,8 +46,10 @@ export interface ClaimOptions {
   forUserId: string;
   /** Which channel to watch. Telegram when absent. */
   kind?: ChannelKind;
-  /** How long to keep watching for the owner's first message. */
+  /** How long to keep watching for the owner's first message, counted while the agent is up. */
   timeoutMs?: number;
+  /** How long to wait for an agent that is down before the window ends (a week). */
+  maxDownMs?: number;
   /** Ids that must never be claimed for this seat even when nothing else is
    *  known about them: the people who chatted with a recycled bot's previous
    *  agent (they were just told "this bot is now X", right as the window
@@ -164,6 +168,21 @@ async function scrubApproval(
   log(res?.code === 0 ? 'claim.unbound_approval_scrubbed' : 'claim.unbound_approval_scrub_failed', { agentId: opts.agentId, kind });
 }
 
+/** How long a window waits for a stopped agent to start before it ends (HB-0468). */
+const MAX_DOWN_MS = 7 * 24 * 3_600_000;
+/**
+ * A window that names nobody ("the first knock wins": a new bot's owner) lasts
+ * at most this long from when it opened, down time and all: left waiting for
+ * days, whoever wrote to the bot first would become its owner, and get the
+ * owner's recovery links (HB-0468 review). Only a window that names its person
+ * waits for a stopped agent.
+ */
+const ANYONE_WINDOW_MAX_MS = 60 * 60_000;
+/** How often a window looks at an agent that is down. */
+const DOWN_POLL_MS = 15_000;
+/** How far past a down agent's next look its stored window reaches: it must not lapse in between (HB-0468 review). */
+const DOWN_SLACK_MS = 15_000;
+
 /**
  * Watches for the owner's first contact and binds it. Resolves with the
  * claimed telegram user id, or null when the window closes unclaimed (the
@@ -177,8 +196,16 @@ export async function claimFirstContact(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
   const pollIntervalMs = opts.pollIntervalMs ?? 3_000;
-  const deadline = Date.now() + timeoutMs;
+  // The window's time runs only while the agent is up: a Telegram attached to a
+  // stopped agent, or a rebuild mid-window, moves the deadline on by the time it
+  // was down, so the person gets the whole window to write once it runs (HB-0468).
+  const openedAt = Date.now();
+  let deadline = openedAt + timeoutMs;
+  /** The latest a window open to anyone may run (ANYONE_WINDOW_MAX_MS); none for a named one. */
+  const anyoneEnds = normalizeHandle(opts.expect) ? undefined : openedAt + Math.max(timeoutMs, ANYONE_WINDOW_MAX_MS);
   const until = new Date(deadline).toISOString();
+  /** The `until` this watcher last stored: another value there means a later watcher took the seat. */
+  let written = until;
   // An OPEN DOOR for as long as we are watching — and a narrow one when the
   // owner said WHO the invite is for: only a knock from that @handle or id is
   // ever claimed, so an open window is not "whoever messages first wins".
@@ -201,8 +228,29 @@ export async function claimFirstContact(
   const storedWindow = () => deps.store.pairingWindows(opts.agentId, new Date(0)).find((w) => w.seat === seat);
   const superseded = (): boolean => {
     const w = storedWindow();
-    return !!w && Date.parse(w.until) > deadline;
+    return !!w && w.until !== written && Date.parse(w.until) > Date.now();
   };
+  /**
+   * Down time moves the deadline on, and the stored window follows, so the
+   * build that brings the agent up still finds it and opens the door. While
+   * down it reaches past the next look and a little more (downLead), so it
+   * never lapses between two looks; written at most every renewEvery. Once up
+   * (`exact`), it is the deadline itself, so its last stretch is listed too and
+   * another seat's restoreDoor does not shut the door on this one's person
+   * (HB-0468 review).
+   */
+  const renewEvery = Math.min(60_000, Math.max(1, Math.floor(timeoutMs / 2)));
+  const downLead = Math.max(pollIntervalMs, DOWN_POLL_MS) + DOWN_SLACK_MS;
+  const followDeadline = (exact: boolean): void => {
+    const w = Date.parse(written);
+    const cap = (t: number) => Math.min(t, anyoneEnds ?? t);
+    if (exact ? w === deadline : w >= cap(deadline + downLead)) return;
+    if (!storedWindow()) return; // closed by someone else: not reopened here
+    written = new Date(exact ? deadline : cap(deadline + downLead + renewEvery)).toISOString();
+    deps.store.openPairingWindow(opts.agentId, written, opts.forUserId, { expect: opts.expect, kind: kindHere });
+  };
+  let downSince: number | undefined; // when it was last seen down, while it still is
+  let downFrom: number | undefined; // when this stretch of down time began
   const expect = normalizeHandle(opts.expect);
   const excluded = new Set(opts.excludeIds ?? []);
   // The agent rests in `allowlist`, where a stranger's DM is dropped in
@@ -214,7 +262,14 @@ export async function claimFirstContact(
     agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind: kindHere,
     accountId: opts.accountId, policy: 'pairing',
   }).catch(() => false);
-  /** Back to silence, unless the owner wants this agent open to anyone — or another window is still waiting for its person. */
+  // The machine it watches: the one the agent was on when the window opened.
+  const hostAtStart = deps.store.getAgent(opts.agentId)?.hostId;
+  /**
+   * Back to silence, unless the owner wants this agent open to anyone — or
+   * another window is still waiting for its person. On the machine the agent
+   * is on now: one that moved while its window waited has its door there
+   * (HB-0468, sixth review), and nothing is done on one it left.
+   */
   const restoreDoor = async (): Promise<void> => {
     forgetDmPolicy(opts.agentId); // a window closing re-asserts the door for real
     const agent = deps.store.getAgent(opts.agentId);
@@ -224,14 +279,33 @@ export async function claimFirstContact(
     if (deps.store.pairingWindows(opts.agentId).some((w) => w.seat !== seat && w.seat.startsWith(`${kindHere}:`))) return;
     const admit = deps.store.listAllowedChannelUserIds(opts.agentId, kindHere);
     if (!admit.length) return; // nobody yet: stay reachable
-    await setDmPolicy(policyDeps, {
-      agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind: kindHere,
+    let provider = deps.provider;
+    if (hostAtStart !== undefined && agent.hostId !== hostAtStart) {
+      if (!deps.providerFor) return;
+      try { provider = deps.providerFor(agent.hostId); } catch { return; }
+    }
+    await setDmPolicy({ ...policyDeps, provider }, {
+      agentId: opts.agentId, runtimeRef: agent.runtimeRef ?? opts.runtimeRef, kind: kindHere,
       accountId: opts.accountId, policy: 'allowlist', allowFrom: admit,
     }).catch(() => false);
   };
-
   let readFailed = false; // said once a window, not every round
-  while (Date.now() < deadline) {
+  for (;;) {
+    const now = Date.now();
+    if (downSince !== undefined) { deadline += now - downSince; downSince = now; }
+    if (anyoneEnds !== undefined && deadline > anyoneEnds) deadline = anyoneEnds;
+    if (now >= deadline) {
+      // Open to anyone, and its hour ran out with the agent down: it ends here.
+      // When the agent comes up its door is as it rests, and the owner opens
+      // a new window to be let in.
+      if (downSince !== undefined && anyoneEnds !== undefined && now >= anyoneEnds) {
+        log('claim.window_abandoned', { agentId: opts.agentId, reason: 'open-to-anyone' });
+        deps.store.closePairingWindow(opts.agentId, seat);
+        await restoreDoor();
+        return null;
+      }
+      break;
+    }
     // The watcher runs detached from the provision task, so the agent can be
     // deleted, failed, or removed underneath it. Abandon only when there is
     // genuinely nothing to claim; a transient STOPPED/REBUILDING/PROVISIONING
@@ -245,9 +319,27 @@ export async function claimFirstContact(
       await restoreDoor();
       return null;
     }
-    // A later watcher took this seat over (Reopen, a re-attach): the window and the door are its now.
+    // A later watcher took this seat over (Reopen, a re-attach): the window
+    // and the door are its now, on whichever machine the agent is on. Asked
+    // before a move is decided: one reopened as a move ends is not closed here.
     if (superseded()) {
       log('claim.window_superseded', { agentId: opts.agentId, kind: kindHere });
+      return null;
+    }
+    // A move under way writes the new machine and ref on the record before
+    // it has succeeded, and puts the old ones back if it is undone: it is
+    // waited out like a rebuild, and nothing is decided meanwhile (HB-0468,
+    // sixth review).
+    const moving = deps.store.activeOperationFor(opts.agentId)?.kind === 'move-host';
+    // Up and settled on another machine: this watcher's provider and runtime
+    // are the old machine's, and it would watch and open a door there for
+    // days. The window ends, and the door on the machine it is on now is put
+    // back to rest; the owner opens a new window there (HB-0468, fifth review).
+    const moved = (hostAtStart !== undefined && agent.hostId !== hostAtStart) || (!!agent.runtimeRef && agent.runtimeRef !== opts.runtimeRef);
+    if (moved && !moving && agent.state === 'RUNNING') {
+      log('claim.window_abandoned', { agentId: opts.agentId, reason: 'moved' });
+      deps.store.closePairingWindow(opts.agentId, seat);
+      await restoreDoor();
       return null;
     }
     // The membership we're binding for was already claimed (e.g. by an earlier
@@ -258,7 +350,42 @@ export async function claimFirstContact(
       : deps.store.memberIdentities(opts.agentId, opts.forUserId)[kind];
     if (bound) { deps.store.closePairingWindow(opts.agentId, seat); await restoreDoor(); return bound; }
 
-    if (agent.state === 'RUNNING') {
+    const down = moving || moved || agent.state === 'STOPPED' || agent.state === 'REBUILDING' || agent.state === 'PROVISIONING';
+    if (down) {
+      downSince ??= now;
+      downFrom ??= now;
+      // Stopped for good, as far as a window goes: it ends, and Reopen starts another.
+      if (now - downFrom > (opts.maxDownMs ?? MAX_DOWN_MS)) {
+        log('claim.window_abandoned', { agentId: opts.agentId, state: agent.state });
+        deps.store.closePairingWindow(opts.agentId, seat);
+        await restoreDoor();
+        return null;
+      }
+      // Closed by someone else meanwhile (its person let in by hand): nothing
+      // to wait for, and the door was theirs to set. Not days of looking.
+      if (!storedWindow()) {
+        log('claim.window_gone', { agentId: opts.agentId, kind: kindHere });
+        return null;
+      }
+      followDeadline(false);
+    } else {
+      if (downFrom !== undefined) {
+        followDeadline(true);
+        // Up again, and still waiting: the door is open, whatever the build
+        // that brought it up made of it (HB-0468 review).
+        if (storedWindow()) {
+          forgetDmPolicy(opts.agentId);
+          await setDmPolicy(policyDeps, {
+            agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind: kindHere,
+            accountId: opts.accountId, policy: 'pairing',
+          }).catch(() => false);
+        }
+      }
+      downSince = undefined;
+      downFrom = undefined;
+    }
+
+    if (!down && agent.state === 'RUNNING') {
       // A read that throws (a docker exec that failed) is tried again next
       // round: thrown out of the loop, it ended the watcher with its window
       // still stored, and the knock it waited for was never claimed
@@ -359,7 +486,8 @@ export async function claimFirstContact(
         log('claim.approve_failed', { agentId: opts.agentId, code: first.code });
       }
     }
-    await sleep(pollIntervalMs);
+    // Down, there is nothing to read: a slower look, for what can be days.
+    await sleep(downSince !== undefined ? Math.max(pollIntervalMs, DOWN_POLL_MS) : pollIntervalMs);
   }
   // Renewed during the last round's sleep: the later watcher closes it when ITS time is up.
   if (superseded()) {

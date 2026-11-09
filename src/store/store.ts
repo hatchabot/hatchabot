@@ -58,6 +58,32 @@ function rowToLocalAccount(r: LocalAccountRow): LocalAccount {
   };
 }
 
+/** Attachments owed a client's last saved secret (kind, client id): never imported, or imported before it (HB-0463). */
+const OWED_CLIENT_SECRET = `agent_connections ac JOIN connections c ON c.id = ac.connection_id JOIN agents a ON a.id = ac.agent_id
+       WHERE c.kind = ? AND c.client_id = ? AND c.client_secret_at IS NOT NULL
+         AND (ac.materialized_at IS NULL OR ac.materialized_at < c.client_secret_at)`;
+
+/**
+ * An agent's peers as a rebuild installs them, sorted and comma-joined: the
+ * one form both sides of "its peers changed" are compared in (HB-0465).
+ */
+export function peersCsv(ids: readonly string[]): string {
+  return [...ids].sort().join(',');
+}
+
+/**
+ * The AI source a write names is gone: deleted while the request that chose
+ * it was still waiting (HB-0570). 409, with words for the owner.
+ */
+export class SourceGoneError extends Error {
+  readonly statusCode = 409;
+  readonly userMessage = 'That AI source was deleted meanwhile. Pick another one and try again.';
+  constructor() {
+    super('That AI source was deleted meanwhile. Pick another one and try again.');
+    this.name = 'SourceGoneError';
+  }
+}
+
 /**
  * SQLite for the MVP; the interface is narrow enough that swapping in Postgres
  * is one file. Every write that changes agent state goes through
@@ -101,6 +127,9 @@ const BASELINE_AT = `COALESCE(
   (SELECT MAX(t3.at) FROM token_samples t3 WHERE t3.agent_id = token_samples.agent_id AND t3.at < ?),
   ?)`;
 
+/** The highest TCP port. */
+const MAX_PORT = 65535;
+
 export function tokenRise(prev: number, next: number): number {
   return next > prev ? next - prev : 0;
 }
@@ -117,6 +146,100 @@ export interface OwnerPrefs {
   /** Telegram: my agents take only bots I parked myself, never a shared house bot. */
   ownBotsOnly: boolean;
 }
+
+/**
+ * Every column that holds a person's owner id, and what the first account's
+ * adoption of password mode's data (adoptLocalOwnerData) does with it:
+ *  - move: the rows become the new account's;
+ *  - keep-old: the same, and where the new account already has the row
+ *    (one per person), the owner's own from before wins;
+ *  - keep-new: the same, and there the new account's row stays;
+ *  - keep-new-drop: as keep-new, and the old owner's clashing rows go (one
+ *    per person a day: the account's is the one it saw that day);
+ *  - own-step: moved by a step of its own;
+ *  - stays: not moved, for the reason given.
+ * A list kept by hand left out the newer tables, so preferences, problem
+ * reports, budgets and alerts stayed with dev-owner (HB-0545):
+ * test/ownerAdoption.test.ts fails on an owner column of the schema that is
+ * not here. What is unique per owner (an agent's slug, a class's name, a
+ * connection's account, the management source) can clash with what the
+ * account made while a failed try waited: #settleOwnerClashes settles those
+ * first, or every retry rolled back for good.
+ * `agent`: the column naming the agent a row is about; such a row moves only
+ * with its agent. `usedBy`: where agents use the row (a source, a machine, a
+ * Google connection): it moves when any of the account's agents uses it, and
+ * stays only when agents left behind alone use it — they are the rare,
+ * passing case, and the owner is told to rename and restart.
+ * test/ownerAdoption.test.ts checks both against the schema.
+ */
+export const OWNER_COLUMNS: ReadonlyArray<{
+  table: string; column: string; how: 'move' | 'keep-old' | 'keep-new' | 'keep-new-drop' | 'own-step' | 'stays'; why?: string; agent?: string;
+  usedBy?: { table: string; column: string; agent: string };
+}> = [
+  // keep-new: an agent with the same slug as a live one of the account's
+  // stays behind (a slug names its container and folder, so it is not
+  // renamed); the caller says so.
+  { table: 'agents', column: 'owner_id', how: 'keep-new' },
+  { table: 'ai_profiles', column: 'owner_id', how: 'move', usedBy: { table: 'agents', column: 'ai_profile_id', agent: 'id' } },
+  { table: 'hosts', column: 'owner_id', how: 'move', usedBy: { table: 'agents', column: 'host_id', agent: 'id' } },
+  { table: 'memberships', column: 'user_id', how: 'keep-new', agent: 'agent_id' },
+  { table: 'memberships', column: 'invited_by', how: 'move', agent: 'agent_id' },
+  // Peer servers: else migration targets vanished on first sign-in.
+  { table: 'peers', column: 'owner_id', how: 'move' },
+  { table: 'invites', column: 'created_by', how: 'move', agent: 'agent_id' },
+  { table: 'invites', column: 'redeemed_by', how: 'move', agent: 'agent_id' },
+  // A CLI token left with the old owner returned an EMPTY fleet.
+  { table: 'cli_tokens', column: 'owner_id', how: 'move', agent: 'agent_id' },
+  // Classes became uneditable orphans; the operator identity text read "Not set".
+  { table: 'agent_classes', column: 'owner_id', how: 'move' },
+  { table: 'operator_profile', column: 'owner_id', how: 'keep-old' },
+  { table: 'posture_snapshots', column: 'owner_id', how: 'keep-new-drop' },
+  { table: 'agent_todos', column: 'owner_id', how: 'move' },
+  // Google connections vanished from the vault; parked pool bots could not be leased.
+  { table: 'connections', column: 'owner_id', how: 'move', usedBy: { table: 'agent_connections', column: 'connection_id', agent: 'agent_id' } },
+  // Made by the pool module when it first starts.
+  { table: 'telegram_pool', column: 'owner_id', how: 'move', agent: 'leased_to' },
+  { table: 'usage_snapshots', column: 'owner_id', how: 'keep-new-drop' },
+  { table: 'agent_group_order', column: 'owner_id', how: 'keep-old' },
+  { table: 'agent_shares', column: 'from_owner', how: 'move', agent: 'source_agent_id' },
+  { table: 'agent_shares', column: 'to_owner', how: 'move' },
+  { table: 'mgmt_heartbeat', column: 'owner_id', how: 'keep-old' },
+  { table: 'derived_images', column: 'created_by', how: 'move' },
+  // The owner's Slack/Discord links: else left out of their own agents' allowlists.
+  { table: 'member_identities', column: 'user_id', how: 'keep-new', agent: 'agent_id' },
+  { table: 'discord_bots', column: 'owner_id', how: 'move', agent: 'archived_for' },
+  { table: 'mgmt_proposals', column: 'owner_id', how: 'move' },
+  { table: 'model_changes', column: 'owner_id', how: 'move', agent: 'agent_id' },
+  { table: 'agent_seen', column: 'owner_id', how: 'keep-new', agent: 'agent_id' },
+  { table: 'telegram_unlinks', column: 'owner_id', how: 'keep-new' },
+  { table: 'ops_tokens', column: 'owner_id', how: 'move', agent: 'agent_id' },
+  // HB-0545: ownBotsOnly fell back to off, reports and their drafts were
+  // lost, and budget and spending alerts went to nobody.
+  { table: 'owner_prefs', column: 'owner_id', how: 'keep-old' },
+  { table: 'recommendation_dismissals', column: 'owner_id', how: 'keep-old' },
+  { table: 'problem_reports', column: 'owner_id', how: 'move', agent: 'agent_id' },
+  // An agent's budget and alert are keyed by the agent's id (scope).
+  { table: 'budgets', column: 'owner_id', how: 'move', agent: 'scope' },
+  { table: 'spend_alerts', column: 'owner_id', how: 'move', agent: 'scope' },
+  { table: 'usage_alerts', column: 'owner_id', how: 'move', agent: 'agent_id' },
+  { table: 'token_incidents', column: 'owner_id', how: 'move', agent: 'agent_id' },
+  { table: 'token_actions', column: 'owner_id', how: 'move', agent: 'agent_id' },
+  { table: 'operations', column: 'requested_by', how: 'move', agent: 'agent_id' },
+  { table: 'move_receipts', column: 'owner_id', how: 'move' },
+  { table: 'security_log', column: 'owner_id', how: 'move' },
+  { table: 'security_notices', column: 'owner_id', how: 'move' },
+  { table: 'security_notices', column: 'about_owner', how: 'move' },
+  { table: 'accounts', column: 'owner_id', how: 'own-step' },
+  { table: 'known_devices', column: 'owner_id', how: 'stays', why: 'a new account is told of each device it signs in from' },
+  { table: 'session_epochs', column: 'owner_id', how: 'stays', why: 'sessions are each account\'s own' },
+  { table: 'second_factors', column: 'owner_id', how: 'stays', why: 'a second factor is a credential: each account adds its own' },
+  { table: 'second_factor_generations', column: 'owner_id', how: 'stays', why: 'goes with second_factors' },
+  { table: 'local_accounts', column: 'host_owner', how: 'stays', why: 'a flag, not an owner id' },
+  { table: 'budgets', column: 'set_by', how: 'stays', why: 'who set it: owner, agent or default, not an id' },
+  { table: 'spend_alerts', column: 'set_by', how: 'stays', why: 'who set it: owner, agent or default, not an id' },
+  { table: 'budget_pauses', column: 'resumed_by', how: 'stays', why: 'owner or gone, not an id' },
+  { table: 'first_account', column: 'owner_id', how: 'stays', why: 'names the account the hand-over is for' },
+];
 
 export class Store {
   constructor(private readonly db: Database.Database) {
@@ -417,6 +540,13 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS cron_quieted (
         agent_id TEXT NOT NULL, job_id TEXT NOT NULL, at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, job_id)
+      );
+      -- A note on the owner's phone each time one of these tasks has run
+      -- (HB-0537, taskNotes.ts): since_ms is when it was turned on, seen_run_ms
+      -- the run last noted (the task's lastRunAtMs), so each run is told once.
+      CREATE TABLE IF NOT EXISTS cron_notes (
+        agent_id TEXT NOT NULL, job_id TEXT NOT NULL, since_ms INTEGER NOT NULL, seen_run_ms INTEGER,
         PRIMARY KEY (agent_id, job_id)
       );
       -- Token health (tokenHealth.ts, docs/features.md "Token steward"): what
@@ -913,6 +1043,15 @@ export class Store {
         gen INTEGER NOT NULL,
         bumped_at TEXT NOT NULL
       );
+      -- The account the data from before accounts goes to: the first one
+      -- that asked, kept even when that hand-over failed (pinFirstAccount).
+      -- done_at: handed over whole; from then on, nothing more is.
+      CREATE TABLE IF NOT EXISTS first_account (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        owner_id TEXT NOT NULL,
+        at TEXT NOT NULL,
+        done_at TEXT
+      );
     `);
     // Windows that were open when this version arrived move to the per-seat
     // table once; the old table is then left empty (its ALTER below still runs).
@@ -1123,6 +1262,9 @@ export class Store {
       // management agent reads its tool list once, when its gateway starts, so
       // an upgrade that adds a tool needs it restarted before it can see one.
       `ALTER TABLE agents ADD COLUMN applied_app_version TEXT`,
+      // Whose Brave key its container was built with: own, fleet or none
+      // (HB-0578 review). NULL: built before it was recorded.
+      `ALTER TABLE agents ADD COLUMN applied_search_key TEXT`,
       // Budgets (v2.124.0): "switch to a cheaper model" at the limit, and the
       // one reply a paused agent's bot sends each chat.
       `ALTER TABLE budget_pauses ADD COLUMN kind TEXT NOT NULL DEFAULT 'pause'`,
@@ -1404,7 +1546,7 @@ export class Store {
     // kept counting a deleted agent for days), claim windows (they carry an
     // invitee's @handle) and the lost-context note. Tables that may not exist
     // yet on an old database are skipped.
-    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'access_checks', 'data_source_removals', 'applied_source_changes'] as const) {
+    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'access_checks', 'data_source_removals', 'applied_source_changes', 'cron_notes'] as const) {
       try { this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId); }
       catch (err) { if (!/no such table/.test(String(err))) throw err; }
     }
@@ -1481,6 +1623,8 @@ export class Store {
            WHERE (s.ref LIKE 'agent-env/%' AND s.ref NOT IN (SELECT secret_ref FROM agent_env))
               OR (s.ref LIKE 'data-source/%' AND s.ref NOT IN (SELECT secret_ref FROM data_sources WHERE secret_ref IS NOT NULL))
               OR (s.ref LIKE 'agent-call-token/%' AND substr(s.ref, ${'agent-call-token/'.length + 1}) NOT IN (SELECT id FROM agents WHERE state != 'DELETED'))
+              -- A pasted bot token held for setup (telegramManual.ts) of an agent that is gone.
+              OR (s.ref LIKE 'telegram/pending/%' AND substr(s.ref, ${'telegram/pending/'.length + 1}) NOT IN (SELECT id FROM agents WHERE state != 'DELETED'))
               -- A waiting app's secret values no waiting row names (a delete that
               -- failed when it went in or was dropped; review, 2026-10-22).
               OR (s.ref LIKE 'app-pending/%' AND NOT EXISTS (SELECT 1 FROM agent_app_pending p WHERE instr(p.vals, '"' || s.ref || '"') > 0))`,
@@ -1649,8 +1793,14 @@ export class Store {
       this.db.prepare(`DELETE FROM agent_classes WHERE id = ?`).run(id);
     });
   }
-  setAgentClass(agentId: string, classId: string | null): void {
-    this.db.prepare(`UPDATE agents SET class_id = ? WHERE id = ?`).run(classId, agentId);
+  /**
+   * Its class set to `next` only while it is still `expected`, the class the
+   * caller read: false, and nothing written, when another change moved it
+   * first. Membership changes go through it, in one transaction with the
+   * model, source and image they write.
+   */
+  setAgentClassIf(agentId: string, expected: string | null, next: string | null): boolean {
+    return this.db.prepare(`UPDATE agents SET class_id = ? WHERE id = ? AND class_id IS ?`).run(next, agentId, expected).changes === 1;
   }
   listAgentsInClass(classId: string): Agent[] {
     return (this.db.prepare(`SELECT * FROM agents WHERE class_id = ? AND state != 'DELETED'`).all(classId) as any[]).map(rowToAgent);
@@ -1737,6 +1887,21 @@ export class Store {
 
   // ---- Agents ------------------------------------------------------------
 
+  /** Whether this AI source is there: what a write that names one checks in the same tick (HB-0570). */
+  aiProfileExists(id: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM ai_profiles WHERE id = ?`).get(id);
+  }
+
+  /**
+   * A new agent, on a source that is there now: refused (SourceGoneError)
+   * when it was deleted while the caller waited (an import's checks wait on
+   * the network). The creators use this; insertAgent itself stays plain.
+   */
+  insertAgentOnSource(a: Agent): void {
+    if (!this.aiProfileExists(a.aiProfileId)) throw new SourceGoneError();
+    this.insertAgent(a);
+  }
+
   insertAgent(a: Agent): void {
     this.db
       .prepare(
@@ -1767,9 +1932,17 @@ export class Store {
       });
   }
 
-  setAgentPendingAction(id: string, action: Agent['pendingAction'] | null): void {
-    // A step done, or a new one where none was waiting: not what a Clear covered (HB-0409).
-    if (!action || !this.getAgent(id)?.pendingAction) this.dropAttentionAckKeys(id, ['pending']);
+  /**
+   * `keepClear`: the step is put back as it was before an answer that did
+   * not go in (the channel-token route could not hold the token), not asked
+   * again, so a Clear the owner gave it stands.
+   */
+  setAgentPendingAction(id: string, action: Agent['pendingAction'] | null, opts: { keepClear?: boolean } = {}): void {
+    // A step done, a new one where none was waiting, or one asked again after
+    // it was answered (setup did not find the answer, or the answer was
+    // refused): not what a Clear covered (HB-0409).
+    const was = this.getAgent(id)?.pendingAction;
+    if (!action || !was || (was.received && !action.received && !opts.keepClear)) this.dropAttentionAckKeys(id, ['pending']);
     this.db
       .prepare(`UPDATE agents SET pending_action = ?, updated_at = ? WHERE id = ?`)
       .run(action ? JSON.stringify(action) : null, new Date().toISOString(), id);
@@ -1962,6 +2135,8 @@ export class Store {
     // a start): a sleeper's mark left on a RUNNING agent showed it ASLEEP and
     // sent the next sweep to stop it again (30th audit).
     if (next === 'RUNNING' && agent.hibernatedAt) this.setHibernated(id, null);
+    // Gone for good: its count of model writes goes with it.
+    if (next === 'DELETED') this.#modelGens.delete(id);
     // Running again here: the downloaded copy is no longer the one that counts.
     if (next === 'RUNNING' && agent.exportedAt) this.setAgentExportedAt(id, null);
     // A management agent that is put away or removed has no key any more.
@@ -2007,19 +2182,31 @@ export class Store {
     const alloc = this.db.transaction((agentId: string) => {
       const agent = this.getAgent(agentId);
       if (!agent) throw new Error(`No such agent: ${agentId}`);
-      if (agent.gatewayPort && agent.gatewayToken) {
+      // A port past 65535, saved by an older release, is allocated again:
+      // returned as it was, every provision failed on it (HB-0554).
+      if (agent.gatewayPort && agent.gatewayPort <= MAX_PORT && agent.gatewayToken) {
         return { port: agent.gatewayPort, token: agent.gatewayToken };
       }
       const row = this.db
-        .prepare(`SELECT MAX(gateway_port) AS p FROM agents`)
+        .prepare(`SELECT MAX(gateway_port) AS p FROM agents WHERE gateway_port <= ${MAX_PORT}`)
         .get() as { p: number | null };
       // Base is configurable so a second installation on the same host uses a
       // different range (docker publishes these on the shared loopback). A
       // non-numeric override would poison Math.max with NaN, so validate it.
       const envBase = Number(process.env.HATCHABOT_GATEWAY_PORT_BASE);
-      const base = Number.isInteger(envBase) && envBase > 0 && envBase < 65536 ? envBase : 19100;
-      const port = Math.max(base - 1, row.p ?? 0) + 1;
-      const token = randomBytes(16).toString('hex');
+      const base = Number.isInteger(envBase) && envBase > 0 && envBase <= MAX_PORT ? envBase : 19100;
+      let port = Math.max(base - 1, row.p ?? 0) + 1;
+      // Counted up past the top of the range: then the first port from the
+      // base that no agent holds (a deleted agent's is free again).
+      if (port > MAX_PORT) {
+        const held = new Set((this.db
+          .prepare(`SELECT gateway_port AS p FROM agents WHERE gateway_port IS NOT NULL AND state != 'DELETED' AND id != ?`)
+          .all(agentId) as Array<{ p: number }>).map((r) => r.p));
+        port = base;
+        while (port <= MAX_PORT && held.has(port)) port++;
+        if (port > MAX_PORT) throw new Error(`No gateway port is free from ${base} to ${MAX_PORT}: set HATCHABOT_GATEWAY_PORT_BASE lower, or delete agents you no longer use.`);
+      }
+      const token = agent.gatewayToken ?? randomBytes(16).toString('hex');
       this.db
         .prepare(`UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?`)
         .run(port, token, agentId);
@@ -2714,64 +2901,35 @@ export class Store {
       .run(ownerId, email.trim()).changes;
   }
 
-  adoptLocalOwnerData(newOwnerId: string, localOwner = 'dev-owner'): number {
+  adoptLocalOwnerData(newOwnerId: string, localOwner = 'dev-owner', opts: { pinned?: boolean } = {}): number {
     if (newOwnerId === localOwner) return 0;
     const adopt = this.db.transaction((owner: string) => {
-      const claimed = this.db
-        .prepare(`SELECT COUNT(*) AS n FROM agents WHERE owner_id != ?`)
-        .get(localOwner) as { n: number };
-      const claimedProfiles = this.db
-        .prepare(`SELECT COUNT(*) AS n FROM ai_profiles WHERE owner_id != ?`)
-        .get(localOwner) as { n: number };
-      if (claimed.n > 0 || claimedProfiles.n > 0) return 0; // already adopted
+      // Anything owned by someone else means it was adopted already. Except
+      // while this account's pinned hand-over is unfinished
+      // (firstAccountAdoption): it may have made things of its own while a
+      // failed try waited, and what is left under the old owner is still its
+      // to take. Once done, this guard holds again: what the old owner gets
+      // later (a leftover dev-owner CLI token's agent) goes to nobody.
+      const unfinished = !!opts.pinned && !!this.db
+        .prepare(`SELECT 1 FROM first_account WHERE id = 1 AND owner_id = ? AND done_at IS NULL`).get(owner);
+      if (!unfinished && this.#adoptedAlready(localOwner)) return 0;
+      this.#settleOwnerClashes(owner, localOwner);
       let rows = 0;
-      for (const sql of [
-        `UPDATE agents SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE ai_profiles SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE hosts SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE memberships SET user_id = ? WHERE user_id = ?`,
-        // Every column that keys off the owner id, or the row silently
-        // orphans under dev-owner: peer servers (else migration targets
-        // vanish on first sign-in), and the two membership/invite back-refs.
-        `UPDATE memberships SET invited_by = ? WHERE invited_by = ?`,
-        `UPDATE peers SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE invites SET created_by = ? WHERE created_by = ?`,
-        `UPDATE invites SET redeemed_by = ? WHERE redeemed_by = ?`,
-        // Without this a CLI token keeps working as the old owner and returns
-        // an EMPTY fleet — "all my agents are gone" instead of "log in again".
-        `UPDATE cli_tokens SET owner_id = ? WHERE owner_id = ?`,
-        // Newer owner-keyed tables: without these the operator identity text
-        // silently reverts to "Not set" on every agent and classes become
-        // uneditable orphans after the first identity sign-in.
-        `UPDATE agent_classes SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE operator_profile SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE posture_snapshots SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE agent_todos SET owner_id = ? WHERE owner_id = ?`,
-        // Audit 2026-09-13: the rest of the owner-keyed tables. Without these
-        // Google connections vanish from the vault, parked pool bots become
-        // unleasable, and usage/group-order/shares/heartbeat/images orphan.
-        `UPDATE connections SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE telegram_pool SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE usage_snapshots SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE agent_group_order SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE agent_shares SET from_owner = ? WHERE from_owner = ?`,
-        `UPDATE agent_shares SET to_owner = ? WHERE to_owner = ?`,
-        `UPDATE mgmt_heartbeat SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE derived_images SET created_by = ? WHERE created_by = ?`,
-        // Night review, 2026-09-27: the owner's Slack/Discord links (else the
-        // next rebuild leaves them out of their own agents' allowlists), parked
-        // Discord/Slack bots, the manager's pending cards, home-screen "seen"
-        // marks, and the manager's door token.
-        `UPDATE OR IGNORE member_identities SET user_id = ? WHERE user_id = ?`,
-        `UPDATE discord_bots SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE mgmt_proposals SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE model_changes SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE OR IGNORE agent_seen SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE OR IGNORE telegram_unlinks SET owner_id = ? WHERE owner_id = ?`,
-        `UPDATE ops_tokens SET owner_id = ? WHERE owner_id = ?`,
-      ]) {
+      for (const { table, column, how, agent, usedBy } of OWNER_COLUMNS) {
+        if (how === 'stays' || how === 'own-step') continue;
+        const verb = how === 'keep-old' ? 'UPDATE OR REPLACE' : how === 'keep-new' || how === 'keep-new-drop' ? 'UPDATE OR IGNORE' : 'UPDATE';
         try {
-          rows += this.db.prepare(sql).run(owner, localOwner).changes;
+          // An agent that stayed behind (its slug clashed) keeps what is about
+          // it (budget, members, tokens…), and what only it uses (a source,
+          // a machine, a connection). Run after the agents row, which is first.
+          const users = usedBy && ((who: string) => `SELECT u.${usedBy.column} FROM ${usedBy.table} u JOIN agents a ON a.id = u.${usedBy.agent}
+            WHERE a.owner_id = ${who} AND a.state != 'DELETED' AND u.${usedBy.column} IS NOT NULL`);
+          const keep = agent ? ` AND (${agent} IS NULL OR ${agent} NOT IN (SELECT id FROM agents WHERE owner_id = ?))`
+            : users ? ` AND (id NOT IN (${users('?')}) OR id IN (${users('?')}))` : '';
+          const args = agent ? [owner, localOwner, localOwner] : users ? [owner, localOwner, localOwner, owner] : [owner, localOwner];
+          rows += this.db.prepare(`${verb} ${table} SET ${column} = ? WHERE ${column} = ?${keep}`).run(...args).changes;
+          // What is left of the old owner's clashed with the account's own day.
+          if (how === 'keep-new-drop') this.db.prepare(`DELETE FROM ${table} WHERE ${column} = ?`).run(localOwner);
         } catch (err) {
           // telegram_pool is created lazily by the pool module; a store that
           // never leased a bot has no such table yet.
@@ -2787,9 +2945,201 @@ export class Store {
         .run(localOwner, owner);
       rows += this.db.prepare(`UPDATE OR IGNORE accounts SET owner_id = ? WHERE owner_id = ?`).run(owner, localOwner).changes;
       this.db.prepare(`UPDATE accounts SET telegram_user_id = NULL WHERE owner_id = ?`).run(localOwner);
+      // Handed over whole: done, and the guard above holds from now on. An
+      // agent that stayed behind keeps the pin open, for a try after a restart.
+      if (unfinished && !this.localOwnerHasData(localOwner)) {
+        this.db.prepare(`UPDATE first_account SET done_at = ? WHERE id = 1`).run(new Date().toISOString());
+      }
       return rows;
     });
     return adopt(newOwnerId);
+  }
+
+  /**
+   * Was the old owner's data handed over before pins existed? An account that
+   * could have taken it (not `except`) owns an agent, a source or a host. A
+   * member's own (an accounts-mode account that is not the host owner) says
+   * nothing: one who signed in first and added a source did not take the
+   * fleet, and the owner's hand-over is still due.
+   */
+  #adoptedAlready(localOwner: string, except?: string): boolean {
+    return !!this.db.prepare(
+      `SELECT 1 FROM (SELECT owner_id FROM agents UNION ALL SELECT owner_id FROM ai_profiles UNION ALL SELECT owner_id FROM hosts) o
+       WHERE o.owner_id NOT IN (?, ?)
+         AND o.owner_id NOT IN (SELECT id FROM local_accounts WHERE host_owner = 0) LIMIT 1`,
+    ).get(localOwner, except ?? localOwner);
+  }
+
+
+  /**
+   * What is unique per owner, settled before the old owner's rows move to
+   * `owner` (see OWNER_COLUMNS):
+   *  - a deleted agent's slug makes way (as releaseDeletedSlug does);
+   *  - the account's own management source wins;
+   *  - a class named like one of the account's is renamed "Name (2)"; its id,
+   *    and so its agents, stay as they are;
+   *  - a Google connection to the same account: the account's own row stays,
+   *    as it is the newer consent, and the old row's agents are attached to
+   *    it; the old row and its stored token go.
+   */
+  #settleOwnerClashes(owner: string, localOwner: string): void {
+    const deleted = this.db.prepare(
+      `SELECT d.owner_id AS ownerId, d.slug FROM agents d
+       JOIN agents o ON o.slug = d.slug AND o.owner_id = (CASE d.owner_id WHEN ? THEN ? ELSE ? END)
+       WHERE d.state = 'DELETED' AND d.owner_id IN (?, ?)`,
+    ).all(owner, localOwner, owner, owner, localOwner) as Array<{ ownerId: string; slug: string }>;
+    for (const d of deleted) this.releaseDeletedSlug(d.ownerId, d.slug);
+    this.db.prepare(
+      `UPDATE ai_profiles SET mgmt_llm = 0
+       WHERE owner_id = ? AND mgmt_llm = 1 AND EXISTS (SELECT 1 FROM ai_profiles p WHERE p.owner_id = ? AND p.mgmt_llm = 1)`,
+    ).run(localOwner, owner);
+    const classes = this.db.prepare(`SELECT id, name, owner_id FROM agent_classes WHERE owner_id IN (?, ?)`).all(owner, localOwner) as Array<{ id: string; name: string; owner_id: string }>;
+    const taken = new Set(classes.map((c) => c.name));
+    const mine = new Set(classes.filter((c) => c.owner_id === owner).map((c) => c.name));
+    for (const c of classes) {
+      if (c.owner_id !== localOwner || !mine.has(c.name)) continue;
+      let n = 2;
+      while (taken.has(`${c.name} (${n})`)) n++;
+      const name = `${c.name} (${n})`;
+      taken.add(name);
+      this.db.prepare(`UPDATE agent_classes SET name = ? WHERE id = ?`).run(name, c.id);
+    }
+    const clashes = this.db.prepare(
+      `SELECT o.id AS old, o.secret_ref AS ref, n.id AS keep FROM connections o
+       JOIN connections n ON n.owner_id = ? AND n.kind = o.kind AND n.email = o.email
+       WHERE o.owner_id = ?`,
+    ).all(owner, localOwner) as Array<{ old: string; ref: string; keep: string }>;
+    // The agents that will stay behind: a live slug the account has too
+    // (deleted ones made way above). They keep the old connection, which
+    // then stays with the old owner; the agents that move go to the account's.
+    const movers = `agent_id NOT IN (SELECT a.id FROM agents a JOIN agents b ON b.owner_id = ? AND b.slug = a.slug WHERE a.owner_id = ?)`;
+    for (const c of clashes) {
+      // The agents moved still hold the old connection's token: their pull
+      // time goes before the account's consent, so the health view says to
+      // attach them again (stale), as after a reconnect. One never delivered
+      // (NULL) stays so: it is not given a time it was never pulled at.
+      const consent = (this.db.prepare(`SELECT created_at FROM connections WHERE id = ?`).get(c.keep) as { created_at: string }).created_at;
+      const before = Number.isFinite(Date.parse(consent)) ? new Date(Date.parse(consent) - 1000).toISOString() : '1970-01-01T00:00:00.000Z';
+      this.db.prepare(
+        `INSERT OR IGNORE INTO agent_connections (agent_id, connection_id, gmail_no_send, attached_at, materialized_at)
+         SELECT agent_id, ?, gmail_no_send, attached_at, CASE WHEN materialized_at IS NULL THEN NULL WHEN materialized_at < ? THEN materialized_at ELSE ? END
+         FROM agent_connections WHERE connection_id = ? AND ${movers}`,
+      ).run(c.keep, consent, before, c.old, owner, localOwner);
+      this.db.prepare(`DELETE FROM agent_connections WHERE connection_id = ? AND ${movers}`).run(c.old, owner, localOwner);
+      if (this.db.prepare(`SELECT 1 FROM agent_connections WHERE connection_id = ?`).get(c.old)) continue;
+      this.db.prepare(`DELETE FROM connections WHERE id = ?`).run(c.old);
+      try { this.db.prepare(`DELETE FROM secrets WHERE ref = ?`).run(c.ref); }
+      catch (err) { if (!/no such table/.test(String(err))) throw err; /* another secret store */ }
+    }
+  }
+
+  /**
+   * Does the old owner still own anything the first account's hand-over
+   * moves (adoptLocalOwnerData: every table OWNER_COLUMNS moves, a live
+   * agent's row only)? With its agents deleted, or "This machine" remade
+   * for an account, its Google connections, spare pool bots, peers, CLI
+   * tokens and settings are still the account's to take. Asked before a
+   * hand-over; what stayed behind after one is localOwnerHasData.
+   */
+  localOwnerHasAnything(localOwner = 'dev-owner'): boolean {
+    for (const { table, column, how } of OWNER_COLUMNS) {
+      if (how === 'stays' || how === 'own-step') continue;
+      try {
+        if (this.db.prepare(`SELECT 1 FROM ${table} WHERE ${column} = ?${table === 'agents' ? ` AND state != 'DELETED'` : ''} LIMIT 1`).get(localOwner)) return true;
+      } catch (err) {
+        // telegram_pool is made by the pool module when it first starts.
+        if (!/no such table/.test(String(err))) throw err;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Did the old owner keep what decides whether a hand-over is whole: an
+   * agent, a source or a host (an agent that stayed behind keeps what only
+   * it uses)? A row that can never move (one the account has its own of)
+   * does not hold the hand-over open.
+   */
+  localOwnerHasData(localOwner = 'dev-owner'): boolean {
+    return !!this.db.prepare(
+      `SELECT 1 FROM agents WHERE owner_id = ? AND state != 'DELETED'
+       UNION ALL SELECT 1 FROM ai_profiles WHERE owner_id = ?
+       UNION ALL SELECT 1 FROM hosts WHERE owner_id = ? LIMIT 1`,
+    ).get(localOwner, localOwner, localOwner);
+  }
+
+  /** Is there still such an account (one that has signed in, or a local one)? */
+  accountExists(ownerId: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM accounts WHERE owner_id = ? UNION ALL SELECT 1 FROM local_accounts WHERE id = ? LIMIT 1`).get(ownerId, ownerId);
+  }
+
+  /**
+   * May this account take over the old owner's data? In accounts mode only
+   * the host owner (account #1): a member who signs in first is not it. An
+   * identity-mode account has no local_accounts row: any may.
+   */
+  mayTakeOverInstall(ownerId: string): boolean {
+    const r = this.db.prepare(`SELECT host_owner FROM local_accounts WHERE id = ?`).get(ownerId) as { host_owner: number } | undefined;
+    return !r || r.host_owner === 1;
+  }
+
+  /**
+   * The account the hand-over above is for: the first to ask, recorded on its
+   * own before the hand-over runs, so a later account cannot win it after a
+   * failed try, nor after a restart. Returns the recorded pin, or undefined
+   * when there is none to make: the data went to an account already (before
+   * pins existed, or in the step that made account #1). Only another
+   * account's rows show that: the asker's own (made while a save of its pin
+   * failed, even across a restart, or a "This machine" host remade at boot
+   * for it, installOwner) do not, or its hand-over was lost for good; nor a
+   * member's (#adoptedAlready).
+   */
+  pinFirstAccount(ownerId: string, localOwner = 'dev-owner'): { ownerId: string; done: boolean } | undefined {
+    return this.db.transaction(() => {
+      const row = this.db.prepare(`SELECT owner_id, done_at FROM first_account WHERE id = 1`).get() as { owner_id: string; done_at: string | null } | undefined;
+      if (row) return { ownerId: row.owner_id, done: !!row.done_at };
+      if (this.#adoptedAlready(localOwner, ownerId)) return undefined;
+      this.db.prepare(`INSERT INTO first_account (id, owner_id, at) VALUES (1, ?, ?)`).run(ownerId, new Date().toISOString());
+      return { ownerId, done: false };
+    })();
+  }
+
+  /**
+   * Whom a re-made "This machine" host belongs to (index.ts makes it when it
+   * is missing): with accounts, the install's owner — account #1 (the host
+   * owner setting), or the one the old owner's data was handed to — else
+   * dev-owner, whose rows nobody signed in can see. Identity mode has no
+   * owner setting: an install handed over before pins existed goes to the
+   * account owning the first source or agent made (the person who set it up,
+   * whose password-mode data it took; the one owning the most could be a
+   * family member). When dev-owner has nothing left, the pick is recorded as
+   * the done pin, so it does not change later.
+   */
+  installOwner(mode: string, localOwner = 'dev-owner'): string {
+    if (mode === 'accounts') {
+      const r = this.db.prepare(`SELECT id FROM local_accounts WHERE host_owner = 1 ORDER BY created_at LIMIT 1`).get() as { id: string } | undefined;
+      if (r) return r.id;
+    }
+    if (mode === 'password') return localOwner;
+    return this.db.transaction(() => {
+      const pin = this.db.prepare(`SELECT owner_id, done_at FROM first_account WHERE id = 1`).get() as { owner_id: string; done_at: string | null } | undefined;
+      if (pin) return pin.done_at ? pin.owner_id : localOwner;
+      const first = this.db.prepare(
+        `SELECT owner_id FROM (
+           SELECT owner_id, created_at FROM agents
+           UNION ALL SELECT owner_id, created_at FROM ai_profiles)
+         WHERE owner_id != ? ORDER BY created_at, owner_id LIMIT 1`,
+      ).get(localOwner) as { owner_id: string } | undefined;
+      if (!first) return localOwner;
+      // Recorded as done only when the old owner has nothing left: a done pin
+      // ends the hand-over, and what dev-owner still has (a connection, a
+      // spare pool bot) is that account's to take at its next sign-in.
+      if (!this.localOwnerHasAnything(localOwner)) {
+        const at = new Date().toISOString();
+        this.db.prepare(`INSERT INTO first_account (id, owner_id, at, done_at) VALUES (1, ?, ?, ?)`).run(first.owner_id, at, at);
+      }
+      return first.owner_id;
+    })();
   }
 
   // ---- Events --------------------------------------------------------------
@@ -2922,6 +3272,22 @@ export class Store {
    * attached or detached since, which settles it. Undefined otherwise.
    */
   telegramSkippedForNoBot(agentId: string): string | undefined {
+    const r = this.#lastTelegramChoice(agentId);
+    return r?.event === 'telegram.skipped' && r.detail?.auto === true ? r.at : undefined;
+  }
+
+  /**
+   * Whether its owner answered the bot-token step "go on without a bot" (the
+   * channel-token route, `telegram.skipped` with no auto), with no Telegram
+   * bot attached or detached since. An agent made web-only never was asked.
+   */
+  telegramSkippedByOwner(agentId: string): boolean {
+    const r = this.#lastTelegramChoice(agentId);
+    return r?.event === 'telegram.skipped' && r.detail?.auto !== true;
+  }
+
+  /** The agent's newest Telegram line that settles whether it has a bot: skipped, attached or detached. */
+  #lastTelegramChoice(agentId: string): { at: string; event: string; detail?: Record<string, unknown> } | undefined {
     const rows = this.db
       .prepare(`SELECT at, event, detail FROM agent_events WHERE agent_id = ? AND event IN ('telegram.skipped', 'channel.attached', 'channel.detached') ORDER BY id DESC LIMIT 20`)
       .all(agentId) as Array<{ at: string; event: string; detail: string | null }>;
@@ -2929,7 +3295,7 @@ export class Store {
       const d = r.detail ? safeParse(r.detail) : undefined;
       // Discord and Slack name their kind; a Telegram attach/detach does not.
       if (r.event !== 'telegram.skipped' && d?.kind && d.kind !== 'telegram') continue;
-      return r.event === 'telegram.skipped' && d?.auto === true ? r.at : undefined;
+      return { at: r.at, event: r.event, ...(d ? { detail: d } : {}) };
     }
     return undefined;
   }
@@ -3669,6 +4035,7 @@ export class Store {
    * agent after a delete) can take the slug back.
    */
   releaseDeletedSlug(ownerId: string, slug: string): void {
+    // Also how the first account's adoption makes way (#settleOwnerClashes).
     this.db
       .prepare(
         `UPDATE agents SET slug = slug || '-deleted-' || substr(id, 1, 8)
@@ -4132,6 +4499,25 @@ export class Store {
     })();
   }
 
+  /** The agent's tasks whose runs are told on the owner's phone (HB-0537, taskNotes.ts). */
+  cronNotes(agentId: string): Array<{ jobId: string; sinceMs: number; seenRunMs?: number }> {
+    return (this.db.prepare(`SELECT job_id, since_ms, seen_run_ms FROM cron_notes WHERE agent_id = ? ORDER BY job_id`).all(agentId) as Array<{ job_id: string; since_ms: number; seen_run_ms: number | null }>)
+      .map((r) => ({ jobId: r.job_id, sinceMs: r.since_ms, ...(r.seen_run_ms !== null ? { seenRunMs: r.seen_run_ms } : {}) }));
+  }
+  /** Agents with any such task: the quick pass looks only at those. */
+  agentsWithCronNotes(): Set<string> {
+    return new Set((this.db.prepare(`SELECT DISTINCT agent_id FROM cron_notes`).all() as Array<{ agent_id: string }>).map((r) => r.agent_id));
+  }
+  /** On: told from runs after `sinceMs` (already on, it keeps what it had). Off: forgotten. */
+  setCronNote(agentId: string, jobId: string, on: boolean, sinceMs: number): void {
+    if (on) this.db.prepare(`INSERT OR IGNORE INTO cron_notes (agent_id, job_id, since_ms) VALUES (?, ?, ?)`).run(agentId, jobId, sinceMs);
+    else this.db.prepare(`DELETE FROM cron_notes WHERE agent_id = ? AND job_id = ?`).run(agentId, jobId);
+  }
+  /** That run has been told (or was not one to tell): never again. */
+  markCronNoted(agentId: string, jobId: string, runMs: number): void {
+    this.db.prepare(`UPDATE cron_notes SET seen_run_ms = ? WHERE agent_id = ? AND job_id = ?`).run(runMs, agentId, jobId);
+  }
+
   // ---- token health, loops and the token ledger (tokenHealth.ts, tokenWatch.ts, compaction.ts) ----
   setTokenHealth(agentId: string, health: unknown, at: string): void {
     this.db.prepare(`INSERT INTO agent_token_health (agent_id, health, at) VALUES (?, ?, ?)
@@ -4247,12 +4633,12 @@ export class Store {
   }
   // ---- budgets (budgets.ts) ----
   listBudgets(): BudgetRow[] {
-    return (this.db.prepare(`SELECT * FROM budgets`).all() as any[]).map((r) => ({
-      scope: r.scope, ownerId: r.owner_id, usd: r.usd, atLimit: r.at_limit === 'pause' || r.at_limit === 'cheaper' ? r.at_limit : 'warn', setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}),
-    }));
+    return (this.db.prepare(`SELECT * FROM budgets`).all() as any[]).map(budgetRow);
   }
+  /** One row, by its key: a budget pass reads it before each action (HB-0574). */
   getBudget(scope: string): BudgetRow | undefined {
-    return this.listBudgets().find((b) => b.scope === scope);
+    const r = this.db.prepare(`SELECT * FROM budgets WHERE scope = ?`).get(scope) as any;
+    return r ? budgetRow(r) : undefined;
   }
   /** usd null removes it. */
   setBudget(scope: string, ownerId: string, usd: number | null, atLimit: 'warn' | 'pause' | 'cheaper', at: string, by?: string): void {
@@ -4312,11 +4698,14 @@ export class Store {
     if (opts.open) where.push('resumed_at IS NULL');
     if (opts.month) { where.push('month = ?'); args.push(opts.month); }
     return (this.db.prepare(`SELECT * FROM budget_pauses ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY paused_at`).all(...args) as any[])
-      .map((r) => ({ agentId: r.agent_id, month: r.month, scope: r.scope, pausedAt: r.paused_at, kind: r.kind === 'cheaper' ? 'cheaper' as const : 'pause' as const,
-        ...(r.already_stopped ? { alreadyStopped: true } : {}),
-        ...(r.kind === 'cheaper' ? { fromModel: r.from_model ?? null } : {}), ...(r.to_model ? { toModel: r.to_model } : {}),
-        ...(r.replies ? { replies: safeParse(r.replies) as Record<string, { u: number; at: number }> } : {}),
-        ...(r.resumed_at ? { resumedAt: r.resumed_at } : {}), ...(r.resumed_by ? { resumedBy: r.resumed_by } : {}) }));
+      .map((r) => this.#pauseRow(r));
+  }
+  #pauseRow(r: any): BudgetPauseRow {
+    return { agentId: r.agent_id, month: r.month, scope: r.scope, pausedAt: r.paused_at, kind: r.kind === 'cheaper' ? 'cheaper' as const : 'pause' as const,
+      ...(r.already_stopped ? { alreadyStopped: true } : {}),
+      ...(r.kind === 'cheaper' ? { fromModel: r.from_model ?? null } : {}), ...(r.to_model ? { toModel: r.to_model } : {}),
+      ...(r.replies ? { replies: safeParse(r.replies) as Record<string, { u: number; at: number }> } : {}),
+      ...(r.resumed_at ? { resumedAt: r.resumed_at } : {}), ...(r.resumed_by ? { resumedBy: r.resumed_by } : {}) };
   }
   getBudgetPause(agentId: string, month: string): BudgetPauseRow | undefined {
     return this.listBudgetPauses({ month }).find((p) => p.agentId === agentId);
@@ -4390,6 +4779,23 @@ export class Store {
    */
   disownBudgetPause(agentId: string): boolean {
     return this.db.prepare(`UPDATE budget_pauses SET already_stopped = 1 WHERE agent_id = ? AND kind = 'pause' AND resumed_at IS NULL AND already_stopped = 0`).run(agentId).changes > 0;
+  }
+  /** An open switch to a cheaper model that did not take (its runtime refused it): as if it was never made. */
+  dropCheaperPause(agentId: string, month: string): void {
+    this.db.prepare(`DELETE FROM budget_pauses WHERE agent_id = ? AND month = ? AND kind = 'cheaper' AND resumed_at IS NULL`).run(agentId, month);
+  }
+  /** Its open switch to a cheaper model, if any (any month: one stays open until a pass ends it). */
+  openCheaperPause(agentId: string): BudgetPauseRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM budget_pauses WHERE agent_id = ? AND kind = 'cheaper' AND resumed_at IS NULL ORDER BY paused_at DESC LIMIT 1`).get(agentId);
+    return r ? this.#pauseRow(r) : undefined;
+  }
+  /**
+   * The model an open switch to a cheaper model puts back when it ends
+   * (its `fromModel`), for an agent still on that cheaper model: a class
+   * change made meanwhile is what it gets back. True when there was one.
+   */
+  setCheaperPauseFrom(agentId: string, onModel: string, fromModel: string | null): boolean {
+    return this.db.prepare(`UPDATE budget_pauses SET from_model = ? WHERE agent_id = ? AND kind = 'cheaper' AND resumed_at IS NULL AND to_model = ?`).run(fromModel, agentId, onModel).changes > 0;
   }
   resumeBudgetPause(agentId: string, month: string, at: string, by: string): void {
     this.db.prepare(`UPDATE budget_pauses SET resumed_at = ?, resumed_by = ? WHERE agent_id = ? AND month = ? AND resumed_at IS NULL`).run(at, by, agentId, month);
@@ -4564,10 +4970,16 @@ export class Store {
     this.db.prepare(`INSERT INTO search_hours (agent_id, hour, provider, n) VALUES (?, ?, ?, ?)
       ON CONFLICT(agent_id, hour, provider) DO UPDATE SET n = n + excluded.n`).run(agentId, at.slice(0, 13), provider, n);
   }
-  /** Searches per agent, hour and provider, from `fromHour` up to (not including) `toHour`. */
-  searchHours(fromHour: string, toHour: string): Array<{ agentId: string; hour: string; provider: string; n: number }> {
-    return (this.db.prepare(`SELECT agent_id, hour, provider, n FROM search_hours WHERE hour >= ? AND hour < ?`).all(fromHour, toHour) as
-      Array<{ agent_id: string; hour: string; provider: string; n: number }>).map((r) => ({ agentId: r.agent_id, hour: r.hour, provider: r.provider, n: r.n }));
+  /**
+   * Searches per agent, hour and provider, from `fromHour` up to (not
+   * including) `toHour`. `agentId`: that agent's rows only, by the table's
+   * key (HB-0578 review).
+   */
+  searchHours(fromHour: string, toHour: string, agentId?: string): Array<{ agentId: string; hour: string; provider: string; n: number }> {
+    const rows = agentId === undefined
+      ? this.db.prepare(`SELECT agent_id, hour, provider, n FROM search_hours WHERE hour >= ? AND hour < ?`).all(fromHour, toHour)
+      : this.db.prepare(`SELECT agent_id, hour, provider, n FROM search_hours WHERE agent_id = ? AND hour >= ? AND hour < ?`).all(agentId, fromHour, toHour);
+    return (rows as Array<{ agent_id: string; hour: string; provider: string; n: number }>).map((r) => ({ agentId: r.agent_id, hour: r.hour, provider: r.provider, n: r.n }));
   }
   pruneSearchHours(beforeIso: string): void {
     this.db.prepare(`DELETE FROM search_hours WHERE hour < ?`).run(beforeIso.slice(0, 13));
@@ -4690,6 +5102,29 @@ export class Store {
   markClientSecretChanged(kind: string, clientId: string, at: string): string[] {
     this.db.prepare(`UPDATE connections SET client_secret_at = ? WHERE kind = ? AND client_id = ?`).run(at, kind, clientId);
     return (this.db.prepare(`SELECT id FROM connections WHERE kind = ? AND client_id = ?`).all(kind, clientId) as Array<{ id: string }>).map((r) => r.id);
+  }
+
+  /**
+   * Attachments of this client's connections from before its last saved
+   * secret: never imported, or imported before it. Who is still owed the new
+   * secret (HB-0463), and the Connections page's secretPending: with what
+   * the delivery judges each agent by, and only `ownerId`'s accounts when it
+   * is given.
+   */
+  connectionsOwedClientSecret(kind: string, clientId: string, opts: { ownerId?: string } = {}): Array<{ agentId: string; connectionId: string; state: Agent['state']; runtimeRef?: string; migratedTo?: string }> {
+    return (this.db.prepare(
+      `SELECT ac.agent_id, ac.connection_id, a.state, a.runtime_ref, a.migrated_to FROM ${OWED_CLIENT_SECRET}
+       ${opts.ownerId === undefined ? '' : 'AND c.owner_id = ?'}
+       ORDER BY ac.agent_id, ac.connection_id`,
+    ).all(kind, clientId, ...(opts.ownerId === undefined ? [] : [opts.ownerId])) as any[])
+      .map((r) => ({ agentId: r.agent_id, connectionId: r.connection_id, state: r.state, runtimeRef: r.runtime_ref ?? undefined, migratedTo: r.migrated_to ?? undefined }));
+  }
+  /** One attachment, when it is owed the secret (the same rule): when it was last imported, null for never. */
+  connectionOwedClientSecret(kind: string, clientId: string, agentId: string, connectionId: string): { materializedAt: string | null } | undefined {
+    const r = this.db.prepare(
+      `SELECT ac.materialized_at FROM ${OWED_CLIENT_SECRET} AND ac.agent_id = ? AND ac.connection_id = ?`,
+    ).get(kind, clientId, agentId, connectionId) as { materialized_at: string | null } | undefined;
+    return r ? { materializedAt: r.materialized_at } : undefined;
   }
 
   /** How many connections, across every account, a client other than `clientId` issued. */
@@ -5115,6 +5550,22 @@ export class Store {
     }
   }
 
+  /**
+   * One file of the agent's setup layer (param_files), in one statement, the
+   * rest as it is now. Callers that wrote back the whole layer as they read it
+   * before an await put back a file another request had changed meanwhile
+   * (HB-0567). A layer that is not there yet is begun; `undefined` takes the
+   * file out of one that is.
+   */
+  setAgentParamFile(id: string, key: 'soul' | 'agents' | 'persona', text: string | undefined): void {
+    const at = new Date().toISOString();
+    if (text === undefined) {
+      this.db.prepare(`UPDATE agents SET param_files = json_remove(param_files, ?), updated_at = ? WHERE id = ? AND param_files IS NOT NULL`).run(`$.${key}`, at, id);
+    } else {
+      this.db.prepare(`UPDATE agents SET param_files = json_set(COALESCE(param_files, '{}'), ?, ?), updated_at = ? WHERE id = ?`).run(`$.${key}`, text, at, id);
+    }
+  }
+
   /** Declare (or clear, with null) the agent's template setup fields. */
   setAgentParameters(id: string, params: TemplateParam[] | null): void {
     this.db
@@ -5263,8 +5714,17 @@ export class Store {
    *  call this — that's what writes the call-agent tool; a live model change
    *  calling it would clear "rebuild needed" without installing anything. */
   recordAppliedPeers(id: string): void {
-    const peers = this.listAgentPeers(id).slice().sort().join(',');
-    this.db.prepare(`UPDATE agents SET applied_peers = ? WHERE id = ?`).run(peers, id);
+    this.db.prepare(`UPDATE agents SET applied_peers = ? WHERE id = ?`).run(peersCsv(this.listAgentPeers(id)), id);
+  }
+
+  /** Whose Brave key the container was built with. ONLY a provision/rebuild records it: that is what puts the key in. */
+  recordAppliedSearchKey(id: string, which: 'own' | 'fleet' | 'none'): void {
+    this.db.prepare(`UPDATE agents SET applied_search_key = ? WHERE id = ?`).run(which, id);
+  }
+  /** See recordAppliedSearchKey; undefined for a container built before it was recorded. */
+  appliedSearchKey(id: string): 'own' | 'fleet' | 'none' | undefined {
+    const v = (this.db.prepare(`SELECT applied_search_key AS k FROM agents WHERE id = ?`).get(id) as { k: string | null } | undefined)?.k;
+    return v === 'own' || v === 'fleet' || v === 'none' ? v : undefined;
   }
 
   /** True if the agent holds an (unexpired) A2A call token row. */
@@ -5287,7 +5747,7 @@ export class Store {
     }
     const out = new Set<string>();
     for (const [id, csv] of applied) {
-      if ((cur.get(id) ?? []).slice().sort().join(',') !== csv) out.add(id);
+      if (peersCsv(cur.get(id) ?? []) !== csv) out.add(id);
     }
     return out;
   }
@@ -5305,18 +5765,45 @@ export class Store {
     return r?.applied_peers ?? '';
   }
 
-  setAgentAIProfile(id: string, aiProfileId: string): void {
-    this.db
-      .prepare(`UPDATE agents SET ai_profile_id = ?, updated_at = ? WHERE id = ?`)
-      .run(aiProfileId, new Date().toISOString(), id);
+  /**
+   * 'ok', or why it did not take: the agent is gone (no row, deleted or being
+   * deleted), or the source is (deleted meanwhile, HB-0570).
+   */
+  setAgentAIProfile(id: string, aiProfileId: string): 'ok' | 'no-agent' | 'no-source' {
+    const took = this.db
+      .prepare(`UPDATE agents SET ai_profile_id = ?, updated_at = ? WHERE id = ? AND state NOT IN ('DELETED', 'DELETING') AND EXISTS (SELECT 1 FROM ai_profiles WHERE id = ?)`)
+      .run(aiProfileId, new Date().toISOString(), id, aiProfileId).changes > 0;
+    if (took) return 'ok';
+    const row = this.db.prepare(`SELECT state FROM agents WHERE id = ?`).get(id) as { state: string } | undefined;
+    return !row || row.state === 'DELETED' || row.state === 'DELETING' ? 'no-agent' : 'no-source';
   }
 
-  /** Per-agent model override; null clears it (agent follows the profile default). */
-  setAgentModel(id: string, model: string | null): void {
+  /**
+   * Per-agent model override; null clears it (agent follows the profile
+   * default). `hatchabot`: a write Hatchabot makes on its own, not one asked
+   * of it for this agent (the budget's switch down and its restore, the
+   * default-model sweep's hold of what it runs): it leaves modelGeneration
+   * as it was.
+   */
+  setAgentModel(id: string, model: string | null, opts: { hatchabot?: boolean } = {}): void {
     this.db
       .prepare(`UPDATE agents SET model = ?, updated_at = ? WHERE id = ?`)
       .run(model, new Date().toISOString(), id);
+    if (!opts.hatchabot) this.#modelWritten(id);
   }
+
+  /**
+   * How many times this agent's model has been written since the process
+   * started, the same value again included, by a change asked for it (its
+   * owner's, its class's), not one Hatchabot made on its own
+   * (setAgentModel's `hatchabot`): a writer that must undo only its own
+   * write (the budget's switch down, HB-0581) can tell whether one came
+   * after it, and a class change whether the agent changed its model
+   * itself since it was checked.
+   */
+  modelGeneration(id: string): number { return this.#modelGens.get(id) ?? 0; }
+  #modelGens = new Map<string, number>();
+  #modelWritten(id: string): void { this.#modelGens.set(id, this.modelGeneration(id) + 1); }
 
   /** One past the current max order in an owner's section (1 if empty), so a
    *  new or freshly-regrouped agent sorts strictly last there. */
@@ -5507,18 +5994,21 @@ export class Store {
     // list with placeholders — validModels is a small, owner-controlled menu.
     const placeholders = validModels.map(() => '?').join(',');
     const notInMenu = validModels.length ? `AND model NOT IN (${placeholders})` : '';
-    return this.db
+    const cleared = this.db
       .prepare(
         `UPDATE agents SET model = NULL, updated_at = ?
          WHERE ai_profile_id = ? ${ownerId ? 'AND owner_id = ?' : ''}
-           AND model IS NOT NULL ${notInMenu}`,
+           AND model IS NOT NULL ${notInMenu}
+         RETURNING id`,
       )
-      .run(
+      .all(
         new Date().toISOString(),
         profileId,
         ...(ownerId ? [ownerId] : []),
         ...validModels,
-      ).changes;
+      ) as Array<{ id: string }>;
+    for (const { id } of cleared) this.#modelWritten(id);
+    return cleared.length;
   }
 
   setAgentSharedMemory(id: string, shared: boolean): void {
@@ -6170,6 +6660,12 @@ export interface TokenIncidentRow {
   fix?: string;
 }
 
+function budgetRow(r: any): BudgetRow {
+  return {
+    scope: r.scope, ownerId: r.owner_id, usd: r.usd, atLimit: r.at_limit === 'pause' || r.at_limit === 'cheaper' ? r.at_limit : 'warn', setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}),
+  };
+}
+
 /** A monthly budget (budgets.ts): scope is an agent's id, or 'machine'. */
 export interface BudgetRow {
   scope: string;
@@ -6189,7 +6685,7 @@ export interface SpendAlertRow {
 }
 /**
  * An agent a budget paused, or moved to a cheaper model (budgets.ts).
- * resumedBy: owner | new-month | budget-raised | started | gone.
+ * resumedBy: owner | new-month | budget-raised | budget-changed | started | gone.
  */
 export interface BudgetPauseRow {
   agentId: string;

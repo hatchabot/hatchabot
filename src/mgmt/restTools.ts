@@ -231,6 +231,21 @@ export const REST_TOOLS: RestTool[] = [
     input_schema: obj({ agent: agentRef, name: str(64, 'name for the copy; default "<name> (copy)"') }, ['agent']),
     call: ({ agent, input }) => ({ method: 'POST', path: `/v1/agents/${agent!.id}/clone`, body: typeof input.name === 'string' ? { name: input.name } : {} }),
     card: ({ agent, input }) => `⧉ Clone "${agent!.name}" as "${typeof input.name === 'string' ? input.name : `${agent!.name} (copy)`}"`,
+    // What did not come along, as the app says it: a ✅ alone hid missing
+    // data sources, variables and daily notes (HB-0572).
+    done: (out) => {
+      const r = (out ?? {}) as { notCopied?: unknown; envNotCopied?: unknown; memoryNotCopied?: unknown; memoryCopyFailed?: unknown };
+      const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+      const lines: string[] = [];
+      if (list(r.notCopied).length) lines.push(`⚠ Its data sources (${list(r.notCopied).join(', ')}) did not come along: add them to the copy under Data.`);
+      if (list(r.envNotCopied).length) lines.push(`⚠ Its variables ${list(r.envNotCopied).join(', ')} could not be read, so the copy does not have them: add them under Advanced → Extra credentials.`);
+      if (r.memoryCopyFailed === true) lines.push("⚠ Its daily notes (memory/) and USER.md couldn't be read, so only MEMORY.md came along.");
+      else if (list(r.memoryNotCopied).length) {
+        const m = list(r.memoryNotCopied);
+        lines.push(`⚠ Some memory files were too big, not text or unreadable and stayed behind: ${m.slice(0, 5).join(', ')}${m.length > 5 ? '…' : ''}.`);
+      }
+      return lines.join('\n') || undefined;
+    },
   },
   {
     name: 'rename_agent', tier: 'mutate', agentArg: true,
@@ -265,11 +280,12 @@ export const REST_TOOLS: RestTool[] = [
     call: async ({ agent, input, get }) => {
       const ref = typeof input.class === 'string' ? input.class.trim() : '';
       if (!ref) return { method: 'POST', path: `/v1/agents/${agent!.id}/class`, body: { classId: null } };
-      const { classes } = (await get('/v1/agent-classes')) as { classes: Array<{ id: string; name: string; model?: string; aiProfileId?: string; image?: string; memoryCap?: string }> };
+      const { classes } = (await get('/v1/agent-classes')) as { classes: Array<{ id: string; name: string; model?: string; aiProfileId?: string; image?: string; memoryCap?: string; swapAllowance?: string }> };
       const cls = pick(classes ?? [], ref, 'class');
       input.__className = cardName(classes ?? [], cls);
-      // What joining changes, on the card: the class's source, model, image
-      // and memory cap — the card named only the class (night review).
+      // What joining changes, on the card: the class's source, model, image,
+      // memory cap and swap allowance — the card named only the class (night
+      // review), and then left out the swap allowance (HB-0558).
       let source: string | undefined;
       if (cls.aiProfileId) {
         try {
@@ -279,16 +295,28 @@ export const REST_TOOLS: RestTool[] = [
           source = hit ? cardName(list, hit) : 'another source';
         } catch { source = 'another source'; }
       }
-      const parts = [source && `AI source ${source}`, cls.model && `model ${cls.model}`, cls.image && `image ${cls.image}`, cls.memoryCap && `memory cap ${cls.memoryCap}`].filter(Boolean);
+      const parts = [source && `AI source ${source}`, cls.model && `model ${cls.model}`, cls.image && `image ${cls.image}`, cls.memoryCap && `memory cap ${cls.memoryCap}`, cls.swapAllowance && `swap allowance ${cls.swapAllowance}`].filter(Boolean);
       input.__classDetail = parts.length ? parts.join(', ') : 'nothing beyond the label';
       // What the card shows goes with the call: a class edited before Confirm
       // is refused, not applied under the card's old words (audit #097).
-      const reviewed = { aiProfileId: cls.aiProfileId ?? null, model: cls.model ?? null, image: cls.image ?? null, memoryCap: cls.memoryCap ?? null };
+      const reviewed = { aiProfileId: cls.aiProfileId ?? null, model: cls.model ?? null, image: cls.image ?? null, memoryCap: cls.memoryCap ?? null, swapAllowance: cls.swapAllowance ?? null };
       return { method: 'POST', path: `/v1/agents/${agent!.id}/class`, body: { classId: cls.id, reviewed } };
     },
     card: ({ agent, input }) => input.__className
       ? `🏷 Put "${agent!.name}" in the class "${String(input.__className)}" — it takes the class's ${String(input.__classDetail ?? 'settings')}. A source or image change applies at its next rebuild.`
       : `🏷 Remove "${agent!.name}" from its class`,
+    // What did not take, as the app says it: a model its runtime refused or
+    // could not take yet, memory limits its container kept, a rebuild still
+    // owed. Dropped, the receipt read ✅ over an agent on its old model (HB-0557).
+    done: (out) => {
+      const r = (out ?? {}) as { rebuild?: unknown; modelPending?: unknown; memoryPending?: unknown };
+      const lines = [
+        typeof r.modelPending === 'string' && r.modelPending ? `⚠ ${r.modelPending}` : '',
+        typeof r.memoryPending === 'string' && r.memoryPending ? `⚠ ${r.memoryPending}` : '',
+        r.rebuild === true ? 'Its new source or image waits for its next rebuild (rebuild_agent applies it now).' : '',
+      ].filter(Boolean);
+      return lines.length ? lines.join('\n') : undefined;
+    },
   },
   {
     name: 'pin_image', tier: 'mutate', agentArg: true, rebuildAfter: true,
@@ -722,6 +750,13 @@ export const REST_TOOLS: RestTool[] = [
     input_schema: obj({}),
     call: () => ({ method: 'POST', path: '/v1/backups/run', body: {} }),
     card: () => '💾 Back up every agent now',
+    // A run that could not start answers at once with status "error": that is
+    // a failure, not a ✅ (HB-0563). One under way ends in the background.
+    done: (out) => {
+      const run = (out as { run?: { status?: unknown; summary?: unknown } } | null)?.run;
+      if (run?.status === 'error') throw new Error(typeof run.summary === 'string' && run.summary.trim() ? run.summary.trim().split('\n').pop()! : 'The backup could not start.');
+      return run?.status === 'running' ? 'It runs in the background (usually a few minutes): list_backups shows when it is done.' : undefined;
+    },
   },
   {
     name: 'delete_base_image', tier: 'mutate',

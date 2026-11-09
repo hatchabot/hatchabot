@@ -13,6 +13,10 @@
  * The month is the UTC calendar month, as budgets use; on a plan with a
  * monthly cap whose reset Brave told the last check, it is the month that
  * ends at that reset instead.
+ *
+ * An agent with a BRAVE_API_KEY of its own searches on its own key: those are
+ * stored as OWN_BRAVE when they are read (sourceUsage.ts) and shown as its
+ * "other" searches, so they use none of the fleet key's credit (HB-0578).
  */
 import type { Store } from '../store/store.js';
 import type { WebSearchState } from './webSearch.js';
@@ -21,6 +25,12 @@ import type { WebSearchState } from './webSearch.js';
 export const OPS_AGENT_SEARCHES = '__hatchabot_agent__';
 /** Where Hatchabot's checks are counted: the key check, and an agent's search test. */
 export const SEARCH_CHECKS = '__checks__';
+/**
+ * The provider name a Brave search is stored under when the agent made it with
+ * its own BRAVE_API_KEY (HB-0578): its own quota and bill, so it counts with
+ * "other" here, never against the fleet key's credit or cost.
+ */
+export const OWN_BRAVE = 'brave-own';
 
 export interface SearchPrice {
   /** Dollars per 1,000 Brave searches. */
@@ -55,7 +65,7 @@ export interface SearchUsageRow {
   kind: 'agent' | 'hatchabot-agent' | 'checks' | 'removed';
   /** Searches Brave answered (each a request it bills). */
   brave: number;
-  /** Searches another provider answered (DuckDuckGo, an agent's own provider, or one the transcript did not name). */
+  /** Searches another provider answered (DuckDuckGo, an agent's own provider or own Brave key, or one the transcript did not name). */
   other: number;
   /** Answered from OpenClaw's cache: no request was made. */
   cached: number;
@@ -99,18 +109,30 @@ export interface SearchUsageReport {
 }
 
 const DAY = 86_400_000;
-const hourOf = (t: number) => new Date(t).toISOString().slice(0, 13);
+/** The UTC hour a time in ms falls in, as the search hours are kept (`2026-11-08T14`). */
+export const hourOfMs = (t: number) => new Date(t).toISOString().slice(0, 13);
 const dayOf = (t: number) => new Date(t).toISOString().slice(0, 10);
 const cents = (x: number) => Math.round(x * 100) / 100;
+
+/**
+ * The same day and time a month earlier, on the month's last day when it is
+ * shorter (HB-0579): a reset on 31 March follows one on 28 February, where
+ * setUTCMonth ran on into 3 March and the report left out five days.
+ */
+export function monthBefore(t: number): number {
+  const d = new Date(t);
+  const y = d.getUTCFullYear(), m = d.getUTCMonth();
+  const py = m === 0 ? y - 1 : y, pm = m === 0 ? 11 : m - 1;
+  const last = new Date(Date.UTC(py, pm + 1, 0)).getUTCDate();
+  return Date.UTC(py, pm, Math.min(d.getUTCDate(), last), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds());
+}
 
 /** The month the report covers: the quota's, when Brave said when it resets; else the UTC calendar month. */
 export function searchPeriod(state: Pick<WebSearchState, 'brave'>, now: number): { start: number; end: number; basis: 'calendar' | 'quota' } {
   const b = state.brave;
   const reset = b?.resetsAt ? Date.parse(b.resetsAt) : NaN;
   if (b && (b.limit ?? 0) > 0 && Number.isFinite(reset) && reset > now && reset <= now + 32 * DAY) {
-    const s = new Date(reset);
-    s.setUTCMonth(s.getUTCMonth() - 1);
-    return { start: s.getTime(), end: reset, basis: 'quota' };
+    return { start: monthBefore(reset), end: reset, basis: 'quota' };
   }
   const d = new Date(now);
   return { start: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1), end: Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1), basis: 'calendar' };
@@ -127,7 +149,7 @@ export function searchUsageReport(o: {
   const { state, price, now } = o;
   const period = searchPeriod(state, now);
   const perSearch = price.per1000 / 1000;
-  const rows = o.hours(hourOf(period.start), hourOf(period.end));
+  const rows = o.hours(hourOfMs(period.start), hourOfMs(period.end));
 
   const days = new Map<string, { brave: number; other: number }>();
   for (let t = Date.UTC(new Date(period.start).getUTCFullYear(), new Date(period.start).getUTCMonth(), new Date(period.start).getUTCDate()); t < period.end; t += DAY) {
@@ -146,7 +168,7 @@ export function searchUsageReport(o: {
     const day = days.get(r.hour.slice(0, 10));
     if (r.provider === 'brave') { w.brave += r.n; if (day) day.brave += r.n; }
     else if (r.provider === 'cached') w.cached += r.n;
-    else { w.other += r.n; if (day) day.other += r.n; }
+    else { w.other += r.n; if (day) day.other += r.n; } // OWN_BRAVE among them: the agent's own bill
   }
   const byAgent = [...who.values()]
     .map((w) => ({ ...w, cost: cents(w.brave * perSearch) }))

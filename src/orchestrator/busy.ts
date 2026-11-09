@@ -9,6 +9,8 @@
  * transition, which surfaced to the user as a rolled-back migration.
  */
 const busy = new Set<string>();
+/** Who waits for an agent to be free (busyDone), let go when it is. */
+const freed = new Map<string, Array<() => void>>();
 
 export function markBusy(agentId: string): void {
   busy.add(agentId);
@@ -16,10 +18,39 @@ export function markBusy(agentId: string): void {
 
 export function clearBusy(agentId: string): void {
   busy.delete(agentId);
+  const waiting = freed.get(agentId);
+  freed.delete(agentId);
+  for (const go of waiting ?? []) go();
 }
 
 export function isBusy(agentId: string): boolean {
   return busy.has(agentId);
+}
+
+/**
+ * Settles once the agent is no longer busy (at once when it is not): for a
+ * job that waits its turn behind whatever holds the agent, rather than
+ * looking again every few seconds. `signal`: a waiter that stops waiting
+ * (its own time limit) is let go and forgotten, not kept until the agent is
+ * free. Never rejects.
+ */
+export function busyDone(agentId: string, signal?: AbortSignal): Promise<void> {
+  if (!busy.has(agentId) || signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const go = () => { signal?.removeEventListener('abort', leave); resolve(); };
+    const leave = () => {
+      const rest = (freed.get(agentId) ?? []).filter((w) => w !== go);
+      if (rest.length) freed.set(agentId, rest); else freed.delete(agentId);
+      resolve();
+    };
+    freed.set(agentId, [...(freed.get(agentId) ?? []), go]);
+    signal?.addEventListener('abort', leave, { once: true });
+  });
+}
+
+/** How many wait for this agent to be free (tests: a waiter that gave up is not among them). */
+export function busyWaiters(agentId: string): number {
+  return freed.get(agentId)?.length ?? 0;
 }
 
 /** A second lifecycle operation arrived while one was still running. */

@@ -260,7 +260,7 @@ describe('a runner (remote daemon) is probed through its own daemon', () => {
       const s = await remote.compressedSwap();
       expect(s.kind).toBe('zswap');
       const run = argv().split('\n').find((l) => l.includes('zswap.%s'))!;
-      expect(run).toMatch(/^-H ssh:\/\/runner@10\.0\.0\.9 run --rm --name hatchabot-vx-[0-9a-f]+ --label hatchabot\.oneshot=hatchabot --network none alpine sh -c /);
+      expect(run).toMatch(/^-H ssh:\/\/runner@10\.0\.0\.9 run --rm --name hatchabot-vx-[0-9a-f]+ --label hatchabot\.oneshot\.process=[0-9a-f]+ --label hatchabot\.oneshot=hatchabot --network none alpine sh -c /);
       writeFileSync(LOG, '');
       await remote.provision(spec({ memory: '3g', memorySwap: '1g' }) as never);
       expect(createLine()).toContain('--memory 3g --memory-swap 4g');

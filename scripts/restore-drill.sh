@@ -44,12 +44,24 @@ fi
 
 # Pre-rename .env files: alias AGENTCLAW_* → HATCHABOT_* (existing HATCHABOT_* wins).
 for v in $(compgen -A variable AGENTCLAW_ 2>/dev/null); do n="HATCHABOT_${v#AGENTCLAW_}"; [ -n "${!n+x}" ] || export "$n=${!v}"; done
-# Whose record this is: the mark this install's backup sets carry (key_owner in
-# backup-volumes.sh), a fingerprint and never the key. uninstall.sh goes by it, as
-# two installs or machines can share the folder (HB-0440).
-DRILL_BY="$(node -e '
-  const key = process.env.HATCHABOT_SECRET_KEY;
-  if (key) process.stdout.write(require("node:crypto").createHash("sha256").update("hatchabot-backup-owner\0" + key).digest("hex").slice(0, 16));' 2>/dev/null || true)"
+# Whose record this is: the mark this install's backup sets carry, a fingerprint
+# and never the key (key_owner, scripts/backup-owner.sh: the one copy).
+# uninstall.sh goes by it, as two installs or machines can share the folder (HB-0440).
+# Missing or unreadable (a checkout cut off part-way, a permission), sourcing it
+# ended the drill under set -e before its trap: no record, and no word in the
+# app (thirteenth review). As the channel timers do with follow-tries.sh:
+# stand-ins, and said. Whose a set is cannot be told then, so the drill takes
+# the newest complete set, as an install with no key does, and its record
+# names no install.
+if ! { [ -r scripts/backup-owner.sh ] && . scripts/backup-owner.sh && declare -F key_owner set_owner >/dev/null; }; then
+  echo "  ⚠ Could not read $PWD/scripts/backup-owner.sh: this drill cannot tell whose sets are whose, so it takes the newest complete set and its record names no install." >&2
+  key_owner() { :; }
+  set_owner() { :; }
+fi
+DRILL_BY="$(key_owner)"
+# The record's owner: this install's mark; the drilled set's own when it is
+# another's, or when this install has no key (below).
+RECORD_OWNER="$DRILL_BY"
 BASE="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
 [ -d "$BASE" ] || [ -n "${HATCHABOT_BACKUP_DIR:-}" ] || { [ -d "$HOME/agentclaw-backups" ] && BASE="$HOME/agentclaw-backups"; }
 IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
@@ -68,8 +80,17 @@ umask 077
 # whether its run finished with every volume in. A set from before the record
 # has none and is taken as it is.
 set_state() { local s; s="$(grep -m1 -o '"state":"[a-z]*"' "$1/backup-status.json" 2>/dev/null || true)"; s="${s#\"state\":\"}"; printf '%s' "${s%\"}"; }
+# Whose set it is: set_owner (scripts/backup-owner.sh), as backup-volumes.sh's
+# retention reads it. Another install's set (two installs share the folder) is
+# not this one's to prove: a drill of it said this install could recover from
+# the other's data (HB-0540).
+# Whether a set whose owner is $1 is another's. Only when this install's own
+# mark is known, as the app reads it (foreignSet): with no key, every marked set
+# was passed over here while the app took them all as this one's (review of HB-0540).
+foreign_owner() { [ -n "$DRILL_BY" ] && [ -n "$1" ] && [ "$1" != "$DRILL_BY" ]; }
 
 RECORD_DIR=""
+SET_OWNER=""
 SET_DATE=""
 SET_STATE=""
 REASON=""
@@ -100,10 +121,35 @@ write_record() {
   local file
   file="$RECORD_DIR/$(date -u +%Y-%m-%dT%H-%M-%SZ).json"
   printf '{"version":1,"set":"%s","setState":"%s","startedAt":"%s","finishedAt":"%s","durationSec":%d,"trigger":"%s","result":"%s","reason":"%s","database":"%s","key":"%s","owner":"%s","volumes":[%s],"isolation":{"network":"none","memory":"%s","cpus":"%s"}}\n' \
-    "$SET_DATE" "$SET_STATE" "$started" "$(date -u +%FT%TZ)" "$SECONDS" "$TRIGGER" "$result" "$REASON" "$db_result" "$key_result" "$DRILL_BY" "$vols" "$LIM_MEMORY" "$LIM_CPUS" \
+    "$SET_DATE" "$SET_STATE" "$started" "$(date -u +%FT%TZ)" "$SECONDS" "$TRIGGER" "$result" "$REASON" "$db_result" "$key_result" "$RECORD_OWNER" "$vols" "$LIM_MEMORY" "$LIM_CPUS" \
     > "$file.tmp" && mv -f "$file.tmp" "$file" || true
-  # The newest 30 records are kept.
-  find "$RECORD_DIR" -maxdepth 1 -type f -name '20*.json' | sort -r | tail -n +31 | while IFS= read -r old; do rm -f "$old"; done
+}
+# The newest 30 of this install's own (its mark, DRILL_BY) are kept, with those
+# that name none, from before records said whose: across every install sharing
+# the folder, another's drills pushed this one's out (second review of
+# HB-0540). Another owner's are left to its own drills, even when this run
+# drilled one of its sets and wrote its record as that install's: pruned by
+# the record's owner, a drill of another install's set from here removed that
+# install's older records (ninth review). With no key of its own, the owner
+# it wrote (the set's) is the best it knows of itself.
+# Every record's owner in one pass (a record is one line): a sed for each
+# one forked hundreds of times in a folder two installs share (third review).
+# Only records this user can read, and nothing here can fail: one it could not
+# (another install's, mode 600) failed the pipeline, and under set -e that
+# ended the EXIT trap before the drill's container, volume, scratch folder and
+# lock were cleaned up (fourth review of HB-0540).
+prune_records() {
+  [ -n "$RECORD_DIR" ] && [ -n "$LOCK" ] || return 0
+  local kept=0 old by f
+  find "$RECORD_DIR" -maxdepth 1 -type f -name '20*.json' 2>/dev/null | while IFS= read -r f; do
+      if [ -r "$f" ]; then printf '%s\0' "$f"; fi
+    done | xargs -0 awk 'FNR == 1 {
+      by = ""; if (match($0, /"owner":"[0-9a-f]*"/)) by = substr($0, RSTART + 9, RLENGTH - 10)
+      print FILENAME "\t" by }' 2>/dev/null | sort -r | while IFS=$'\t' read -r old by; do
+    [ -z "$by" ] || [ "$by" = "${DRILL_BY:-$RECORD_OWNER}" ] || continue
+    kept=$((kept + 1))
+    [ "$kept" -le 30 ] || rm -f "$old" 2>/dev/null || true
+  done || true
 }
 cleanup() {
   [ -n "$DRILL_CT" ] && docker rm -f "$DRILL_CT" >/dev/null 2>&1 || true
@@ -112,9 +158,14 @@ cleanup() {
 }
 finish() {
   local rc=$?
+  # Nothing here may end the trap part-way: under set -e one failed step left
+  # the container, the volume, the scratch folder and the lock behind (fourth
+  # review of HB-0540). The record, the cleanup, and only then what is optional.
+  set +e
   [ "$rc" -eq 0 ] || fail=1
   write_record
   cleanup
+  prune_records
   # Only this drill's own lock: one that names another drill is that drill's.
   [ -n "$LOCK" ] && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"
   exit "$rc"
@@ -198,6 +249,8 @@ if [ $# -ge 1 ]; then
   take_lock
   st="$(set_state "$BACKUP")"
   if [ -n "$st" ] && [ "$st" != complete ]; then echo "  ⚠ $(basename "$BACKUP") is not a complete set (its run says \"$st\") — drilling it anyway, as asked." >&2; fi
+  SET_OWNER="$(set_owner "$BACKUP")"
+  if foreign_owner "$SET_OWNER"; then echo "  ⚠ $(basename "$BACKUP") is another Hatchabot install's set (its .backup-owner, or the key it saved, is not this install's) — drilling it anyway, as asked." >&2; fi
 else
   # The base checked first: under pipefail a find on a missing directory
   # ended the script with find's own error and not this one (2026-10-09).
@@ -206,12 +259,17 @@ else
   take_lock
   # The newest set whose run finished: a partial or still-running one is not
   # what a restore would use, and drilling it proved nothing (2026-10-09).
+  # Its record first (a grep), its owner only for a set it would take, newest
+  # first, and it stops at the first one kept: the owner of every set was read
+  # before, a node for each one from before the owner file (second review).
   BACKUP=""
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     st="$(set_state "$d")"
-    if [ -z "$st" ] || [ "$st" = complete ]; then BACKUP="$(cd "$d" && pwd)"; break; fi
-    echo "  • $(basename "$d") is not a complete set (its run says \"$st\") — passing over it" >&2
+    if [ -n "$st" ] && [ "$st" != complete ]; then echo "  • $(basename "$d") is not a complete set (its run says \"$st\") — passing over it" >&2; continue; fi
+    so="$(set_owner "$d")"
+    if foreign_owner "$so"; then echo "  • $(basename "$d") is another Hatchabot install's set — passing over it" >&2; continue; fi
+    BACKUP="$(cd "$d" && pwd)"; SET_OWNER="$so"; break
   done < <(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | sort -r)
   [ -n "$BACKUP" ] || { REASON=no-complete-set; echo "✗ No complete backup set under $BASE" >&2; exit 1; }
 fi
@@ -222,6 +280,14 @@ if [ -n "$LOCK" ]; then DRILL_OWNER="$(cd "$RECORD_DIR" && pwd -P | cksum | cut 
 [ -n "$DRILL_OWNER" ] || DRILL_OWNER=none
 SET_DATE="$(basename "$BACKUP")"
 SET_STATE="$(set_state "$BACKUP")"
+# With no key of its own, the record names the install whose set it proved,
+# so that install's readiness (drills.ts, listDrills) and uninstall.sh find it.
+# Another install's set, drilled as asked, is recorded as that install's: it
+# proves nothing of this one's (second review of HB-0540).
+if [ -z "$DRILL_BY" ] || foreign_owner "$SET_OWNER"; then
+  RECORD_OWNER="$SET_OWNER"
+  case "$RECORD_OWNER" in *[!0-9a-f]*) RECORD_OWNER="" ;; esac   # a mark is hex; anything else is not written into the record
+fi
 echo "Drilling restore from: $BACKUP"
 
 SCRATCH="$(mktemp -d)"

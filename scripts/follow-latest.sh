@@ -26,15 +26,20 @@ if [ "${1:-}" = --install ]; then
   NODE_BIN="$(command -v node)" || { echo "node not found on PATH — run this from a shell where 'node --version' works." >&2; exit 1; }
   DOCKER_BIN="$(command -v docker)" || { echo "docker not found on PATH — run this from a shell where 'docker version' works." >&2; exit 1; }
   UNIT_PATH="$(dirname "$NODE_BIN"):$(dirname "$DOCKER_BIN"):/usr/local/bin:/usr/bin:/bin"
+  # In quotes as systemd reads them: a backslash or quote escaped, % doubled,
+  # and $ doubled in ExecStart. Unquoted, a production folder with a space was
+  # cut at the space, and every tick looked for a checkout that is not there
+  # (HB-0546).
+  . "$(dirname "$0")/systemd-quote.sh"
   cat > "$UNITS/$NAME.service" <<EOF
 [Unit]
 Description=Hatchabot: deploy the newest release tag to this machine
 
 [Service]
 Type=oneshot
-Environment=HATCHABOT_PROD_DIR=$PROD
-Environment="PATH=$(printf '%s' "$UNIT_PATH" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g')"
-ExecStart=/usr/bin/env bash "$PROD/scripts/follow-latest.sh"
+Environment="HATCHABOT_PROD_DIR=$(systemd_quoted "$PROD")"
+Environment="PATH=$(systemd_quoted "$UNIT_PATH")"
+ExecStart=/usr/bin/env bash "$(systemd_arg "$PROD")/scripts/follow-latest.sh"
 EOF
   cat > "$UNITS/$NAME.timer" <<EOF
 [Unit]
@@ -63,12 +68,20 @@ if [ "${1:-}" = --uninstall ]; then
 fi
 
 # A deploy checks out a new tag in $PROD, replacing this very file while bash is
-# still reading it. Run from a private copy.
+# still reading it. Run from a private copy. One it cannot make (a full disk)
+# ended the tick under set -e with no word and no wait (fourteenth review): it
+# reads this file as it is, which nothing changes until a repair or a deploy,
+# and stops before either with the try counted as the disk's (disk_stop).
+NO_COPY=0
 if [ -z "${FOLLOW_LATEST_COPY:-}" ]; then
-  tmp="$(mktemp)"; cp "$0" "$tmp"
-  FOLLOW_LATEST_COPY="$tmp" exec bash "$tmp" "$@"
+  tmp=""
+  if tmp="$(mktemp 2>/dev/null)" && cp "$0" "$tmp" 2>/dev/null; then
+    FOLLOW_LATEST_COPY="$tmp" FOLLOW_LATEST_HOME="$(cd "$(dirname "$0")" && pwd)" exec bash "$tmp" "$@"
+  fi
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  NO_COPY=1
 fi
-trap 'rm -f "$FOLLOW_LATEST_COPY"' EXIT
+trap '[ -z "${FOLLOW_LATEST_COPY:-}" ] || rm -f "$FOLLOW_LATEST_COPY"' EXIT
 
 [ -d "$PROD/.git" ] || { echo "No production checkout at $PROD."; exit 1; }
 mkdir -p "$STATE"
@@ -85,6 +98,48 @@ CUT="$STATE/upgrade-$(cd "$PROD" && printf %s "$PWD" | cksum | cut -d' ' -f1).fr
 # Only ever forward: a checkout that is ahead (a hand deploy of a newer tag) stays.
 vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
 if [ ! -f "$CUT" ] && [ -n "$CUR" ] && [ "$CUR" != "$NEWEST" ] && [ "$(vernewer "$CUR" "$NEWEST")" = "$CUR" ]; then exit 0; fi
+# A tag whose install keeps failing waits longer each time, then is set aside;
+# a full disk waits the same way, never counted against it: the try record
+# (scripts/follow-tries.sh, shared with follow-channel.sh), read beside where
+# this ran from, before a deploy replaces it.
+# Missing or unreadable, it must not stop the tick before the repair (fifth
+# review): stand-ins that count nothing.
+TRIES_HELPER="${FOLLOW_LATEST_HOME:-$(dirname "$0")}/follow-tries.sh"
+if ! { [ -r "$TRIES_HELPER" ] && . "$TRIES_HELPER" && declare -F tries_open tries_waiting note_try forget_tries >/dev/null; }; then
+  echo "Could not read $TRIES_HELPER: this tick keeps no count of its tries, and tries the deploy."
+  MAX_TRIES=8
+  tries_open() { T_COUNT=0; T_LAST=0; T_DISK=0; }
+  tries_waiting() { return 1; }
+  note_try() { :; }
+  forget_tries() { :; }
+fi
+tries_open "$STATE/follow-latest-tries" hatchabot-follow-latest-tries "$NEWEST"
+# disk_stop WHAT: a file of this tick's own it could not write (a full disk):
+# said, and counted as a try the disk failed, so the next ticks wait; under
+# set -e it ended the tick with no word, and every tick tried again
+# (fourteenth review). Before a repair or a deploy changes anything.
+disk_stop() {
+  echo "Could not write $1 (a full disk?), so this tick stops before changing anything. This does not count against $NEWEST; the next ticks wait."
+  note_try 1
+  exit 1
+}
+# disk_waiting: 0 while the wait after the disk's last failure lasts, as
+# tries_waiting has it for the disk's alone (an hour at most), whatever the
+# tag's own: a repair puts back the release that was serving, and waits for
+# room only. A repair the disk stopped (5) was not counted, and ran again on
+# every tick while the disk stayed full (fifteenth review).
+disk_waiting() { [ "$T_DISK" -gt 0 ] && ( T_COUNT="$T_DISK"; tries_waiting ); }
+# disk_words TEXT: upgrade.sh's, the list its said_kind reads, a copy
+# (test/nightScripts.test.ts holds them equal): this runs from a copy of
+# itself, and reads nothing of the release's before its deploy script.
+disk_words() {
+  case "$1" in
+    *[Nn]"o space left on device"*|*[Dd]"isk quota"*|*EDQUOT*) return 0 ;;
+    *"file watchers"*) return 1 ;;
+    *ENOSPC*) return 0 ;;
+  esac
+  return 1
+}
 # A killed deploy put back without the newest tag's code: by the deploy script
 # of the release it came from, which was serving here, and which puts that
 # release back first and then installs it again. Two cases (HB-0372): the
@@ -95,34 +150,55 @@ CUT_FROM=""; [ ! -f "$CUT" ] || CUT_FROM="$(sed -n 's/^from //p' "$CUT" | sed -n
 repair_cut() {
   local deploy rc=0
   echo "A deploy of $PROD was cut off part-way; putting ${CUT_FROM:-the previous release} back."
-  deploy="$(mktemp)"
+  [ "$NO_COPY" = 0 ] || disk_stop "a private copy of $0 in ${TMPDIR:-/tmp}"
+  deploy="$(mktemp 2>/dev/null)" || disk_stop "a copy of the deploy script in ${TMPDIR:-/tmp}"
   if ! git -C "$PROD" show "$CUT_FROM:scripts/deploy-release.sh" > "$deploy" 2>/dev/null; then
     rm -f "$deploy"; echo "Could not read that release's deploy script. Deploy a release by hand: scripts/deploy-release.sh vX.Y.Z"; return 1
   fi
-  HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$CUT_FROM" || rc=$?
+  HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$CUT_FROM" || rc=$?
   rm -f "$deploy"
+  # 4: a deploy or upgrade holds the lock, and repairs it first. Routine, as
+  # follow-channel.sh has it (tenth review). 5: the machine's disk, or a
+  # folder it cannot write: a try the disk failed, so the next repair waits
+  # (disk_waiting), never counted against the tag.
+  if [ "$rc" = 4 ]; then echo "Another deploy or upgrade of $PROD is running; it puts ${CUT_FROM:-the previous release} back, or the next tick does."; rc=0; fi
+  if [ "$rc" = 5 ]; then
+    note_try 1
+    # Counted here as well: a try this tick counts after it (a tag not yet
+    # published) writes the record from these, and wrote over this one.
+    T_COUNT=$((T_COUNT + 1)); T_DISK=$((T_DISK + 1)); T_LAST="$(date +%s)"
+    echo "Putting ${CUT_FROM:-the previous release} back could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $NEWEST."
+  fi
   return "$rc"
 }
-if [ -n "$CUT_FROM" ] && [ "$(vernewer "$CUT_FROM" "$NEWEST")" = "$CUT_FROM" ]; then repair_cut || exit 1; exit 0; fi
+if [ -n "$CUT_FROM" ] && [ "$(vernewer "$CUT_FROM" "$NEWEST")" = "$CUT_FROM" ]; then
+  ! disk_waiting || exit 0
+  repair_cut || exit 1
+  exit 0
+fi
 # A tag set aside stays aside, but not with a killed deploy to repair: the
 # deploy repairs that and then tries the tag once more (aside again if it
 # still does not start).
-if [ ! -f "$CUT" ] && [ "$(cat "$STATE/follow-latest-failed" 2>/dev/null)" = "$NEWEST" ]; then exit 0; fi
-# A tag whose install keeps failing (exit 3) is not tried every ten minutes
-# for ever: after each failure in a row the wait doubles (10 min, 20, 40 … a
-# day at most), and after MAX_TRIES it is set aside like a tag that did not
-# start (review, 2026-10-09). "<tag> <failures> <epoch>".
-TRIES="$STATE/follow-latest-tries"; MAX_TRIES=8
-T_TARGET=""; T_COUNT=0; T_LAST=0
-{ read -r T_TARGET T_COUNT T_LAST < "$TRIES"; } 2>/dev/null || true
-case "${T_COUNT:-}${T_LAST:-}" in ''|*[!0-9]*) T_COUNT=0; T_LAST=0 ;; esac
-if [ "$T_TARGET" = "$NEWEST" ] && [ "$T_COUNT" -gt 0 ]; then
-  WAIT=$(( 10 * (1 << (T_COUNT - 1)) - 5 ))   # minutes, less 5 for the timer's own jitter: 5, 15, 35 …
-  [ "$WAIT" -le 1440 ] || WAIT=1440
-  [ -f "$CUT" ] || [ $(( $(date +%s) - T_LAST )) -ge $(( WAIT * 60 )) ] || exit 0
-else
-  T_COUNT=0
-fi
+FAILED="$STATE/follow-latest-failed"
+if [ ! -f "$CUT" ] && [ "$(cat "$FAILED" 2>/dev/null)" = "$NEWEST" ]; then exit 0; fi
+# With a killed deploy to repair, the wait is the disk's alone (disk_waiting).
+if [ -f "$CUT" ]; then ! disk_waiting || exit 0; else ! tries_waiting || exit 0; fi
+# set_aside RELEASE SAID AFTER: RELEASE is not tried again (FAILED names it)
+# and its record of tries goes; SAID and AFTER are said. FAILED is written
+# whole or not at all, and never ends the tick: `>` on a full disk left it cut
+# short, and under set -e ended the tick before anything was counted, so the
+# next tick ran the release again at once (thirteenth review). Not written,
+# the try is counted instead, so the next ones still wait.
+set_aside() {
+  if { printf '%s\n' "$1" > "$FAILED.tmp" && mv -f "$FAILED.tmp" "$FAILED"; } 2>/dev/null; then
+    forget_tries
+    echo "$2 $3"
+  else
+    rm -f "$FAILED.tmp" 2>/dev/null || true
+    echo "$2 Could not write $FAILED to set $1 aside (a full disk?): this try is counted instead, so the next ones wait."
+    note_try 0
+  fi
+}
 
 # ---- Only a release the release workflow published (#37) ----
 # A tag alone proves nothing: anyone who could push one would have its
@@ -140,7 +216,7 @@ verify_release() {
   local tag="$1" dir code commit rc=0
   WHY=""
   [ "$(vernewer "$tag" v2.159.0)" = "$tag" ] || return 0
-  dir="$(mktemp -d)"
+  dir="$(mktemp -d 2>/dev/null)" || disk_stop "a folder for GitHub's answer in ${TMPDIR:-/tmp}"
   code="$(curl -sS --max-time 30 -o "$dir/release.json" -w '%{http_code}' \
     -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$SLUG/releases/tags/$tag" 2>"$dir/err")" || rc=$?
   if [ "$rc" != 0 ] || { [ "$code" != 200 ] && [ "$code" != 404 ]; }; then
@@ -193,17 +269,15 @@ case "$vrc" in
   20)
     # A release is published a few minutes after its tag. One that stays
     # unpublished is looked at less and less often, then set aside.
-    if [ $((T_COUNT + 1)) -ge "$MAX_TRIES" ]; then
-      echo "$NEWEST" > "$STATE/follow-latest-failed"; rm -f "$TRIES"
-      echo "Not deploying $NEWEST: $WHY, $MAX_TRIES times in a row. It will not be looked at again; the next tag will be."
+    if [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then
+      set_aside "$NEWEST" "Not deploying $NEWEST: $WHY, $MAX_TRIES times in a row." "It will not be looked at again; the next tag will be."
     else
-      echo "$NEWEST $((T_COUNT + 1)) $(date +%s)" > "$TRIES"
-      echo "Not deploying $NEWEST yet: $WHY. Looking again later ($((T_COUNT + 1)) of $MAX_TRIES)."
+      note_try 0
+      echo "Not deploying $NEWEST yet: $WHY. Looking again later ($((T_COUNT + 1 - T_DISK)) of $MAX_TRIES)."
     fi
     exit 1 ;;
   30)
-    echo "$NEWEST" > "$STATE/follow-latest-failed"; rm -f "$TRIES"
-    echo "Not deploying $NEWEST: $WHY. None of its code was run. It will not be retried; the next tag will be."
+    set_aside "$NEWEST" "Not deploying $NEWEST: $WHY. None of its code was run." "It will not be retried; the next tag will be."
     exit 1 ;;
   *)
     echo "Not deploying $NEWEST yet: $WHY. Trying again next time."
@@ -211,26 +285,45 @@ case "$vrc" in
 esac
 
 # The deploy script as the NEW release ships it, from a copy for the same reason.
-deploy="$(mktemp)"
-git -C "$PROD" show "$NEWEST:scripts/deploy-release.sh" > "$deploy"
+# HATCHABOT_FOLLOW_KNOWS_5: this timer reads 5 (below); a deploy says 5 only to
+# a caller that says so, since the timer running it is the release before's,
+# and one from before 5 tried every tick on it (seventh review).
+[ "$NO_COPY" = 0 ] || disk_stop "a private copy of $0 in ${TMPDIR:-/tmp}"
+deploy="$(mktemp 2>/dev/null)" || disk_stop "a copy of the deploy script in ${TMPDIR:-/tmp}"
+if ! err="$(git -C "$PROD" show "$NEWEST:scripts/deploy-release.sh" 2>&1 > "$deploy")"; then
+  rm -f "$deploy"
+  # The disk's words as said_kind reads them (disk_words), and a write that
+  # came up short: its own list missed EDQUOT and a bare ENOSPC (fifteenth review).
+  if disk_words "$err"; then disk_stop "a copy of the deploy script in ${TMPDIR:-/tmp} ($err)"; fi
+  case "$err" in *[Ww]"rite error"*|*[Uu]"nable to write"*) disk_stop "a copy of the deploy script in ${TMPDIR:-/tmp} ($err)" ;; esac
+  echo "Could not read the deploy script $NEWEST ships: ${err:-git said nothing}. Trying again next time."
+  exit 1
+fi
 echo "Following latest: ${CUR:-untagged} → $NEWEST"
-if HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$NEWEST"; then
-  rm -f "$STATE/follow-latest-failed" "$TRIES" "$deploy"
+if HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$NEWEST"; then
+  rm -f "$FAILED" "$deploy"; forget_tries
 else
   rc=$?
   rm -f "$deploy"
   # Exit 1 = the release did not start and was rolled back: set aside at once.
-  # 3 = the install step failed: tried again, less and less often. 2 = refused
-  # (a stray file in prod), 4 = a deploy was running: tried again next time.
-  if [ "$rc" = 1 ]; then
-    echo "$NEWEST" > "$STATE/follow-latest-failed"; rm -f "$TRIES"
-    echo "Deploying $NEWEST failed and was rolled back. It will not be retried; the next tag will be."
-  elif [ "$rc" = 3 ] && [ $((T_COUNT + 1)) -ge "$MAX_TRIES" ]; then
-    echo "$NEWEST" > "$STATE/follow-latest-failed"; rm -f "$TRIES"
-    echo "Deploying $NEWEST did not complete $MAX_TRIES times in a row. It will not be retried; the next tag will be."
+  # 3 = the install step failed: tried again, less and less often. 5 = this
+  # machine's disk (full, or a folder it cannot write): tried again the same
+  # way, never set aside for it. 2 = refused (a stray file in prod): tried
+  # again next time. 4 = a deploy or upgrade was running: routine, the tick
+  # ends 0 and counts nothing, as follow-channel.sh's does (tenth review).
+  if [ "$rc" = 4 ]; then
+    echo "Another deploy or upgrade of $PROD is running; this tick leaves $NEWEST to it, or to the next tick."
+    exit 0
+  elif [ "$rc" = 1 ]; then
+    set_aside "$NEWEST" "Deploying $NEWEST failed and was rolled back." "It will not be retried; the next tag will be."
+  elif [ "$rc" = 3 ] && [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then
+    set_aside "$NEWEST" "Deploying $NEWEST did not complete $MAX_TRIES times in a row." "It will not be retried; the next tag will be."
   elif [ "$rc" = 3 ]; then
-    echo "$NEWEST $((T_COUNT + 1)) $(date +%s)" > "$TRIES"
-    echo "Deploying $NEWEST did not complete (see above); it will be tried again later ($((T_COUNT + 1)) of $MAX_TRIES)."
+    note_try 0
+    echo "Deploying $NEWEST did not complete (see above); it will be tried again later ($((T_COUNT + 1 - T_DISK)) of $MAX_TRIES)."
+  elif [ "$rc" = 5 ]; then
+    note_try 1
+    echo "Deploying $NEWEST could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $NEWEST."
   else
     echo "Deploying $NEWEST did not complete (see above); it will be tried again."
   fi

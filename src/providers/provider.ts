@@ -237,6 +237,8 @@ export interface ExecResult {
    *  and answered as if the agent had no files or the write had worked
    *  (HB-0332, HB-0373). */
   volumeMissing?: boolean;
+  /** The client was ended by a signal it was not sent for a timeout: its one-shot may run on. */
+  signalled?: boolean;
 }
 
 export interface ImagesInUse {
@@ -305,13 +307,26 @@ export interface RuntimeProvider {
   streamFromVolume?(runtimeRef: string, argv: string[]): import('node:stream').Readable;
   /** The write-side twin: a one-shot on the VOLUME (writable) fed `input` on stdin — an upload. */
   writeToVolume?(runtimeRef: string, argv: string[], input: Buffer): Promise<ExecResult>;
-  /** Remove volume one-shots left behind: finished but not removed, and with
-   *  `created` (the default, for boot) those that never started. Returns how
+  /** Remove volume one-shots left behind: finished (exited or dead) but not
+   *  removed, and with `created` (the default, for boot) those that never
+   *  started. A running one is never removed, whichever process made it.
+   *  With `notThisProcess` (at boot and every 10 minutes) each goes only
+   *  5 minutes (ONESHOT_STALE_MS) after it finished, or, never run, after it
+   *  was made, whichever process made it: the maker may still be reading
+   *  what it left. A running nightly backup's are its own. Returns how
    *  many. Optional. */
-  sweepOneShots?(opts?: { created?: boolean; createdBefore?: number }): Promise<number>;
+  sweepOneShots?(opts?: { created?: boolean; notThisProcess?: boolean; orThrow?: boolean }): Promise<number>;
 
   /** What this runtime is actually running (image identity, OpenClaw version). */
   info(runtimeRef: string): Promise<RuntimeInfo>;
+  /**
+   * The OpenClaw version each of these runtimes runs (its container's
+   * org.agentclaw.openclaw-version label), from one listing of the
+   * machine's running containers instead of an inspect each. One it does
+   * not see is left out. A listing that failed rejects, so the caller asks
+   * info() instead. Optional: without it, info() each.
+   */
+  openclawVersions?(runtimeRefs: string[]): Promise<Map<string, string>>;
 
   /**
    * What a runtime provisioned right now would run. Comparing this against
@@ -493,6 +508,13 @@ export interface RuntimeProvider {
    * with no such one-shots has nothing to stop.
    */
   stopVolumeWriters?(runtimeRef: string): Promise<string | undefined>;
+
+  /**
+   * Forget what this process keeps about the writers of the runtime's volume,
+   * for an agent archived (destroy with purge forgets its own). It only ever
+   * saves a look: forgotten, the next write there looks once. Optional.
+   */
+  forgetVolumeWriters?(runtimeRef: string): void;
 
   /**
    * Restore a tarball into ONE agent's workspace directory, leaving the rest

@@ -98,6 +98,23 @@ describe('readiness from the sets on disk', () => {
     expect(usableFor(set!, 'hatchabot-a2-vol')).toBe(false);
   });
 
+  it('a volume that failed in a later run of the same day: the earlier run\'s whole archive is still offered (HB-0471)', () => {
+    const w = base();
+    w.set(day(2), ['hatchabot-a1-vol'], { state: 'complete', captured: ['hatchabot-a1-vol'] });
+    // The morning's run took a1 whole; a noon run failed on it and left that archive as it was.
+    w.set(day(0), ['hatchabot-a1-vol'], { state: 'incomplete', failedVolumes: ['hatchabot-a1-vol'], captured: ['hatchabot-a1-vol'] });
+    const sets = listBackups(w.b);
+    expect(usableFor(sets[0]!, 'hatchabot-a1-vol')).toBe(true);
+    const r = computeReadiness({ sets, drills: [], agents: [agent('a1')], host: hosts, now: Date.now() });
+    const a1 = r.agents[0]!;
+    expect(a1).toMatchObject({ latestUsable: { date: day(0), complete: false }, leftOut: { count: 0 } });
+    expect(a1.restorable.map((s) => s.date)).toEqual([day(0), day(2)]);
+    // Failed and never captured whole that day: still not offered.
+    const v = base();
+    v.set(day(0), ['hatchabot-a1-vol'], { state: 'incomplete', failedVolumes: ['hatchabot-a1-vol'], captured: [] });
+    expect(usableFor(listBackups(v.b)[0]!, 'hatchabot-a1-vol')).toBe(false);
+  });
+
   it('a runner asleep night after night: stale, why, and its runner not answering; the alert while the machine is fresh', () => {
     const w = base();
     w.set(day(4), ['hatchabot-a1-vol', 'hatchabot-r1-vol'], { state: 'complete' });
@@ -150,6 +167,54 @@ describe('readiness from the sets on disk', () => {
     const r = computeReadiness({ sets: listBackups(w.b), drills: [], agents: [agent('a1')], host: hosts, now: Date.now() });
     expect(r.agents[0]).toMatchObject({ status: 'not covered' });
     expect(r.newestSet).toBeUndefined();
+  });
+
+  it('another install\'s newer set with an archive of the same name: a restore choice, never what covers it (seventh review)', () => {
+    const w = base();
+    w.set(day(3), ['hatchabot-a1-vol', 'hatchabot-a2-vol'], { state: 'complete', captured: ['hatchabot-a1-vol', 'hatchabot-a2-vol'] });
+    // Last night's own set left a1 out (its archive failed); a2 is in it.
+    w.set(day(1), ['hatchabot-a2-vol'], { state: 'incomplete', failedVolumes: ['hatchabot-a1-vol'], captured: ['hatchabot-a2-vol'] });
+    w.set(day(0), ['hatchabot-a1-vol'], { state: 'complete', captured: ['hatchabot-a1-vol'] });
+    const now = Date.now();
+    // Today's set is another install's (BackupSet.foreign): its a1 archive is not this agent's proof.
+    const sets = listBackups(w.b).map((s) => (s.date === day(0, now) ? { ...s, foreign: true } : s));
+    const drills = [{ id: '2026-01-05T05-10-00Z', set: day(3), finishedAt: `${day(3)}T05:20:00Z`, startedAt: `${day(3)}T05:10:00Z`, volumes: [{ volume: 'hatchabot-a1-vol', passed: true, restored: true, readable: true, layout: true, note: '' }] }];
+    const r = computeReadiness({ sets, drills: drills as never, agents: [agent('a1'), agent('a2')], host: hosts, now });
+    const by = Object.fromEntries(r.agents.map((a) => [a.agentId, a]));
+    expect(r.newestSet).toBe(day(1, now));
+    // Its own newest holding it is three days old: stale, and left out of last night's.
+    expect(by.a1).toMatchObject({ status: 'stale', leftOut: { count: 1, failed: 1 } });
+    expect(by.a1!.line).toMatch(new RegExp(`^Its newest backup is from ${day(3, now)} \\(3 days ago\\).* A newer copy made by another install, or under an earlier key, is from ${day(0, now)}\\.$`));
+    expect(by.a1!.alert).toBeDefined();
+    // Offered first, labelled, then its own.
+    expect(by.a1!.restorable.map((s) => [s.date, !!s.otherKey])).toEqual([[day(0, now), true], [day(3, now), false]]);
+    expect(by.a1!.latestUsable).toMatchObject({ date: day(0, now), otherKey: true });
+    // Restore… picks this install's own first (eighth review).
+    expect(by.a1!.ownLatest).toMatchObject({ date: day(3, now), ageDays: 3 });
+    expect(by.a2).toMatchObject({ status: 'never drilled' });
+
+    // With no own set holding it at all: not covered, though the other install's set has it.
+    const only = computeReadiness({ sets: sets.filter((s) => s.date !== day(3, now)), drills: [], agents: [agent('a1')], host: hosts, now });
+    expect(only.agents[0]).toMatchObject({ status: 'not covered', restorable: [expect.objectContaining({ date: day(0, now), otherKey: true })] });
+    expect(only.agents[0]!.line).toMatch(new RegExp(`^None of this install's backups holds it — left out of the last backup: its archive failed\\. A copy made by another install, or under an earlier key, is from ${day(0, now)}\\.$`));
+    expect(only.agents[0]!.alert).toMatchObject({ key: 'recovery:none' });
+    expect(only.agents[0]!.ownLatest).toBeUndefined();
+  });
+  it('fifteen newer sets of another install\'s: the own older one is still among the choices, and the one picked (tenth review)', () => {
+    const w = base();
+    w.set(day(20), ['hatchabot-a1-vol'], { state: 'complete', captured: ['hatchabot-a1-vol'] });
+    for (let d = 0; d < 15; d++) w.set(day(d), ['hatchabot-a1-vol'], { state: 'complete', captured: ['hatchabot-a1-vol'] });
+    const now = Date.now();
+    const sets = listBackups(w.b).map((s) => (s.date === day(20, now) ? s : { ...s, foreign: true }));
+    const a1 = computeReadiness({ sets, drills: [], agents: [agent('a1')], host: hosts, now }).agents[0]!;
+    expect(a1.restorable).toHaveLength(14);
+    expect(a1.restorable.filter((s) => !s.otherKey).map((s) => s.date)).toEqual([day(20, now)]);
+    // Newest first still: the other install's newest kept, the own one last.
+    expect(a1.restorable[0]).toMatchObject({ date: day(0, now), otherKey: true });
+    expect(a1.restorable.at(-1)).toMatchObject({ date: day(20, now) });
+    expect(a1.ownLatest).toMatchObject({ date: day(20, now) });
+    // As the page picks (web/index.html, v2RecoveryToggle): ownLatest, being among the choices.
+    expect(a1.restorable.some((s) => s.date === a1.ownLatest!.date)).toBe(true);
   });
 });
 

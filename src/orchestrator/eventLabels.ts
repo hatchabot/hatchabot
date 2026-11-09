@@ -61,6 +61,11 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'memory.swap_set': (d) => `swap allowance ${d.swap === 'default' ? 'back to the default' : d.swap === 'class' ? 'set by its class' : 'set'}: ${String(d.effective ?? '')}${d.withheld ? ` — not given: this host has no compressed swap (${String(d.withheld)})` : d.live ? ' — applied to the container' : ''}`,
   'memory.swap_host': (d) => d.compressed ? `its host compresses swap now (${String(d.kind)}): its swap allowance is given` : `its host has no compressed swap now (${String(d.kind)}): it runs without swap`,
   'memory.cap_set': (d) => `memory cap ${d.cap === 'default' ? 'back to the default' : d.cap === 'class' ? 'set by its class' : 'set'}: ${String(d.effective ?? '')}${d.live ? ' — applied to the running container' : ''}`,
+  'memory.limits_kept': (d) => `${d.when ? `${String(d.when)}, but ` : ''}its container kept its old memory limits${d.why ? ` (${String(d.why)})` : ''} — a rebuild applies the new ones`,
+  'class.detached': (d) => `left its class ${d.after ? String(d.after) : 'once the class change under way was done'}: it runs a model, source or image the class does not`,
+  'class.detach_failed': (d) => `could not take it out of its class after the class change${d.why ? ` (${String(d.why)})` : ''}`,
+  'memory.budget_told': (d) => `its memory budget in AGENTS.md now says ${String(d.cap ?? 'its cap')}`,
+  'memory.budget_not_told': (d) => `its new memory budget was not written to AGENTS.md${d.why === 'busy' ? ' (it stayed busy)' : d.why ? ` (${String(d.why)})` : ''} — a rebuild writes it`,
   'snapshot.captured': 'memory files snapshotted',
   'snapshot.unchanged': 'memory files unchanged since the last snapshot, so no new one',
   'memory.checkpointed': 'conversation written to memory',
@@ -167,6 +172,9 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'agent.restored': 'restored from a backup',
   'agentsmd.sync_error': 'AGENTS.md did not sync',
   'agentsmd.sync_failed': 'AGENTS.md did not sync',
+  'agentsmd.sync_raced': 'AGENTS.md changed while it was being synced — read again',
+  'agentsmd.sync_unsure': 'its memory budget was not written into AGENTS.md: a code fence above "Memory budget" does not close the way it opens. Close that fence (the same backticks on a line of their own)',
+  'runner_key.public_unchecked': (d) => `the runner key's public half (${String(d.key ?? 'the .pub file')}) was used without checking it against the key: ${String(d.error || 'ssh-keygen did not answer').trim()}`,
   'app.public_url_written': (d) => `links now use ${String(d.url ?? 'the new address')}`,
   'archive.recycle_failed': 'its bot could not go back to the pool; the token was discarded',
   'auth.family_accounts_on': 'family accounts turned on',
@@ -174,8 +182,24 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'claim.approve_failed': (d) => `letting someone in failed: ${String(d.error ?? '')}`.trim(),
   'claim.bound': 'its owner linked from the first message',
   'claim.read_failed': 'waiting for a first message: its pairing requests could not be read; trying again',
-  'claim.window_abandoned': 'the first-contact window was given up',
+  'volume.writers_unlisted': (d) => `before a write to its files, the copies that might still be writing there could not be listed; written anyway: ${String(d.error ?? '')}`.trim(),
+  'claim.window_abandoned': (d) => (d.reason === 'open-to-anyone'
+    ? 'the first-contact window ended: the agent was down past the hour a window open to anyone may last. Once it is up, open a new one (That\'s me, or Let them in again under Members)'
+    : d.reason === 'moved'
+      ? 'the first-contact window ended: the agent moved to another machine. Open a new one there (That\'s me, or Let them in again under Members)'
+      : 'the first-contact window was given up'),
+  'agentsmd.section_unsure': (d) => {
+    const h = Array.isArray(d.headings) ? d.headings.map((x) => `"${String(x).replace(/^#+\s*/, '')}"`).join(', ') : 'a section';
+    // The line to fix first (third review of HB-0520); an older entry has none.
+    if (typeof d.line === 'number') {
+      const opened = typeof d.opened === 'number' && d.opened > 0 ? ` opened on line ${d.opened}` : '';
+      const fence = typeof d.fence === 'string' ? d.fence : 'the same backticks';
+      return `AGENTS.md line ${d.line}: some Markdown readers take it to close the code fence${opened} and others do not, so ${h} was left as it was. Close that fence with ${fence} on a line of its own, then rebuild`;
+    }
+    return `AGENTS.md: ${h} left as it was, since a code fence above it does not close the way it opens. Close that fence (the same backticks on a line of their own), then rebuild`;
+  },
   'claim.window_closed': 'the first-contact window closed',
+  'claim.window_gone': 'the first-contact window was closed elsewhere while the agent was stopped: nothing left to wait for',
   'claim.window_superseded': 'the first-contact window was reopened meanwhile: the later window owns it',
   'connection.attached': (d) => `connection ${String(d.name ?? d.kind ?? '')} attached`.trim(),
   'connection.detached': (d) => `connection ${String(d.name ?? d.kind ?? '')} detached`.trim(),
@@ -240,6 +264,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'model.live_set_failed': 'the running agent did not take the new model — it applies at the next rebuild',
   'model.volume_gone': 'the new model could not be written: its volume is gone',
   'model.apply_deferred': 'the new model was saved while another change was under way — it applies with that change or the next rebuild',
+  'model.apply_failed': (d) => `its class's model ${String(d.model ?? '')} did not go on: the rebuild it waited for did not put it on, nor did a try after it — Rebuild it to apply`,
   'model.changed': (d) => `model changed: ${String(d.from ?? 'unknown')} → ${String(d.to ?? '')}`,
   'model.guard_proposed': (d) => `Hatchabot suggests switching back to ${String(d.to ?? 'the previous model')}: it did worse on ${String(d.from ?? 'the new one')}`,
   'model.ledger_backfilled': 'earlier model changes recorded in the ledger',
@@ -265,8 +290,9 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'budget.resumed': (d) => `started again: ${d.why === 'new-month' ? 'a new month' : 'its budget was raised'}`,
   'budget.pause_closed': (d) => `its budget's pause record closed, with no start (it was stopped by hand, or asleep): ${d.why === 'new-month' ? 'a new month' : 'its budget was raised'}`,
   'budget.downgraded': (d) => `moved to ${String(d.to ?? 'a cheaper model').replace(/^.*\//, '')}: its monthly budget is used up (until the 1st)`,
-  'budget.model_restored': (d) => `back on its own model: ${d.why === 'new-month' ? 'a new month' : d.why === 'archived' ? 'it was archived' : 'its budget was raised'}`,
+  'budget.model_restored': (d) => `back on its own model: ${d.why === 'new-month' ? 'a new month' : d.why === 'archived' ? 'it was archived' : d.why === 'budget-changed' ? 'its budget was changed' : 'its budget was raised'}`,
   'budget.paused_reply': () => 'told someone who wrote to it that it is paused for its budget',
+  'budget.paused_reply_queue_full': () => "100 messages wait for it on Telegram: whoever writes after them gets no paused reply until it is back",
   'budget.step_set': (d) => d.every ? `spending alert: tell the owner every $${d.every}` : 'spending alert removed',
   'budget.machine_step_set': (d) => d.every ? `the machine's spending alert: every $${d.every}` : "the machine's spending alert removed",
   'budget.step_told': (d) => `told the owner it has spent $${d.spent} this month (alerts every $${d.every})`,
@@ -325,6 +351,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'timezone.set': (d) => `its time zone set to ${String(d.now ?? '')}`,
   'owner.command_owner_set': 'you were set as the agent\'s owner in OpenClaw',
   'cron.retargeted': 'scheduled tasks pointed at the owner\'s chat (they reached no one)',
+  'cron.note_set': (d) => (d.on ? 'you will be told on your phone when a scheduled task runs' : 'no more phone notes when a scheduled task runs'),
+  'cron.noted': (d) => `${d.told ? 'told you on your phone' : 'could not tell you on your phone'} that "${String(d.task ?? '')}" ${d.status === 'error' ? 'failed' : 'ran'}`,
   'restore.access_read_failed': "could not read who the backup let in",
   'restore.reapply_partial': 'only its bot and members were put back after the restore; the rest waits for a rebuild',
   'restore.reapply_failed': 'current settings could not be put back after the restore',

@@ -35,6 +35,28 @@ export type OpKind =
   | 'backup-run'
   | 'restore-drill';
 
+/**
+ * The long operations that replace an agent's files. A snapshot taken by hand
+ * is refused under one, and one that read the files while one began is not
+ * kept (HB-0566).
+ */
+export const FILES_REPLACED_BY: ReadonlySet<string> = new Set<OpKind>([
+  'move-host', 'migrate', 'import', 'restore-backup', 'restore-snapshot', 'provision', 'rebuild', 'archive', 'app-update', 'app-rollback',
+]);
+const filesReplacing = new Map<string, number>();
+/** A change that replaces the agent's files has started running, or started again after a restart (counted in memory, by agent). */
+export function noteFilesReplacing(agentId: string): void {
+  filesReplacing.set(agentId, (filesReplacing.get(agentId) ?? 0) + 1);
+}
+/** How many such changes have begun on it: a snapshot reads this before and after it reads the files. */
+export function filesReplacingCount(agentId: string): number {
+  return filesReplacing.get(agentId) ?? 0;
+}
+/** A deleted agent's count goes with it. */
+export function forgetFilesReplacing(agentId: string): void {
+  filesReplacing.delete(agentId);
+}
+
 export type OpStatus = OperationRow['status'];
 export type Operation = OperationRow;
 
@@ -171,6 +193,25 @@ let journal: (event: string, detail: Record<string, unknown>) => void = () => {}
 export function setOperationJournal(fn: (event: string, detail: Record<string, unknown>) => void): void {
   journal = fn;
 }
+/**
+ * A note the runtime provider makes about one agent's volume, which it knows
+ * by its runtime ref only (localDockerProvider.ts setVolumeEventSink): to the
+ * journal (`warn`), and onto that agent's timeline, so its Activity shows it.
+ * index.ts wires it. Never throws: it must not break the write it is about.
+ */
+export function runtimeEventLog(
+  store: Pick<Store, 'listAllActiveAgents' | 'recordEvent'>,
+  warn: (event: string, detail: Record<string, unknown>) => void,
+): (event: string, detail: { runtimeRef: string } & Record<string, unknown>) => void {
+  return (event, detail) => {
+    let agentId: string | undefined;
+    try { agentId = store.listAllActiveAgents().find((a) => a.runtimeRef === detail.runtimeRef)?.id; } catch { /* the journal line all the same */ }
+    try { warn(event, { ...(agentId ? { agentId } : {}), ...detail }); } catch { /* as below */ }
+    if (agentId) {
+      try { store.recordEvent(agentId, event, detail); } catch { /* a timeline write never breaks the write */ }
+    }
+  };
+}
 
 /**
  * Tests only: called before each step is recorded. Throwing `SimulatedCrash`
@@ -265,6 +306,7 @@ export function handleFor(store: Store, id: string): OpHandle {
     id,
     start() {
       const op = store.updateOperation(id, { status: 'running', bootId: currentBootId() });
+      if (op?.agentId && FILES_REPLACED_BY.has(op.kind)) noteFilesReplacing(op.agentId);
       if (op) event(store, op, 'op.started', { label: KIND_LABEL[op.kind] ?? op.kind });
     },
     step(key, detail) {
@@ -300,6 +342,8 @@ export function beginOperation(
 ): OpHandle {
   const now = new Date().toISOString();
   const id = `op_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
+  // Counted when it starts running: a queued one counts at start().
+  if (!opts.queued && agentId && FILES_REPLACED_BY.has(kind)) noteFilesReplacing(agentId);
   store.insertOperation({
     id, agentId, hostId: opts.hostId ?? null, kind, requestedBy: opts.requestedBy ?? null,
     requestedAt: now, params, step: null, stepAt: null, status: opts.queued ? 'queued' : 'running', outcome: null,

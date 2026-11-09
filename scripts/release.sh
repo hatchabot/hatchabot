@@ -65,8 +65,15 @@ val() { printf '%s\n' "$OUT" | sed -n "s/^$1=//p"; }
 SHA="$(val commit)"; TAG="$(val tag)"
 
 # The notes are published apart from the code: no push hook sees them.
-node scripts/privacy-check.mjs --text "$WORK/notes.md" \
-  || die "The release notes did not pass the privacy check (above) — fix the CHANGELOG section, land it, run this again."
+# Said as the check says it: an incomplete check (3: a record it could not
+# read) was blamed on the CHANGELOG, under its own line naming the record (HB-0529).
+PRIVACY_RC=0; node scripts/privacy-check.mjs --text "$WORK/notes.md" || PRIVACY_RC=$?
+case "$PRIVACY_RC" in
+  0) ;;
+  1) die "The release notes did not pass the privacy check (above) — fix the CHANGELOG section, land it, run this again." ;;
+  3) die "The privacy check could not check the release notes in full: it could not read what it names above. Fix that, then run this again. Nothing was tagged." ;;
+  *) die "The privacy check stopped (exit $PRIVACY_RC) — its reason is above. Nothing was tagged." ;;
+esac
 node scripts/privacy-check.mjs --sync-ci \
   || die "Could not bring the public repo's privacy fingerprints up to date (above) — its release workflow would check the notes with an old set."
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -10,7 +10,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { READER_FLOORS, USAGE_READER_SCRIPT, type TokenHealthRaw } from '../src/orchestrator/usage.js';
 import { sampleAgentUsage } from '../src/orchestrator/sourceUsage.js';
-import { buildTokenHealth, incidentWords, injectedSize, loopSignals, THRESHOLDS } from '../src/orchestrator/tokenHealth.js';
+import { buildTokenHealth, incidentWords, injectedSize, loopSignals, promptFiles, THRESHOLDS } from '../src/orchestrator/tokenHealth.js';
 import { LOOP_LINE, parseLoopLines } from '../src/orchestrator/loopLines.js';
 import { runTokenWatch, TELL_PER_HOUR } from '../src/orchestrator/tokenWatch.js';
 import { channelHandlerTimeoutMs, channelTimeoutEnv, CHANNEL_HANDLER_TIMEOUT_DEFAULT_MS } from '../src/orchestrator/channelTimeout.js';
@@ -166,6 +166,68 @@ describe('the usage reader reads token health on its existing pass', () => {
     // Files and settings.
     expect(h.files.kitchen).toEqual({ 'AGENTS.md': 25_000, 'SOUL.md': 500, 'MEMORY.md': 30_000 });
     expect(h.cfg).toMatchObject({ thinkingDefault: 'low', agentThinking: { kitchen: 'medium' }, modelThinking: { 'anthropic/claude-sonnet-5': 'high' }, caps: { 'anthropic/claude-sonnet-5': 150_000 } });
+  });
+
+  it('instruction files are measured in characters, as OpenClaw limits them, not bytes (HB-0601)', () => {
+    const out = runReader((root) => {
+      mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+      writeFileSync(join(root, 'kitchen', 'agent', 'AGENTS.md'), '漢'.repeat(7000));
+      writeFileSync(join(root, 'kitchen', 'agent', 'SOUL.md'), 'é'.repeat(100));
+    });
+    expect(out.health.files.kitchen).toEqual({ 'AGENTS.md': 7000, 'SOUL.md': 100 });
+    expect(injectedSize(out.health.files.kitchen)).toEqual({ chars: 7100, truncated: [] });
+  });
+
+  it('an instruction file is read again only once its size or time changed, not at every pass (HB-0601, seventh review)', () => {
+    const base = mkdtempSync(join(tmpdir(), 'hb-token-'));
+    const root = join(base, 'agents');
+    const agent = join(root, 'kitchen', 'agent');
+    mkdirSync(agent, { recursive: true });
+    writeFileSync(join(agent, 'MEMORY.md'), '漢'.repeat(7000));
+    writeFileSync(join(agent, 'USER.md'), 'é'.repeat(100));
+    // Each read of an instruction file is said on stderr. MEMORY.md and USER.md: the Purpose excerpt reads only SOUL.md and AGENTS.md.
+    const script = 'const __fs = require("fs"); const __read = __fs.readFileSync;\n'
+      + '__fs.readFileSync = (p, ...a) => { if (/\\.md$/.test(String(p))) process.stderr.write("READ " + require("path").basename(String(p)) + "\\n"); return __read(p, ...a); };\n'
+      + USAGE_READER_SCRIPT.replace('"/home/node/.openclaw/agents"', JSON.stringify(root));
+    const pass = () => {
+      const r = spawnSync(process.execPath, ['--no-warnings', '-e', script], { encoding: 'utf8' });
+      expect(r.status, r.stderr).toBe(0);
+      return { files: JSON.parse(r.stdout).health.files.kitchen, read: r.stderr.split('\n').filter((l) => /^READ (MEMORY|USER)\.md$/.test(l)).map((l) => l.slice(5)).sort() };
+    };
+    expect(pass()).toEqual({ files: { 'MEMORY.md': 7000, 'USER.md': 100 }, read: ['MEMORY.md', 'USER.md'] });
+    // Unchanged: the counts are the same, and nothing is read.
+    expect(pass()).toEqual({ files: { 'MEMORY.md': 7000, 'USER.md': 100 }, read: [] });
+    // One edited: only it is read.
+    writeFileSync(join(agent, 'MEMORY.md'), '漢'.repeat(6000));
+    expect(pass()).toEqual({ files: { 'MEMORY.md': 6000, 'USER.md': 100 }, read: ['MEMORY.md'] });
+    // The kept counts are where snapshots leave them out (OpenClaw's tmp folder).
+    expect(existsSync(join(base, 'tmp', 'hatchabot-instruction-sizes.json'))).toBe(true);
+  });
+
+  it("names the OpenClaw it runs, and TOOLS.md counts only where that OpenClaw puts it in the prompt (HB-0516)", () => {
+    const base = mkdtempSync(join(tmpdir(), 'hb-token-'));
+    const pkg = join(base, 'package.json');
+    writeFileSync(pkg, JSON.stringify({ name: 'openclaw', version: '2026.9.8' }));
+    const root = join(base, 'agents');
+    mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+    writeFileSync(join(root, 'kitchen', 'agent', 'AGENTS.md'), 'a'.repeat(1000));
+    writeFileSync(join(root, 'kitchen', 'agent', 'TOOLS.md'), 't'.repeat(3000));
+    const script = USAGE_READER_SCRIPT.replace('"/home/node/.openclaw/agents"', JSON.stringify(root))
+      .replace(/const OC_PACKAGE = \[[^\]]*\];/, `const OC_PACKAGE = [${JSON.stringify(pkg)}];`);
+    expect(script).toContain(`const OC_PACKAGE = [${JSON.stringify(pkg)}];`);
+    const r = spawnSync(process.execPath, ['--no-warnings', '-e', script], { encoding: 'utf8' });
+    expect(r.status, r.stderr).toBe(0);
+    const h = JSON.parse(r.stdout).health;
+    expect(h.ocv).toBe('2026.9.8');
+    expect(h.files.kitchen['TOOLS.md']).toBe(3000);
+    expect(injectedSize(promptFiles(h.files.kitchen, h.ocv)).chars).toBe(1000);
+    // 2026.9.6, the rollback, leaves it out too (its WORKSPACE_BOOTSTRAP_FILENAMES has no TOOLS.md).
+    expect(injectedSize(promptFiles(h.files.kitchen, '2026.9.6')).chars).toBe(1000);
+    // An OpenClaw that still reads it, or one the reader could not name: counted.
+    expect(injectedSize(promptFiles(h.files.kitchen, '2026.7.1')).chars).toBe(4000);
+    expect(injectedSize(promptFiles(h.files.kitchen, undefined)).chars).toBe(4000);
+    expect(injectedSize(promptFiles(h.files.kitchen, 'nightly')).chars).toBe(4000);
+    expect(promptFiles(h.files.kitchen, '2026.10.1-beta.1')).toEqual({ 'AGENTS.md': 1000 });
   });
 
   it('an agent with none of the new tables still reads (health has empty parts)', () => {
@@ -400,6 +462,16 @@ describe('get_token_health', () => {
   it('counts what OpenClaw injects into every turn: 20K a file, 60K in all, BOOTSTRAP.md only once', () => {
     expect(injectedSize({ 'AGENTS.md': 25_000, 'SOUL.md': 500, 'MEMORY.md': 30_000, 'BOOTSTRAP.md': 9_000 })).toEqual({ chars: 40_500, truncated: ['AGENTS.md', 'MEMORY.md'] });
     expect(injectedSize({ 'AGENTS.md': 30_000, 'SOUL.md': 30_000, 'MEMORY.md': 30_000, 'USER.md': 30_000 }).chars).toBe(60_000);
+  });
+
+  it('TOOLS.md is left out of what goes in every turn on an OpenClaw that does not load it (HB-0516)', async () => {
+    const { store, f } = await world();
+    const now = Date.now();
+    store.setTokenHealth('a1', health({ ...stuckHealth(now), ocv: '2026.9.8', files: { stock: { 'AGENTS.md': 13_000, 'TOOLS.md': 9_000 } } }), iso(now));
+    const row = (await f.inject({ method: 'GET', url: '/v1/token-health?agent=stock', headers: H })).json().rows[0];
+    expect(row.instructions).toMatchObject({ files: { 'AGENTS.md': 13_000 }, injectedChars: 13_000 });
+    store.setTokenHealth('a1', health({ ...stuckHealth(now), files: { stock: { 'AGENTS.md': 13_000, 'TOOLS.md': 9_000 } } }), iso(now));
+    expect((await f.inject({ method: 'GET', url: '/v1/token-health?agent=stock', headers: H })).json().rows[0].instructions.injectedChars).toBe(22_000);
   });
 
   it('the scorecard\'s scheduled task count rides along; a local model has no cost', async () => {

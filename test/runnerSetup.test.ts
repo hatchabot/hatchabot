@@ -4,8 +4,9 @@
  * paste-on-the-runner snippet, and the image copy. Each of these automates a
  * step that silently broke the first live runner when done by hand.
  */
-import { describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { describe, expect, it, vi } from 'vitest';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -17,6 +18,37 @@ import {
   runnerSetupSnippet,
   sshConfigPath,
 } from '../src/orchestrator/runnerSetup.js';
+
+// A filesystem with no hard links, when set: link() fails with this code.
+const fsHooks = vi.hoisted(() => ({
+  linkFails: undefined as string | undefined,
+  onStat: undefined as ((p: string, r: import('node:fs').Stats) => Promise<void>) | undefined,
+  onRename: undefined as ((from: string, to: string) => Promise<void>) | undefined,
+  /** A lock taken ('wx'), whichever way it is made: after it is there. */
+  onClaim: undefined as ((p: string) => Promise<void>) | undefined,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    link: async (from: string, to: string) => {
+      if (fsHooks.linkFails) throw Object.assign(new Error(`${fsHooks.linkFails}: link '${from}' -> '${to}'`), { code: fsHooks.linkFails });
+      return real.link(from, to);
+    },
+    // The look first, then the hook: what it saw is held while the hook waits.
+    stat: async (p: string, ...a: []) => { const r = await real.stat(p, ...a); await fsHooks.onStat?.(String(p), r); return r; },
+    rename: async (from: string, to: string) => { await fsHooks.onRename?.(String(from), String(to)); return real.rename(from, to); },
+    open: async (p: string, flags?: string, mode?: number) => {
+      const h = await real.open(p, flags, mode);
+      if (flags === 'wx' && String(p).endsWith('.lock')) await fsHooks.onClaim?.(String(p));
+      return h;
+    },
+    writeFile: async (p: string, data: string, opts?: { flag?: string }) => {
+      await real.writeFile(p, data, opts as never);
+      if (opts?.flag === 'wx' && String(p).endsWith('.lock')) await fsHooks.onClaim?.(String(p));
+    },
+  };
+});
 
 describe('parseSshEndpoint', () => {
   it('parses user/host/port and rejects non-ssh schemes', () => {
@@ -35,6 +67,286 @@ describe('ensureRunnerKey', () => {
     expect(existsSync(join(dir, 'agentclaw_runner'))).toBe(true);
     const pub2 = await ensureRunnerKey({ sshDir: dir });
     expect(pub2).toBe(pub1); // reused, not regenerated
+  });
+
+  /** ssh-keygen behind a shim that logs each run, slowly, and fails while `fail` is there. Sandboxed: a temp PATH entry. */
+  async function withKeygenShim<T>(dir: string, run: () => Promise<T>): Promise<T> {
+    const real = execFileSync('sh', ['-c', 'command -v ssh-keygen'], { encoding: 'utf8' }).trim();
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'ssh-keygen'), `#!/bin/sh\necho "$*" >> "${join(dir, 'runs')}"\n[ -e "${join(dir, 'fail')}" ] && exit 1\nsleep 0.2\nexec "${real}" "$@" </dev/null\n`, { mode: 0o755 });
+    const old = process.env.PATH;
+    process.env.PATH = `${bin}:${old}`;
+    try { return await run(); } finally { process.env.PATH = old; }
+  }
+
+  it('two first setups at once make one key with one ssh-keygen, and leave no half key (HB-0577)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const keys = join(dir, 'keys');
+    const [a, b] = await withKeygenShim(dir, () => Promise.all([ensureRunnerKey({ sshDir: keys }), ensureRunnerKey({ sshDir: keys })]));
+    expect(a).toMatch(/^ssh-ed25519 /);
+    expect(b).toBe(a);
+    // One key made; each setup reads its public half out of it.
+    expect(readFileSync(join(dir, 'runs'), 'utf8').trim().split('\n').filter((l) => l.startsWith('-t ed25519'))).toHaveLength(1);
+    expect(readdirSync(keys).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
+    expect(statSync(join(keys, 'agentclaw_runner')).mode & 0o777).toBe(0o600);
+  });
+
+  it('two processes making the key at once: the first one in place is the key, both halves match, and both get it (HB-0577 review)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const keys = join(dir, 'keys');
+    mkdirSync(keys, { mode: 0o700 });
+    // Another process's view of the same folder: by another path, so this
+    // process's one-at-a-time map does not see the two as one.
+    const other = join(dir, 'keys-other');
+    symlinkSync(keys, other);
+    // Each later ssh-keygen run is slower: the first maker is done before the second.
+    const real = execFileSync('sh', ['-c', 'command -v ssh-keygen'], { encoding: 'utf8' }).trim();
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    const runs = join(dir, 'runs');
+    writeFileSync(join(bin, 'ssh-keygen'), `#!/bin/sh\necho "$*" >> "${runs}"\nn=$(wc -l < "${runs}")\nsleep 0.$((n * 3))\nexec "${real}" "$@" </dev/null\n`, { mode: 0o755 });
+    const old = process.env.PATH;
+    process.env.PATH = `${bin}:${old}`;
+    let a: string, b: string;
+    try {
+      [a, b] = await Promise.all([ensureRunnerKey({ sshDir: keys }), ensureRunnerKey({ sshDir: other })]);
+    } finally { process.env.PATH = old; }
+    const keyPart = (line: string) => line.trim().split(/\s+/).slice(0, 2).join(' ');
+    expect(a).toMatch(/^ssh-ed25519 /);
+    expect(keyPart(b)).toBe(keyPart(a));
+    // The public half on disk is the private key's own.
+    const derived = execFileSync(real, ['-y', '-f', join(keys, 'agentclaw_runner')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    expect(keyPart(readFileSync(join(keys, 'agentclaw_runner.pub'), 'utf8'))).toBe(keyPart(derived));
+    expect(keyPart(a)).toBe(keyPart(derived));
+    // Two keys were made; the second's pair is gone.
+    expect(readFileSync(runs, 'utf8').split('\n').filter((l) => l.startsWith('-t ed25519'))).toHaveLength(2);
+    expect(readdirSync(keys).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
+    expect(statSync(join(keys, 'agentclaw_runner')).mode & 0o777).toBe(0o600);
+  });
+
+  it('a private key with no public half (stopped between the two): the public half is made from it (HB-0577 review)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const pub = await ensureRunnerKey({ sshDir: dir });
+    rmSync(join(dir, 'agentclaw_runner.pub'));
+    const again = await ensureRunnerKey({ sshDir: dir });
+    expect(again.split(' ').slice(0, 2)).toEqual(pub.split(' ').slice(0, 2));
+    expect(readFileSync(join(dir, 'agentclaw_runner.pub'), 'utf8').trim()).toBe(again);
+  });
+
+  const keyPart = (line: string) => line.trim().split(/\s+/).slice(0, 2).join(' ');
+  const realKeygen = () => execFileSync('sh', ['-c', 'command -v ssh-keygen'], { encoding: 'utf8' }).trim();
+  /**
+   * Another process's key wins the race: while this one makes its pair, that
+   * key (`winner`) is put in place with `pub` as its key.pub. ssh-keygen -y
+   * fails while `no-derive` is there. Sandboxed: a temp PATH entry.
+   */
+  async function rivalWins<T>(dir: string, keys: string, pub: string, run: () => Promise<T>): Promise<T> {
+    const real = realKeygen();
+    const winner = join(dir, 'winner');
+    execFileSync(real, ['-t', 'ed25519', '-N', '', '-f', winner, '-C', 'winner'], { stdio: 'ignore' });
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'ssh-keygen'), `#!/bin/sh
+echo "$*" >> "${join(dir, 'runs')}"
+case "$*" in *"-t ed25519"*) cp "${winner}" "${join(keys, 'agentclaw_runner')}"; chmod 600 "${join(keys, 'agentclaw_runner')}"; cp "${pub === 'winner' ? `${winner}.pub` : pub}" "${join(keys, 'agentclaw_runner.pub')}" ;; esac
+case "$*" in *"-y "*) [ -e "${join(dir, 'no-derive')}" ] && exit 1 ;; esac
+exec "${real}" "$@" </dev/null
+`, { mode: 0o755 });
+    const old = process.env.PATH;
+    process.env.PATH = `${bin}:${old}`;
+    try { return await run(); } finally { process.env.PATH = old; }
+  }
+
+  it('key.pub is read as it is on every later setup: ssh-keygen runs only to make the key (HB-0577, sixth review)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const keys = join(dir, 'keys');
+    const runs = () => readFileSync(join(dir, 'runs'), 'utf8').trim().split('\n');
+    await withKeygenShim(dir, async () => {
+      const pub = await ensureRunnerKey({ sshDir: keys });
+      expect(runs().filter((l) => l.startsWith('-t ed25519'))).toHaveLength(1);
+      const made = runs().length;
+      expect(await ensureRunnerKey({ sshDir: keys })).toBe(pub);
+      expect(await ensureRunnerKey({ sshDir: keys })).toBe(pub);
+      expect(runs()).toHaveLength(made);
+    });
+  });
+
+  it("right after another process's key won the race, a key.pub that is not that key's is written again from it (HB-0577, fifth and sixth reviews)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const keys = join(dir, 'keys');
+    // The losing pair's public half, as two makers at once could leave it.
+    const other = join(dir, 'other');
+    execFileSync(realKeygen(), ['-t', 'ed25519', '-N', '', '-f', other, '-C', 'other'], { stdio: 'ignore' });
+    const got = await rivalWins(dir, keys, `${other}.pub`, () => ensureRunnerKey({ sshDir: keys }));
+    const winner = keyPart(readFileSync(join(dir, 'winner.pub'), 'utf8'));
+    expect(keyPart(got)).toBe(winner);
+    expect(keyPart(readFileSync(join(keys, 'agentclaw_runner.pub'), 'utf8'))).toBe(winner);
+    expect(readdirSync(keys).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
+  });
+
+  it('an ssh-keygen -y that fails after a lost race: key.pub is the answer, and that is noted (HB-0577, sixth review)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const keys = join(dir, 'keys');
+    writeFileSync(join(dir, 'no-derive'), '');
+    const notes: Array<[string, Record<string, unknown>]> = [];
+    const got = await rivalWins(dir, keys, 'winner', () => ensureRunnerKey({ sshDir: keys, log: (e, d) => notes.push([e, d]) }));
+    expect(keyPart(got)).toBe(keyPart(readFileSync(join(dir, 'winner.pub'), 'utf8')));
+    expect(readFileSync(join(dir, 'runs'), 'utf8')).toMatch(/^-y /m);
+    expect(notes).toEqual([['runner_key.public_unchecked', { key: join(keys, 'agentclaw_runner.pub'), error: expect.any(String) }]]);
+  });
+
+  it('its note gives the error, or says ssh-keygen did not answer', () => {
+    const key = '/home/someone/.ssh/agentclaw_runner.pub';
+    expect(eventLabel('runner_key.public_unchecked', { key, error: 'Command failed: ssh-keygen -y\nLoad key: invalid format\n' })).toMatch(/invalid format$/);
+    expect(eventLabel('runner_key.public_unchecked', { key, error: '' })).toMatch(/: ssh-keygen did not answer$/);
+  });
+
+  it('a filesystem with no hard links: the key is renamed into place under a lock, only if none is there (HB-0577, sixth and seventh reviews)', async () => {
+    for (const code of ['EXDEV', 'EPERM', 'ENOTSUP']) {
+      fsHooks.linkFails = code;
+      try {
+        const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+        const pub = await ensureRunnerKey({ sshDir: dir });
+        const derived = execFileSync(realKeygen(), ['-y', '-f', join(dir, 'agentclaw_runner')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        expect(keyPart(pub)).toBe(keyPart(derived));
+        expect(statSync(join(dir, 'agentclaw_runner')).mode & 0o777).toBe(0o600);
+        expect(readdirSync(dir).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
+      } finally { fsHooks.linkFails = undefined; }
+    }
+    // A lock left by a process that stopped while it held it is taken over.
+    fsHooks.linkFails = 'EXDEV';
+    try {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+      writeFileSync(join(dir, 'agentclaw_runner.lock'), '');
+      utimesSync(join(dir, 'agentclaw_runner.lock'), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+      expect(await ensureRunnerKey({ sshDir: dir })).toMatch(/^ssh-ed25519 /);
+      expect(readdirSync(dir).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
+    } finally { fsHooks.linkFails = undefined; }
+    // Another process's key got there first: replaced, never.
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const keys = join(dir, 'keys');
+    fsHooks.linkFails = 'EXDEV';
+    try {
+      const got = await rivalWins(dir, keys, 'winner', () => ensureRunnerKey({ sshDir: keys }));
+      expect(keyPart(got)).toBe(keyPart(readFileSync(join(dir, 'winner.pub'), 'utf8')));
+      expect(readFileSync(join(keys, 'agentclaw_runner'), 'utf8')).toBe(readFileSync(join(dir, 'winner'), 'utf8'));
+      expect(readdirSync(keys).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
+    } finally { fsHooks.linkFails = undefined; }
+  });
+
+  it('two setups that both find a stale lock on a filesystem with no hard links: one takes it over, and only one puts a key in place (HB-0577, eighth review)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    // The second setup reaches the same folder by another path, as a second process would: it does not wait on the first's in this one.
+    const other = join(mkdtempSync(join(tmpdir(), 'acl-sshlink-')), 'ssh');
+    symlinkSync(dir, other);
+    writeFileSync(join(dir, 'agentclaw_runner.lock'), '');
+    utimesSync(join(dir, 'agentclaw_runner.lock'), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    // Both find it stale before either acts; the second acts a moment later, while the first holds the lock it made.
+    let looks = 0;
+    let bothLooked!: () => void;
+    const both = new Promise<void>((r) => { bothLooked = r; });
+    fsHooks.onStat = async (p) => {
+      if (!p.endsWith('agentclaw_runner.lock')) return;
+      const n = ++looks;
+      if (n > 2) return;
+      if (n === 2) bothLooked();
+      await both;
+      if (n === 2) await new Promise((r) => setTimeout(r, 30));
+    };
+    let placed = 0;
+    fsHooks.onRename = async (_from, to) => {
+      if (!to.endsWith('/agentclaw_runner')) return;
+      placed++;
+      await new Promise((r) => setTimeout(r, 100));
+    };
+    fsHooks.linkFails = 'EXDEV';
+    try {
+      const [a, b] = await Promise.all([ensureRunnerKey({ sshDir: dir }), ensureRunnerKey({ sshDir: other })]);
+      expect(looks).toBeGreaterThanOrEqual(2);
+      expect(placed).toBe(1);
+      expect(a).toBe(b);
+      expect(a).toBe(readFileSync(join(dir, 'agentclaw_runner.pub'), 'utf8').trim());
+      expect(readdirSync(dir).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
+    } finally {
+      fsHooks.linkFails = undefined;
+      fsHooks.onStat = undefined;
+      fsHooks.onRename = undefined;
+    }
+  });
+
+  it('three setups: a waiter that took a fresh lock for a stale one puts it back only where none is, and the holder that lost it starts over: one key is put in place (HB-0577, ninth review)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    // Three paths to one folder, as three processes would each have.
+    const via = () => { const p = join(mkdtempSync(join(tmpdir(), 'acl-sshlink-')), 'ssh'); symlinkSync(dir, p); return p; };
+    const [b, c] = [via(), via()];
+    writeFileSync(join(dir, 'agentclaw_runner.lock'), '');
+    utimesSync(join(dir, 'agentclaw_runner.lock'), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    const signal = () => { let go!: () => void; const p = new Promise<void>((r) => { go = r; }); return { p, go }; };
+    const [bothLooked, aHolds, bTook, cHolds] = [signal(), signal(), signal(), signal()];
+    let looks = 0, claims = 0, placed = 0;
+    // A and B both find the lock stale. A takes it over and makes its own; B, a moment late, renames A's away.
+    fsHooks.onStat = async (p, r) => {
+      if (p.endsWith('agentclaw_runner.lock')) {
+        const n = ++looks;
+        if (n > 2) return;
+        if (n === 2) bothLooked.go();
+        await bothLooked.p;
+        if (n === 2) await aHolds.p;
+      } else if (p.includes('.lock.stale-') && Date.now() - r.mtimeMs < 10_000) {
+        // B has A's fresh lock in hand: C takes the empty place before B puts it back.
+        bTook.go();
+        await cHolds.p;
+      }
+    };
+    fsHooks.onClaim = async () => {
+      const n = ++claims;
+      if (n === 1) { aHolds.go(); await cHolds.p; await new Promise((r) => setTimeout(r, 50)); }
+      else if (n === 2) cHolds.go();
+    };
+    fsHooks.onRename = async (_from, to) => {
+      if (!to.endsWith('/agentclaw_runner')) return;
+      placed++;
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    fsHooks.linkFails = 'EXDEV';
+    try {
+      const first = ensureRunnerKey({ sshDir: dir });
+      const second = ensureRunnerKey({ sshDir: b });
+      const third = bTook.p.then(() => ensureRunnerKey({ sshDir: c }));
+      const keys = await Promise.all([first, second, third]);
+      expect(placed).toBe(1);
+      expect(new Set(keys).size).toBe(1);
+      expect(keys[0]).toBe(readFileSync(join(dir, 'agentclaw_runner.pub'), 'utf8').trim());
+      expect(readdirSync(dir).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
+    } finally {
+      fsHooks.linkFails = undefined;
+      fsHooks.onStat = undefined;
+      fsHooks.onClaim = undefined;
+      fsHooks.onRename = undefined;
+    }
+  });
+
+  it('a key at its place that does not read, with no public half: the error says what to remove, rather than failing the same way for ever (HB-0577, seventh review)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    writeFileSync(join(dir, 'agentclaw_runner'), 'the first lines of a key, cut short\n', { mode: 0o600 });
+    await expect(ensureRunnerKey({ sshDir: dir })).rejects.toThrow(new RegExp(`cannot be read.*remove ${join(dir, 'agentclaw_runner').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} and add the runner again`));
+    // Removed as it says: a new key is made.
+    rmSync(join(dir, 'agentclaw_runner'));
+    expect(await ensureRunnerKey({ sshDir: dir })).toMatch(/^ssh-ed25519 /);
+  });
+
+  it('a keygen that fails leaves nothing behind, and the next setup makes the key (HB-0577)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const keys = join(dir, 'keys');
+    writeFileSync(join(dir, 'fail'), '');
+    await withKeygenShim(dir, async () => {
+      await expect(ensureRunnerKey({ sshDir: keys })).rejects.toThrow();
+      expect(readdirSync(keys)).toEqual([]);
+      rmSync(join(dir, 'fail'));
+      expect(await ensureRunnerKey({ sshDir: keys })).toMatch(/^ssh-ed25519 /);
+    });
+    expect(readdirSync(keys).sort()).toEqual(['agentclaw_runner', 'agentclaw_runner.pub']);
   });
 });
 

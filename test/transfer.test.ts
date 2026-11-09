@@ -1,15 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exportAgent, importAgent, peekFormat, TransferError } from '../src/orchestrator/transfer.js';
+import { exportAgent, importAgent, MAX_RAW_STATE_BYTES, MAX_STATE_BYTES, peekFormat, stateAllowance, tooLarge, TransferError } from '../src/orchestrator/transfer.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
+import { TelegramUnavailableError } from '../src/channels/telegramManual.js';
 
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -76,6 +77,8 @@ describe('an imported bot token is checked (2026-09-25)', () => {
     await expect(importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async () => 'someone_elses_bot' })).rejects.toThrow(/belongs to @someone_elses_bot, not @kitchenbot/);
     expect(dst.store.listAllActiveAgents()).toHaveLength(0);
     await expect(importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async () => { throw new Error('401'); } })).rejects.toThrow(/Telegram rejected the bot token/);
+    // Telegram not answering is not a bad token: try again (review of HB-0552).
+    await expect(importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async () => { throw new TelegramUnavailableError('made-up outage'); } })).rejects.toThrow(/did not answer.*Try the import again/);
     const seen: string[] = [];
     const agent = await importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async (t) => { seen.push(t); return 'KitchenBot'; } }); // case-insensitive, as Telegram is
     expect(seen).toEqual(['bot-token-123']);
@@ -102,6 +105,124 @@ describe('export failure handling', () => {
     src.provider.exportState = async () => ({ length: 200 * 1024 * 1024 } as any);
     await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/too large to move/);
     expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  it('a state at the limit with large environment values is refused, not written as a file no import can read; the agent runs again (HB-0582)', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    for (let i = 0; i < 64; i++) {
+      await src.secrets.put(`agent-env/big-${i}`, 'x'.repeat(8192));
+      src.store.insertAgentEnv({ id: `big-${i}`, agentId: 'a1', name: `MADE_UP_${i}`, secretRef: `agent-env/big-${i}`, createdAt: 'now' });
+    }
+    // At the limit for a small manifest: let through by the first check, over the ceiling with these values.
+    let encoded = false;
+    src.provider.exportState = async () => ({ length: MAX_RAW_STATE_BYTES, toString: () => { encoded = true; return ''; } } as any);
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/too large to move as a single file \(the limit is about \d+ MB with its settings and environment values\)/);
+    expect(encoded).toBe(false);
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  it('the same agent measured near the limit is refused before the stop, its env values counted (review of HB-0582)', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    for (let i = 0; i < 64; i++) {
+      await src.secrets.put(`agent-env/big-${i}`, 'x'.repeat(8192));
+      src.store.insertAgentEnv({ id: `big-${i}`, agentId: 'a1', name: `MADE_UP_${i}`, secretRef: `agent-env/big-${i}`, createdAt: 'now' });
+    }
+    let tarred = false;
+    src.provider.exportState = async () => { tarred = true; return { length: MAX_RAW_STATE_BYTES - 1000, toString: () => '' } as any; };
+    // Under the limit for the state alone, over what the file can carry beside 512 KB of values.
+    src.provider.execResponses.set('sh-volume', { code: 0, stdout: `${MAX_RAW_STATE_BYTES - 1000}\n`, stderr: '' });
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/too large to move as a single file \(the limit is about \d+ MB with its settings and environment values\)/);
+    expect(tarred).toBe(false);
+    expect(src.provider.runtimes.get(ref)!.phase).toBe('running'); // never stopped
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+    // The raw size answers only under what this agent may carry; past it, a trial compress decides.
+    const [, script] = src.provider.execLog.find(([k]) => k === 'sh-volume')!;
+    const threshold = Number(/-le (\d+)/.exec(script!)![1]);
+    expect(threshold).toBeLessThan(stateAllowance(64 * 8192)); // the values alone take that much room
+  });
+
+  it('with no room at all beside the settings and environment values, refused at once: the volume is never measured (twelfth review)', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    // The manifest without its state measured as all but filling the file, without
+    // building 256 MB of values: only that one measure is answered so.
+    const realLength = Buffer.byteLength;
+    const spy = vi.spyOn(Buffer, 'byteLength').mockImplementation(((s: string, enc?: BufferEncoding) =>
+      typeof s === 'string' && s.includes('"envVars"') && s.includes('"state":""') ? MAX_STATE_BYTES - 1000 : realLength.call(Buffer, s, enc)) as typeof Buffer.byteLength);
+    let tarred = false;
+    src.provider.exportState = async () => { tarred = true; return { length: 1000, toString: () => '' } as any; };
+    try {
+      await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/settings and environment values alone come to about \d+ MB, next to the \d+ MB a single file can hold, so there is no room for its saved state/);
+    } finally { spy.mockRestore(); }
+    expect(src.provider.execLog.some(([k]) => k === 'sh-volume'), 'the volume measured').toBe(false);
+    expect(tarred).toBe(false);
+    expect(src.provider.runtimes.get(ref)!.phase).toBe('running'); // never stopped
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  it('what the check before the stop lets through is what the file carries: one measure of this file, not a bound (second review of HB-0582)', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    for (let i = 0; i < 16; i++) {
+      await src.secrets.put(`agent-env/big-${i}`, 'x'.repeat(8192));
+      src.store.insertAgentEnv({ id: `big-${i}`, agentId: 'a1', name: `MADE_UP_${i}`, secretRef: `agent-env/big-${i}`, createdAt: 'now' });
+    }
+    let size = 1000;
+    src.provider.exportState = async () => ({ length: size, toString: () => '' } as any);
+    src.provider.execResponses.set('sh-volume', { code: 0, stdout: '1000\n', stderr: '' });
+    await exportAgent(src.deps, 'a1');
+    const threshold = () => Number(/-le (\d+)/.exec(src.provider.execLog.filter(([k]) => k === 'sh-volume').at(-1)![1]!)![1]);
+    const allowance = threshold();
+    // A state of exactly that is carried; one byte more is refused after the tar, by the same measure.
+    size = allowance;
+    await expect(exportAgent(src.deps, 'a1')).resolves.toMatchObject({ filename: expect.any(String) });
+    expect(threshold()).toBe(allowance);
+    size = allowance + 1;
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/too large to move as a single file/);
+    // A plain agent's file is small: the whole ceiling, none of it held back for a bound.
+    const plain = await installation();
+    await seedSourceAgent(plain);
+    plain.provider.execResponses.set('sh-volume', { code: 0, stdout: '1000\n', stderr: '' });
+    await exportAgent(plain.deps, 'a1');
+    expect(Number(/-le (\d+)/.exec(plain.provider.execLog.find(([k]) => k === 'sh-volume')![1]!)![1])).toBe(MAX_RAW_STATE_BYTES);
+  });
+});
+
+describe('the state a manifest can carry (HB-0582)', () => {
+  it('with next to no room left beside the settings and environment values: their size is named, never "about 0 MB" (eleventh review)', () => {
+    const meta = MAX_STATE_BYTES - 1000; // values that alone come to the ceiling
+    expect(stateAllowance(meta)).toBeLessThan(1e6);
+    const full = tooLarge(5e6, stateAllowance(meta), meta).message;
+    expect(full).toContain(`settings and environment values alone come to about ${(meta / 1e6).toFixed(0)} MB, next to the ${(MAX_STATE_BYTES / 1e6).toFixed(0)} MB a single file can hold`);
+    expect(full).toContain('Remove its largest environment values');
+    expect(full).not.toMatch(/about 0 MB/);
+    // With room, as before: the limit for the state.
+    expect(tooLarge(300e6).message).toContain(`(the limit is about ${(MAX_RAW_STATE_BYTES / 1e6).toFixed(0)} MB)`);
+    expect(tooLarge(300e6, stateAllowance(64 * 8192), 64 * 8192).message).toMatch(/the limit is about \d+ MB with its settings and environment values/);
+  });
+  it('base64 of the allowance plus the manifest fits the importer\'s ceiling, and one byte more does not', () => {
+    const base64Len = (n: number) => Math.ceil(n / 3) * 4;
+    for (const meta of [2_000, 8_192, 8_193, 8_194, 8_195, 16_472, 8_192 * 64 + 4_000]) {
+      const a = stateAllowance(meta);
+      expect(meta + base64Len(a)).toBeLessThanOrEqual(MAX_STATE_BYTES);
+      expect(a === MAX_RAW_STATE_BYTES || meta + base64Len(a + 1) > MAX_STATE_BYTES).toBe(true);
+      expect(a).toBeLessThanOrEqual(MAX_RAW_STATE_BYTES);
+    }
+    // The audit's case: two 8 KB values, 8,280 bytes over the ceiling before.
+    const meta = Buffer.byteLength(JSON.stringify({ envVars: [{ name: 'MADE_UP_ONE', value: 'x'.repeat(8192) }, { name: 'MADE_UP_TWO', value: 'x'.repeat(8192) }], state: '' }));
+    expect(stateAllowance(meta)).toBeLessThan(MAX_RAW_STATE_BYTES);
+    expect(meta + base64Len(stateAllowance(meta))).toBeLessThanOrEqual(MAX_STATE_BYTES);
+  });
+
+  it('the file\'s size is the manifest\'s plus the state\'s base64, nothing escaped (what stateAllowance counts on)', () => {
+    const manifest = { envVars: [{ name: 'MADE_UP', value: 'y'.repeat(300) }], state: '' };
+    const meta = Buffer.byteLength(JSON.stringify(manifest));
+    for (const n of [0, 1, 2, 3, 4, 299, 300, 301]) {
+      const state = randomBytes(n).toString('base64');
+      expect(Buffer.byteLength(JSON.stringify({ ...manifest, state }))).toBe(meta + Math.ceil(n / 3) * 4);
+    }
   });
 });
 
@@ -234,7 +355,7 @@ describe('agent export/import', () => {
     const src = await installation();
     await seedSourceAgent(src);
     src.store.upsertAgentClass({ id: 'heavy', ownerId: 'o', name: 'Heavy', memoryCap: '8g', swapAllowance: '4g' });
-    src.store.setAgentClass('a1', 'heavy');
+    src.store.setAgentClassIf('a1', src.store.getAgent('a1')?.classId ?? null, 'heavy');
     const m = JSON.parse(gunzipSync((await exportAgent(src.deps, 'a1')).data).toString('utf8'));
     expect(m.agent).toMatchObject({ memoryCap: '8g', swapAllowance: '4g' });
     expect(m.agent.classId).toBeUndefined();

@@ -78,7 +78,7 @@ function scriptWorld(volumes: string[], agentRefs: string[]) {
   const root = tmp('hb-bkscript-');
   const home = join(root, 'home'); mkdirSync(home);
   const repo = join(root, 'install'); mkdirSync(join(repo, 'scripts'), { recursive: true }); mkdirSync(join(repo, 'data'));
-  writeFileSync(join(repo, 'scripts', 'backup-volumes.sh'), readFileSync('scripts/backup-volumes.sh'), { mode: 0o755 });
+  for (const f of ['backup-volumes.sh', 'backup-owner.sh']) writeFileSync(join(repo, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
   writeFileSync(join(repo, '.env'), 'HATCHABOT_SECRET_KEY=not-a-real-key\n');
   const db = new Database(join(repo, 'data', 'hatchabot.sqlite'));
   db.exec(`CREATE TABLE agents (id TEXT, state TEXT, runtime_ref TEXT)`);
@@ -111,6 +111,8 @@ case "$1 $2" in
   run*)
     # A slow volume: the run holds its lock long enough for another to look.
     if [ -f "${root}/slow" ]; then sleep 1; fi
+    # A held volume: the run waits here, its lock held, until the test removes the file (at most a minute).
+    n=0; while [ -f "${root}/hold" ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n + 1)); done
     vol=""; out=""
     for a in "$@"; do case "$a" in *:/data:ro) vol="\${a%%:/data:ro}";; *:/out) out="\${a%%:/out}";; esac; done
     # The file the script's own command writes, under /out.
@@ -190,14 +192,20 @@ esac
 describe('scripts/backup-volumes.sh records how the run ended', () => {
   it('a run stopped by a signal (the service restarting, a shutdown) is incomplete, never complete (HB-0368)', async () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol', 'hatchabot-notes-2-vol'], ['docker://hatchabot-kitchen-1', 'docker://hatchabot-notes-2']);
-    writeFileSync(join(w.root, 'slow'), '');
+    // Held inside its first volume until the signal is sent: no timed sleep to race (HB-0622).
+    const hold = join(w.root, 'hold');
+    writeFileSync(hold, '');
     const c = spawn('bash', [join(w.repo, 'scripts', 'backup-volumes.sh')], {
       env: { HOME: join(w.root, 'home'), PATH: `${w.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HATCHABOT_BACKUP_DIR: w.backups, HATCHABOT_PREFIX: 'hatchabot', NODE_PATH: join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..') },
       stdio: 'ignore',
     });
-    const t0 = Date.now();
-    while (!/^run /m.test(w.localLog()) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
-    c.kill('SIGTERM');
+    try {
+      const t0 = Date.now();
+      while (!/^run /m.test(w.localLog()) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
+      c.kill('SIGTERM');
+    } finally {
+      rmSync(hold, { force: true }); // bash runs its trap once the step it waits on ends; never left held
+    }
     const code = await new Promise<number | null>((r) => c.on('exit', (n) => r(n)));
     expect(code).toBe(143);
     expect(readSetStatus(w.setDir())).toMatchObject({ complete: false });
@@ -348,16 +356,22 @@ describe('scripts/backup-volumes.sh: a second run of the same day (HB-0433)', ()
     const w = scriptWorld(VOLS, REFS);
     expect(w.run().status).toBe(0);
     expect(w.record().captured).toEqual(VOLS);
-    // The noon run, stopped by a restart while it writes the first volume.
-    writeFileSync(join(w.root, 'slow'), '');
+    // The noon run, stopped by a restart while it writes the first volume: held there until
+    // the signal is sent (HB-0622).
+    const hold = join(w.root, 'hold');
+    writeFileSync(hold, '');
     const c = spawn('bash', [join(w.repo, 'scripts', 'backup-volumes.sh')], {
       env: { HOME: join(w.root, 'home'), PATH: `${w.bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HATCHABOT_BACKUP_DIR: w.backups, HATCHABOT_PREFIX: 'hatchabot', NODE_PATH: join(dirname(createRequire(import.meta.url).resolve('better-sqlite3/package.json')), '..') },
       stdio: 'ignore',
     });
-    const before = (w.localLog().match(/^run /gm) ?? []).length;
-    const t0 = Date.now();
-    while ((w.localLog().match(/^run /gm) ?? []).length === before && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
-    c.kill('SIGTERM');
+    try {
+      const before = (w.localLog().match(/^run /gm) ?? []).length;
+      const t0 = Date.now();
+      while ((w.localLog().match(/^run /gm) ?? []).length === before && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
+      c.kill('SIGTERM');
+    } finally {
+      rmSync(hold, { force: true }); // never left held past the test
+    }
     await new Promise((r) => c.on('exit', r));
     const st = readSetStatus(w.setDir());
     expect(st.complete).toBe(false);
@@ -476,6 +490,21 @@ describe('scripts/backup-volumes.sh: two installs sharing a backups folder (HB-0
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(existsSync(bLegacy)).toBe(true);
     expect(existsSync(aLegacy)).toBe(false);
+  });
+});
+
+describe('scripts/backup-volumes.sh without its owner helper (fifteenth review)', () => {
+  it('a missing or empty scripts/backup-owner.sh stops the run before it makes the day\'s folder: no empty set that reads as today\'s', () => {
+    for (const helper of ['missing', 'empty'] as const) {
+      const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+      const file = join(w.repo, 'scripts', 'backup-owner.sh');
+      if (helper === 'missing') rmSync(file); else writeFileSync(file, '');
+      const r = w.run();
+      expect(r.status, `${helper}: ${r.stdout}${r.stderr}`).toBe(1);
+      expect(r.stderr, helper).toContain(`Could not read ${w.repo}/scripts/backup-owner.sh: without it this run cannot tell whose the sets in ${w.backups} are, so it stops before writing anything.`);
+      expect(existsSync(w.today()), helper).toBe(false);
+      expect(w.localLog(), helper).toBe('');
+    }
   });
 });
 
@@ -744,14 +773,28 @@ exec /bin/cat "$@"
   it('a run releases only its own lock: one that now names another run is left to it (#215)', async () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
     const lock = join(w.today(), '.backup-lock');
-    writeFileSync(join(w.root, 'slow'), '');
+    // The run waits inside its backup, lock held, until the test lets it go: no timed sleep to
+    // race on a loaded machine (HB-0622).
+    const hold = join(w.root, 'hold');
+    writeFileSync(hold, '');
     const running = w.start();
+    let ended = false;
+    const end = running.then((r) => { ended = true; return r; });
     // While it backs up, the lock comes to name another (live) run.
-    for (let i = 0; i < 50 && !existsSync(join(lock, 'pid')); i++) await new Promise((r) => setTimeout(r, 20));
-    writeFileSync(join(lock, 'pid'), String(process.pid));
-    expect((await running).status).toBe(0);
+    // A whole pid, not just the file: `echo $$ > pid` creates it empty before it writes.
+    const holds = () => { try { return /^\d+\s*$/.test(readFileSync(join(lock, 'pid'), 'utf8')); } catch { return false; } };
+    try {
+      const until = Date.now() + 30_000;
+      while (!holds() && !ended && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+      expect(ended, 'the run ended before its lock was seen').toBe(false);
+      expect(holds(), 'the run never wrote its lock').toBe(true);
+      writeFileSync(join(lock, 'pid'), String(process.pid));
+    } finally {
+      rmSync(hold, { force: true }); // never leave the run held past the test
+    }
+    expect((await end).status).toBe(0);
     expect(readFileSync(join(lock, 'pid'), 'utf8')).toBe(String(process.pid));
-  });
+  }, 60_000);
 
   it('a base directory that is already there keeps its mode; a new one is 0700; the set is 0700', () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
@@ -808,7 +851,7 @@ describe('scripts/restore-drill.sh picks a set worth drilling (2026-10-09)', () 
   function drill(base: string, args: string[] = []) {
     const root = tmp('hb-drill-');
     mkdirSync(join(root, 'install', 'scripts'), { recursive: true });
-    writeFileSync(join(root, 'install', 'scripts', 'restore-drill.sh'), readFileSync('scripts/restore-drill.sh'), { mode: 0o755 });
+    for (const f of ['restore-drill.sh', 'backup-owner.sh']) writeFileSync(join(root, 'install', 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     mkdirSync(join(root, 'bin'));
     writeFileSync(join(root, 'bin', 'docker'), '#!/bin/sh\necho "docker must not run here" >&2; exit 99\n', { mode: 0o755 });
     return spawnSync('bash', [join(root, 'install', 'scripts', 'restore-drill.sh'), ...args], {

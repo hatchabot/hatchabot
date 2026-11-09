@@ -12,8 +12,14 @@ import { scriptEnv } from './helpers/scriptEnv.js';
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
+/**
+ * A listener that takes the connection and never answers: curl waits for ever,
+ * unless it was given a deadline (--max-time), which it then reaches (exit 28).
+ */
+const HANGS = 'case " $* " in *" --max-time "*) exit 28 ;; esac\nexec /bin/sleep 20\n';
+
 /** Restart a fake install whose service answers only at `serving`; returns the URLs curl was asked for. */
-function restart(env: string, serving: string, os = 'Linux') {
+function restart(env: string, serving: string, os = 'Linux', hangs = false) {
   const root = mkdtempSync(join(tmpdir(), 'hb-restart-')); dirs.push(root);
   const home = join(root, 'home'); mkdirSync(home);
   const repo = join(root, 'install'); mkdirSync(join(repo, 'scripts'), { recursive: true });
@@ -25,8 +31,8 @@ function restart(env: string, serving: string, os = 'Linux') {
   for (const tool of ['systemctl', 'launchctl', 'sleep', 'journalctl']) writeFileSync(join(bin, tool), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
   writeFileSync(join(bin, 'uname'), `#!/usr/bin/env bash\necho ${os}\n`, { mode: 0o755 });
   // The last argument is the URL; only the listener's real address answers.
-  writeFileSync(join(bin, 'curl'), `#!/usr/bin/env bash\nurl="\${@: -1}"\necho "$* " >> ${JSON.stringify(asked)}\n[ "$url" = ${JSON.stringify(serving)} ]\n`, { mode: 0o755 });
-  const r = spawnSync('bash', [join(repo, 'scripts', 'restart.sh')], { encoding: 'utf8', env: scriptEnv(home, `${bin}:/usr/bin:/bin`) });
+  writeFileSync(join(bin, 'curl'), `#!/usr/bin/env bash\nurl="\${@: -1}"\necho "$* " >> ${JSON.stringify(asked)}\n${hangs ? HANGS : ''}[ "$url" = ${JSON.stringify(serving)} ]\n`, { mode: 0o755 });
+  const r = spawnSync('bash', [join(repo, 'scripts', 'restart.sh')], { encoding: 'utf8', env: scriptEnv(home, `${bin}:/usr/bin:/bin`), timeout: 15_000 });
   let calls: string[] = [];
   try { calls = readFileSync(asked, 'utf8').trim().split('\n'); } catch { /* never called */ }
   return { status: r.status, out: r.stdout + r.stderr, calls };
@@ -61,6 +67,14 @@ describe('scripts/restart.sh health probe (#225)', () => {
     expect(restart('PORT = 9137\n', 'http://localhost:8080/healthz', 'Darwin').status).toBe(0);
     expect(restart('PORT=7000\nPORT= 9137\n', 'http://localhost:7000/healthz', 'Darwin').status).toBe(0);
     expect(restart('  PORT="9137"  # moved\n', 'http://localhost:9137/healthz', 'Darwin').status).toBe(0);
+  });
+
+  it('a listener that takes the connection and never answers: each request ends, and so does the wait (HB-0553)', () => {
+    const r = restart('PORT=8080\n', 'http://localhost:8080/healthz', 'Linux', true);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("isn't answering at http://localhost:8080");
+    expect(r.calls.length).toBeGreaterThan(1);
+    for (const c of r.calls) expect(c).toMatch(/--connect-timeout \d+ --max-time \d+ /);
   });
 
   it('a listener that does not answer still fails, naming where it was asked', () => {

@@ -56,8 +56,13 @@ export interface AgentUsage extends UsageSplit {
   profile?: ModelProfile;
   /** Token health (tokenHealth.ts): conversation size, cache, cost split, scheduled runs, instruction files, loop signals. */
   health?: TokenHealthRaw;
-  /** Web searches per UTC hour ("2026-11-07T01") by provider, from `since` (ms) on (HB-0532). */
-  searches?: { since: number; hours: Record<string, Record<string, number>> };
+  /**
+   * Web searches per UTC hour ("2026-11-07T01") by provider, from `since` (ms)
+   * on: 32 days back (HB-0532, HB-0580). `from`: the earliest event the reader
+   * found at all (ms; 0 for none). Before it the agent has no transcripts any
+   * more, so this reading says nothing of those hours (HB-0580 review).
+   */
+  searches?: { since: number; from: number; hours: Record<string, Record<string, number>> };
 }
 
 /** [input, output, cacheRead, cacheWrite] */
@@ -86,8 +91,10 @@ export interface TokenHealthRaw {
   jobTokens: Record<string, Record<string, Mix4>>;
   thinking: { calls: number; of: number };
   cfg: { thinkingDefault?: string; agentThinking: Record<string, string>; modelThinking: Record<string, string>; caps: Record<string, number> } | null;
-  /** Bytes of each instruction file, per agent directory. */
+  /** Characters of each instruction file, per agent directory (bytes before v2.178.0, and for a file over 1 MB). */
   files: Record<string, Record<string, number>>;
+  /** The OpenClaw version the container runs, when the reader found it (HB-0516). */
+  ocv?: string;
   compactions: { n: number; last: number; before: number };
   /** Scheduled tasks' runs in the 30 days (OpenClaw's own upkeep jobs left out); rr = [start, ms since the error before it]. */
   jobs: Array<{ id: string; name?: string; off?: boolean; runs: number; ok: number; error: number; interrupted: number; skipped: number; streak: number; first: number; last: number; lastStatus: string; rr: Array<[number, number]> }> | null;
@@ -195,9 +202,14 @@ const win = {}; const turnOf = {}; let promptErrors = 0;
 // HB-0532): a web_search tool result names it ("brave", "duckduckgo", …), and
 // one OpenClaw answered from its cache is "cached" (no request was made).
 // Failed searches are not counted: a refused request spends nothing.
+// 32 days back, not 30: the month the report covers can be 31 days long, and
+// a first reading late on its last day must still see its first (HB-0580).
+const SW = Date.now() - 32 * 86400000;
 const SR = {};
+// The earliest event read at all: before it there are no transcripts left to count from.
+let seenFrom = Infinity;
 const srch = (at, msg) => {
-  if (msg.role !== "toolResult" || msg.toolName !== "web_search" || msg.isError === true || !(at >= W30)) return;
+  if (msg.role !== "toolResult" || msg.toolName !== "web_search" || msg.isError === true || !(at >= SW)) return;
   const d = msg.details && typeof msg.details === "object" ? msg.details : null;
   if (d && d.error) return;
   let p = d && typeof d.provider === "string" ? d.provider : "", cached = !!(d && d.cached === true);
@@ -318,6 +330,7 @@ const prof = (sid, at, msg) => {
 };
 const ev = (sid, at, e) => {
   if (!e) return;
+  if (at > 0 && at < seenFrom) seenFrom = at;
   if (e.type === "custom" && /prompt-error/.test(String(e.customType || ""))) { if (at >= W30) promptErrors++; return; }
   if (e.type === "compaction") {
     if (e.id) { if (seen.has(e.id)) return; seen.add(e.id); }
@@ -456,13 +469,43 @@ try {
 // Token health: the instruction files OpenClaw puts in every turn (sizes only),
 // the thinking and context settings, scheduled runs, and channel messages that
 // were retried (the gateway's own ingress queue: counts and times, no payload).
+// Sizes in characters, as OpenClaw's limits count them: a file's bytes are up to
+// three times that in Chinese or Japanese (HB-0601). A file over 1 MB is past
+// every limit whatever its unit, and is not read. Each count is kept by the
+// file's byte size and mtime in OpenClaw's tmp folder (left out of snapshots):
+// a file is read again only once it changed, not at every pass (seventh review).
+const SIZES = path.join(root, "..", "tmp", "hatchabot-instruction-sizes.json");
+let knownSizes = {};
+try { knownSizes = JSON.parse(fs.readFileSync(SIZES, "utf8")) || {}; } catch {}
+const keptSizes = {}; let sizesChanged = false;
 const files = {};
 for (const d of dirs) {
   const f = {};
   for (const name of ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md", "MEMORY.md", "TOOLS.md"]) {
-    try { const st = fs.statSync(path.join(root, d, "agent", name)); if (st.isFile()) f[name] = st.size; } catch {}
+    try {
+      const p = path.join(root, d, "agent", name); const st = fs.statSync(p);
+      if (!st.isFile()) continue;
+      if (st.size > 1048576) { f[name] = st.size; continue; }
+      const k = knownSizes[p];
+      if (Array.isArray(k) && k[0] === st.size && k[1] === st.mtimeMs && typeof k[2] === "number") f[name] = k[2];
+      else { f[name] = fs.readFileSync(p, "utf8").length; sizesChanged = true; }
+      keptSizes[p] = [st.size, st.mtimeMs, f[name]];
+    } catch {}
   }
   files[d] = f;
+}
+if (sizesChanged || Object.keys(knownSizes).length !== Object.keys(keptSizes).length) {
+  try {
+    fs.mkdirSync(path.dirname(SIZES), { recursive: true });
+    const t = SIZES + "." + process.pid; fs.writeFileSync(t, JSON.stringify(keptSizes)); fs.renameSync(t, SIZES);
+  } catch {}
+}
+// The OpenClaw this container runs: which files go in every turn depends on it
+// (2026.9.6 and later leave TOOLS.md out, HB-0516). "" when not found.
+const OC_PACKAGE = [path.join(path.dirname(process.execPath), "..", "lib", "node_modules", "openclaw", "package.json"), "/usr/local/lib/node_modules/openclaw/package.json", "/usr/lib/node_modules/openclaw/package.json"];
+let ocv = "";
+for (const p of OC_PACKAGE) {
+  try { const v = JSON.parse(fs.readFileSync(p, "utf8")).version; if (typeof v === "string" && /^[0-9][0-9A-Za-z.+-]{0,39}$/.test(v)) { ocv = v; break; } } catch {}
 }
 let cfg = null;
 try {
@@ -519,12 +562,12 @@ for (const [sid, l] of Object.entries(HW.latest)) {
 }
 top.sort((a, b) => b.ctx - a.ctx);
 const cs = HW.conv.sort((a, b) => a - b);
-out.health = { v: 1, since: W30,
+out.health = { v: 1, since: W30, ...(ocv ? { ocv } : {}),
   conv: { calls: cs.length, p50: rank(cs, 0.5), p90: rank(cs, 0.9), max: cs.length ? cs[cs.length - 1] : 0, over100k: HW.over100k },
   main, top: top.slice(0, 5), cache: HW.cache, split: HW.split, jobTokens: HW.jobTok, thinking: { calls: HW.think[0], of: HW.think[1] },
   cfg, files, compactions: HW.comp, jobs, ingress, big: HW.big, guard: HW.guard, streaks: HW.streaks };
 out.window = { since: W30, models: wm, promptErrors, hourly: true };
-out.searches = { v: 1, since: W30, hours: SR };
+out.searches = { v: 1, since: SW, from: seenFrom === Infinity ? 0 : seenFrom, hours: SR };
 out.purposes = purposes; out.crons = crons;
 process.stdout.write(JSON.stringify(out));
 `;
@@ -552,7 +595,7 @@ export async function agentUsage(
   // marked, so the sampler keeps the profile but writes no total from it.
   let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number; bad?: number;
     window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number; hourly?: boolean }; purposes?: Record<string, string>; crons?: number | null;
-    health?: TokenHealthRaw; searches?: { v?: number; since?: number; hours?: Record<string, Record<string, number>> } };
+    health?: TokenHealthRaw; searches?: { v?: number; since?: number; from?: number; hours?: Record<string, Record<string, number>> } };
   try {
     raw = JSON.parse(res.stdout);
     if (!raw || typeof raw.models !== 'object') throw new Error('no usage object');
@@ -596,7 +639,7 @@ export async function agentUsage(
       },
     } : {}),
     ...(raw.health && raw.health.v === 1 && typeof raw.health.conv === 'object' ? { health: raw.health } : {}),
-    ...(raw.searches?.v === 1 && Number(raw.searches.since) > 0 ? { searches: { since: Number(raw.searches.since), hours: searchHoursOf(raw.searches.hours) } } : {}),
+    ...(raw.searches?.v === 1 && Number(raw.searches.since) > 0 ? { searches: { since: Number(raw.searches.since), from: Number(raw.searches.from) || 0, hours: searchHoursOf(raw.searches.hours) } } : {}),
   };
 }
 

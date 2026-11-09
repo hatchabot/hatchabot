@@ -737,6 +737,71 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     expect(none).not.toContain('master-account@example.org');
   });
 
+  it("a child whose own section its code fences leave unsure is not pushed, and says why: it keeps neither the master's Data sources nor loses its Google accounts (eighth review of HB-0520)", async () => {
+    const master = 'Playbook.\n\n## Data sources\n- the master\'s folder\n\n## Google accounts\n- master-account@example.org\n';
+    // An example above that never closes the way it opens: some readers take its sections as quoted.
+    const unclosed = ['Old.', '```bash', 'an example never closed', '````', ''];
+    const run = async (childFile: string) => {
+      const { f, provider, child, store } = await withChild();
+      const written: string[] = [];
+      const inner = provider.execShell.bind(provider);
+      provider.execShell = async (ref, script, opts) => {
+        if (script.includes('base64 -d') && script.includes(`${child.slug}/agent/AGENTS.md`)) {
+          written.push(Buffer.from(/echo "([A-Za-z0-9+/=]+)"/.exec(script)![1]!, 'base64').toString('utf8'));
+          return { code: 0, stdout: '', stderr: '' };
+        }
+        if (script.includes('AGENTS.md')) return { code: 0, stdout: script.includes(`${child.slug}/agent/`) ? childFile : master, stderr: '' };
+        return inner(ref, script, opts);
+      };
+      const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+      return { body: res.json(), written, child, store };
+    };
+    for (const [section, file] of [
+      ['Data sources', [...unclosed, '## Data sources', '- its own folder', '````', ''].join('\n')],
+      ['Google accounts', [...unclosed, '## Google accounts', '- child-account@example.org', '````', ''].join('\n')],
+    ] as const) {
+      const { body, written, child, store } = await run(file);
+      expect(body.pushed, section).toBe(0);
+      expect(body.results.find((r: { id: string }) => r.id === child.id)).toMatchObject({ ok: false, error: `its AGENTS.md has a code fence that doesn't close above "${section}"; fix it and push again` });
+      expect(written, section).toEqual([]);
+      // Checked before the snapshot: a child not pushed gets none (ninth review).
+      expect(store.listSnapshots(child.id).filter((s) => s.reason === 'pre-params'), section).toEqual([]);
+    }
+  });
+
+  it("a master whose own fences leave its Google accounts unsure: a child with none never gets the master's addresses, and one with its own is not pushed, naming the master (ninth review)", async () => {
+    // An example in the master's AGENTS.md never closes the way it opens: some readers take its Google accounts as quoted.
+    const master = ['Playbook.', '```bash', 'an example never closed', '````', '', '## Google accounts', '- master-account@example.org', '', '## After', 'keep', ''].join('\n');
+    const run = async (childFile: string) => {
+      const { f, provider, child, store } = await withChild();
+      const written: string[] = [];
+      const inner = provider.execShell.bind(provider);
+      provider.execShell = async (ref, script, opts) => {
+        if (script.includes('base64 -d') && script.includes(`${child.slug}/agent/AGENTS.md`)) {
+          written.push(Buffer.from(/echo "([A-Za-z0-9+/=]+)"/.exec(script)![1]!, 'base64').toString('utf8'));
+          return { code: 0, stdout: '', stderr: '' };
+        }
+        if (script.includes('AGENTS.md')) return { code: 0, stdout: script.includes(`${child.slug}/agent/`) ? childFile : master, stderr: '' };
+        return inner(ref, script, opts);
+      };
+      const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+      return { body: res.json(), written, child, store };
+    };
+    // A child with no Google accounts: pushed, without the master's.
+    const none = await run('Old.\n');
+    expect(none.body.pushed).toBe(1);
+    expect(none.written.length).toBeGreaterThan(0);
+    for (const w of none.written) expect(w).not.toContain('master-account@example.org');
+    expect(none.written[0]).toContain('## After');
+    // A child with its own: the master's section would not be replaced, so it is not pushed, and the master is named.
+    const own = await run('Old.\n\n## Google accounts\n- child-account@example.org\n');
+    expect(own.body.pushed).toBe(0);
+    const masterName = own.store.getAgent('a1')!.name;
+    expect(own.body.results.find((r: { id: string }) => r.id === own.child.id)).toMatchObject({ ok: false, error: `${masterName}'s AGENTS.md has a code fence that doesn't close above "Google accounts"; fix it there and push again` });
+    expect(own.written).toEqual([]);
+    expect(own.store.listSnapshots(own.child.id).filter((s) => s.reason === 'pre-params')).toEqual([]);
+  });
+
   it("a child refused for a description too long reads the whole reason (HB-0309)", async () => {
     const { store, f, child } = await withChild();
     // "growth " 1,200 times: 8,400 characters rendered.
@@ -1167,7 +1232,7 @@ describe('10th audit regressions', () => {
     // Readable again: the lesson is added under what was there.
     fakeVolume(provider, files);
     expect((await merge()).statusCode).toBe(200);
-    expect(files.get('AGENTS.md')).toMatch(/^# Playbook\nEvery rule the copies follow\.\n\n<!-- distilled from Kid, [0-9-]+ -->\nA lesson worth keeping around\.\n$/);
+    expect(files.get('AGENTS.md')).toMatch(/^# Playbook\nEvery rule the copies follow\.\n\n<!-- distilled from Kid, [0-9-]+ \(proposal pm1\) -->\nA lesson worth keeping around\.\n$/);
     expect(store.listProposals('a1')).toEqual([]);
   });
 

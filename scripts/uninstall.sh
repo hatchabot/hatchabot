@@ -19,6 +19,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 [ -x .node/bin/node ] && PATH="$PWD/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 REPO="$(pwd)"
+HERE="$REPO"  # this script's own clone, where its helpers are (REPO can become the service's install, below)
 
 PURGE=0; BACKUPS=0; ASSUME_YES=0; INSTALLED=0; FORGET_RUNNERS=0
 for arg in "$@"; do
@@ -595,19 +596,13 @@ if [ "$PURGE" = 1 ]; then
     exit 1
   fi
   say "Deleting local state…"
-  # What marks this install's files in the backup folder: as backup-volumes.sh's
-  # key_owner fingerprints the key, by either reading of it (above). With an
-  # argument, the key a set saved there.
-  key_owner() {
-    node -e '
-    const fs = require("node:fs");
-    const { parseEnv } = require("node:util");
-    const saved = process.argv[1];
-    const key = saved ? (() => { const f = fs.existsSync(saved) ? parseEnv(fs.readFileSync(saved, "utf8")) : {}; return f.HATCHABOT_SECRET_KEY ?? f.AGENTCLAW_SECRET_KEY; })()
-      : process.env.KEY_READ ?? process.env.HATCHABOT_SECRET_KEY ?? process.env.AGENTCLAW_SECRET_KEY;
-    if (key) process.stdout.write(require("node:crypto").createHash("sha256").update("hatchabot-backup-owner\0" + key).digest("hex").slice(0, 16));' "${1:-}" 2>/dev/null || true
-  }
-  OWNER="$(key_owner)"; ALT_OWNER="$(KEY_READ="$ENV_ALT_KEY" key_owner)"
+  # What marks this install's files in the backup folder: the fingerprint of
+  # its key, by either reading of it (above), made by key_owner
+  # (scripts/backup-owner.sh, the one copy backup-volumes.sh uses too). With
+  # an argument, the key a set saved there.
+  # Without it nothing could be told apart, and every set would read as this one's.
+  . "$HERE/scripts/backup-owner.sh" || { echo "✗ $HERE/scripts/backup-owner.sh could not be read, so this install's backups cannot be told from another's: stopping here."; exit 1; }
+  OWNER="$(key_owner)"; ALT_OWNER="$(HATCHABOT_SECRET_KEY="$ENV_ALT_KEY" key_owner)"
   # A move killed part-way leaves its copy of the volume, tokens and all, in the
   # data folder. No later boot sweeps it now, and it is no backup, so it goes
   # with or without --backups, even when the data folder itself stays below.
@@ -640,9 +635,7 @@ if [ "$PURGE" = 1 ]; then
       sd="$(sed -n 's/^{"version":1,"set":"\([^"]*\)".*$/\1/p' "$1" | sed -n 1p)"
       case "$sd" in 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
       is_set "$BACKUP_DIR/$sd" || return 1
-      by="$(cat "$BACKUP_DIR/$sd/.backup-owner" 2>/dev/null || true)"
-      if [ -z "$by" ] && [ -f "$BACKUP_DIR/$sd/secret-key.env" ]; then by="$(key_owner "$BACKUP_DIR/$sd/secret-key.env")"; fi
-      is_mine "$by"
+      is_mine "$(set_owner "$BACKUP_DIR/$sd" "$OWNER$ALT_OWNER")"
     }
     DRILLS="$BACKUP_DIR/drills"
     if [ -L "$DRILLS" ]; then echo "  kept $DRILLS: it is a link to another folder, and its records may not be this install's"
@@ -666,12 +659,11 @@ if [ "$PURGE" = 1 ]; then
     fi
     # Nor another install's sets, when two share the folder: a set names the
     # install that made it (.backup-owner), or an older one the key it saved,
-    # fingerprinted as backup-volumes.sh's key_owner does (HB-0280).
+    # fingerprinted by key_owner (set_owner, scripts/backup-owner.sh; HB-0280).
     SETS=0; THEIRS=0
     for d in "$BACKUP_DIR"/20??-??-??; do
       is_set "$d" || continue
-      so="$(cat "$d/.backup-owner" 2>/dev/null || true)"
-      if [ -z "$so" ] && [ -n "$OWNER" ] && [ -f "$d/secret-key.env" ]; then so="$(key_owner "$d/secret-key.env")"; fi
+      so="$(set_owner "$d" "$OWNER")"
       if [ -n "$OWNER" ] && [ -n "$so" ] && [ "$so" != "$OWNER" ] && [ "$so" != "$ALT_OWNER" ]; then THEIRS=$((THEIRS + 1)); continue; fi
       rm -rf "$d" && SETS=$((SETS + 1))
     done

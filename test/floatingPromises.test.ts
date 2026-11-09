@@ -20,7 +20,7 @@ const CANNOT_REJECT: Record<string, string> = {
   // Lock tails: each is the `run.catch(...)` or `run.then(f, f)` of the line above it.
   tail: 'a queue tail, already caught', turn: 'a queue tail, already caught', settled: 'a queue tail, already caught', next: 'ops/notify.ts: the chain ends in .catch',
   // Their own bodies catch what can fail.
-  'this.#reapOneShot': 'catches the docker call', 'this.#settleOneShot': 'catches every docker call, and its callback only resolves',
+  'this.#reapOneShot': 'catches the docker call', 'this.#settleOneShot': 'catches every docker call, and its callback only notes the volume and resolves',
   browsersNow: 'ends in .catch', syncDocsHeld: 'ends in .catch', runUsageSample: 'ends in .catch',
   // The first of these is proved below, with a store that throws.
   runPausedReplies: 'try/catch', refreshDetectedUrl: 'catches the only await',

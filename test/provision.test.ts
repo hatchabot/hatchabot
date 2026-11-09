@@ -9,10 +9,14 @@ import {
   retryPendingSchedules,
   retryPendingSchedulesWhenUp,
   runProvisionSteps,
+  SEARCH_KEY_REF,
+  syncDataSourceDocs,
 } from '../src/orchestrator/provision.js';
+import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { attributeBrave } from '../src/orchestrator/sourceUsage.js';
 import { AgentBusyError, whileBusy } from '../src/orchestrator/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { dataSourcesSection, memoryPolicySection, operatorSection, replaceSection, withInstallSection, DATA_SOURCES_HEADING, OPERATOR_HEADING } from '../src/openclaw/workspace.js';
+import { dataSourcesSection, fenceScansForTests, memoryPolicySection, operatorSection, replaceSection, withInstallSection, DATA_SOURCES_HEADING, OPERATOR_HEADING } from '../src/openclaw/workspace.js';
 import { Store } from '../src/store/store.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
@@ -78,6 +82,116 @@ async function world(opts: { failOn?: 'provision' | 'start'; parkFirst?: boolean
 }
 
 const INPUT = { ownerId: 'o', name: 'Kitchen', aiProfileId: 'p1', hostId: 'h1' };
+
+describe("whose Brave key a container has is recorded when it is built (HB-0578 review)", () => {
+  it('a key saved or removed counts only from the build that puts it in', async () => {
+    const w = await world();
+    await w.secrets.put(SEARCH_KEY_REF, 'fleet-search-key-example');
+    const first = await provisionAgent(w.deps, INPUT);
+    expect((await runProvisionSteps(w.deps, first.agent.id)).agent.state).toBe('RUNNING');
+    const id = first.agent.id;
+    expect(w.store.appliedSearchKey(id)).toBe('fleet');
+    const count = (hour: string) => attributeBrave(w.store, id, '2026-11-01T00', { [hour]: { brave: 3 } })[hour];
+    // Its own key saved: the container still has the fleet's until it is rebuilt.
+    await w.secrets.put('agent-env/own-brave', 'own-search-key-example');
+    w.store.insertAgentEnv({ id: 'env-brave', agentId: id, name: 'BRAVE_API_KEY', secretRef: 'agent-env/own-brave', createdAt: 'now' });
+    expect(count('2026-11-02T10')).toEqual({ brave: 3 });
+    expect((await rebuildAgent(w.deps, id)).state).toBe('RUNNING');
+    expect(w.store.appliedSearchKey(id)).toBe('own');
+    expect(count('2026-11-02T11')).toEqual({ 'brave-own': 3 });
+    // Taken off again: still its own key in there until the next build.
+    w.store.deleteAgentEnv(id, 'env-brave');
+    expect(count('2026-11-02T12')).toEqual({ 'brave-own': 3 });
+    expect((await rebuildAgent(w.deps, id)).state).toBe('RUNNING');
+    expect(count('2026-11-02T13')).toEqual({ brave: 3 });
+    // No key at all in it.
+    await w.secrets.delete(SEARCH_KEY_REF);
+    expect((await rebuildAgent(w.deps, id)).state).toBe('RUNNING');
+    expect(w.store.appliedSearchKey(id)).toBe('none');
+  });
+});
+
+describe("AGENTS.md sections its code fences make unsure (HB-0520 review)", () => {
+  it('what was said is kept for 200 agents at most, the least lately said going first: an agent deleted with its fence unsure is not kept for ever (sixth review)', async () => {
+    const w = await world();
+    const first = await provisionAgent(w.deps, INPUT);
+    expect((await runProvisionSteps(w.deps, first.agent.id)).agent.state).toBe('RUNNING');
+    const agent = w.store.getAgent(first.agent.id)!;
+    w.provider.execResponses.set('sh', { code: 0, stdout: ['# Kitchen', '```bash', 'an example never closed', '````', '## Peers', '- Garden Helper', '````', ''].join('\n'), stderr: '' });
+    const said: string[] = [];
+    const sync = (id: string) => syncDataSourceDocs(w.deps, id, agent.runtimeRef!, (event, detail) => { if (event === 'agentsmd.section_unsure') said.push(String(detail.agentId)); });
+    await sync(agent.id);
+    // 200 more agents with the same fence, each said once (and later deleted, which nothing else forgets).
+    for (let i = 0; i < 200; i++) {
+      w.store.insertAgent({ id: `gone-${i}`, ownerId: `o-${i}`, name: `Gone ${i}`, slug: agent.slug, state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+      await sync(`gone-${i}`);
+    }
+    expect(said).toHaveLength(201);
+    // The first was the least lately said: forgotten, so said once more.
+    await sync(agent.id);
+    expect(said).toHaveLength(202);
+    expect(said.at(-1)).toBe(agent.id);
+    // The latest are still known.
+    await sync('gone-199');
+    expect(said).toHaveLength(202);
+  });
+
+  it('a sync reads each text\'s fences once and passes that to every section: a file already current is read for fences once (seventh review)', async () => {
+    const w = await world();
+    const first = await provisionAgent(w.deps, INPUT);
+    expect((await runProvisionSteps(w.deps, first.agent.id)).agent.state).toBe('RUNNING');
+    const agent = w.store.getAgent(first.agent.id)!;
+    const sync = () => syncDataSourceDocs(w.deps, agent.id, agent.runtimeRef!, () => {});
+    // What the sync writes for a file with an example in it.
+    w.provider.execResponses.set('sh', { code: 0, stdout: ['# Kitchen', '```bash', 'ls', '```', ''].join('\n'), stderr: '' });
+    w.provider.execLog.length = 0;
+    await sync();
+    const write = w.provider.execLog.find((c) => c[0] === 'sh' && /AGENTS\.md"?\.tmp/.test(String(c[1])));
+    const current = Buffer.from(/echo "([A-Za-z0-9+/=]+)" \| base64 -d/.exec(String(write?.[1]))![1]!, 'base64').toString('utf8');
+    // That file, synced again: nothing to write, and its fences read once (three scans), with the install section's own (two).
+    w.provider.execResponses.set('sh', { code: 0, stdout: current, stderr: '' });
+    w.provider.execLog.length = 0;
+    const before = fenceScansForTests();
+    await sync();
+    expect(fenceScansForTests() - before).toBe(5);
+    expect(w.provider.execLog.some((c) => c[0] === 'sh' && /AGENTS\.md"?\.tmp/.test(String(c[1])))).toBe(false);
+  });
+
+  it('are left as they are, and the agent\'s Activity says which, and what to fix', async () => {
+    const w = await world();
+    const first = await provisionAgent(w.deps, INPUT);
+    expect((await runProvisionSteps(w.deps, first.agent.id)).agent.state).toBe('RUNNING');
+    const agent = w.store.getAgent(first.agent.id)!;
+    // Its peers were taken away, but an example above the list never closes the way it opens.
+    const md = ['# Kitchen', '```bash', 'an example never closed', '````', '## Peers', '- Garden Helper', '````', ''].join('\n');
+    w.provider.execResponses.set('sh', { code: 0, stdout: md, stderr: '' });
+    const logged: Array<{ event: string; detail: Record<string, unknown> }> = [];
+    await syncDataSourceDocs(w.deps, agent.id, agent.runtimeRef!, (event, detail) => logged.push({ event, detail }));
+    const unsure = logged.filter((l) => l.event === 'agentsmd.section_unsure');
+    // The line the readings part on, and the fence it should close.
+    expect(unsure).toEqual([{ event: 'agentsmd.section_unsure', detail: { agentId: agent.id, headings: ['## Peers'], line: 4, fence: '```', opened: 2 } }]);
+    expect(eventLabel(unsure[0]!.event, unsure[0]!.detail)).toBe('AGENTS.md line 4: some Markdown readers take it to close the code fence opened on line 2 and others do not, so "Peers" was left as it was. Close that fence with ``` on a line of its own, then rebuild');
+    // The next syncs, the file as it was: said once, not on every one.
+    const sync = () => syncDataSourceDocs(w.deps, agent.id, agent.runtimeRef!, (event, detail) => logged.push({ event, detail }));
+    await sync();
+    await sync();
+    expect(logged.filter((l) => l.event === 'agentsmd.section_unsure')).toHaveLength(1);
+    // The file changed, the fence still not closed: said again, once.
+    w.provider.execResponses.set('sh', { code: 0, stdout: md.replace('# Kitchen', '# Kitchen\n\nA note.'), stderr: '' });
+    await sync();
+    await sync();
+    expect(logged.filter((l) => l.event === 'agentsmd.section_unsure').map((l) => l.detail.line)).toEqual([4, 6]);
+    // A file whose fences close: nothing said.
+    w.provider.execResponses.set('sh', { code: 0, stdout: '# Kitchen\n```bash\nls\n```\n', stderr: '' });
+    logged.length = 0;
+    await sync();
+    expect(logged.map((l) => l.event)).not.toContain('agentsmd.section_unsure');
+    // Broken the same way again later: said again.
+    w.provider.execResponses.set('sh', { code: 0, stdout: md, stderr: '' });
+    await sync();
+    expect(logged.filter((l) => l.event === 'agentsmd.section_unsure')).toHaveLength(1);
+  });
+});
 
 describe('runProvisionSteps', () => {
   it('rolls back the channel lease and runtime on start failure and lands FAILED', async () => {
@@ -1079,7 +1193,7 @@ describe('the memory cap reaches docker, the environment and AGENTS.md', () => {
     expect(p.lastSpec!.env.HATCHABOT_MEMORY_CAP).toBe('3g');
 
     w.store.upsertAgentClass({ id: 'c1', ownerId: 'o', name: 'Quants', memoryCap: '6g' });
-    w.store.setAgentClass(agent.id, 'c1');
+    w.store.setAgentClassIf(agent.id, w.store.getAgent(agent.id)?.classId ?? null, 'c1');
     p.execResponses.set('sh', { code: 0, stdout: '# K\n\n## Memory policy\n- old\n', stderr: '' });
     await rebuildAgent(w.deps, agent.id);
     expect(p.lastSpec!.memory).toBe('6g');

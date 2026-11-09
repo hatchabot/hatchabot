@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { backupsDir } from './backups.js';
+import { backupsDir, ownerMark } from './backups.js';
 
 const SCRIPT = resolve(fileURLToPath(import.meta.url), '../../../scripts/restore-drill.sh');
 
@@ -39,6 +39,8 @@ export interface DrillRecord {
   reason: string;
   database: string;
   key: string;
+  /** Whose drill it was: the install's backup mark (ownerMark), '' when the record does not say. */
+  owner: string;
   volumes: DrillVolume[];
 }
 
@@ -48,18 +50,32 @@ export function drillsDir(base = backupsDir()): string {
 
 const RECORD = /^20\d\d-\d\d-\d\dT\d\d-\d\d-\d\dZ\.json$/;
 
-/** Every drill record, newest first (at most 30: the script keeps that many). Read defensively: the files are the script's. */
-export function listDrills(base = backupsDir()): DrillRecord[] {
+/**
+ * Every drill record of this install's, newest first (at most 30: the script
+ * keeps that many of each install's). Read defensively: the files are the script's. Filtered by
+ * owner as the sets are (foreignSet): two installs that share the backup
+ * folder share drills/, and readiness took the other install's newest record
+ * that named a volume as this one's proof (review of HB-0540). A record that
+ * names no owner is taken as this install's; without a mark of its own, every
+ * record is.
+ */
+export function listDrills(base = backupsDir(), mark = ownerMark()): DrillRecord[] {
   const dir = drillsDir(base);
   if (!existsSync(dir)) return [];
   let files: string[];
   try { files = readdirSync(dir).filter((f) => RECORD.test(f)); } catch { return []; }
   const out: DrillRecord[] = [];
-  for (const f of files.sort().reverse().slice(0, 30)) {
+  // The newest 30 of this install's: the newest 30 of every install's, then
+  // filtered, left this one's out under another's newer drills (second review
+  // of HB-0540). The drill keeps 30 per install, so this reads few more.
+  for (const f of files.sort().reverse()) {
+    if (out.length >= 30) break;
     let r: Record<string, unknown>;
     try { r = JSON.parse(readFileSync(join(dir, f), 'utf8')) as Record<string, unknown>; } catch { continue; }
     if (!r || typeof r !== 'object') continue;
     const s = (v: unknown) => (typeof v === 'string' ? v.slice(0, 80) : '');
+    const owner = s(r.owner);
+    if (mark && owner && owner !== mark) continue;
     const b = (v: unknown) => (typeof v === 'boolean' ? v : null);
     const volumes = (Array.isArray(r.volumes) ? r.volumes : []).slice(0, 500).flatMap((v): DrillVolume[] => {
       if (!v || typeof v !== 'object' || typeof (v as { volume?: unknown }).volume !== 'string') return [];
@@ -71,7 +87,7 @@ export function listDrills(base = backupsDir()): DrillRecord[] {
       set: s(r.set), setState: s(r.setState), startedAt: s(r.startedAt), finishedAt: s(r.finishedAt),
       durationSec: Number.isFinite(Number(r.durationSec)) ? Number(r.durationSec) : 0,
       trigger: s(r.trigger), passed: r.result === 'passed', reason: s(r.reason),
-      database: s(r.database), key: s(r.key), volumes,
+      database: s(r.database), key: s(r.key), owner, volumes,
     });
   }
   return out;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Jar } from './helpers/publicApp.js';
 import { SHIM_DNS } from './helpers/tailscaleShim.js';
+import { regexpEscape } from '../src/domain/regexpEscape.js';
 import { at, closeAfterEach, privCookie, resetRecoveryLimits, withTelegram, world, type World } from './helpers/publicWorld.js';
 
 /**
@@ -85,7 +86,7 @@ describe('an account with owner rights is recovered at the private address only'
     w.sent.length = 0;
     await w.h.app.inject({ method: 'POST', url: '/v1/local-accounts/recover', payload: { username: 'owner' } });
     expect(w.sent).toHaveLength(1);
-    expect(w.sent[0]!.text).toMatch(new RegExp(`https://${SHIM_DNS.replace(/\./g, '\\.')}/\\?claim=[A-Za-z0-9_-]{20,}`));
+    expect(w.sent[0]!.text).toMatch(new RegExp(`https://${regexpEscape(SHIM_DNS)}/\\?claim=[A-Za-z0-9_-]{20,}`));
     expect(w.sent[0]!.text).not.toContain(':8443');
     // A member's link is made for the public address while it is on (they may not be on the tailnet).
     const m = await w.h.addAccount('member');

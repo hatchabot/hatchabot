@@ -716,11 +716,13 @@ describe('exporting a volume that is not there (2026-10-09)', () => {
   });
 
   it('a run goes on as before when the volume is there, asking first whether it reads or writes (HB-0373)', async () => {
-    await provider.execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'true', { readOnly: true });
-    expect(argv()).toMatch(/^volume inspect .*\n.*run --rm .*hatchabot-kitchen-helper-df918a55-vol:\/home\/node:ro /m);
+    // A volume no other test here writes: the first write to it looks.
+    await provider.execShellOnVolume('docker://hatchabot-kitchen-helper-0f0f0f01', 'true', { readOnly: true });
+    expect(argv()).toMatch(/^volume inspect .*\n.*run --rm .*hatchabot-kitchen-helper-0f0f0f01-vol:\/home\/node:ro /m);
     writeFileSync(LOG, '');
-    await provider.execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'true');
-    expect(argv()).toMatch(/^volume inspect .*\n.*run --rm .*hatchabot-kitchen-helper-df918a55-vol:\/home\/node /m);
+    await provider.execShellOnVolume('docker://hatchabot-kitchen-helper-0f0f0f01', 'true');
+    // A write looks for a writer an earlier call left first (HB-0509), the first time after start-up; a read does not.
+    expect(argv()).toMatch(/^volume inspect .*\nps -a --filter volume=hatchabot-kitchen-helper-0f0f0f01-vol .*\n.*run --rm .*hatchabot-kitchen-helper-0f0f0f01-vol:\/home\/node /m);
   });
 
   it('a write, an upload, a download and a workspace copy all say it is gone and never make it (HB-0373)', async () => {

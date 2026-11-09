@@ -4,6 +4,8 @@ import type { Agent } from '../domain/types.js';
 import { agentUsage } from './usage.js';
 import { estimateCost } from './pricing.js';
 import { parseLoopLines } from './loopLines.js';
+import { hourOfMs, OWN_BRAVE } from './searchUsage.js';
+import type { SecretStore } from '../secrets/secretStore.js';
 
 /**
  * AI-source usage visibility. Anthropic won't tell a setup-token how much of a
@@ -71,6 +73,7 @@ export function slotOf(iso: string): string {
 }
 
 const DAY = 86_400_000;
+const HOUR = 3_600_000;
 export /** How many agents to sample at once, and how long one whole pass may take. */
 // A blank or non-numeric knob is the default, not zero workers and no budget (30th audit).
 const PASS_CONCURRENCY = Math.max(1, Number(process.env.HATCHABOT_USAGE_CONCURRENCY) || 6);
@@ -79,8 +82,107 @@ const RETAIN_MS = 8 * DAY;
 /** Web search counts are kept longer: a month's chart, and last year's for comparison (HB-0532). */
 const SEARCH_RETAIN_MS = 400 * DAY;
 
+/**
+ * An agent's Brave searches on its own key, filed as OWN_BRAVE (HB-0578): its
+ * own BRAVE_API_KEY wins over the fleet's in its container (provision.ts), so
+ * they are its own bill, not the fleet credit. The reader cannot tell the two
+ * apart, so a count already stored is never filed again: for each hour, only
+ * what the reading has beyond the hour's stored total, fleet and own together,
+ * is filed, under the key its container has now (sixth review). A rebuild that
+ * put its own key in at 14:20 left the fleet's searches of 14:00 to 14:20 the
+ * fleet's. The key it has now is the one it was built with, recorded at its
+ * last build (a key saved or removed reaches it only at the next, HB-0578
+ * review); a container built before that record falls back to the agent's
+ * saved key. A reading with fewer than stored (a session gone) leaves the
+ * stored counts as they are: storeSearchHours never lowers an hour (eighth
+ * and ninth reviews).
+ */
+export function attributeBrave(
+  store: Pick<Store, 'listAgentEnv' | 'searchHours' | 'appliedSearchKey'>,
+  agentId: string,
+  sinceHour: string,
+  hours: Record<string, Record<string, number>>,
+  /** Whether its saved key is its own, when no build has said (ownSearchKey); a saved key, when not given. */
+  savedIsOwn?: boolean,
+): Record<string, Record<string, number>> {
+  if (!Object.values(hours).some((by) => (by.brave ?? 0) > 0)) return hours;
+  const applied = store.appliedSearchKey(agentId);
+  const ownNow = applied ? applied === 'own' : savedIsOwn ?? store.listAgentEnv(agentId).some((e) => e.name === 'BRAVE_API_KEY');
+  const stored = new Map<string, { fleet: number; own: number }>();
+  for (const r of store.searchHours(sinceHour, '9999', agentId)) {
+    if (r.provider !== 'brave' && r.provider !== OWN_BRAVE) continue;
+    const was = stored.get(r.hour) ?? { fleet: 0, own: 0 };
+    if (r.provider === OWN_BRAVE) was.own += r.n; else was.fleet += r.n;
+    stored.set(r.hour, was);
+  }
+  const out: Record<string, Record<string, number>> = {};
+  for (const [hour, by] of Object.entries(hours)) {
+    const { brave = 0, [OWN_BRAVE]: readOwn = 0, ...rest } = by;
+    const read = brave + readOwn;
+    if (!read) { out[hour] = by; continue; }
+    let { fleet, own } = stored.get(hour) ?? { fleet: 0, own: 0 };
+    const more = Math.max(0, read - fleet - own);
+    if (ownNow) own += more; else fleet += more;
+    out[hour] = { ...rest, ...(fleet ? { brave: fleet } : {}), ...(own ? { [OWN_BRAVE]: own } : {}) };
+  }
+  return out;
+}
+
+/**
+ * A reading's web searches, stored. A re-read counts nothing twice (HB-0532),
+ * and never lowers a stored hour: each count is the larger of the stored one
+ * and the read one, so the searches of a session gone since (a reset, a
+ * deleted or pruned session) stay where they were counted (HB-0580 review;
+ * fifth and eighth reviews). It reads from the window's first whole hour (the
+ * first is only partly read), or from the first whole hour after the earliest
+ * event it found when that is later, and the hour that event falls in. A
+ * reading that found nothing at all changes nothing.
+ */
+export function storeSearchHours(
+  store: Pick<Store, 'listAgentEnv' | 'searchHours' | 'appliedSearchKey' | 'setSearchHours'>,
+  agentId: string,
+  s: { since: number; from: number; hours: Record<string, Record<string, number>> },
+  savedIsOwn?: boolean,
+): void {
+  if (!s.from) return;
+  const sinceHour = hourOfMs(Math.ceil(s.since / HOUR) * HOUR);
+  const fromStart = Math.floor(s.from / HOUR) * HOUR;
+  const whole = hourOfMs(s.from > fromStart ? fromStart + HOUR : fromStart);
+  const start = whole > sinceHour ? whole : sinceHour;
+  // The hour read in part, when it is inside the window.
+  const part = s.from > fromStart && hourOfMs(fromStart) >= sinceHour ? hourOfMs(fromStart) : undefined;
+  const first = part ?? start;
+  const read = attributeBrave(store, agentId, first, s.hours, savedIsOwn);
+  const out: Record<string, Record<string, number>> = {};
+  for (const [h, by] of Object.entries(read)) if (h >= start || h === part) out[h] = { ...by };
+  for (const r of store.searchHours(first, '9999', agentId)) {
+    const by = (out[r.hour] ??= {});
+    by[r.provider] = Math.max(by[r.provider] ?? 0, r.n);
+  }
+  store.setSearchHours(agentId, first, out);
+}
+
+/**
+ * Whether the Brave key saved on an agent is its own, as the build decides
+ * (buildRuntimeSpec): one equal to the fleet's key is the fleet's (HB-0578,
+ * fifth review). For an agent no build has stamped since the upgrade.
+ * Undefined when its secrets cannot be read: the saved key counts as its own.
+ */
+export async function ownSearchKey(store: Pick<Store, 'listAgentEnv'>, secrets: Pick<SecretStore, 'get'> | undefined, agentId: string): Promise<boolean | undefined> {
+  const env = store.listAgentEnv(agentId).find((e) => e.name === 'BRAVE_API_KEY');
+  if (!env) return false;
+  if (!secrets) return undefined;
+  const { SEARCH_KEY_REF } = await import('./provision.js');
+  const mine = await secrets.get(env.secretRef).catch(() => undefined);
+  if (mine === undefined) return undefined;
+  const fleet = await secrets.get(SEARCH_KEY_REF).catch(() => undefined);
+  return mine !== fleet;
+}
+
 export interface SampleDeps {
   store: Store;
+  /** To tell an agent's saved Brave key from the fleet's (ownSearchKey). */
+  secrets?: Pick<SecretStore, 'get'>;
   providerFor: (hostId: string) => RuntimeProvider;
   log?: (event: string, detail: Record<string, unknown>) => void;
 }
@@ -193,9 +295,11 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     }
     // Token health from the same read (tokenHealth.ts): a review then wakes nothing.
     if (u.health) store.setTokenHealth(a.id, u.health, nowIso);
-    // Its web searches from the same read: the whole window is replaced, so a re-read counts nothing twice (HB-0532).
-    // The window's first hour is only partly read, so it starts at the next whole one.
-    if (u.searches) store.setSearchHours(a.id, new Date(Math.ceil(u.searches.since / 3_600_000) * 3_600_000).toISOString().slice(0, 13), u.searches.hours);
+    // Its web searches from the same read (storeSearchHours).
+    if (u.searches) {
+      const savedIsOwn = store.appliedSearchKey(a.id) ? undefined : await ownSearchKey(store, deps.secrets, a.id);
+      storeSearchHours(store, a.id, u.searches, savedIsOwn);
+    }
     // Successful calls per slot, from the transcripts: the whole 8 days the
     // first time (replacing the log's partial counts), then from an hour
     // before the last slot written, so late-arriving calls land.

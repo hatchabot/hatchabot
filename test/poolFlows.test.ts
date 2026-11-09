@@ -6,6 +6,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CompositeTelegramProvisioner } from '../src/channels/composite.js';
+import { TelegramManualProvisioner } from '../src/channels/telegramManual.js';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 /** verifyBotToken hits api.telegram.org — fake Telegram's getMe. */
@@ -137,7 +138,7 @@ describe('skipPool / pending token — the manual choice wins over the pool', ()
     let pending = false;
     const manual = {
       provision: vi.fn().mockResolvedValue({ ...chan, accountId: 'mintedbot' }),
-      hasPending: () => pending,
+      waitingFor: async () => pending,
     } as any;
     const c = new CompositeTelegramProvisioner(pool, manual);
     const req = { agentId: 'a1', agentName: 'A', slug: 'a' };
@@ -156,6 +157,25 @@ describe('skipPool / pending token — the manual choice wins over the pool', ()
     pool.provision.mockClear();
     expect((await c.provision(req)).accountId).toBe('mintedbot');
     expect(pool.provision).not.toHaveBeenCalled();
+  });
+
+  // Eighth review: a pasted token is held on disk too, so a restart before
+  // setup takes it keeps it, and it still wins over a pool bot.
+  it('a token pasted before a restart still wins over a pool bot, and is taken', async () => {
+    const held = new Map<string, string>();
+    const secrets = {
+      put: async (ref: string, v: string) => { held.set(ref, v); },
+      get: async (ref: string) => { const v = held.get(ref); if (v === undefined) throw new Error(`no secret ${ref}`); return v; },
+      delete: async (ref: string) => { held.delete(ref); },
+    };
+    await new TelegramManualProvisioner(secrets as never).submitToken('a1', '123:made-up-token', 'made_up_bot');
+    const pool = { provision: vi.fn().mockResolvedValue({ accountId: 'poolbot', secretRef: 's', deepLink: 'd' }) } as any;
+    const c = new CompositeTelegramProvisioner(pool, new TelegramManualProvisioner(secrets as never));
+    c.loadHeld(['a1']); // the boot read (registerRoutes)
+    expect((await c.provision({ agentId: 'a1', agentName: 'A', slug: 'a' })).accountId).toBe('made_up_bot');
+    expect(pool.provision).not.toHaveBeenCalled();
+    expect(held.get('telegram/bot/made_up_bot')).toBe('123:made-up-token');
+    expect(held.has(TelegramManualProvisioner.pendingRef('a1'))).toBe(false);
   });
 });
 

@@ -14,21 +14,21 @@ import { computeUsagePeriod, localDay, snapshotDailyUsage, USAGE_PERIODS, type U
 import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
-import { Transform, pipeline } from 'node:stream';
+import { type Duplex, Transform, pipeline } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname as osHostname, totalmem } from 'node:os';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import compress from '@fastify/compress';
-import { ChannelTakenError, normalizeHandle, type SectionSort, Store } from '../store/store.js';
+import { ChannelTakenError, normalizeHandle, peersCsv, type SectionSort, SourceGoneError, Store } from '../store/store.js';
 import { SecretNotFoundError, type SecretStore } from '../secrets/secretStore.js';
 import type { ContainerStats, ExecResult, ImagesInUse, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
 import { ProviderError, VOLUME_GONE, parseByteSize } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import { tcpTlsProblem } from '../providers/runnerEndpoint.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
-import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
+import { InvalidBotTokenError, sameToken, verifyBotToken } from '../channels/telegramManual.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
 import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
@@ -67,6 +67,7 @@ import {
   runOwedRebuildHook,
   runProvisionSteps,
   syncDataSourceDocs,
+  syncMemoryBudget,
   syncGitDataSources,
   scrubRemovedDataSources,
   skipPoolOnce,
@@ -78,12 +79,13 @@ import {
 import { generateDeployKey, isPublicGitUrl, normalizeGitUrl, probeGitSource, PUBLIC_REPO_READ_ONLY } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
 import { claimFirstContact, holdDoorForKnocks, isKnockWindow, listPairingRequests } from '../orchestrator/claim.js';
-import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orchestrator/busy.js';
+import { AgentBusyError, busyDone, clearBusy, isBusy, markBusy, whileBusy } from '../orchestrator/busy.js';
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError, copyElsewhere, leaveBotToCopy } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { commandOwnersFor, reapplyCurrentSettings, retryPendingSchedules, retryPendingSchedulesWhenUp } from '../orchestrator/provision.js';
-import { CronSystemOwnedError, CRON_QUICK_CHECK_MS, addCron, cronStoreReadShell, editCron, cronTargetFor, pendingRetarget, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
+import { CronSystemOwnedError, CRON_QUICK_CHECK_MS, addCron, cronStoreReadShell, editCron, cronTargetFor, readCronStore, retargetDue, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns, type Cron } from '../orchestrator/crons.js';
+import { TASK_NOTES_PER_HOUR, dueTaskNotes, taskNoteText } from '../orchestrator/taskNotes.js';
 import { dropAppPending, onePendingChange, pendingSecretRefs, resolvePendingValues, stashOldPendingSecrets, stashPendingSecrets } from '../orchestrator/appPending.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
@@ -168,10 +170,10 @@ import { agentHealth, aiSourceHealth, doctorLint } from '../orchestrator/health.
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
 import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
-import { replaceSection, removeSection, extractSection, DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING } from '../openclaw/workspace.js';
+import { replaceSection, removeSectionEverywhere, readSection, DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar, grantedServices, isGoogleService,
-  exchangeGoogleCode, googleAuthUrl, materializeConnection, offAgainIfDetached, removeQueuedNow, syncConnections, withConnectionLock,
+  exchangeGoogleCode, googleAuthUrl, materializeConnection, materializeConnections, offAgainIfDetached, removeQueuedNow, syncConnections, withConnectionLock,
   isAccountEmail, parseOAuthClient, revokeGoogleToken, testGmail, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { accessAlertOf, accessOverview, agentsWithAccessFindings, verifyAgentAccess } from '../orchestrator/accessOverview.js';
@@ -215,7 +217,7 @@ import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type Re
 import { migrateAgent, MigrateError, MOVE_HEADER, moveIdFrom, moveState, preflight, receiveMove } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
 import { appChoices, putTasksBack, type AppOpParams } from '../orchestrator/appOperations.js';
-import { BACKGROUND_KINDS, beginOperation, currentBootId, handleFor, KIND_LABEL, operationRefusal, operationSummary, publicOperation, rethrowIfCrash, runInBackground, spanWords, STATUS_EVENT, type OpHandle } from '../orchestrator/operations.js';
+import { BACKGROUND_KINDS, beginOperation, currentBootId, FILES_REPLACED_BY, filesReplacingCount, forgetFilesReplacing, handleFor, KIND_LABEL, noteFilesReplacing, operationRefusal, operationSummary, publicOperation, rethrowIfCrash, runInBackground, spanWords, STATUS_EVENT, type OpHandle } from '../orchestrator/operations.js';
 import { recoverOperation, RecoverError, resumeOperations, startOperationRetryLoop, type ResumeContext } from '../orchestrator/operationsResume.js';
 import {
   ensureRunnerKey,
@@ -242,15 +244,15 @@ import {
   inspectWorkspace,
   botPollState,
 } from '../orchestrator/adopt.js';
-import type { Agent, AIProfile, Channel, Host } from '../domain/types.js';
+import type { Agent, AgentClass, AIProfile, Channel, Host } from '../domain/types.js';
 import { LOCAL_OWNER, ownerIdOf, principalOf } from './principal.js';
 import { registerWebChatRoutes, webChatBusy } from './webChat.js';
 import {
-  forwardedClientAddress, GUEST_VIEW_SCRIPT, GUEST_VIEW_SCRIPT_PATH, guestControlUiConfig, guestHttpPath, spliceGuest,
-  stripClientIdentity, withConsoleIdentity, withGuestView,
+  forwardedClientAddress, GUEST_CONNECT_TIMEOUT_MS, GUEST_IDLE_TO_CLOSE_MS, GuestActivity, GUEST_ROOM_EVERY_MS, GUEST_VIEW_SCRIPT, GUEST_VIEW_SCRIPT_PATH, guestControlUiConfig, guestHttpPath, MAX_GUEST_CONSOLES,
+  spliceGuest, stripClientIdentity, withConsoleIdentity, withGuestView, type GuestSplice,
 } from './consoleProxy.js';
 import { CONSOLE_WORKER_STUB } from './consoleWorkerStub.js';
-import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
+import { ConsoleAccess, type RoomPromise } from '../orchestrator/consoleAccess.js';
 import { credentialValuesFromEnv, redactSecrets } from '../domain/redact.js';
 import { boundInput, buildReport, endpointIdentity, issueUrl, knownProblems, localContext, matchKnownProblems, readSource, redactForPublic, searchSource, type PublicRedactContext, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
 import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
@@ -284,6 +286,8 @@ const adoptWaitSaid = new Set<string>();
 export interface ApiDeps {
   /** Stands in for the network when search is checked (tests). */
   searchFetch?: typeof fetch;
+  /** Stands in for Telegram when a note is pushed to the owner's phone (tests). */
+  pushFetch?: typeof fetch;
   store: Store;
   secrets: SecretStore;
   /** Keyed by Host.provider — 'mock', 'local-docker', later 'gce'. */
@@ -455,6 +459,18 @@ async function sixAtATime<T, R>(items: T[], fn: (item: T) => Promise<R>): Promis
 }
 
 /**
+ * `fn` in the queue `queues` keeps for `key`, after what is already in it:
+ * one at a time per key, each started once the one before has settled,
+ * failed or not (model applies per agent, changes per class).
+ */
+function inQueue<T>(queues: Map<string, Promise<unknown>>, key: string, fn: () => Promise<T>): Promise<T> {
+  const next = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(fn);
+  const settled = next.catch(() => {}).finally(() => { if (queues.get(key) === settled) queues.delete(key); });
+  queues.set(key, settled);
+  return next;
+}
+
+/**
  * A per-agent model override is only valid for a cloud profile and must be one
  * the profile actually offers — its default plus its switchable menu — so a
  * typo can't provision green and fail on first use. Returns an error string,
@@ -572,6 +588,12 @@ export function etagMatches(header: string | undefined, etag: string): boolean {
 
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<RoutesHandle> {
   const { store, secrets } = deps;
+  // Bot tokens held for setup (telegramManual.ts) are read from the store
+  // once, now, for every agent, as the store read on each look did (one
+  // pasted on attach is held for a running agent until that request's
+  // provision); after that only memory is asked, and every look waits for
+  // this read.
+  deps.channel?.loadHeld?.(store.listAllActiveAgents().map((a) => a.id));
 
   // Compress what the app fetches: the page was 778 KB per load and the
   // /v1/agents poll 91 KB every 8 s, a quarter and an eighth of that gzipped —
@@ -680,7 +702,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   const watchImportedOwner = (agent: Agent, o: { accountId: string; excludeIds: string[] }): void => {
     if (!agent.runtimeRef) return;
     void claimFirstContact(
-      { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+      { store, provider: providerFor(agent.hostId), providerFor, log: trace(agent.id) },
       { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: o.accountId, forUserId: agent.ownerId, timeoutMs: 30 * 60_000, excludeIds: o.excludeIds },
     ).catch((err) => app.log.error({ err, agentId: agent.id }, 'owner claim after import failed'));
   };
@@ -735,8 +757,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
     }
   };
+  // What is still owed every 10 minutes: a chat app's new bot name, and a new
+  // Google client secret to a running agent that did not take it (HB-0463).
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
-    setInterval(() => { void retryPendingChannelNames().catch(() => {}); }, 10 * 60_000).unref();
+    setInterval(() => {
+      void retryPendingChannelNames().catch(() => {});
+      void clientSecretSweep().catch((err: unknown) => app.log.warn({ err: String(err) }, 'client secret sweep failed'));
+    }, 10 * 60_000).unref();
   }
 
   /**
@@ -777,6 +804,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return !state || state === 'DELETED' || state === 'DELETING';
   };
   const AGENT_GONE = 'It was deleted.';
+  /** A machine-login Max source is this machine's ~/.claude: an agent on a runner cannot reach it. */
+  const machineLoginOnly = (p: AIProfile): boolean => p.vendor !== 'local' && p.kind === 'subscription' && !p.secretRef;
+  const MACHINE_LOGIN_NO_RUNNER = "This Claude Max profile uses this machine's login, which can't reach a runner. Run `claude setup-token` and add it as a setup-token AI source, or use an API-key profile.";
+  const SOURCE_SWITCH_BUSY = 'The agent is busy (a rebuild, a move or a backup) — switch its AI source when that is done.';
 
   /**
    * Phase 4 (docs/identity.md): an agent a member may *see* — theirs by
@@ -826,6 +857,24 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // What a web-chat guest's console visits leave in the timeline (guestConsoleLog.ts).
   const guestConsoleLog = new GuestConsoleLog();
   const archiving = new Map<string, { at: string; step: string }>();
+  /**
+   * Its peers are not the ones its last rebuild installed (the call-agent
+   * tool): its card's "peers changed", and Start's judgement
+   * (rebuildOwedAtStart), which keeps no mark that nothing would clear once
+   * the peers went back to what it has (HB-0465). The agent list and the bulk
+   * Connect ask the same of all an owner's agents at once
+   * (store.agentsWithPeersPending, in the same peersCsv form).
+   */
+  const peersNotInstalled = (agentId: string): boolean =>
+    peersCsv(store.listAgentPeers(agentId)) !== store.appliedPeersCsv(agentId);
+  /**
+   * A class's model written to an agent whose runtime is too old for it,
+   * with the image that brings one new enough (applyClassToAgent's
+   * modelWaitsForRebuild): agent → that model, so the list says it waits
+   * for its rebuild. In memory: after a restart it reads as behind until
+   * the rebuild.
+   */
+  const modelWaitsImage = new Map<string, string>();
   const publicAgent = (agent: Agent, extra: Record<string, unknown> = {}) => {
     const desired = store.getAIProfile(agent.aiProfileId);
     // What this agent WILL run: its own override if any, else the profile
@@ -837,6 +886,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return {
       ...agent,
       gatewayToken: undefined,
+      // An answered bot-token step is setup's to take up, not the owner's:
+      // shown as setting up, so no app or CLI reads it as asked again.
+      pendingAction: agent.pendingAction?.received ? undefined : agent.pendingAction,
       // The raw template layer is bulky file text — the app only needs to know
       // the values are editable; the PUT /params route re-reads the real thing.
       paramFiles: undefined,
@@ -846,10 +898,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       model: agent.appliedModel ?? desiredModel,
       /** What it WILL run after a rebuild, when that differs from now. */
       pendingModel: switched ? desiredModel : undefined,
+      /**
+       * That model waits for a rebuild it is owed (a source switch, one due
+       * at its next start, or the image its class's model needs:
+       * modelWaitsImage), rather than for a runtime that refused it:
+       * the class list counts only the latter as "still on an old model".
+       */
+      rebuildWaits: switched ? !!(agent.appliedProfileId && agent.appliedProfileId !== agent.aiProfileId) || !!agent.rebuildOnStart || (!!desiredModel && modelWaitsImage.get(agent.id) === desiredModel) : undefined,
       /** True when the granted peer set differs from what was installed at the
        *  last rebuild — the call-agent tool is (re)installed on rebuild, so this
        *  agent needs one before it can consult its current peers. */
-      peersPending: store.listAgentPeers(agent.id).slice().sort().join(',') !== store.appliedPeersCsv(agent.id),
+      peersPending: peersNotInstalled(agent.id),
       /** The agent's class name (for display/filter), resolved from classId. */
       className: agent.classId ? store.getAgentClass(agent.classId)?.name : undefined,
       /** The models this agent could switch to (its profile's menu), so the
@@ -990,6 +1049,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return true;
   };
 
+  /** A change refused once its turn came (withCoreFilesTurn): the answer's status and words. */
+  class TurnRefused extends Error { constructor(readonly status: number, message: string) { super(message); } }
+  /**
+   * The agent as it is at its turn, not as read before the wait: one deleted
+   * meanwhile is refused (404), one stopped or asleep too (409, `notRunning`).
+   * Where it runs is read here, so one moved meanwhile is written where it is.
+   */
+  const freshRunning = (agentId: string, notRunning: (a: Agent) => string): Agent & { runtimeRef: string } => {
+    const fresh = store.getAgent(agentId);
+    if (!fresh || agentGone(agentId)) throw new TurnRefused(404, AGENT_GONE);
+    if (fresh.state !== 'RUNNING' || !fresh.runtimeRef) throw new TurnRefused(409, notRunning(fresh));
+    return fresh as Agent & { runtimeRef: string };
+  };
+
   const snapshotDeps = (agent: Agent) => ({
     store,
     provider: providerFor(agent.hostId),
@@ -1128,7 +1201,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** `webOnlyIfNoBot`: a dry pool means web-only, not a parked token prompt (ProvisionDeps); kept on the agent for a Retry. */
   // Set where the app routes are defined (below); provisioning calls it when an agent comes up.
   let runPendingApp: (agentId: string) => Promise<void> = async () => {};
-  const kickProvision = (agentId: string, opts: { webOnlyIfNoBot?: boolean } = {}): void => {
+  /** How long setup for an answered step waits for another holder of the agent to let go. */
+  const SETUP_WAITS_FOR_BUSY_MS = 30 * 60_000;
+  /** `queuedSince`: when setup for an answered step was first asked for (provisionWhenFree). */
+  const kickProvision = (agentId: string, opts: { webOnlyIfNoBot?: boolean; queuedSince?: number } = {}): void => {
     if (inflight.has(agentId)) return;
     // On the record, not only for this run: a Retry after a failed setup makes
     // the same promise the first attempt did (HB-0415).
@@ -1149,12 +1225,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         );
       } catch (err) {
         op.fail(err);
+        // An answered bot-token step whose setup could not start. Another
+        // holder took the agent between the look and the start: queued again
+        // behind it. Anything else is the agent's own: failed with the
+        // reason, for a Retry, which takes the held token.
+        if (store.getAgent(agentId)?.pendingAction?.received) {
+          if (err instanceof AgentBusyError) provisionWhenFree(agentId, opts.queuedSince ?? Date.now());
+          else {
+            store.setAgentPendingAction(agentId, null);
+            store.setAgentState(agentId, 'FAILED', `Setup could not start: ${err instanceof Error ? err.message : String(err)} Tap Retry.`);
+          }
+        }
         throw err;
       }
       const s = result.agent.state;
       if (s === 'RUNNING') store.setAgentWebOnlyIfNoBot(agentId, false);
       if (s === 'FAILED') op.fail(result.agent.stateReason ?? 'Setup failed.');
-      else op.done(s === 'RUNNING' ? 'Set up and running.' : result.agent.pendingAction ? 'Waiting for a step from you.' : `Setup ended ${s.toLowerCase()}.`);
+      else op.done(s === 'RUNNING' ? 'Set up and running.'
+        : result.agent.pendingAction?.received ? 'A bot token came in as it ended: setup runs again with it.'
+        : result.agent.pendingAction ? 'Waiting for a step from you.' : `Setup ended ${s.toLowerCase()}.`);
       // Fresh agent went live in pairing mode → watch for the owner's first
       // message and bind it (the §12.4 claim). DETACHED: the claim window is
       // 10 minutes of idle polling on an agent that is already live — holding
@@ -1171,7 +1260,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .some((m) => m.userId === result.agent.ownerId && m.channelUserId);
       if (result.agent.state === 'RUNNING' && result.agent.runtimeRef && channelRow && !ownerBound) {
         void claimFirstContact(
-          { store, provider, log },
+          { store, provider, providerFor, log },
           {
             agentId,
             runtimeRef: result.agent.runtimeRef,
@@ -1191,6 +1280,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .catch((err) => app.log.error({ err, agentId }, 'provision task failed'))
         .finally(() => inflight.delete(agentId)),
     );
+  };
+  /**
+   * Setup for an answered bot-token step (a pasted token, or "go on without
+   * one"): now, or once the setup or rebuild under way ends. Dropped while one
+   * ran, the answer waited for nothing, and reconcile failed the agent. The
+   * step stays answered (`received`) until setup takes the answer up.
+   */
+  const provisionWhenFree = (agentId: string, since = Date.now()): void => {
+    // A delete under way (it marks itself before it waits for a setup), the
+    // agent gone, or the answer taken up already: nothing is started.
+    const a = store.getAgent(agentId);
+    if (deletesRunning.has(agentId) || (a?.state !== 'PROVISIONING' && a?.state !== 'FAILED') || !a.pendingAction?.received) return;
+    const after = (p: Promise<unknown>) => void p
+      .then(() => provisionWhenFree(agentId, since))
+      .catch((err) => app.log.error({ err, agentId }, 'queued setup failed'));
+    const running = inflight.get(agentId);
+    if (running) { after(running); return; }
+    // Another holder has the agent (an import, a move, a change): asked again
+    // when it lets go, for up to SETUP_WAITS_FOR_BUSY_MS, rather than failed.
+    if (isBusy(agentId)) {
+      if (Date.now() - since < SETUP_WAITS_FOR_BUSY_MS) { after(new Promise((r) => { setTimeout(r, 2_000).unref(); })); return; }
+      store.setAgentPendingAction(agentId, null); // a held token stays held, for the Retry
+      store.setAgentState(agentId, 'FAILED', 'Setup could not start: the agent was busy with another change for 30 minutes. Tap Retry.');
+      return;
+    }
+    kickProvision(agentId, { queuedSince: since });
   };
 
   /**
@@ -1368,9 +1483,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   /** Keep a change for this stopped or sleeping agent's next start, which is a rebuild (startStopped, wakeAgent). */
-  const oweRebuild = (agentId: string): void => {
+  const oweRebuild = (agentId: string, log = trace(agentId)): void => {
     store.setRebuildOnStart(agentId, new Date().toISOString());
-    trace(agentId)('rebuild.owed', {});
+    log('rebuild.owed', {});
   };
   /**
    * A change only a new container picks up (a source, a browser, a bot, where
@@ -1930,6 +2045,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     appUrl: appUrlFor(),
     /** The address invitation and reset links are made for: the public one while public access is on. */
     linkUrl: linkUrlFor(),
+    /**
+     * 2: a bot hand-over (channel-token) marks the step answered until setup
+     * takes the token or turns it down, and the same token posted again is
+     * answered 202. The CLI tells this server from an older one by it
+     * (cli.ts HANDOVER_SAYS).
+     */
+    handover: 2,
     identity:
       deps.authMode === 'identity'
         ? {
@@ -2008,12 +2130,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * finished last and left the runtime on the older model (HB-0323).
    */
   const modelApplies = new Map<string, Promise<unknown>>();
-  const applyModelToRuntime = (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild' | 'gone'> => {
-    const next = (modelApplies.get(agentId) ?? Promise.resolve()).catch(() => {}).then(() => applyModelNow(agentId));
-    const settled = next.catch(() => {}).finally(() => { if (modelApplies.get(agentId) === settled) modelApplies.delete(agentId); });
-    modelApplies.set(agentId, settled);
-    return next;
-  };
+  const applyModelToRuntime = (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild' | 'gone'> =>
+    inQueue(modelApplies, agentId, () => applyModelNow(agentId));
   const applyModelNow = async (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild' | 'gone'> => {
     const a = store.getAgent(agentId);
     const p = a && store.getAIProfile(a.aiProfileId);
@@ -2106,19 +2224,193 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * later class edit re-applies to every tagged agent. So when an agent's
    * source or model is changed by hand (card or bulk) to something the class
    * doesn't pin, drop the tag — otherwise the next class edit would silently
-   * yank the agent back. Returns true when it detached.
+   * yank the agent back. `detached`: it did.
+   * When the class it leaves set a memory cap or a swap allowance, the
+   * limits that apply now go on its container (its own or the
+   * fleet's: applyCurrentLimits reads it without its class, whatever the
+   * class row says by then), as removing the class by hand does (HB-0561),
+   * and a running agent whose limits went on hears its new budget
+   * (limitsTold, HB-0599). Here, so every path that detaches does both: the
+   * model route, PATCH, the bulk switch and the default-model sweep; the
+   * callers only say what happened.
+   * Called in one transaction with the model, source or image write that
+   * drifted it; the tag comes off only while it is still the class read
+   * (setAgentClassIf). The limits start once that has committed and the
+   * caller's own steps after it have run: a rebuild under way then (one the
+   * caller kicked, or any other), they go on after it, off the request, as
+   * it may have read the class's. `limits`: those put on now, to say a
+   * refusal (memoryPending, traced). Never rejects.
+   * An edit of its class under way (checking its members or writing
+   * them, classEditsUnderWay), which may make it look drifted only because
+   * it has not reached it yet: decided once the edits under way are done,
+   * on the agent as they left it, in the class's queue and off the request
+   * (`detached: 'pending'`; a failure traced); its limits then go on
+   * outside the queue. Another agent joining or leaving the class does not
+   * make it wait. Nothing that runs in a class's queue calls this (the
+   * edit, its deletion and a join use driftedFrom), so it never waits on
+   * itself.
    */
-  const detachClassIfDrifted = (agentId: string): boolean => {
+  /**
+   * Edits of each class under way, from their first check to the end of
+   * their turn in its queue (PUT /v1/agent-classes/:id), and who waits for
+   * them to be done (classEditsDone): a detach decided after them.
+   */
+  const classEditsUnderWay = new Map<string, { n: number; idle: Array<() => void> }>();
+  const classEditBegun = (classId: string): void => {
+    const e = classEditsUnderWay.get(classId) ?? { n: 0, idle: [] };
+    e.n++;
+    classEditsUnderWay.set(classId, e);
+  };
+  const classEditEnded = (classId: string): void => {
+    const e = classEditsUnderWay.get(classId);
+    if (!e || --e.n > 0) return;
+    classEditsUnderWay.delete(classId);
+    for (const go of e.idle) go();
+  };
+  const classEditsDone = (classId: string): Promise<void> => {
+    const e = classEditsUnderWay.get(classId);
+    return e ? new Promise<void>((go) => { e.idle.push(go); }) : Promise.resolve();
+  };
+  /** Limits its container kept: the sentence (memoryPending) and its reason alone (why), for clients to word. */
+  type Kept = { memoryPending?: string; why?: string };
+  /** What applyCurrentLimits did: kept (Kept), went on (`applied`), or refused by a machine that answers (`refused`). */
+  type LimitsOut = Kept & { applied?: { memory: string; swap?: string }; refused?: string };
+  type Detach = { detached: boolean | 'pending'; limits?: Promise<Kept> };
+  const detachClassIfDrifted = (agentId: string): Detach => {
     const a = store.getAgent(agentId);
-    if (!a?.classId) return false;
-    const c = store.getAgentClass(a.classId);
-    if (!c) { store.setAgentClass(agentId, null); return true; }
+    if (!a?.classId) return { detached: false };
+    const classId = a.classId;
+    const c = store.getAgentClass(classId);
+    if (c && !driftedFrom(a, c)) return { detached: false };
+    // A class with no limits of its own left nothing on its container: not touched (a runner asleep holds up no answer).
+    const setsLimits = (cl: AgentClass | undefined) => !!(cl?.memoryCap || cl?.swapAllowance);
+    if (c && classEditsUnderWay.has(classId)) {
+      void classEditsDone(classId).then(() => inClassQueue([classId], async () => {
+        // Still in that class, and still not what it asks for, once its change is written.
+        const now = store.getAgent(agentId), cl = store.getAgentClass(classId);
+        if (now?.classId !== classId || (cl && !driftedFrom(now, cl)) || !store.setAgentClassIf(agentId, classId, null)) return false;
+        trace(agentId)('class.detached', { after: 'once the class change under way was done' });
+        return setsLimits(cl);
+      })).then((limits) => (limits ? limitsAfterDetach(agentId) : undefined))
+        .catch((err) => trace(agentId)('class.detach_failed', { why: String((err as Error)?.message ?? err).slice(0, 200) }));
+      return { detached: 'pending' };
+    }
+    if (!store.setAgentClassIf(agentId, classId, null)) return { detached: false };
+    return { detached: true, ...(setsLimits(c) ? { limits: Promise.resolve().then(() => limitsAfterDetach(agentId)) } : {}) };
+  };
+  /**
+   * Whether it runs something its class does not (a source, a model, an
+   * image the class sets). On its budget's cheaper model, with the class's
+   * model the one that comes back when that ends (its open switch's
+   * fromModel), it runs what its class sets as far as the class goes.
+   */
+  const driftedFrom = (a: Agent, c: { model?: string; aiProfileId?: string; image?: string }): boolean => {
     const p = store.getAIProfile(a.aiProfileId);
-    const drifted = (c.aiProfileId && c.aiProfileId !== a.aiProfileId) ||
-      (c.model && p && effectiveModel(a, p) !== c.model) ||
-      (c.image && a.image !== c.image);
-    if (drifted) store.setAgentClass(agentId, null);
-    return !!drifted;
+    const onBudget = (m: string) => { const cheap = store.openCheaperPause(a.id); return !!cheap && cheap.toModel === a.model && cheap.fromModel === m; };
+    return !!((c.aiProfileId && c.aiProfileId !== a.aiProfileId) || (c.model && p && effectiveModel(a, p) !== c.model && !onBudget(c.model)) || (c.image && a.image !== c.image));
+  };
+  /**
+   * The limits that apply now put on its container, and its budget told
+   * when they went on (each agent on its own: one stuck, busy or being
+   * rebuilt, holds up none of the others), unless `tellIf`, asked of it as
+   * it is then, says no (capMovedFrom: only if the cap it runs on changed).
+   * Limits its container kept are traced with the container's own reason,
+   * `when` saying what moved them. Every class path puts limits on through
+   * it: a detach, an edit's members, a class deleted, a join or a leave.
+   */
+  const limitsTold = (agentId: string, opts: { when?: string; tellIf?: (now: Agent) => boolean } = {}): Promise<LimitsOut> => inLimitsTurn(agentId, () => applyCurrentLimits(agentId, { forClass: true })).then((r) => {
+    const now = store.getAgent(agentId);
+    if (r.applied) { if (now && (opts.tellIf?.(now) ?? true)) void tellMemoryBudget(agentId).catch(() => undefined); }
+    else if (r.memoryPending) trace(agentId)('memory.limits_kept', { why: r.why ?? 'not applied', when: opts.when ?? 'its class was taken off' });
+    return r;
+  });
+  /** For limitsTold's `tellIf`: the cap it runs on now is not `before`. */
+  const capMovedFrom = (before: string) => (now: Agent): boolean =>
+    effectiveMemoryCap(now, now.classId ? store.getAgentClass(now.classId) : undefined) !== before;
+  /**
+   * An answer's limits its container kept: the sentence (memoryPending) and,
+   * beside it, its parts (limitsKept: whose, and the reason alone), which the
+   * app and the manager word themselves rather than parse the sentence.
+   */
+  const keptSaid = (name: string, k: Kept | undefined): { memoryPending?: string; limitsKept?: { name: string; why: string } } =>
+    k?.memoryPending ? { memoryPending: k.memoryPending, limitsKept: { name, why: k.why ?? 'not applied' } } : {};
+  /** A class taken off: its limits, now or after a rebuild under way (detachClassIfDrifted). Never rejects. */
+  const limitsAfterDetach = (agentId: string): Promise<Kept> => {
+    const rebuilding = inflight.get(agentId);
+    if (!rebuilding) return limitsTold(agentId);
+    void rebuilding.catch(() => undefined).then(() => limitsTold(agentId)).catch(() => undefined);
+    return Promise.resolve({});
+  };
+  /**
+   * How a change of an agent's limits reaches its container: the limits that
+   * apply to it put on its container, as stored (its own, its class's, the
+   * fleet's) or with `how.change`, not at some later rebuild. A container
+   * that could not take them keeps its old ones until it is rebuilt: said
+   * in memoryPending (#138), and `why` is the container's reason alone.
+   * Never rejects.
+   * Its caller holds the agent's limits turn (inLimitsTurn), so it reads
+   * the agent as it is when that comes: a class edit's apply that read it
+   * as a member, still at work when the agent left the class, no longer
+   * lands after the one its leaving asked for and puts the class's limits
+   * back on; and no other change of its limits lands between PATCH's docker
+   * call and its record. (The limits sweep, the fleet's own settings and
+   * Start still put limits on outside the turn: a sweep that reads PATCH's
+   * docker change before its record puts the old one back, and the next
+   * sweep puts the stored one on again. Backlog HB-0653.)
+   * Its callers:
+   * - every class path (limitsTold: an edit's members, a class deleted, a
+   *   join, a leave, a detach), with `forClass`: an agent with a cap and a
+   *   swap allowance of its own is left alone, as its limits never depended
+   *   on its class, so there is nothing to put on, nor a machine away to
+   *   warn of;
+   * - PATCH's own cap or swap allowance (setMemoryCap, setSwapAllowance),
+   *   with `change`, put on as if stored; PATCH stores it in its one
+   *   transaction, in the same turn. Not taken on a machine that answers
+   *   (docker refused it: a cap below what it uses, a value docker rejects;
+   *   or any other error there), it is not stored (`refused`, a 502): kept,
+   *   a later rebuild would put it on and could kill the agent for memory.
+   *   A machine gone (providerFor throws) or not answering (reachable()
+   *   false: a runner asleep), or no container running to change, keeps it:
+   *   stored, and said in memoryPending where its container kept the old
+   *   limits;
+   * - PATCH stopping after one of its docker calls moved the limits (a
+   *   later one refused, or the change refused at its write, HB-0570):
+   *   neither, which puts the container back on what the store says.
+   */
+  const limitApplies = new Map<string, Promise<unknown>>();
+  /** An agent's turn for its container memory limits (applyCurrentLimits): limitsTold takes it for a class path, PATCH for its own cap or swap. */
+  const inLimitsTurn = <T>(agentId: string, fn: () => Promise<T>): Promise<T> => inQueue(limitApplies, agentId, fn);
+  type LimitsChange = { memoryCap?: string | null; swapAllowance?: string | null };
+  const applyCurrentLimits = async (agentId: string, how: { change?: LimitsChange; forClass?: boolean } = {}): Promise<LimitsOut> => {
+    const { change } = how;
+    const now = store.getAgent(agentId);
+    if (!now) return {};
+    if (how.forClass && now.memoryCap && now.swapAllowance) return {};
+    if (!now.runtimeRef || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) return {};
+    // The cap and the swap allowance (swap.ts) together: either may be the class's.
+    const as: Agent = !change ? now : {
+      ...now,
+      ...('memoryCap' in change ? { memoryCap: change.memoryCap ?? undefined } : {}),
+      ...('swapAllowance' in change ? { swapAllowance: change.swapAllowance ?? undefined } : {}),
+    };
+    const lim = agentMemoryLimits(store, as);
+    // Its machine gone from the list (providerFor throws) is a reason like any other.
+    let prov: RuntimeProvider;
+    try { prov = providerFor(now.hostId); } catch {
+      return { why: 'its machine is not known here', memoryPending: 'Its container kept its old memory limits (its machine is not known here); a rebuild applies them.' };
+    }
+    if (!prov.updateMemory) return {};
+    try { await prov.updateMemory(now.runtimeRef, lim.memory, lim.swap); return { applied: lim }; }
+    catch (err) {
+      const said = err instanceof ProviderError ? err.userMessage : undefined;
+      // Its machine answers, and the change did not go on: whatever the error,
+      // a change of its own is refused and not stored. Kept only for a
+      // machine that does not answer (asleep, offline).
+      if (change && (prov.reachable ? await prov.reachable().catch(() => false) : true)) {
+        return { refused: said, why: said };
+      }
+      return { why: said ?? 'memory cap not applied', memoryPending: `Its container kept its old memory limits (${said ?? 'not applied'}); a rebuild applies them.` };
+    }
   };
 
   // ---- agent classes (model/source tiers) ----------------------------------
@@ -2152,9 +2444,119 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * or rebuild writes the sections. Best-effort; never rejects.
    */
   const syncDocsHeld = (a: Agent, provider = providerFor(a.hostId)): Promise<void> =>
-    whileBusy(a.id, () => syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id)))
+    whileBusy(a.id, () => syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id), { turn: (write) => withAgentsMdTurn(a.id, write) }))
       .catch(() => { /* busy, or the sync failed: the next rebuild writes them */ });
-  const setMemoryCap = async (req: FastifyRequest, agent: Agent, cap: string | null): Promise<{ error?: string; status?: number; applied?: string }> => {
+  /**
+   * One write of an agent's AGENTS.md at a time among those that take this
+   * turn: a save of it, the budget's check and rename, the held syncs'
+   * write. A keyed chain, not the busy flag, which would refuse a Rebuild
+   * or a class apply asked meanwhile.
+   */
+  const agentsMdTurns = new Map<string, Promise<unknown>>();
+  const withAgentsMdTurn = <T>(agentId: string, fn: () => Promise<T>): Promise<T> => inQueue(agentsMdTurns, agentId, fn);
+  /**
+   * A running agent whose memory cap moved hears its new budget (AGENTS.md):
+   * its own cap set, or a class assigned, edited, deleted or dropped, which
+   * changed the container's cap and left the agent sizing jobs to the old
+   * one (HB-0599). The budget is about its container, so it is told even
+   * with a source switch waiting for its rebuild.
+   * Only that section (syncMemoryBudget): off the request, outside the busy
+   * flag and the agent's model queue, so it never refuses a Rebuild nor
+   * holds up a model change, and so it leaves the agent's peers, tools and
+   * other sections to the syncs that hold the agent. A save made while it
+   * works is not written over (audit #096, HB-0230): it replaces AGENTS.md
+   * only if it is still what it read, checked and renamed in the turn a
+   * save takes (withAgentsMdTurn); changed meanwhile, it reads it again, a
+   * few times at most.
+   * Per agent, one at work and at most one more wanted: asks made meanwhile
+   * are that one, which reads all they stored.
+   * Busy (a backup, a move, a restore), it waits for that to end (busyDone),
+   * then looks again: up to BUDGET_BUSY_MAX_MS, past which it gives up,
+   * traced (memory.budget_not_told), and lets the next change start afresh
+   * rather than hold its place for good; one asked while it waited is not
+   * dropped, and waits its own while. Being rebuilt, it waits for the
+   * rebuild, which may have written AGENTS.md before the cap moved.
+   * Stopped or moved away, it is left to its next start. Never rejects.
+   */
+  const budgetSyncs = new Map<string, { again: boolean; done: Promise<void> }>();
+  const BUDGET_BUSY_MAX_MS = 30 * 60_000;
+  const tellMemoryBudget = (agentId: string): Promise<void> => {
+    const at = budgetSyncs.get(agentId);
+    if (at) { at.again = true; return at.done; }
+    const entry = { again: true, done: Promise.resolve() };
+    budgetSyncs.set(agentId, entry);
+    entry.done = (async () => {
+      let raced = 0;
+      // Checked and let go with nothing awaited between, so no ask falls between the two.
+      // Anything that throws (its machine gone: providerFor) ends this one,
+      // traced, and lets the next ask start afresh.
+      try {
+        while (entry.again) {
+          entry.again = false;
+          const a = store.getAgent(agentId);
+          if (!a?.runtimeRef || a.state !== 'RUNNING' || a.migratedTo) continue;
+          const rebuilding = inflight.get(agentId);
+          if (rebuilding) { await rebuilding.catch(() => undefined); entry.again = true; continue; }
+          if (isBusy(agentId)) {
+            // Its wait ends with the agent free or the time limit, and a wait
+            // that timed out is taken off the agent's waiters (busyDone's signal).
+            const stop = new AbortController();
+            let timedOut = false;
+            const timer = setTimeout(() => { timedOut = true; stop.abort(); }, BUDGET_BUSY_MAX_MS);
+            timer.unref?.();
+            await busyDone(agentId, stop.signal);
+            clearTimeout(timer);
+            if (!timedOut) { entry.again = true; continue; }
+            trace(agentId)('memory.budget_not_told', { why: `it stayed busy (a backup, a move) for ${BUDGET_BUSY_MAX_MS / 60_000} minutes; the next change of its cap tells it` });
+            // Asked again while it waited: that ask is not dropped, it waits its own while.
+            continue;
+          }
+          const provider = providerFor(a.hostId);
+          const out = await syncMemoryBudget({ store, provider }, a.id, a.runtimeRef, trace(a.id), (commit) => withAgentsMdTurn(agentId, commit))
+            .catch(() => 'failed' as const);
+          if (out === 'changed') {
+            if (++raced < 3) entry.again = true;
+            else trace(agentId)('memory.budget_not_told', { why: 'AGENTS.md kept changing while it was written' });
+          }
+        }
+      } catch (err) {
+        trace(agentId)('memory.budget_not_told', { why: String((err as Error)?.message ?? err).slice(0, 200) });
+      } finally {
+        budgetSyncs.delete(agentId);
+      }
+    })();
+    return entry.done;
+  };
+  /**
+   * One change to a class at a time: an edit, its deletion, an agent joining
+   * or leaving it. Each reads the class as the one before left it and
+   * writes all of it (the class's row, its members' records). Two edits
+   * close together applying at once left members on the earlier one's
+   * model, and one joining meanwhile missed the edit (HB-0560). Only the
+   * records are written in the queue: the containers (a model, memory
+   * limits) are changed after it, in each agent's own turn
+   * (applyModelToRuntime, applyCurrentLimits), which reads the agent as
+   * it is then, so a slow or sleeping container holds up no other change
+   * of the class and the last change stored is the one that lands
+   * (classStep). Several classes (an agent moving from one to another) are
+   * queued for in one order, so two moves the other way round never wait on
+   * each other.
+   */
+  const classQueues = new Map<string, Promise<unknown>>();
+  const inClassQueue = <T>(classIds: Array<string | null | undefined>, fn: () => Promise<T>): Promise<T> => {
+    const ids = [...new Set(classIds.filter((c): c is string => !!c))].sort();
+    return ids.reduceRight<() => Promise<T>>((inner, id) => () => inQueue(classQueues, id, inner), fn)();
+  };
+  /**
+   * What a class change's turn in its queue hands back: a refusal to send
+   * (`status`, `body`), or the work left once the queue is let go (`later`:
+   * its members' containers, and the answer). Sent and run outside the
+   * queue (classStep), so nothing in the queue holds a reply.
+   */
+  type ClassStep = { status: number; body: unknown } | { later: () => Promise<unknown> };
+  const classStep = (reply: FastifyReply, step: ClassStep): Promise<unknown> | FastifyReply =>
+    'later' in step ? step.later() : reply.code(step.status).send(step.body);
+  const setMemoryCap = async (req: FastifyRequest, agent: Agent, cap: string | null): Promise<{ error?: string; status?: number; applied?: string; own?: string | null; live?: boolean; record?: (log?: (event: string, detail: Record<string, unknown>) => void) => void } & Kept> => {
     let own: string | null = null;
     if (cap !== null) {
       const bytes = parseMemoryCap(cap);
@@ -2165,23 +2567,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return { status: 403, error: `Up to ${memberMemoryMax()} per agent here; the machine's owner can go higher (HATCHABOT_AGENT_MEMORY_MAX).` };
       }
     }
-    const effective = effectiveMemoryCap({ memoryCap: own ?? undefined }, agent.classId ? store.getAgentClass(agent.classId) : undefined);
+    // The cap hits its container has so far become the baseline, read before
+    // the new cap goes on. Then the limits it makes go on its container
+    // (applyCurrentLimits, in the limits turn PATCH holds): refused by docker
+    // on a machine that answers, nothing is stored (502); a machine gone or
+    // asleep keeps it, said in memoryPending.
+    const now = store.getAgent(agent.id) ?? agent;
+    const effective = effectiveMemoryCap({ memoryCap: own ?? undefined }, now.classId ? store.getAgentClass(now.classId) : undefined);
     let baseline: number | undefined, baselineStartedAt: string | undefined;
-    const provider = providerFor(agent.hostId);
-    if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) {
-      try { const info = await provider.info(agent.runtimeRef); baseline = info.memCapHits; baselineStartedAt = info.startedAt; } catch { /* no reading: no baseline */ }
-      if (provider.updateMemory) {
-        // The swap allowance rides along (a lower cap can shrink it): a call without it would take it away.
-        const limits = agentMemoryLimits(store, { ...agent, memoryCap: own ?? undefined });
-        try { await provider.updateMemory(agent.runtimeRef, effective, limits.swap); }
-        catch (err) { return { status: 502, error: err instanceof ProviderError ? err.userMessage : "Couldn't change the container's memory cap." }; }
-      }
+    if (now.runtimeRef && (now.state === 'RUNNING' || now.state === 'STOPPED')) {
+      try { const info = await providerFor(now.hostId).info(now.runtimeRef); baseline = info.memCapHits; baselineStartedAt = info.startedAt; } catch { /* no reading: no baseline */ }
     }
-    store.setAgentMemoryCap(agent.id, own, baseline, baselineStartedAt);
-    trace(agent.id)('memory.cap_set', { cap: own ?? 'default', effective, live: !!agent.runtimeRef });
-    // The agent hears its new budget (AGENTS.md) once the whole change is
-    // stored: PATCH /v1/agents/:id syncs at its end (HB-0230).
-    return { applied: effective };
+    // Its record is the caller's, written with the rest of its change
+    // (PATCH's one transaction); its trace goes to `log`, which PATCH writes
+    // once the change is committed. The agent hears its new budget
+    // (AGENTS.md) once the whole change is stored: PATCH tells it at its end (HB-0230).
+    const record = (log = trace(agent.id)) => {
+      store.setAgentMemoryCap(agent.id, own, baseline, baselineStartedAt);
+      log('memory.cap_set', { cap: own ?? 'default', effective, live: !!now.runtimeRef });
+    };
+    const out = await applyCurrentLimits(agent.id, { change: { memoryCap: own } });
+    if ('refused' in out) return { status: 502, error: out.refused ?? "Couldn't change the container's memory cap." };
+    return { applied: effective, own, record, live: !!out.applied, ...(out.memoryPending ? { memoryPending: out.memoryPending, why: out.why } : {}) };
   };
 
   /**
@@ -2231,47 +2638,187 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   /**
-   * A source switch lands with a rebuild, on the agent's own image (`image`:
-   * the one being set with it). What it would then run must be something
-   * that OpenClaw can present on the new source: a pin that cannot is dropped,
-   * as one the source does not offer is, and the source's default stands in.
-   * `problem`: that default cannot run either, so the switch is refused (HB-0425).
+   * The one check of what an agent will run once a change is stored (HB-0603
+   * A): its source, its model and the OpenClaw that model runs on, taken
+   * together. Every path that changes one of them asks it: the model route
+   * (a pin set or cleared), PATCH (source, model, image), a class (assigned
+   * or edited), the bulk switch and the manager's card (model-check). Each
+   * used to check only the part it changed, so a cleared pin (HB-0555), a
+   * class with only a source (HB-0556) and an image pin alone (HB-0459) could
+   * put a subscription agent on a model its runtime refuses.
+   * - `pin` given: the pin the change sets, null meaning the source's default.
+   * - Not given, the agent's own pin rides along. A source switch drops one
+   *   its new source does not offer or its runtime cannot use there, and the
+   *   source's default stands in (`dropPin`, HB-0425); any other change that
+   *   leaves it unable to run is refused.
+   * - `rebuildOn`: the change lands with a rebuild (a source switch, a new
+   *   image), on this image (null = the fleet default); left out, the
+   *   container it runs now.
+   * `problem`: what it would run cannot run there, so the change is refused.
    */
-  const sourceSwitchRuntime = async (a: Agent, target: AIProfile, image: string | null = a.image ?? null): Promise<{ dropPin?: boolean; problem?: string }> => {
+  const finalModelCheck = async (
+    a: Agent, target: AIProfile, next: { pin?: string | null; switching?: boolean; rebuildOn?: string | null },
+  ): Promise<{ dropPin?: boolean; problem?: string }> => {
+    if (next.pin !== undefined || !next.switching) {
+      const runs = next.pin !== undefined ? next.pin ?? target.model : effectiveModel(a, target);
+      const problem = await subscriptionRuntimeProblem(a, target, runs, next.rebuildOn);
+      if (!problem) return {};
+      // No pin: the source's default is what it would run, and said so
+      // (HB-0555). A pin its source no longer offers is passed over the same
+      // way, and named: the agent does have a model of its own.
+      const own = next.pin !== undefined ? next.pin : a.model;
+      if (own && own === runs) return { problem };
+      return { problem: own
+        ? `Its model ${own} is no longer on its source's menu, so it would run the source's default, and ${problem}`
+        : `Without a model of its own it would run its source's default, and ${problem}` };
+    }
     const pin = a.model && !modelOverrideProblem(target, a.model) ? a.model : undefined;
-    if (pin && !(await subscriptionRuntimeProblem(a, target, pin, image))) return {};
-    const problem = await subscriptionRuntimeProblem(a, target, target.model, image);
+    if (pin && !(await subscriptionRuntimeProblem(a, target, pin, next.rebuildOn))) return {};
+    const problem = await subscriptionRuntimeProblem(a, target, target.model, next.rebuildOn);
     return { ...(pin ? { dropPin: true } : {}), ...(problem ? { problem } : {}) };
   };
+  /**
+   * A source switch lands with a rebuild, on the agent's own image (`image`:
+   * the one being set with it): finalModelCheck, a pin it cannot use dropped.
+   */
+  const sourceSwitchRuntime = (a: Agent, target: AIProfile, image: string | null = a.image ?? null): Promise<{ dropPin?: boolean; problem?: string }> =>
+    finalModelCheck(a, target, { switching: true, rebuildOn: image });
+  /**
+   * Why this agent may not be put on `model` now (null: back to its source's
+   * default): the source's menu, then the runtime it runs. The model route
+   * refuses with it, and the manager's card asks it first (model-check), so
+   * a card is never filed for a change Confirm would refuse (HB-0597).
+   */
+  const modelChoiceProblem = async (agent: Agent, profile: AIProfile, model: string | null): Promise<{ status: 400 | 409; error: string } | undefined> => {
+    const menu = modelOverrideProblem(profile, model);
+    if (menu) return { status: 400, error: menu };
+    const r = await finalModelCheck(agent, profile, { pin: model });
+    return r.problem ? { status: 409, error: r.problem } : undefined;
+  };
 
-  const applyClassToAgent = async (
-    agent: Agent,
-    cls: { model?: string; aiProfileId?: string; image?: string },
-    opts: { unpin?: boolean } = {},
-  ): Promise<{ rebuild: boolean; error?: string; modelPending?: string }> => {
+  /**
+   * AI sources an agent is being switched to, counted. A switch takes a hold in
+   * the same tick as its last look at the source and lets it go when it is
+   * done, and the source's delete is refused while one is held. Looked up
+   * again only after its waits, a switch that found the source gone had
+   * already applied the rest of its change (HB-0570).
+   * Alongside the store's own check at the write: that one refuses only when
+   * the switch is done, with its other changes made; a hold refuses the delete.
+   * They end when the change does (withSourceHold), not at onResponse, which
+   * a caller that hangs up brings while the handler is still writing. Or after
+   * HOLD_MS, as holdOnce's do: a handler stuck that long must not keep its
+   * source from being deleted for good.
+   */
+  const sourceHolds = new Map<string, Set<{ at: number }>>();
+  const holdSource = (id: string): (() => void) => {
+    const hold = { at: Date.now() };
+    const set = sourceHolds.get(id) ?? new Set();
+    sourceHolds.set(id, set.add(hold));
+    return () => {
+      set.delete(hold);
+      if (!set.size && sourceHolds.get(id) === set) sourceHolds.delete(id);
+    };
+  };
+  /** A switch onto source `id` is under way. Holds past HOLD_MS no longer count, and are logged once as they go. */
+  const sourceHeld = (id: string): boolean => {
+    const set = sourceHolds.get(id);
+    if (!set) return false;
+    for (const hold of set) {
+      if (Date.now() - hold.at < HOLD_MS) continue;
+      set.delete(hold);
+      app.log.warn({ source: id, heldMs: Date.now() - hold.at }, 'source.hold_expired');
+    }
+    if (!set.size) sourceHolds.delete(id);
+    return set.size > 0;
+  };
+  /** `fn` under a hold on source `id` (none without one), taken before `fn` starts. */
+  const withSourceHold = async <T>(id: string | undefined, fn: () => Promise<T>): Promise<T> => {
+    const release = id ? holdSource(id) : () => {};
+    try { return await fn(); } finally { release(); }
+  };
+
+  /**
+   * What an agent runs, for a class change to tell whether the agent changed
+   * it itself since (changedSince): its source, its image, and its model
+   * with the generation of its writes (Store.modelGeneration).
+   */
+  type Since = { gen: number; model?: string; aiProfileId: string; image?: string };
+  const runsModel = (a: Agent): string | undefined => { const p = store.getAIProfile(a.aiProfileId); return p ? effectiveModel(a, p) : a.model; };
+  const sinceOf = (a: Agent): Since => ({ gen: store.modelGeneration(a.id), model: runsModel(a), aiProfileId: a.aiProfileId, image: a.image });
+  /**
+   * Its source or image changed, or a model was written for it that changed
+   * what it runs. A write that keeps what it runs (the same model chosen
+   * again) is no change of its own; nor is a new source default it follows,
+   * written to no agent, nor a write Hatchabot made on its own (the
+   * budget's switch down and restore, the default-model sweep's hold),
+   * which leaves the model generation as it was.
+   */
+  const changedSince = (agentId: string, since: Since): boolean => {
+    const now = store.getAgent(agentId);
+    if (!now || now.aiProfileId !== since.aiProfileId || (now.image ?? null) !== (since.image ?? null)) return true;
+    return store.modelGeneration(agentId) !== since.gen && runsModel(now) !== since.model;
+  };
+  /**
+   * A class as one agent will take it: what is written to it (its source,
+   * model, image) when its class changes or it joins one.
+   */
+  type ClassTarget = { id: string; model?: string; aiProfileId?: string; image?: string };
+  /** Which class settings a check was made for, to tell whether it still fits when written. */
+  const classKey = (c: ClassTarget, unpin: boolean): string => JSON.stringify([c.id, c.model ?? null, c.aiProfileId ?? null, c.image ?? null, unpin]);
+  /**
+   * A class checked against one agent, before anything is written and before
+   * its class's queue is taken (checkClassFor): every check that asks its
+   * machine (an image pin, the runtime a model needs) is made here, so a
+   * container slow to answer, or a runner asleep, holds up no other change
+   * of the class. `since`: what it ran when it was read for the check (a
+   * change of its own made after stands: changedSince); `pin`: its own
+   * model then, where the check and the write read it; `for`: the class
+   * settings checked (classKey).
+   */
+  type ClassCheck = { since: Since; for: string; error: string } | {
+    since: Since; for: string; switching: boolean; target: AIProfile; imageChange: boolean; unpin: boolean;
+    dropPin: boolean; modelWaitsForRebuild: boolean; pin?: string | null;
+  };
+  /**
+   * Why a class may not be written to this agent now, or nothing: a source
+   * switch not under a rebuild or a move, which reads the source as it goes
+   * (HB-0063), and a source or image change not under an operation on disk
+   * (held, interrupted), as PATCH and the bulk switch refuse: it resumes on
+   * the settings it began with (HB-0573). Asked by checkClassFor before its
+   * runtime checks, and by applyClassToAgent just before the write.
+   */
+  const classWriteRefusal = (agentId: string, switching: boolean, imageChange: boolean): string | undefined => {
+    if (switching || imageChange) { const onDisk = operationRefusal(store, agentId); if (onDisk) return onDisk; }
+    if (switching && isBusy(agentId)) return 'busy (a rebuild, a move or a backup) — apply the class again when that is done';
+    return undefined;
+  };
+  /** A class's machine-login Max source for an agent on a runner: refused at its check and again at its write. */
+  const CLASS_RUNNER = "the class's machine-login Max source can't reach an agent on a runner — use a setup-token source";
+  const checkClassFor = async (agent: Agent, cls: ClassTarget, unpinAsked = false): Promise<ClassCheck> => {
+    const since = sinceOf(agent), key = classKey(cls, unpinAsked);
     // Validate the WHOLE class against the agent's TARGET source before writing
     // anything — a failed model check must not leave the agent half-switched.
     const switching = !!cls.aiProfileId && cls.aiProfileId !== agent.aiProfileId;
     const target = store.getAIProfile(switching ? cls.aiProfileId! : agent.aiProfileId);
-    if (!target) return { rebuild: false, error: switching ? 'class source unavailable' : 'agent has no AI source' };
-    if (switching && agent.ops && target.vendor === 'local') return { rebuild: false, error: "the Hatchabot agent can't use a local model" };
-    // Not under a rebuild or a move: it reads the source as it goes (HB-0063).
-    if (switching && isBusy(agent.id)) return { rebuild: false, error: 'busy (a rebuild, a move or a backup) — apply the class again when that is done' };
+    if (!target) return { since, for: key, error: switching ? 'class source unavailable' : 'agent has no AI source' };
+    if (switching && agent.ops && target.vendor === 'local') return { since, for: key, error: "the Hatchabot agent can't use a local model" };
+    // Not under a rebuild, a move or an operation on disk (classWriteRefusal);
+    // asked again just before the write, after the runtime checks below.
+    const refused = classWriteRefusal(agent.id, switching, false);
+    if (refused) return { since, for: key, error: refused };
     if (switching) {
-      if (target.ownerId !== agent.ownerId && !target.shared) return { rebuild: false, error: 'class source unavailable' };
+      if (target.ownerId !== agent.ownerId && !target.shared) return { since, for: key, error: 'class source unavailable' };
       // Same layered guard as create/switch: a machine-login Max source is never
       // usable by another account's agent, shared flag or not.
       if (target.kind === 'subscription' && !target.secretRef && target.ownerId !== agent.ownerId) {
-        return { rebuild: false, error: "a machine-login Max source can't run another account's agent" };
+        return { since, for: key, error: "a machine-login Max source can't run another account's agent" };
       }
       // A runner cannot use this machine's login, as PATCH and the source switch refuse.
-      if (target.vendor !== 'local' && target.kind === 'subscription' && !target.secretRef && store.getHost(agent.hostId)?.kind !== 'local') {
-        return { rebuild: false, error: "the class's machine-login Max source can't reach an agent on a runner — use a setup-token source" };
-      }
+      if (machineLoginOnly(target) && store.getHost(agent.hostId)?.kind !== 'local') return { since, for: key, error: CLASS_RUNNER };
     }
     if (cls.model) {
       const prob = modelOverrideProblem(target, cls.model);
-      if (prob) return { rebuild: false, error: prob }; // e.g. local source, or model not on this source
+      if (prob) return { since, for: key, error: prob }; // e.g. local source, or model not on this source
     }
     // The class image pins the agent (applied on its next rebuild); no class
     // image leaves whatever pin the agent has, unless the class edit cleared
@@ -2279,50 +2826,159 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // like any pin before anything is written: a class image the agent's data
     // cannot go back to is refused for it, as PATCH image refuses it (#147),
     // and a refusal leaves its pin where it was (#149).
-    const unpin = !!opts.unpin && !!agent.image;
+    const unpin = unpinAsked && !!agent.image;
     const imageChange = unpin || (!!cls.image && cls.image !== (agent.image ?? undefined));
     if (imageChange) {
       const pin = await imagePinCheck(agent, unpin ? null : cls.image!);
-      if (pin.problem) return { rebuild: false, error: pin.problem };
+      if (pin.problem) return { since, for: key, error: pin.problem };
     }
     // The class's model on a subscription, against the OpenClaw it will run
     // on: the image a source or image change rebuilds it on, and the
     // container it is applied to now. The model route refused it; a class
     // gave it (audit #069). Too old now but not after the class's new image:
     // it waits for that rebuild rather than break the agent until then.
+    // Without a model of its own, the class still decides what the agent runs
+    // when it changes its source or image: the agent's pin (dropped on a source
+    // that cannot use it), else the source's default, checked the same way
+    // (finalModelCheck; a class with only a source skipped it, HB-0556).
     let modelWaitsForRebuild = false;
+    let dropPin = false;
+    const rebuildOn = unpin ? null : (cls.image ?? agent.image ?? null);
     if (cls.model) {
       if (switching || imageChange) {
-        const tooOld = await subscriptionRuntimeProblem(agent, target, cls.model, unpin ? null : (cls.image ?? agent.image ?? null));
-        if (tooOld) return { rebuild: false, error: tooOld };
+        const tooOld = (await finalModelCheck(agent, target, { pin: cls.model, rebuildOn })).problem;
+        if (tooOld) return { since, for: key, error: tooOld };
       }
       if (!switching) {
-        const tooOld = await subscriptionRuntimeProblem(agent, target, cls.model);
-        if (tooOld && !imageChange) return { rebuild: false, error: tooOld };
+        const tooOld = (await finalModelCheck(agent, target, { pin: cls.model })).problem;
+        if (tooOld && !imageChange) return { since, for: key, error: tooOld };
         modelWaitsForRebuild = !!tooOld;
       }
+    } else if (switching || imageChange) {
+      const runtime = await finalModelCheck(agent, target, { switching, rebuildOn });
+      if (runtime.problem) return { since, for: key, error: runtime.problem };
+      dropPin = !!runtime.dropPin;
     }
-    store.transact(() => {
+    return {
+      since, for: key, switching, target, imageChange, unpin, dropPin, modelWaitsForRebuild,
+      // Its own model, which the checks above and the write read (a class without one).
+      ...(!cls.model && (switching || imageChange) ? { pin: agent.model ?? null } : {}),
+    };
+  };
+  /**
+   * A class written to one agent, checked by checkClassFor (`check`, for
+   * these settings): its record only, in one transaction, and nothing that
+   * asks its machine. `agent`: as read in the class's queue. `from`: the
+   * class it is in as the caller read it; `cls.id` for a member of an edit.
+   * A change of its own made since its check stands: nothing is written
+   * (`changed`); its own model set meanwhile where the check read it, also
+   * nothing (`moved`: checked again, it may be written). `req`: its model
+   * change goes in the ledger as the class's, read around this write alone.
+   * `finish`, when its model is to go on its runtime now, does that
+   * container work; the caller runs it once the class's queue is let go.
+   */
+  type ClassWrite = { rebuild: boolean; error?: string; changed?: boolean; moved?: boolean; finish?: () => Promise<{ rebuild: boolean; modelPending?: string }> };
+  /**
+   * What each agent ran once a class was last written to it
+   * (applyClassToAgent): a join that finds the agent changed since its
+   * check tells a change of its class (an edit of the class it leaves,
+   * written just before in that class's queue) from one of its owner's.
+   * An agent's entry goes when it is deleted.
+   */
+  const classWrote = new Map<string, Since>();
+  const applyClassToAgent = (agent: Agent, cls: ClassTarget, check: ClassCheck, opts: { from: string | null; req?: FastifyRequest }): ClassWrite => {
+    if ('error' in check) return { rebuild: false, error: check.error };
+    const { switching, imageChange, unpin, dropPin, modelWaitsForRebuild } = check;
+    // The source as it is now, for the checks that read only the store.
+    const target = store.getAIProfile(check.target.id) ?? check.target;
+    if (cls.model) {
+      const prob = modelOverrideProblem(target, cls.model);
+      if (prob) return { rebuild: false, error: prob };
+    }
+    const refused = classWriteRefusal(agent.id, switching, imageChange);
+    if (refused) return { rebuild: false, error: refused };
+    // Its class, then everything else, in one transaction: written only
+    // while it is still in the class the caller read (setAgentClassIf), and
+    // its own model, source and image are as its check read them
+    // (`since`). A change of its own made meanwhile, outside the class's
+    // queue, stands: nothing is written (`changed`), and whether it leaves
+    // the class is decided once this change is done (detachClassIfDrifted).
+    const before = snapshotModels(store, [agent.id]);
+    // Judged again here, as PATCH does: deleted, or moved to a runner for a
+    // switch to this machine's login, during the checks, nothing is written;
+    // its source deleted past its hold (withSourceHold), nothing either.
+    const wrote = store.transact(() => {
+      if (agentGone(agent.id)) return 'no-agent' as const;
+      if (changedSince(agent.id, check.since)) return 'changed' as const;
+      const pin = store.getAgent(agent.id)?.model ?? null;
+      if (check.pin !== undefined && pin !== check.pin) return 'moved' as const;
+      if (switching) {
+        if (machineLoginOnly(target) && store.getHost(store.getAgent(agent.id)!.hostId)?.kind !== 'local') return 'runner' as const;
+        // What the store would refuse at the write (setAgentAIProfile), asked before anything is written.
+        if (!store.getAIProfile(cls.aiProfileId!)) return 'no-source' as const;
+      }
+      if (!store.setAgentClassIf(agent.id, opts.from, cls.id)) return 'changed' as const;
       if (switching) {
         store.setAgentAIProfile(agent.id, cls.aiProfileId!);
-        if (agent.model && !cls.model && modelOverrideProblem(target, agent.model)) store.setAgentModel(agent.id, null);
+        if (pin && !cls.model && (dropPin || modelOverrideProblem(target, pin))) store.setAgentModel(agent.id, null);
       }
-      if (cls.model) store.setAgentModel(agent.id, cls.model);
+      // On the cheaper model its budget switched it to (its source kept):
+      // the class's model is the one that comes back when that ends.
+      if (cls.model && !(!switching && pin && pin !== cls.model && store.setCheaperPauseFrom(agent.id, pin, cls.model))) store.setAgentModel(agent.id, cls.model);
       if (imageChange) store.setAgentImage(agent.id, unpin ? null : cls.image!);
+      return 'wrote' as const;
     });
+    if (wrote === 'changed') return { rebuild: false, changed: true };
+    if (wrote === 'moved') return { rebuild: false, moved: true };
+    if (wrote !== 'wrote') return { rebuild: false, error: wrote === 'runner' ? CLASS_RUNNER : wrote === 'no-agent' ? 'it was deleted' : "the class's source was deleted meanwhile" };
+    classWrote.set(agent.id, sinceOf(store.getAgent(agent.id) ?? agent));
+    if (cls.model && modelWaitsForRebuild) modelWaitsImage.set(agent.id, cls.model); else modelWaitsImage.delete(agent.id);
+    if (opts.req) recordLedger(opts.req, 'class', before);
     // A source change is applied by a rebuild (auth/env are provision-time);
     // a model-only change applies now (live, or staged on the stopped volume).
     // A runtime that refused it still answers on its old model: said, not
     // counted as applied (audit #068). A source switch already waiting for a
     // rebuild takes the model with it.
     const rebuild = switching || imageChange;
-    if (!switching && cls.model && !modelWaitsForRebuild) {
-      const how = await applyModelToRuntime(agent.id).catch(() => 'failed' as const);
-      if (how === 'rebuild') return { rebuild: true };
-      if (how === 'gone') return { rebuild, modelPending: `its stored files are not on its machine: its volume is gone, so ${cls.model} could not be written to it (a Rebuild would make a fresh, empty volume)` };
-      if (how === 'failed' && !rebuild) {
-        return { rebuild, modelPending: `its runtime did not take ${cls.model}, so it still answers on its old model — try again, or Rebuild it to apply` };
-      }
+    if (!switching && cls.model && !modelWaitsForRebuild) return { rebuild, finish: () => classModelOn(agent, target, cls.model!, rebuild) };
+    return { rebuild };
+  };
+  /**
+   * A class's model put on a member's runtime, once its record is written
+   * (applyClassToAgent's `finish`): after its class's queue is let go, in
+   * the agent's own turn (applyModelToRuntime), which reads what it runs
+   * when it comes, so a later edit's model is the one that lands.
+   */
+  const classModelOn = async (agent: Agent, target: AIProfile, model: string, rebuild: boolean): Promise<{ rebuild: boolean; modelPending?: string }> => {
+    const how = await applyModelToRuntime(agent.id).catch(() => 'failed' as const);
+    if (how === 'rebuild') return { rebuild: true };
+    if (how === 'gone') return { rebuild, modelPending: `its stored files are not on its machine: its volume is gone, so ${model} could not be written to it (a Rebuild would make a fresh, empty volume)` };
+    if (how === 'failed' && !rebuild) {
+      return { rebuild, modelPending: `its runtime did not take ${model}, so it still answers on its old model — try again, or Rebuild it to apply` };
+    }
+    // A rebuild under way: it puts the model on from the record, or, past
+    // that step already, the apply chained after it does. Applied there.
+    // Neither took it (the rebuild failed, the runtime refused): traced on
+    // the agent, which then shows the model still to come (pendingModel)
+    // in the list and in its class's row.
+    if (how === 'none' && !rebuild && inflight.has(agent.id)) {
+      const id = agent.id;
+      const on = () => { const a = store.getAgent(id), p = a && store.getAIProfile(a.aiProfileId); return !a || !p || a.appliedModel === effectiveModel(a, p); };
+      void inflight.get(id)!.then(async () => {
+        if (on()) return;
+        const after = await applyModelToRuntime(id).catch(() => 'failed' as const);
+        if (after !== 'live' && after !== 'staged' && !on()) trace(id)('model.apply_failed', { model, why: `the rebuild it waited for did not put it on, nor did a try after it (${after})` });
+      }).catch(() => undefined);
+      return { rebuild };
+    }
+    // Busy (a snapshot, a backup, a move): stored only. Not applied, so not
+    // counted as applied, while its runtime runs another model (HB-0564).
+    // With nothing applied on record, it runs what it ran before: its pin,
+    // or its source's default (which may be the class's model already).
+    const now = how === 'none' && !rebuild ? store.getAgent(agent.id) : undefined;
+    if (now?.runtimeRef && !now.migratedTo && (now.state === 'RUNNING' || now.state === 'STOPPED')
+      && (now.appliedModel ? now.appliedModel !== model : effectiveModel(agent, target) !== model)) {
+      return { rebuild, modelPending: `it was busy with another operation, so ${model} is recorded but it still answers on its old model — apply the class again once that is done, or Rebuild it to apply` };
     }
     return { rebuild };
   };
@@ -2392,21 +3048,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (bytes > parseMemoryCap(memberMemoryMax())! && !ownsLocalHost(req)) return { status: 403, error: `Up to ${memberMemoryMax()} per agent here; the machine's owner can go higher (HATCHABOT_AGENT_MEMORY_MAX).` };
     return undefined;
   };
-  /** Set (or clear) an agent's own swap allowance and apply it to its container right away, with its cap. */
-  const setSwapAllowance = async (agent: Agent, input: string | null): Promise<{ error?: string; status?: number }> => {
+  /**
+   * Set (or clear) an agent's own swap allowance and apply it to its container
+   * right away, with its cap. As setMemoryCap: on its container now
+   * (applyCurrentLimits, in the limits turn PATCH holds), its record for the
+   * caller to store (`withCap`: a cap set in the same change, not yet
+   * stored), and its trace (`after`) once the change is.
+   */
+  const setSwapAllowance = async (agent: Agent, input: string | null, withCap: { memoryCap?: string | null } = {}): Promise<{ error?: string; status?: number; live?: boolean; record?: () => void; after?: () => Promise<void> } & Kept> => {
     const own = input === null ? null : formatSwapAllowance(parseSwapAllowance(input)!);
-    const next = { ...store.getAgent(agent.id)!, swapAllowance: own ?? undefined };
-    const provider = providerFor(agent.hostId);
-    if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED') && provider.updateMemory) {
-      const lim = agentMemoryLimits(store, next);
-      try { await provider.updateMemory(agent.runtimeRef, lim.memory, lim.swap); }
-      catch (err) { return { status: 502, error: err instanceof ProviderError ? err.userMessage : "Couldn't change the container's swap allowance." }; }
-    }
-    store.setAgentSwapAllowance(agent.id, own);
-    const lim = agentMemoryLimits(store, next);
-    const host = lim.swap ? await provider.compressedSwap?.().catch(() => undefined) : undefined;
-    trace(agent.id)('memory.swap_set', { swap: own ?? 'default', effective: lim.swap ?? 'off', live: !!agent.runtimeRef, ...(lim.swap && host && !host.compressed ? { withheld: host.kind } : {}) });
-    return {};
+    // Refused by docker on a machine that answers, nothing is stored (502).
+    const out = await applyCurrentLimits(agent.id, { change: { ...withCap, swapAllowance: own } });
+    if ('refused' in out) return { status: 502, error: out.refused ?? "Couldn't change the container's swap allowance." };
+    const after = async () => {
+      const now = store.getAgent(agent.id) ?? agent;
+      const lim = out.applied ?? agentMemoryLimits(store, now);
+      let host: Awaited<ReturnType<NonNullable<RuntimeProvider['compressedSwap']>>> | undefined;
+      if (lim.swap) { try { host = await providerFor(now.hostId).compressedSwap?.(); } catch { /* no reading */ } }
+      trace(agent.id)('memory.swap_set', { swap: own ?? 'default', effective: lim.swap ?? 'off', live: !!out.applied, ...(lim.swap && host && !host.compressed ? { withheld: host.kind } : {}) });
+    };
+    return { record: () => store.setAgentSwapAllowance(agent.id, own), after, live: !!out.applied, ...(out.memoryPending ? { memoryPending: out.memoryPending, why: out.why } : {}) };
   };
   app.get('/v1/agent-classes', async (req) => ({ classes: store.listAgentClasses(ownerIdOf(req)) }));
 
@@ -2443,106 +3104,233 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   app.put<{ Params: { id: string }; Body: { name?: string; model?: string; aiProfileId?: string; image?: string | null } }>(
     '/v1/agent-classes/:id',
+    // In the class's queue: the edit before this one has written every
+    // member, so this one reads the class as it left it (HB-0560). Only the
+    // records are written there: every check that asks a member's machine
+    // (an image pin, the runtime a model needs) is made before the queue is
+    // taken (checkClassFor), and each member's container work (its model,
+    // its memory limits) runs once the queue is let go, in that agent's own
+    // turn, which reads it as it is then. A slow container, or a runner
+    // asleep, holds up no other change of the class. In the queue, the
+    // checks are used only while they still fit: the class as it was read
+    // (`row`) and each member's check for these settings. Otherwise it
+    // checks again, three times at most; past that it answers 409 with
+    // nothing written (classChangedThrice). Nothing in the queue asks a
+    // machine.
     async (req, reply) => {
-      const cls = store.getAgentClass(req.params.id);
-      if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
-      const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string; image?: string | null; memoryCap?: string | null; swapAllowance?: string | null };
-      for (const [k, v] of Object.entries(b)) if (v !== undefined && v !== null && typeof v !== 'string') return reply.code(400).send({ error: `${k}: a string.` });
-      const name = b.name !== undefined ? (b.name.trim().slice(0, 48) || cls.name) : cls.name;
-      let memoryCap = cls.memoryCap;
-      if (b.memoryCap !== undefined) {
-        const capIn = b.memoryCap?.trim() || undefined;
-        const capCheck = capIn ? classCapProblem(req, capIn) : undefined;
-        if (capCheck) return reply.code(capCheck.status).send({ error: capCheck.error });
-        memoryCap = capIn ? formatMemoryCap(parseMemoryCap(capIn)!) : undefined;
-      }
-      let swapAllowance = cls.swapAllowance;
-      if (b.swapAllowance !== undefined) {
-        const swapIn = b.swapAllowance?.trim() || undefined;
-        const swapCheck = swapIn ? swapAllowanceProblem(req, swapIn, memoryCap ?? defaultMemoryCap()) : undefined;
-        if (swapCheck) return reply.code(swapCheck.status).send({ error: swapCheck.error });
-        swapAllowance = swapIn ? formatSwapAllowance(parseSwapAllowance(swapIn)!) : undefined;
-      }
-      const image = b.image !== undefined ? (b.image?.trim() || undefined) : cls.image;
-      if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
-      if (image && image !== cls.image && !ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
-      const clash = store.agentClassByName(cls.ownerId, name);
-      if (clash && clash.id !== cls.id) return reply.code(400).send({ error: `There's already a class called "${name}".` });
-      const model = b.model !== undefined ? (b.model.trim() || undefined) : cls.model;
-      let aiProfileId = b.aiProfileId !== undefined ? (b.aiProfileId || undefined) : cls.aiProfileId;
-      if (aiProfileId) {
-        const src = store.getAIProfile(aiProfileId);
-        const usable = !!src && (src.ownerId === ownerIdOf(req) || src.shared);
-        // Only a source this request names is refused. A stored one that was
-        // deleted or un-shared since is dropped: it made every edit of the
-        // class (a rename, a model) answer "Unknown AI source" (night review).
-        if (!usable && b.aiProfileId !== undefined) return reply.code(400).send({ error: 'Unknown AI source.' });
-        if (!usable) aiProfileId = undefined;
-        // A model or source this edit names must go together, as on create (HB-0060).
-        const prob = usable && (b.model !== undefined || b.aiProfileId !== undefined) ? modelOverrideProblem(src!, model) : undefined;
-        if (prob) return reply.code(400).send({ error: prob });
-      }
-      store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image, memoryCap, swapAllowance });
-      // Propagate the (possibly changed) model/source/image to every agent in the class.
-      // modelPending: members whose runtime refused the class's model — the
-      // record has it, the agent still answers on its old one (audit #068).
-      let applied = 0, needRebuild = 0; const skipped: string[] = []; const modelPending: string[] = [];
-      const members = store.listAgentsInClass(cls.id);
-      await ledgered(req, 'class', members.map((a) => a.id), async () => {
-      for (const a of members) {
-        if (a.state === 'ARCHIVED') continue; // nothing to apply to; it keeps its tag
-        // A class cap reaches members without a cap of their own, live.
-        // Its swap allowance too (swap.ts), which a class cap can also shrink.
-        const capMoved = memoryCap !== cls.memoryCap && !a.memoryCap;
-        const swapMoved = swapAllowance !== cls.swapAllowance && !a.swapAllowance;
-        // Named in the request, they are applied even when the class already
-        // says so: a retry after a container refused them saw no change, did
-        // nothing and answered with no skips (#220).
-        const asked = (b.memoryCap !== undefined || b.swapAllowance !== undefined) && (!a.memoryCap || !a.swapAllowance);
-        if ((capMoved || swapMoved || asked || (memoryCap !== cls.memoryCap && !!effectiveSwapAllowance(a, { memoryCap, swapAllowance }))) && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
-          const prov = providerFor(a.hostId);
-          const lim = agentMemoryLimits({ getAgentClass: () => ({ ...cls, memoryCap, swapAllowance }) }, a);
-          try {
-            await prov.updateMemory?.(a.runtimeRef, lim.memory, lim.swap);
-            if (capMoved) trace(a.id)('memory.cap_set', { cap: 'class', effective: lim.memory, live: true });
-            if (swapMoved) trace(a.id)('memory.swap_set', { swap: 'class', effective: lim.swap ?? 'off', live: true });
-          } catch (err) { skipped.push(`${a.name}: ${err instanceof ProviderError ? err.userMessage : 'memory cap not applied'}`); }
+      // Under way until its records are written (classEditsUnderWay), the checks included.
+      classEditBegun(req.params.id);
+      let step: ClassStep;
+      try {
+        for (let attempt = 1; ; attempt++) {
+          const last = attempt >= 3;
+          const seen = classEditPlan(req);
+          if ('status' in seen) return reply.code(seen.status).send(seen.body);
+          // The source it moves members to held from this look until they
+          // are written (withSourceHold): its delete is refused meanwhile
+          // (HB-0570). Members all on it already hold nothing, and the
+          // delete says it is in use.
+          const moves = seen.aiProfileId && store.listAgentsInClass(seen.cls.id).some((a) => a.state !== 'ARCHIVED' && a.aiProfileId !== seen.aiProfileId) ? seen.aiProfileId : undefined;
+          const turn = await withSourceHold(moves, async () => {
+            const checks = await checkEditMembers(seen);
+            return inClassQueue([req.params.id], async (): Promise<ClassStep | { again: true }> => {
+              const plan = classEditPlan(req);
+              if ('status' in plan) return plan;
+              if (plan.row !== seen.row) return last ? classChangedThrice : { again: true };
+              return writeClassEdit(plan, checks, last, req);
+            });
+          });
+          if ('again' in turn) continue;
+          step = turn;
+          break;
         }
-        // The class image cleared: members it had pinned go back to the fleet
-        // default (needs a rebuild), and the rest of the edit (model, source)
-        // still applies — it was skipped (night review). Unpinned only once
-        // the whole change passed: a refused model kept the pin gone (#149).
-        const unpin = !image && !!cls.image && a.image === cls.image;
-        const r = await applyClassToAgent(a, { model, aiProfileId, image }, { unpin });
-        if (r.error) skipped.push(`${a.name}: ${r.error}`);
-        else if (r.modelPending) modelPending.push(`${a.name}: ${r.modelPending}`);
-        else { applied++; if (r.rebuild) needRebuild++; }
+      } finally {
+        classEditEnded(req.params.id);
       }
-      });
-      return { class: store.getAgentClass(cls.id), applied, needRebuild, skipped, modelPending };
+      return classStep(reply, step);
     },
   );
-
-  app.delete<{ Params: { id: string } }>('/v1/agent-classes/:id', async (req, reply) => {
+  /** A class change whose checks never fitted the class and its members as they were then, three tries running: nothing written. */
+  const classChangedThrice: ClassStep = { status: 409, body: { error: 'The class or its members kept changing while this applied. Nothing was changed; try again.' } };
+  const unpinFor = (e: ClassEdit, a: Agent): boolean => !e.image && !!e.cls.image && a.image === e.cls.image;
+  const editTarget = (e: ClassEdit): ClassTarget => ({ id: e.cls.id, model: e.model, aiProfileId: e.aiProfileId, image: e.image });
+  /** Each member of an edited class checked against its new settings, outside the class's queue. */
+  const checkEditMembers = async (e: ClassEdit): Promise<Map<string, ClassCheck>> => {
+    const members = store.listAgentsInClass(e.cls.id).filter((a) => a.state !== 'ARCHIVED');
+    const checked = await sixAtATime(members, async (a) => [a.id, await checkClassFor(a, editTarget(e), unpinFor(e, a))] as const);
+    return new Map(checked);
+  };
+  /**
+   * An edit's records, in its class's queue: the class row, then each member
+   * with its check. A member with none that fits these settings (one that
+   * joined since, the class changed since) asks for the checks again
+   * (`again`); on the last try, nothing is written (classChangedThrice).
+   * A member the budget switched to a cheaper model keeps it, and gets
+   * the class's model back when that ends (applyClassToAgent).
+   */
+  const writeClassEdit = (e: ClassEdit, checks: Map<string, ClassCheck>, last: boolean, req: FastifyRequest): ClassStep | { again: true } => {
+    const { cls, name, model, aiProfileId, image, memoryCap, swapAllowance, b } = e;
+    const target = editTarget(e);
+    const members = store.listAgentsInClass(cls.id).filter((a) => a.state !== 'ARCHIVED');
+    const fits = (a: Agent) => checks.get(a.id)?.for === classKey(target, unpinFor(e, a));
+    if (members.some((a) => !fits(a))) return last ? classChangedThrice : { again: true };
+    // The class row and its members are written with nothing awaited
+    // between, so no other change of the class reads the new row before its
+    // members have it.
+    store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image, memoryCap, swapAllowance });
+    // Propagate the (possibly changed) model/source/image to every agent in the class.
+    // modelPending: members whose runtime refused the class's model — the
+    // record has it, the agent still answers on its old one (audit #068).
+    type Done = { applied: number; needRebuild: number; skipped: string[]; modelPending: string[] };
+    const nothing = (): Done => ({ applied: 0, needRebuild: 0, skipped: [], modelPending: [] });
+    // Each member's container work once the queue is let go, six at a time,
+    // each in its agent's own turn; said in member order.
+    const later: Array<() => Promise<Done>> = [];
+    for (const m of members) {
+      const a = store.getAgent(m.id);
+      if (!a || a.classId !== cls.id) continue; // it left the class meanwhile
+      // The class image cleared: members it had pinned go back to the fleet
+      // default (needs a rebuild), and the rest of the edit (model, source)
+      // still applies — it was skipped (night review). Unpinned only once
+      // the whole change passed: a refused model kept the pin gone (#149).
+      const r = applyClassToAgent(a, target, checks.get(a.id)!, { from: cls.id, req });
+      // Its own model, source or image changed since its check: that
+      // change stands, and nothing of the class is written to it. Still
+      // what the class now asks for, it stays, and the class's limits reach
+      // it as they do the rest. Otherwise it leaves the class here, said,
+      // rather than stay in it on the class's old settings; the limits that
+      // apply without it go on when the class set any.
+      // (One taken out of the class meanwhile is not read as a member here:
+      // nothing is awaited between this read and its write.)
+      // Its own model set while it was checked (`moved`, for a class without a
+      // model whose source or image moves): the same.
+      if ((r.changed || r.moved) && driftedFrom(store.getAgent(a.id) ?? a, { model, aiProfileId, image })) {
+        const left = store.setAgentClassIf(a.id, cls.id, null);
+        if (left) trace(a.id)('class.detached', { after: 'as its class was edited, after its own change' });
+        const limitsToo = left && !!(cls.memoryCap || cls.swapAllowance || memoryCap || swapAllowance);
+        later.push(async () => {
+          const kept = limitsToo ? await limitsAfterDetach(a.id) : {};
+          const note = kept.memoryPending ? `; its container kept its old memory limits (${kept.why ?? 'not applied'})` : '';
+          const what = r.moved ? 'its own model was set while this was checked, and it keeps it' : 'its own model, source or image was changed while this applied, and keeps that change';
+          return { ...nothing(), skipped: [`${a.name}: ${what}${left ? '; it left the class' : ''}${note}`] };
+        });
+        continue;
+      }
+      // A class cap reaches members without a cap of their own, live.
+      // Its swap allowance too (swap.ts), which a class cap can also shrink.
+      // Named in the request, they are applied even when the class already
+      // says so: a retry after a container refused them saw no change, did
+      // nothing and answered with no skips (#220). The limits that apply
+      // to it as it is then (applyCurrentLimits): its class's as saved,
+      // unless it left the class while the model was applied.
+      const capMoved = memoryCap !== cls.memoryCap && !a.memoryCap;
+      const swapMoved = swapAllowance !== cls.swapAllowance && !a.swapAllowance;
+      const asked = (b.memoryCap !== undefined || b.swapAllowance !== undefined) && (!a.memoryCap || !a.swapAllowance);
+      const limits = capMoved || swapMoved || asked || (memoryCap !== cls.memoryCap && !!effectiveSwapAllowance(a, { memoryCap, swapAllowance }));
+      later.push(async () => {
+        const done = nothing();
+        if (r.changed) done.applied++;
+        else if (r.error) done.skipped.push(`${a.name}: ${r.error}`);
+        else if (r.moved) done.skipped.push(`${a.name}: its own model was set while this was checked — apply the class again`);
+        else {
+          const on = r.finish ? await r.finish() : { rebuild: r.rebuild, modelPending: undefined };
+          if (on.modelPending) done.modelPending.push(`${a.name}: ${on.modelPending}`);
+          else { done.applied++; if (on.rebuild) done.needRebuild++; }
+        }
+        if (!limits) return done;
+        // Its new budget, told (HB-0599): unless the cap is its own.
+        const out = await limitsTold(a.id, { when: "its class's limits changed", tellIf: () => !a.memoryCap && (capMoved || b.memoryCap !== undefined) });
+        if (out.why) done.skipped.push(`${a.name}: ${out.why}`);
+        else if (out.applied) {
+          if (capMoved) trace(a.id)('memory.cap_set', { cap: 'class', effective: out.applied.memory, live: true });
+          if (swapMoved) trace(a.id)('memory.swap_set', { swap: 'class', effective: out.applied.swap ?? 'off', live: true });
+        }
+        return done;
+      });
+    }
+    return {
+      later: async () => {
+        const all = await sixAtATime(later, (step) => step());
+        return {
+          class: store.getAgentClass(cls.id),
+          applied: all.reduce((n, d) => n + d.applied, 0),
+          needRebuild: all.reduce((n, d) => n + d.needRebuild, 0),
+          skipped: all.flatMap((d) => d.skipped),
+          modelPending: all.flatMap((d) => d.modelPending),
+        };
+      },
+    };
+  };
+  /**
+   * A class edit as asked (PUT /v1/agent-classes/:id), read against the class
+   * as it is now: its new settings, or the refusal to send. Only the store:
+   * made before the edit's checks and again in the class's queue, where
+   * `row` (the class as read) tells whether it changed in between.
+   */
+  type ClassEdit = { cls: AgentClass; row: string; name: string; model?: string; aiProfileId?: string; image?: string; memoryCap?: string; swapAllowance?: string; b: { memoryCap?: string | null; swapAllowance?: string | null } };
+  const classEditPlan = (req: FastifyRequest<{ Params: { id: string } }>): { status: number; body: unknown } | ClassEdit => {
     const cls = store.getAgentClass(req.params.id);
-    if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
+    if (!cls || cls.ownerId !== ownerIdOf(req)) return { status: 404, body: { error: 'Not found' } };
+    const b = (req.body ?? {}) as { name?: string | null; model?: string | null; aiProfileId?: string; image?: string | null; memoryCap?: string | null; swapAllowance?: string | null };
+    for (const [k, v] of Object.entries(b)) if (v !== undefined && v !== null && typeof v !== 'string') return { status: 400, body: { error: `${k}: a string.` } };
+    // null clears a field, but a class always has a name: null reached .trim() and answered 500 (HB-0596).
+    if (b.name === null) return { status: 400, body: { error: 'A class needs a name.' } };
+    const name = b.name !== undefined ? (b.name.trim().slice(0, 48) || cls.name) : cls.name;
+    let memoryCap = cls.memoryCap;
+    if (b.memoryCap !== undefined) {
+      const capIn = b.memoryCap?.trim() || undefined;
+      const capCheck = capIn ? classCapProblem(req, capIn) : undefined;
+      if (capCheck) return { status: capCheck.status, body: { error: capCheck.error } };
+      memoryCap = capIn ? formatMemoryCap(parseMemoryCap(capIn)!) : undefined;
+    }
+    let swapAllowance = cls.swapAllowance;
+    if (b.swapAllowance !== undefined) {
+      const swapIn = b.swapAllowance?.trim() || undefined;
+      const swapCheck = swapIn ? swapAllowanceProblem(req, swapIn, memoryCap ?? defaultMemoryCap()) : undefined;
+      if (swapCheck) return { status: swapCheck.status, body: { error: swapCheck.error } };
+      swapAllowance = swapIn ? formatSwapAllowance(parseSwapAllowance(swapIn)!) : undefined;
+    }
+    const image = b.image !== undefined ? (b.image?.trim() || undefined) : cls.image;
+    if (image && !IMAGE_TAG_RE.test(image)) return { status: 400, body: { error: 'That image tag is not valid.' } };
+    if (image && image !== cls.image && !ownsLocalHost(req)) return { status: 403, body: { error: MACHINE_OWNER_ONLY } };
+    const clash = store.agentClassByName(cls.ownerId, name);
+    if (clash && clash.id !== cls.id) return { status: 400, body: { error: `There's already a class called "${name}".` } };
+    const model = b.model !== undefined ? (b.model?.trim() || undefined) : cls.model;
+    let aiProfileId = b.aiProfileId !== undefined ? (b.aiProfileId || undefined) : cls.aiProfileId;
+    if (aiProfileId) {
+      const src = store.getAIProfile(aiProfileId);
+      const usable = !!src && (src.ownerId === ownerIdOf(req) || src.shared);
+      // Only a source this request names is refused. A stored one that was
+      // deleted or un-shared since is dropped: it made every edit of the
+      // class (a rename, a model) answer "Unknown AI source" (night review).
+      if (!usable && b.aiProfileId !== undefined) return { status: 400, body: { error: 'Unknown AI source.' } };
+      if (!usable) aiProfileId = undefined;
+      // A model or source this edit names must go together, as on create (HB-0060).
+      const prob = usable && (b.model !== undefined || b.aiProfileId !== undefined) ? modelOverrideProblem(src!, model) : undefined;
+      if (prob) return { status: 400, body: { error: prob } };
+    }
+    return { cls, row: JSON.stringify(cls), name, model, aiProfileId, image, memoryCap, swapAllowance, b };
+  };
+
+  // In the class's queue: an edit still writing finishes first (HB-0560).
+  // Its members' containers are changed once the queue is let go, as an edit's are.
+  app.delete<{ Params: { id: string } }>('/v1/agent-classes/:id', async (req, reply) => classStep(reply, await inClassQueue([req.params.id], async (): Promise<ClassStep> => {
+    const cls = store.getAgentClass(req.params.id);
+    if (!cls || cls.ownerId !== ownerIdOf(req)) return { status: 404, body: { error: 'Not found' } };
     const members = store.listAgentsInClass(cls.id);
     store.deleteAgentClass(cls.id); // also clears class_id on its agents (their models are left as-is)
-    // Members without a cap (or swap allowance) of their own ran on the
-    // class's: their containers get the limits that now apply, as a class
-    // edit does, rather than keep the deleted class's until a rebuild (#148).
-    const skipped: string[] = [];
-    if (cls.memoryCap || cls.swapAllowance) {
-      for (const m of members) {
-        const a = store.getAgent(m.id);
-        if (!a?.runtimeRef || (a.memoryCap && a.swapAllowance) || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) continue;
-        const lim = agentMemoryLimits(store, a);
-        try { await providerFor(a.hostId).updateMemory?.(a.runtimeRef, lim.memory, lim.swap); }
-        catch (err) { skipped.push(`${a.name}: ${err instanceof ProviderError ? err.userMessage : 'memory cap not applied'}`); }
-      }
-    }
-    return { removed: true, skipped };
-  });
+    return { later: async () => {
+      // Members without a cap (or swap allowance) of their own ran on the
+      // class's: their containers get the limits that now apply, as a class
+      // edit does, rather than keep the deleted class's until a rebuild (#148).
+      // Six at a time, each in its agent's own turn; said in member order.
+      const skipped = cls.memoryCap || cls.swapAllowance ? await sixAtATime(members, async (m) => {
+        const out = await limitsTold(m.id, { when: 'its class was deleted', tellIf: capMovedFrom(effectiveMemoryCap(m, cls)) });
+        return out.why ? [`${(store.getAgent(m.id) ?? m).name}: ${out.why}`] : [];
+      }) : [];
+      return { removed: true, skipped: skipped.flat() };
+    } };
+  })));
 
   /**
    * Assign (or clear, with classId=null) an agent's class, applying its model/source.
@@ -2552,46 +3340,99 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * (audit #097).
    */
   app.post<{ Params: { id: string }; Body: { classId?: string | null; reviewed?: Record<string, string | null> } }>('/v1/agents/:id/class', async (req, reply) => {
-    const agent = ownedAgent(req, req.params.id);
-    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const owned = ownedAgent(req, req.params.id);
+    if (!owned) return reply.code(404).send({ error: 'Not found' });
     const classId = (req.body as { classId?: string | null } | undefined)?.classId ?? null;
     const reviewed = (req.body as { reviewed?: unknown } | undefined)?.reviewed;
     if (reviewed !== undefined && (typeof reviewed !== 'object' || reviewed === null || Array.isArray(reviewed))) {
       return reply.code(400).send({ error: 'reviewed: the class settings as shown, or left out.' });
     }
-    // The class's memory cap governs an agent with none of its own: applied
-    // to the container now, as a class edit does, not at some later rebuild
-    // (night review, 2026-09-28).
-    // A container that could not take it keeps its old limits until it is
-    // rebuilt: said in memoryPending, not swallowed as applied (#138).
-    const applyCap = async (): Promise<{ memoryPending?: string }> => {
-      const now = store.getAgent(agent.id);
-      if (!now?.runtimeRef || (now.memoryCap && now.swapAllowance) || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) return {};
-      // The cap and the swap allowance (swap.ts) together: either may be the class's.
-      const lim = agentMemoryLimits(store, now);
-      try { await providerFor(now.hostId).updateMemory?.(now.runtimeRef, lim.memory, lim.swap); return {}; }
-      catch (err) { return { memoryPending: `Its container kept its old memory limits (${err instanceof ProviderError ? err.userMessage : 'not applied'}); a rebuild applies them.` }; }
-    };
-    if (classId === null) { store.setAgentClass(agent.id, null); return { classId: null, rebuild: false, ...(await applyCap()) }; }
-    const cls = store.getAgentClass(classId);
-    if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such class.' });
-    if (reviewed) {
-      const shown = reviewed as Record<string, unknown>;
-      const label = { aiProfileId: 'AI source', model: 'model', image: 'image', memoryCap: 'memory cap' } as const;
-      const moved = (Object.keys(label) as Array<keyof typeof label>)
-        .filter((k) => k in shown && (shown[k] ?? null) !== (cls[k] ?? null));
-      if (moved.length) {
-        const value = (k: keyof typeof label) => (k === 'aiProfileId' && cls.aiProfileId
-          ? store.getAIProfile(cls.aiProfileId)?.name ?? 'another source'
-          : cls[k] ?? 'none');
-        const said = moved.map((k) => `${label[k]} ${value(k)}`).join(', ');
-        return reply.code(409).send({ error: `The class "${cls.name}" changed after this was shown: it now has ${said}. Nothing was changed; ask again to see it as it is.` });
-      }
+    // In the queues of the class it leaves and the one it joins: an edit of
+    // either writing now finishes first, and one saved meanwhile waits and
+    // then reaches it as a member (HB-0560). The class it leaves is read
+    // again once in them: one deleted, or that it left, while this waited
+    // (no class now) is no reason to refuse. Moved into another class by a
+    // path outside these queues, nothing is written and it says so
+    // (setAgentClassIf), as when its own model or source is changed while
+    // it joins. The checks that ask its machine are made before the queues
+    // are taken (checkClassFor), and used in them while they still fit the
+    // class (three tries, then 409 with nothing written); its container
+    // (its model, its memory limits) is changed once they are let go, as an
+    // edit's members are.
+    const changed: ClassStep = { status: 409, body: { error: 'Its class, model or source was changed while this applied. Nothing was changed; ask again.' } };
+    for (let attempt = 1; ; attempt++) {
+      const last = attempt >= 3;
+      const seen = store.getAgent(owned.id);
+      if (!seen) return reply.code(404).send({ error: 'Not found' });
+      const queued = seen.classId ?? null;
+      const seenCls = classId ? store.getAgentClass(classId) : undefined;
+      // The source a class moves it to held from this look until it is
+      // written (withSourceHold): its delete is refused meanwhile (HB-0570).
+      // One already on it holds nothing, and the delete says it is in use.
+      const moves = seenCls?.aiProfileId && seenCls.aiProfileId !== seen.aiProfileId ? seenCls.aiProfileId : undefined;
+      const step = await withSourceHold(moves, async () => {
+        const check = seenCls && seenCls.ownerId === ownerIdOf(req) ? await checkClassFor(seen, seenCls) : undefined;
+        return inClassQueue([queued, classId], async (): Promise<ClassStep | { again: true }> => {
+          const agent = store.getAgent(owned.id);
+          if (!agent) return { status: 404, body: { error: 'Not found' } };
+          const from = agent.classId ?? null;
+          if (from !== queued && from !== null && from !== classId) return changed;
+          // The class's memory cap governs an agent with none of its own: applied
+          // to the container now, as a class edit does, not at some later rebuild
+          // (night review, 2026-09-28).
+          // A container that could not take it keeps its old limits until it is
+          // rebuilt: said in memoryPending, not swallowed as applied (#138).
+          // The cap it ran on before, to tell it a new budget (HB-0599).
+          const capBefore = effectiveMemoryCap(agent, agent.classId ? store.getAgentClass(agent.classId) : undefined);
+          const applyCap = async (when: string) => keptSaid(agent.name, await limitsTold(agent.id, { when, tellIf: capMovedFrom(capBefore) }));
+          if (classId === null) {
+            if (!store.setAgentClassIf(agent.id, from, null)) return changed;
+            return { later: async () => ({ classId: null, rebuild: false, ...(await applyCap('it left its class')) }) };
+          }
+          const cls = store.getAgentClass(classId);
+          if (!cls || cls.ownerId !== ownerIdOf(req)) return { status: 404, body: { error: 'No such class.' } };
+          if (reviewed) {
+            const shown = reviewed as Record<string, unknown>;
+            // The swap allowance too: it changes the container's memory as the cap does (HB-0558).
+            const label = { aiProfileId: 'AI source', model: 'model', image: 'image', memoryCap: 'memory cap', swapAllowance: 'swap allowance' } as const;
+            const differ = (Object.keys(label) as Array<keyof typeof label>)
+              .filter((k) => k in shown && (shown[k] ?? null) !== (cls[k] ?? null));
+            if (differ.length) {
+              const value = (k: keyof typeof label) => (k === 'aiProfileId' && cls.aiProfileId
+                ? store.getAIProfile(cls.aiProfileId)?.name ?? 'another source'
+                : cls[k] ?? 'none');
+              const said = differ.map((k) => `${label[k]} ${value(k)}`).join(', ');
+              return { status: 409, body: { error: `The class "${cls.name}" changed after this was shown: it now has ${said}. Nothing was changed; ask again to see it as it is.` } };
+            }
+          }
+          // Its check, while it fits the class as it is now; three that did not: nothing written.
+          if (check?.for !== classKey(cls, false)) {
+            // The source it was checked to move to, deleted meanwhile (past
+            // its hold), which takes it off the class too: said, with nothing
+            // written, rather than checked again for a class it was not asked to join.
+            if (check && !('error' in check) && check.switching && !store.getAIProfile(check.target.id)) return { status: 400, body: { error: "the class's source was deleted meanwhile" } };
+            return last ? classChangedThrice : { again: true };
+          }
+          const r = applyClassToAgent(agent, cls, check, { from, req });
+          if (r.changed || r.moved) {
+            // Changed by its class, not its owner, since its check (an edit of
+            // the class it leaves, written first): checked again, as above.
+            const byClass = classWrote.get(agent.id);
+            if (byClass && !changedSince(agent.id, byClass)) return last ? classChangedThrice : { again: true };
+            return changed;
+          }
+          if (r.error) return { status: 400, body: { error: r.error } };
+          return {
+            later: async () => {
+              const done = r.finish ? await r.finish() : { rebuild: r.rebuild, modelPending: undefined };
+              return { classId: cls.id, rebuild: done.rebuild, ...(done.modelPending ? { modelPending: `It joined the class, but ${done.modelPending}.` } : {}), ...(await applyCap('it joined a class')) };
+            },
+          };
+        });
+      });
+      if ('again' in step) continue;
+      return classStep(reply, step);
     }
-    const r = await ledgered(req, 'class', [agent.id], () => applyClassToAgent(agent, cls));
-    if (r.error) return reply.code(400).send({ error: r.error });
-    store.setAgentClass(agent.id, cls.id);
-    return { classId: cls.id, rebuild: r.rebuild, ...(r.modelPending ? { modelPending: `It joined the class, but ${r.modelPending}.` } : {}), ...(await applyCap()) };
   });
 
   // ---- AI-source usage: requests, tokens and rate-limit hits per source -------
@@ -2701,7 +3542,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // "Switch to a cheaper model" at the limit: the cheapest model its source
         // offers, live, in the ledger as the budget's (the quality guard and the
         // Right-size savings leave such changes out); its own pin comes back after.
-        downgrade: async (a) => {
+        downgrade: async (a, hold) => {
           const profile = store.getAIProfile(a.aiProfileId);
           if (!profile || profile.vendor === 'local') return undefined;
           const price = (m: string) => { const o = modelOption(m); return o ? o.input + o.output / 5 : undefined; };
@@ -2716,9 +3557,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             if (!(await subscriptionRuntimeProblem(a, profile, m))) { cheapest = m; break; }
           }
           if (!cheapest) return undefined;
-          const from = a.model ?? null;
+          const from = a.model ?? null, defaultThen = profile.model;
           const before = snapshotModels(store, [a.id]);
-          store.setAgentModel(a.id, cheapest);
+          // Hatchabot's own write, not the agent's (setAgentModel's `hatchabot`):
+          // a class change checked before it still applies (changedSince).
+          // Its pause row opens with it (`hold`), before it is applied: a
+          // class's model written meanwhile becomes the one that comes back.
+          store.transact(() => { store.setAgentModel(a.id, cheapest, { hatchabot: true }); hold(from, cheapest); });
+          const ours = store.modelGeneration(a.id), source = store.getAgent(a.id)?.aiProfileId;
           // A switch the runtime refused is not a switch: the record goes back and
           // the budget tries again next pass, its 100% message waiting (budgets.ts).
           // Counted as made, it kept spending on the dearer model while the owner
@@ -2728,7 +3574,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // model while the owner was told it had moved (audit, 2026-10-23).
           const applied = await applyModelToRuntime(a.id).catch(() => 'failed' as const);
           if (applied !== 'live' && applied !== 'staged') {
-            store.setAgentModel(a.id, from);
+            // Only the budget's own write goes back: a model the owner chose
+            // while it waited stands, the same model included, and its own
+            // apply (queued behind this one) puts it on. Put back
+            // unconditionally, that choice was lost (HB-0581). A write asked
+            // for it since moves the agent's model generation on; one
+            // Hatchabot made on its own does not (the default-model sweep's
+            // hold of this same model), so it goes back then too. A source
+            // switched meanwhile changes what the model means, so it stands.
+            // A follower whose source's default that sweep moved is held on
+            // the default it followed, as the sweep holds followers, while
+            // the menu offers it.
+            // A class's model written meanwhile, as the one to come back, is the one put back.
+            const now = store.getAgent(a.id);
+            if (now && store.modelGeneration(a.id) === ours && now.aiProfileId === source) {
+              const p = store.getAIProfile(source), meant = store.openCheaperPause(a.id)?.fromModel;
+              const held = meant !== undefined && meant !== from ? meant
+                : from === null && p && defaultThen && p.model !== defaultThen && !modelOverrideProblem(p, defaultThen) ? defaultThen : from;
+              store.setAgentModel(a.id, held, { hatchabot: true });
+            }
             throw new Error(`the runtime did not take ${cheapest} (${applied})`);
           }
           recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Its monthly budget was reached: the cheapest model its source offers, until the 1st.' });
@@ -2739,13 +3603,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (!profile) return false;
           const back = pin && !modelOverrideProblem(profile, pin) ? pin : null;
           const before = snapshotModels(store, [a.id]);
-          store.setAgentModel(a.id, back);
+          store.setAgentModel(a.id, back, { hatchabot: true });
           // Unlike the switch down, a runtime that refuses this keeps the record:
           // its own model is what it should run, the page shows it as waiting
           // (pendingModel), and the next rebuild puts it on. Kept cheap, a pause
           // over it would replace the record that remembers its own model.
           await applyModelToRuntime(a.id).catch(() => 'failed' as const);
           recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Back to its own model: a new month, or its budget raised.' });
+          return true;
+        },
+        // The cheaper model a budget chose, back for a pause that did not take
+        // (budgets.ts putCheaperBackOrClose): the budget's switch, kept only if
+        // the runtime took it, as with the switch down.
+        reapplyCheaper: async (a, model) => {
+          const own = store.getAgent(a.id)?.model ?? null;
+          const before = snapshotModels(store, [a.id]);
+          store.setAgentModel(a.id, model);
+          const applied = await applyModelToRuntime(a.id).catch(() => 'failed' as const);
+          if (applied !== 'live' && applied !== 'staged') { store.setAgentModel(a.id, own); return false; }
+          recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Its monthly budget was reached: the cheapest model its source offers, until the 1st.' });
           return true;
         },
         log: (event, detail) => { trace(String(detail.agentId ?? 'admin'))(event, detail); },
@@ -2770,7 +3646,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   if (!process.env.VITEST) setInterval(() => { void runPausedReplies(); }, 60_000).unref();
   const runUsageSample = () => {
     if (usageSampling) return usageSampling;
-    usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
+    usageSampling = sampleSourceUsage({ store, secrets, providerFor, log: (e, d) => app.log.info(d, e) })
       .then(async (r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); try { snapshotUsageFromSamples(); } catch (err) { app.log.warn({ err: String(err) }, 'usage.snapshot_failed'); }
         runModelGuard();
         // The loop watcher before the spike check: a loop told in this pass
@@ -3477,7 +4353,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Hibernation: the idle sweep and the Telegram wake poll (hibernate.ts).
   const hibernateDeps: HibernateDeps = {
     store, secrets, providerFor,
-    afterWake: clearPinsWhenUp,
+    // Up again: its budget too, as Start does (a cap changed while it slept).
+    afterWake: (a) => { clearPinsWhenUp(a); void tellMemoryBudget(a.id).catch(() => undefined); },
     // A change was made while it slept. Refused at render time (a source with no
     // key, say) it stays down: it is a stopped agent then, with the reason on its
     // trail, or every message would ask for the same refused rebuild again.
@@ -3620,7 +4497,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * agent made in its chat (an 8am summary asked for in the web chat at
    * night) fired before the next daily pass re-pointed it, and its result
    * reached no one (2026-10-12). Per running agent it reads the task store
-   * once (pendingRetarget, ~65 ms) and starts the CLI only when a task needs
+   * once (readCronStore, ~65 ms) and starts the CLI only when a task needs
    * changing. Tasks a pass could not change are not tried again until they
    * change: the signature of what was due is kept per agent.
    */
@@ -3737,6 +4614,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     for (const k of [...adoptRan.keys()]) if (!live.has(k)) { adoptRan.delete(k); adoptLastTry.delete(k); }
   };
+  /**
+   * Tell the owner, on their phone, of each finished run of a task they asked
+   * about (HB-0537, taskNotes.ts), from the quick pass's read of the store.
+   * Each run is marked told before the note goes, so a slow or failed send
+   * never tells it twice; the notes have their own hourly budget.
+   */
+  const noteFinishedTasks = async (a: Agent, jobs: Cron[]) => {
+    const settings = store.cronNotes(a.id);
+    if (!settings.length) return;
+    const { due, seen, gone } = dueTaskNotes(settings, jobs);
+    for (const id of gone) store.setCronNote(a.id, id, false, 0);
+    for (const s of seen) store.markCronNoted(a.id, s.jobId, s.runMs);
+    const base = appUrlFor();
+    for (const d of due) {
+      const { headline, tail } = taskNoteText({
+        agent: a.name, task: d.name, status: d.status, runAtMs: d.runAtMs, now: Date.now(),
+        ...(base ? { link: `${base}/#console=${encodeURIComponent(a.slug)}` } : {}),
+      });
+      const told = await taskNotePush.waiting(a.ownerId, headline, undefined, { note: true, tail }).catch(() => false);
+      trace(a.id)('cron.noted', { task: d.name, status: d.status, told });
+    }
+  };
   const quickTried = new Map<string, string>();
   let quickRunning = false;
   const quickCronRetarget = async () => {
@@ -3745,12 +4644,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try {
       try { await finishDeferredAdopts(); } catch { /* next time */ }
       let agents: Agent[];
-      try { agents = store.listAllActiveAgents(); }
+      let noting: Set<string>;
+      try { agents = store.listAllActiveAgents(); noting = store.agentsWithCronNotes(); }
       catch (err) { app.log.warn({ err: String(err) }, 'cron.sweep_failed'); return; }
       for (const a of agents) {
         if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) { quickTried.delete(a.id); continue; }
         try {
-          const due = await pendingRetarget(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a), store.quietedCrons(a.id), attachedApps(a.id));
+          // One read of its task store serves both: the runs to tell, and the tasks to re-point.
+          const read = await readCronStore(providerFor(a.hostId), a.runtimeRef, a.slug);
+          if (read && noting.has(a.id)) {
+            try { await noteFinishedTasks(a, read.jobs); }
+            catch (err) { app.log.warn({ agent: a.id, err: String(err) }, 'cron.note_failed'); }
+          }
+          const due = read && retargetDue(read, cronTargetFor(store, a), store.quietedCrons(a.id), attachedApps(a.id));
           if (!due?.ids.length) { quickTried.delete(a.id); continue; }
           if (quickTried.get(a.id) === due.sig) continue;
           quickTried.set(a.id, due.sig);
@@ -4510,6 +5416,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           await p.stopBrowser(b.agentContainer).catch(() => { left.push(b.name); });
         }
       }
+      // Finished one-shots too: one Docker stopped mid-restore keeps the
+      // agent's archive (/tmp/s.tgz), and the 10-minute sweep never visits a
+      // runner Hatchabot no longer knows (HB-0512). Exited ones only.
+      if (reachable && p.sweepOneShots) {
+        await p.sweepOneShots({ created: false, orThrow: true }).catch(() => { left.push('stopped helper containers labelled hatchabot.oneshot'); });
+      }
       const svc = runnerEmbedders.get(host.id) ?? embedderFor(host.id);
       const emb = await svc.remove(reachable).catch((err) => ({ leftThere: String((err as Error)?.message ?? err).slice(0, 200) }));
       { const busy = inUse(); if (busy) return reply.code(409).send(busy); }
@@ -4770,10 +5682,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try {
       username = await verifyBotToken(token);
     } catch (err) {
+      // Telegram not answering is no strike against the person: 503, try again.
+      if (!(err instanceof InvalidBotTokenError)) throw err;
       noteFailure(req, ownerIdOf(req));
-      return reply.code(400).send({
-        error: err instanceof InvalidBotTokenError ? err.message : 'Could not verify that token with Telegram.',
-      });
+      return reply.code(400).send({ error: err.userMessage });
     }
     const using = store.findAgentUsingAccount(username);
     if (using) {
@@ -5101,16 +6013,36 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * new source lacks, detaching a drifted class), and optionally rebuild with a
    * checkpoint first and/or a transcript recovery chained after the rebuild.
    * Shared by the owner-scoped adopt-agents and the host-owner migrate.
+   * A class it leaves takes its memory limits with it, in that agent's own
+   * turn: started here and not waited for, so a batch on a runner asleep
+   * does not wait for each in turn. `limits` collects them, each the line
+   * to say when its container kept the old ones; the caller waits for them
+   * all at once (limitsSaid).
    */
-  const switchAgentToSource = async (
-    a: Agent,
+  const switchAgentToSourceHeld = async (
+    listed: Agent,
     target: AIProfile,
     opts: { rebuild?: boolean; checkpoint?: boolean; recoverAfter?: boolean },
-    tally: { switched: number; rebuilding: number; atNextStart: number; notRecovered: number; classDetached: number; skipped: Array<{ name: string; reason: string }> },
+    tally: { switched: number; rebuilding: number; atNextStart: number; notRecovered: number; classDetached: number; classDetachPending?: number; skipped: Array<{ name: string; reason: string }> },
+    limits: Array<Promise<KeptLine | undefined>>,
   ): Promise<void> => {
-    if (a.aiProfileId === target.id) return; // already here — nothing to do
+    // The agent as it is when its step comes, and again after the runtime
+    // check's wait, not as the batch listed it: one moved to a runner
+    // meanwhile was switched onto this machine's login.
+    const begun = store.getAgent(listed.id);
+    if (!begun || agentGone(listed.id)) {
+      tally.skipped.push({ name: listed.name, reason: 'it was deleted' });
+      return;
+    }
+    if (begun.aiProfileId === target.id) return; // already here — nothing to do
     // Before the checks below, which must see the agent as it is when it is written.
-    const runtime = await sourceSwitchRuntime(a, target);
+    const runtime = await sourceSwitchRuntime(begun, target);
+    const a = store.getAgent(listed.id);
+    if (!a || agentGone(listed.id)) {
+      tally.skipped.push({ name: listed.name, reason: 'it was deleted' });
+      return;
+    }
+    if (a.aiProfileId === target.id) return;
     if (runtime.problem) {
       tally.skipped.push({ name: a.name, reason: runtime.problem });
       return;
@@ -5118,8 +6050,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // A machine-login Max source (no secretRef) can't reach a runner-hosted
     // agent, exactly as create/move/PATCH enforce. Refuse per agent rather
     // than fail the whole batch.
-    const host = store.getHost(a.hostId);
-    if (target.vendor !== 'local' && target.kind === 'subscription' && host?.kind !== 'local' && !target.secretRef) {
+    if (machineLoginOnly(target) && store.getHost(a.hostId)?.kind !== 'local') {
       tally.skipped.push({ name: a.name, reason: "machine-login Max can't run on a runner — use a setup-token source" });
       return;
     }
@@ -5134,17 +6065,42 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       tally.skipped.push({ name: a.name, reason: "a machine-login Max source can't run another account's agent" });
       return;
     }
+    // Deleted while its runtime was asked about: not switched to (HB-0570).
     // Not under a rebuild or a move: it reads the source as it goes (HB-0063).
     if (isBusy(a.id) || store.activeOperationFor(a.id)) {
       tally.skipped.push({ name: a.name, reason: 'busy (a rebuild, a move or a backup) — switch it when that is done' });
       return;
     }
-    store.setAgentAIProfile(a.id, target.id);
-    // Drop a model pin the new source doesn't offer, so the agent falls back
-    // to the new default instead of provisioning healthy and failing on use.
-    if (a.model && (runtime.dropPin || modelOverrideProblem(target, a.model))) store.setAgentModel(a.id, null);
+    // The class comes off in one transaction with the source and model
+    // written (setAgentClassIf), and takes its memory limits with it
+    // (detachClassIfDrifted): after a rebuild kicked below, as nothing is
+    // awaited before it is kicked (a backup or a move could start in that
+    // gap); without one, now, and a container that kept the old ones is
+    // named (memoryPending). One whose class is still applying a change
+    // leaves it once that is done, and this does not wait for it.
+    const fresh = store.getAgent(a.id) ?? a;
+    // The source's write first: the store refuses it for an agent or a
+    // source deleted meanwhile, and then nothing is written (HB-0570).
+    const dropped = store.transact(() => {
+      const set = store.setAgentAIProfile(a.id, target.id);
+      if (set !== 'ok') return set;
+      // Drop a model pin the new source doesn't offer, so the agent falls back
+      // to the new default instead of provisioning healthy and failing on use.
+      // The pin as it is now, read here: one its owner set while the checks
+      // above ran (or while earlier agents of the batch switched) stands when
+      // the new source offers it; the runtime's refusal (dropPin) was of the
+      // pin those checks read.
+      const pin = store.getAgent(a.id)?.model;
+      if (pin && (modelOverrideProblem(target, pin) || (runtime.dropPin && pin === begun.model))) store.setAgentModel(a.id, null);
+      return detachClassIfDrifted(a.id);
+    });
+    if (typeof dropped === 'string') {
+      tally.skipped.push({ name: a.name, reason: dropped === 'no-agent' ? 'it was deleted' : 'that AI source was deleted meanwhile' });
+      return;
+    }
     tally.switched++;
-    if (detachClassIfDrifted(a.id)) tally.classDetached++;
+    if (dropped.detached === true) tally.classDetached++;
+    else if (dropped.detached === 'pending') tally.classDetachPending = (tally.classDetachPending ?? 0) + 1;
     // Stopped or asleep, it stays so and takes the new source when it next
     // starts: a rebuild would start it, on a source it may not have been meant
     // to spend on, and in Migrate all it may be another account's (HB-0411).
@@ -5152,7 +6108,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // run: the answer counts them, and Recover context is there once it is up.
     // So with any agent no rebuild started for here (archived, still being set
     // up, a rebuild refused): a recovery only runs chained to one, below.
-    const fresh = store.getAgent(a.id) ?? a;
     let recoveryChained = false;
     if (opts.rebuild && fresh.runtimeRef && fresh.state === 'STOPPED') {
       oweRebuild(a.id);
@@ -5161,7 +6116,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Checkpoint only a RUNNING agent — a stopped one has no live turn to
       // summarise. Each runs as the first step of its own background rebuild.
       const checkpoint = opts.checkpoint === true;
-      if (kickRebuild(a.id, { checkpoint })) {
+      const kicked = kickRebuild(a.id, { checkpoint });
+      if (kicked) {
         tally.rebuilding++;
         if (opts.recoverAfter) {
           // Chain onto the rebuild's own task so recovery runs on the NEW
@@ -5183,7 +6139,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     }
     if (opts.recoverAfter && !recoveryChained) tally.notRecovered++;
+    if (dropped.limits) limits.push(keptLine(a.name, dropped.limits));
   };
+  /** One agent of a batch whose container kept its old limits, or nothing; never rejects. */
+  type KeptLine = { name: string; why: string; line: string };
+  const keptLine = (name: string, limits: Promise<Kept>): Promise<KeptLine | undefined> =>
+    limits.then((r) => (r.memoryPending ? { name, why: r.why ?? 'not applied', line: `${name}: ${r.memoryPending}` } : undefined), () => undefined);
+  /**
+   * The kept limits of a batch, in its order, once all have answered: the
+   * sentences (memoryPending, "Name: …") and their parts (limitsKept).
+   */
+  const limitsSaid = async (limits: Array<Promise<KeptLine | undefined>>): Promise<{ memoryPending?: string[]; limitsKept?: Array<{ name: string; why: string }> }> => {
+    const kept = (await Promise.all(limits)).filter((k): k is KeptLine => !!k);
+    return kept.length ? { memoryPending: kept.map((k) => k.line), limitsKept: kept.map(({ name, why }) => ({ name, why })) } : {};
+  };
+  /** Under a hold on the source it goes to, from its first look until it is written, when it is not on it already: its delete is refused meanwhile (HB-0570). */
+  const switchAgentToSource = (...[a, target, opts, tally, limits]: Parameters<typeof switchAgentToSourceHeld>): Promise<void> =>
+    withSourceHold(a.aiProfileId !== target.id ? target.id : undefined, () => switchAgentToSourceHeld(a, target, opts, tally, limits));
 
   /**
    * HOST-OWNER admin: move EVERY agent on one of your sources — other accounts'
@@ -5209,13 +6181,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Recover context is its owner's alone (runningAgent): the caller cannot press it for
       // another account's agent, so those are counted apart, for the answer to say so.
       let notRecoveredOthers = 0;
+      const limits: Array<Promise<KeptLine | undefined>> = [];
       await ledgered(req, 'source-switch', onIt.map((a) => a.id), async () => {
         for (const a of onIt) {
           const before = tally.notRecovered;
-          await switchAgentToSource(a, target, b, tally);
+          await switchAgentToSource(a, target, b, tally, limits);
           if (tally.notRecovered > before && a.ownerId !== ownerIdOf(req)) notRecoveredOthers++;
         }
       });
+      Object.assign(tally, await limitsSaid(limits));
       trace('admin')('source.migrated', { from: from.id, to: target.id, ...tally, notRecoveredOthers, skipped: tally.skipped.length });
       return { ...tally, notRecoveredOthers, agents: onIt.length, otherAccounts: new Set(onIt.filter((a) => a.ownerId !== ownerIdOf(req)).map((a) => a.ownerId)).size };
     },
@@ -5255,8 +6229,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         : mine.filter((a) => a.aiProfileId !== target.id); // "all" = everything not already here
 
       const tally = { switched: 0, rebuilding: 0, atNextStart: 0, notRecovered: 0, classDetached: 0, skipped: [] as Array<{ name: string; reason: string }> };
-      await ledgered(req, 'source-switch', requested.map((a) => a.id), async () => { for (const a of requested) await switchAgentToSource(a, target, parsed.data, tally); });
-      return tally;
+      const limits: Array<Promise<KeptLine | undefined>> = [];
+      await ledgered(req, 'source-switch', requested.map((a) => a.id), async () => { for (const a of requested) await switchAgentToSource(a, target, parsed.data, tally, limits); });
+      return { ...tally, ...(await limitsSaid(limits)) };
     },
   );
 
@@ -5325,7 +6300,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         } else {
           const runsNow = a.appliedProfileId === profile.id && a.appliedModel ? a.appliedModel : undefined;
           const current = a.model ?? runsNow ?? oldDefault;
-          store.setAgentModel(a.id, current); // pin (no-op if already this override)
+          store.setAgentModel(a.id, current, { hatchabot: true }); // pin (no-op if already this override): a hold, not a change of its own
           heldModels.add(current);
           held++;
         }
@@ -5347,7 +6322,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (a.model && oldMenu.includes(a.model)) { heldModels.add(a.model); continue; }
         if (await subscriptionRuntimeProblem(a, profile, newDefault, a.runtimeRef ? undefined : (a.image ?? null))) {
           const runsNow = a.appliedProfileId === profile.id && a.appliedModel ? a.appliedModel : oldDefault;
-          store.setAgentModel(a.id, runsNow);
+          store.setAgentModel(a.id, runsNow, { hatchabot: true });
           heldModels.add(runsNow);
           othersHeld++;
         }
@@ -5358,11 +6333,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // agent drifts to the new default, defeating the hold.
       const extras = parsed.data.models ?? (profile.models ?? []);
       const menu = [...new Set([newDefault, ...extras, ...heldModels])];
-      store.setAIProfileModel(profile.id, newDefault);
-      store.setAIProfileModels(profile.id, menu);
-      // `menu` is built from OUR held models only, so scope the sweep to us —
-      // another owner's pin isn't ours to clear.
-      store.clearStaleAgentModels(profile.id, menu, ownerIdOf(req));
+      // The ticked agents whose class pinned another model come off it in
+      // one transaction with the new default (setAgentClassIf).
+      const drops = store.transact(() => {
+        store.setAIProfileModel(profile.id, newDefault);
+        store.setAIProfileModels(profile.id, menu);
+        // `menu` is built from OUR held models only, so scope the sweep to us —
+        // another owner's pin isn't ours to clear.
+        store.clearStaleAgentModels(profile.id, menu, ownerIdOf(req));
+        return new Map(mine.filter((a) => applyIds.has(a.id)).map((a) => [a.id, detachClassIfDrifted(a.id)]));
+      });
       // The switched agents' changes go in the ledger; the held ones did not move.
       recordLedger(req, 'default-model', ledgerBefore);
       recordLedger(req, 'source-default', othersBefore);
@@ -5375,20 +6355,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // applyModelToRuntime re-reads agent + profile from the store, so it sees
       // the NEW default (the local `profile` object above is stale after
       // setAIProfileModel — using it applied the OLD model to every agent).
-      let live = 0, staged = 0, volumeGone = 0, classDetached = 0;
+      let live = 0, staged = 0, volumeGone = 0, classDetached = 0, classDetachPending = 0;
+      // A class dropped takes its memory limits with it, and the agent is told
+      // its new budget; a container that kept the old ones is named. Each in
+      // its own turn, waited for together at the end (limitsSaid).
+      const limits: Array<Promise<KeptLine | undefined>> = [];
       for (const a of mine) {
-        if (!applyIds.has(a.id)) continue;
-        if (detachClassIfDrifted(a.id)) classDetached++;
+        const dropped = drops.get(a.id);
+        if (!dropped) continue;
+        // A member of a class still applying a change leaves it once that is done.
+        if (dropped.detached === true) classDetached++; else if (dropped.detached === 'pending') classDetachPending++;
+        if (dropped.limits) limits.push(keptLine(a.name, dropped.limits));
         const how = await applyModelToRuntime(a.id);
         if (how === 'live') live++; else if (how === 'staged') staged++; else if (how === 'gone') volumeGone++;
       }
+      const kept = await limitsSaid(limits);
 
       const { secretRef: _s, ...safe } = store.getAIProfile(profile.id)!;
       // `applied` counts agents this call actually touched. It previously
       // echoed applyIds.size, which over-reported when the caller passed ids
       // that aren't theirs (a shared profile's other users) — they're filtered
       // out of `mine`, so nothing happened to them.
-      return { profile: safe, applied, held, live, staged, classDetached, ...(volumeGone ? { volumeGone } : {}), ...(notSwitched.length ? { notSwitched } : {}), ...(othersHeld ? { othersHeld } : {}) };
+      return { profile: safe, applied, held, live, staged, classDetached, ...(classDetachPending ? { classDetachPending } : {}), ...(volumeGone ? { volumeGone } : {}), ...(notSwitched.length ? { notSwitched } : {}), ...(othersHeld ? { othersHeld } : {}), ...kept };
     },
   );
 
@@ -5482,17 +6470,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // an older image (a runner's, a pinned one), whose smaller catalog pruned
     // the menu for every agent on the source (HB-0082). The answer says which
     // runtime it came from.
+    // Every candidate's version is read before the newest two are asked for
+    // their catalogue: taking the first twelve first left a newer runtime past
+    // them unasked (HB-0565). One listing of each machine's containers, not
+    // an inspect per agent, the machines at once; where a provider has no
+    // listing or it failed, those agents are inspected, six at a time in all,
+    // and no more than twelve of them, as the menu asked before (a listing
+    // that fails on a big fleet does not become an inspect per agent).
     const running = store
       .listAgents(ownerIdOf(req))
-      .filter((a) => a.aiProfileId === profile.id && a.state === 'RUNNING' && a.runtimeRef)
-      .slice(0, 12);
-    const versions = await Promise.all(running.map(async (a) => ({
-      a, v: (await providerFor(a.hostId).info(a.runtimeRef!).catch(() => undefined))?.openclawVersion,
-    })));
+      .filter((a) => a.aiProfileId === profile.id && a.state === 'RUNNING' && a.runtimeRef);
+    const byHost = new Map<string, Agent[]>();
+    for (const a of running) { const onHost = byHost.get(a.hostId); if (onHost) onHost.push(a); else byHost.set(a.hostId, [a]); }
+    // A machine not known here (gone from the list: providerFor throws) has its agents left out, not the menu failed.
+    const known = [...byHost].flatMap(([hostId, onHost]) => { try { return [{ prov: providerFor(hostId), onHost }]; } catch { return []; } });
+    const listings = await Promise.all(known.map(async ({ prov, onHost }) => {
+      const listed = prov.openclawVersions ? await prov.openclawVersions(onHost.map((a) => a.runtimeRef!)).catch(() => undefined) : undefined;
+      return { prov, onHost, listed };
+    }));
+    const versions: Array<{ a: Agent; v?: string }> = listings.flatMap(({ onHost, listed }) => (listed ? onHost.map((a) => ({ a, v: listed.get(a.runtimeRef!) })) : []));
+    const unlisted = listings.flatMap(({ prov, onHost, listed }) => (listed ? [] : onHost.map((a) => ({ prov, a })))).slice(0, 12);
+    versions.push(...await sixAtATime(unlisted, async ({ prov, a }) => ({ a, v: (await prov.info(a.runtimeRef!).catch(() => undefined))?.openclawVersion })));
     const newer = (x?: string, y?: string) => (x && y ? (openclawAtLeast(x, y) ? (openclawAtLeast(y, x) ? 0 : -1) : 1) : x ? -1 : y ? 1 : 0);
     versions.sort((x, y) => newer(x.v, y.v));
+    const provOf = new Map(listings.flatMap(({ prov, onHost }) => onHost.map((a) => [a.id, prov] as const)));
     for (const { a: live, v } of versions.slice(0, 2)) {
-      const found = await runtimeModels(providerFor(live.hostId), live.runtimeRef!, 'anthropic');
+      const found = await runtimeModels(provOf.get(live.id)!, live.runtimeRef!, 'anthropic');
       const usable = found.filter((m) => m.catalogued).map((m) => m.id);
       // Only trust a non-empty answer; an old CLI without --all returns nothing.
       if (usable.length) {
@@ -5571,8 +6574,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           `unshare this one and let those agents keep it until they move.`,
       });
     }
-    if (profile.secretRef) await secrets.delete(profile.secretRef).catch(() => {});
+    // An agent being switched to it, its checks still under way (HB-0570):
+    // after the in-use check, whose answer says more when both are true.
+    if (sourceHeld(profile.id)) return reply.code(409).send({ error: 'An agent is switching to it; try again in a moment.' });
+    // Gone in the same tick as the in-use check and the holds, then its key:
+    // an agent switched to it while the key was being deleted kept a source
+    // that no longer existed (HB-0570). A switch from now on finds no such source.
     store.deleteAIProfile(profile.id);
+    if (profile.secretRef) await secrets.delete(profile.secretRef).catch(() => {});
     return { deleted: true };
   });
 
@@ -5675,7 +6684,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * agent's own Telegram bot — the one thing the retired management bot did
    * that the app could not. One way only: confirming stays in the app.
    */
-  const opsPush = createOpsPush({
+  const opsPushDeps: Parameters<typeof createOpsPush>[0] = {
     botToken: async (ownerId) => {
       const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
       const row = ops && store.getChannelForAgent(ops.id, 'telegram');
@@ -5703,8 +6712,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
       return !!(ops && store.getChannelForAgent(ops.id, 'discord') && store.memberIdentities(ops.id, ownerId).discord && connectorFor('discord')?.dm);
     },
+    ...(deps.pushFetch ? { fetchImpl: deps.pushFetch } : {}),
     log: (event, detail) => app.log.info(detail, event),
-  });
+  };
+  const opsPush = createOpsPush(opsPushDeps);
+  /** A task's run, told on the owner's phone (HB-0537): the same bot, a budget of its own, so a busy morning of reports never uses up the alerts' hour. */
+  const taskNotePush = createOpsPush({ ...opsPushDeps, perHour: TASK_NOTES_PER_HOUR });
+  /** Whether such a note has a way to the owner: their Hatchabot agent's Telegram bot with them linked on it, or its Discord. */
+  const ownerNoteReach = (ownerId: string): boolean => {
+    const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
+    if (!ops) return false;
+    if (store.getChannelForAgent(ops.id, 'telegram') && opsPushDeps.chatId(ownerId)) return true;
+    return opsPushDeps.discordLinked?.(ownerId) === true;
+  };
 
   registerMgmtChat(app, {
     store, secrets, opsPeerOk,
@@ -5762,13 +6782,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // A Claude Max profile reaches a runner only as a setup-token (secretRef
     // present) — that credential is injected as data. The machine-login flavour
     // mounts this box's ~/.claude, which a remote runner can't see.
-    if (profile.kind === 'subscription' && host.kind !== 'local' && !profile.secretRef) {
-      return reply.code(400).send({
-        error:
-          "This Claude Max profile uses this machine's login, which can't reach a runner. " +
-          'Run `claude setup-token` and add it as a setup-token AI source, or use an API-key profile.',
-      });
-    }
+    if (machineLoginOnly(profile) && host.kind !== 'local') return reply.code(400).send({ error: MACHINE_LOGIN_NO_RUNNER });
 
     // A per-agent model override, if given, must belong to the profile's menu
     // and never applies to a local source.
@@ -6051,7 +7065,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const recentNeedsYou = (a: Agent): string | undefined => {
     const cleared = new Set((a.attentionAck ?? '').split('\n'));
     if (a.state === 'FAILED' && !cleared.has('failed')) return 'it failed';
-    if (a.pendingAction && !cleared.has('pending')) return a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you';
+    if (a.pendingAction && !a.pendingAction.received && !cleared.has('pending')) return a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you';
     if (a.state === 'STOPPED' && a.stateReason && !cleared.has('not-started')) return 'it did not start again';
     return undefined;
   };
@@ -6882,18 +7896,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // present) rides to a runner; only the machine-login flavour is
         // desktop-only. Without the secretRef check a runner agent couldn't be
         // switched to a setup-token source it could have been created with.
-        if (
-          next.vendor !== 'local' &&
-          next.kind === 'subscription' &&
-          host?.kind !== 'local' &&
-          !next.secretRef
-        ) {
-          return reply.code(400).send({
-            error:
-              "This Claude Max profile uses this machine's login, which can't reach a runner. " +
-              'Use a setup-token Max source or an API key for a runner agent.',
-          });
-        }
+        if (machineLoginOnly(next) && host?.kind !== 'local') return reply.code(400).send({ error: MACHINE_LOGIN_NO_RUNNER });
         if (agent.ops && next.vendor === 'local') return reply.code(400).send({ error: OPS_NO_LOCAL });
         target = next;
         switchingProfile = true;
@@ -6903,27 +7906,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const problem = modelOverrideProblem(target, model);
         if (problem) return reply.code(400).send({ error: problem });
       }
-      // One check for every way a model is chosen (subscriptionRuntimeProblem).
+      // One check of what it will run (finalModelCheck): a pin set or cleared,
+      // a source switch, or an image alone, which went unchecked (HB-0555, HB-0459).
       const landsOn = parsed.data.image !== undefined ? parsed.data.image : agent.image ?? null;
       let dropRuntimePin = false;
-      if (target && model) {
-        const tooOld = await subscriptionRuntimeProblem(agent, target, model, switchingProfile || parsed.data.image !== undefined ? landsOn : undefined);
-        if (tooOld) return reply.code(400).send({ error: tooOld });
-      } else if (target && switchingProfile) {
-        const runtime = await sourceSwitchRuntime(model === null ? { ...agent, model: undefined } : agent, target, landsOn);
+      if (target && (model !== undefined || switchingProfile || parsed.data.image !== undefined)) {
+        const runtime = await finalModelCheck(agent, target, {
+          ...(model !== undefined ? { pin: model } : {}), switching: switchingProfile,
+          rebuildOn: switchingProfile || parsed.data.image !== undefined ? landsOn : undefined,
+        });
         if (runtime.problem) return reply.code(400).send({ error: runtime.problem });
         dropRuntimePin = !!runtime.dropPin;
       }
+      // An operation on disk (held, interrupted) resumes on the source it began
+      // with: refused as the bulk switch refuses it, after the checks above (HB-0573).
+      if (switchingProfile && operationRefuses(agent, reply)) return reply;
       // A rebuild or a move holding the agent reads its source as it goes: a
       // switch meanwhile could finish it on a mix of the two (HB-0063).
-      if (switchingProfile && isBusy(agent.id)) {
-        return reply.code(409).send({ error: 'The agent is busy (a rebuild, a move or a backup) — switch its AI source when that is done.' });
-      }
+      if (switchingProfile && isBusy(agent.id)) return reply.code(409).send({ error: SOURCE_SWITCH_BUSY });
 
       // One live apply can fail (the memory cap's docker update, 502). Every
-      // refusal is above or here, the cap next (it writes its own record only
-      // once docker took it), and the plain DB writes last — so a 400/409
-      // changes nothing and a 502 leaves at most the cap, which stands alone.
+      // refusal is above or here, the cap's docker update next, then every
+      // store write in one transaction, and what follows from them last: a
+      // 400/409 or a 502 changes nothing.
       // Memory is always shared now (2026-09-29): an agent's memory is one,
       // reachable from every conversation, so "private" could not be kept.
       // `sharedMemory: true` from an old client changes nothing: every agent
@@ -6931,40 +7936,144 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (shared === false && !agent.ops) {
         return reply.code(400).send({ error: "An agent's memory is always shared with everyone who talks to it. For something private, give that person their own agent." });
       }
-      if (parsed.data.memoryCap !== undefined) {
-        const r = await setMemoryCap(req, agent, parsed.data.memoryCap);
-        if (r.error) return reply.code(r.status ?? 400).send({ error: r.error });
-      }
-      if (parsed.data.swapAllowance !== undefined) {
-        const r = await setSwapAllowance(store.getAgent(agent.id) ?? agent, parsed.data.swapAllowance);
-        if (r.error) return reply.code(r.status ?? 400).send({ error: r.error });
-      }
-      // All checks passed and the live applies took: the plain writes.
-      if (parsed.data.attentionAck !== undefined) store.setAgentAttentionAck(agent.id, parsed.data.attentionAck);
-      if (parsed.data.hibernate !== undefined) store.setHibernatePolicy(agent.id, parsed.data.hibernate);
-      if (parsed.data.filesMaxMb !== undefined) store.setAgentFilesMaxMb(agent.id, parsed.data.filesMaxMb);
-      if (parsed.data.icon !== undefined || parsed.data.iconColor !== undefined) {
-        store.setAgentIcon(agent.id, parsed.data.icon, parsed.data.iconColor);
-      }
+      // The source was looked up before the runtime checks above: deleted
+      // during them, the agent was left on a source that no longer existed (HB-0570).
+      if (switchingProfile && !store.getAIProfile(aiProfileId!)) return reply.code(409).send({ error: new SourceGoneError().userMessage });
+      // Held from this look until the change is stored or refused: its
+      // delete is refused meanwhile, so nothing below can find it gone. Once
+      // stored, the agent is on it, and the delete says it is in use.
+      // A class dropped, by the image's step or by the source's and model's
+      // (detachClassIfDrifted, in one transaction with what it writes): the
+      // one that dropped it, and the limits that apply without it (HB-0561).
+      let dropped: ReturnType<typeof detachClassIfDrifted> | undefined;
+      const detachLimits: Array<Promise<Kept> | undefined> = [];
+      const noteDetach = (d: ReturnType<typeof detachClassIfDrifted>) => { detachLimits.push(d.limits); if (d.detached) dropped = d; };
+      // Its traces wait for the commit: a change rolled back logged what it
+      // never stored.
+      const traced: Array<[string, Record<string, unknown>]> = [];
+      const traceLater = (event: string, detail: Record<string, unknown>) => { traced.push([event, detail]); };
+      let capSet: Awaited<ReturnType<typeof setMemoryCap>> | undefined;
+      let swapSet: Awaited<ReturnType<typeof setSwapAllowance>> | undefined;
+      // Its own cap or swap allowance changes in the agent's limits turn,
+      // held from their docker calls until they are stored or put back: a
+      // class's limits that apply to it meanwhile wait, and then read it as
+      // stored, rather than land between the docker call and the record.
+      const ownLimits = parsed.data.memoryCap !== undefined || parsed.data.swapAllowance !== undefined;
+      const inItsLimitsTurn = <T>(fn: () => Promise<T>): Promise<T> => (ownLimits ? inLimitsTurn(agent.id, fn) : fn());
+      // True when it answered (refused): a reply is a thenable, and awaited it came back as nothing.
+      const answered = await withSourceHold(switchingProfile ? aiProfileId : undefined, () => inItsLimitsTurn(async (): Promise<boolean> => {
+        // Once a docker call has moved its limits, any stop before the change
+        // is stored puts the container back on what the store says
+        // (applyCurrentLimits with no change, in this same turn).
+        let limitsMoved = false;
+        const putBack = () => (limitsMoved ? applyCurrentLimits(agent.id).then(() => undefined, () => undefined) : Promise.resolve());
+        if (parsed.data.memoryCap !== undefined) {
+          capSet = await setMemoryCap(req, agent, parsed.data.memoryCap);
+          if (capSet.error) { reply.code(capSet.status ?? 400).send({ error: capSet.error }); return true; }
+          limitsMoved = !!capSet.live;
+        }
+        // Every store write of the change in one transaction, the source's
+        // first: refused there (the agent or the source deleted meanwhile, or
+        // a rebuild or a move begun during the waits above), nothing is stored
+        // and nothing that follows is done (HB-0570).
+        let refused: 'no-agent' | 'no-source' | 'busy' | 'runner' | undefined;
+        try {
+          if (parsed.data.swapAllowance !== undefined) {
+            // As it is after the cap's docker call, not as read at the start.
+            const now = store.getAgent(agent.id);
+            if (!now || agentGone(agent.id)) { await putBack(); reply.code(404).send({ error: AGENT_GONE }); return true; }
+            swapSet = await setSwapAllowance(now, parsed.data.swapAllowance, capSet ? { memoryCap: capSet.own ?? null } : {});
+            if (swapSet.error) { await putBack(); reply.code(swapSet.status ?? 400).send({ error: swapSet.error }); return true; }
+            if (swapSet.live) limitsMoved = true;
+          }
+          store.transact(() => {
+            // Deleted meanwhile: none of the change is written, a source switch or not.
+            if (agentGone(agent.id)) { refused = 'no-agent'; return; }
+            if (switchingProfile) {
+              if (isBusy(agent.id)) { refused = 'busy'; return; }
+              // Where it is now: moved to a runner during the waits above, this machine's login cannot reach it.
+              if (target && machineLoginOnly(target) && store.getHost(store.getAgent(agent.id)!.hostId)?.kind !== 'local') { refused = 'runner'; return; }
+              const set = store.setAgentAIProfile(agent.id, aiProfileId!);
+              if (set !== 'ok') { refused = set; return; }
+            }
+            if (model !== undefined) {
+              store.setAgentModel(agent.id, model);
+            } else if (switchingProfile && agent.model && target && (dropRuntimePin || modelOverrideProblem(target, agent.model))) {
+              // The switch strands the old pin (new source lacks it, is local, or its
+              // runtime cannot use it there). Drop it so the agent falls back to the
+              // new source's default.
+              store.setAgentModel(agent.id, null);
+            }
+            capSet?.record?.(traceLater);
+            swapSet?.record?.();
+            if (parsed.data.attentionAck !== undefined) store.setAgentAttentionAck(agent.id, parsed.data.attentionAck);
+            if (parsed.data.hibernate !== undefined) store.setHibernatePolicy(agent.id, parsed.data.hibernate);
+            if (parsed.data.filesMaxMb !== undefined) store.setAgentFilesMaxMb(agent.id, parsed.data.filesMaxMb);
+            if (parsed.data.icon !== undefined || parsed.data.iconColor !== undefined) {
+              store.setAgentIcon(agent.id, parsed.data.icon, parsed.data.iconColor);
+            }
+            if (parsed.data.parameters !== undefined) store.setAgentParameters(agent.id, parsed.data.parameters);
+            if (parsed.data.groupAccess !== undefined) store.setAgentGroupAccess(agent.id, parsed.data.groupAccess);
+            if (parsed.data.richMessages !== undefined) store.setAgentRichMessages(agent.id, parsed.data.richMessages);
+            if (parsed.data.embedMode !== undefined) {
+              store.setAgentEmbedMode(agent.id, parsed.data.embedMode);
+              traceLater('embed.mode', { mode: parsed.data.embedMode });
+            }
+            if (parsed.data.browser !== undefined && parsed.data.browser !== !!agent.browser) {
+              store.setAgentBrowser(agent.id, parsed.data.browser);
+              traceLater('browser.switched', { on: parsed.data.browser });
+            }
+            if (parsed.data.cronTriggers !== undefined) store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);
+            if (persona !== undefined) {
+              store.setAgentPersona(agent.id, persona.trim());
+              // Same layer-sync rule as direct file edits: without it, the next
+              // "Apply values" re-renders the persona from the stale layer and
+              // reverts this edit. Its one key, the rest as it is now (HB-0567).
+              if (store.getAgent(agent.id)?.paramFiles) store.setAgentParamFile(agent.id, 'persona', persona.trim());
+            }
+            if (group !== undefined) store.setAgentGroup(agent.id, group ? group : null);
+            if (runsHere) store.setAgentMigratedTo(agent.id, null);
+            if (parsed.data.image !== undefined) {
+              store.setAgentImage(agent.id, parsed.data.image);
+              // No rebuild is started here (the page and the manager's
+              // pin_image send one after), so a running agent that leaves its
+              // class gets the limits that apply without it now.
+              noteDetach(detachClassIfDrifted(agent.id));
+              // Stopped or asleep, it moves onto it when it next starts, as the app says
+              // (HB-0441). Running, the caller rebuilds it or tells the owner to.
+              if (sameImage !== true && (agent.image ?? null) !== parsed.data.image && agent.runtimeRef && store.getAgent(agent.id)?.state === 'STOPPED') oweRebuild(agent.id, traceLater);
+            }
+            if (sharedPathList) store.setAgentSharedPaths(agent.id, sharedPathList);
+            if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
+            // Either step may detach it: the image's, or this one for the
+            // source or model. Once one let it go (or will, once its class's
+            // change under way is done), it is not asked again. A source
+            // switch waits for its rebuild, which writes the budget
+            // (tellMemoryBudget leaves it to that).
+            if ((switchingProfile || model !== undefined) && !dropped) noteDetach(detachClassIfDrifted(agent.id));
+          });
+        } catch (err) {
+          await putBack();
+          throw err;
+        }
+        if (refused) await putBack();
+        if (refused === 'no-agent') { reply.code(404).send({ error: AGENT_GONE }); return true; }
+        if (refused === 'no-source') { reply.code(409).send({ error: new SourceGoneError().userMessage }); return true; }
+        if (refused === 'busy') { reply.code(409).send({ error: SOURCE_SWITCH_BUSY }); return true; }
+        if (refused === 'runner') { reply.code(400).send({ error: MACHINE_LOGIN_NO_RUNNER }); return true; }
+        return false;
+      }));
+      if (answered) return reply;
+      for (const [event, detail] of traced) trace(agent.id)(event, detail);
+      // true, or 'pending' while its class's change under way is applied (as the model route says).
+      const classDetached = dropped?.detached ?? false;
+      // Stored; a container that kept its old limits is said (memoryPending).
+      const ownKept: Kept = capSet?.memoryPending ? capSet : swapSet?.memoryPending ? swapSet : {};
+      const capOn = !!capSet?.live;
 
-      if (parsed.data.parameters !== undefined) {
-        store.setAgentParameters(agent.id, parsed.data.parameters);
-      }
-
-      if (parsed.data.groupAccess !== undefined) {
-        store.setAgentGroupAccess(agent.id, parsed.data.groupAccess);
-      }
-
-      if (parsed.data.richMessages !== undefined) {
-        store.setAgentRichMessages(agent.id, parsed.data.richMessages);
-      }
-      if (parsed.data.embedMode !== undefined) {
-        store.setAgentEmbedMode(agent.id, parsed.data.embedMode);
-        trace(agent.id)('embed.mode', { mode: parsed.data.embedMode });
-      }
+      // Stored: what follows from it, outside the store.
+      await swapSet?.after?.();
       if (parsed.data.browser !== undefined && parsed.data.browser !== !!agent.browser) {
-        store.setAgentBrowser(agent.id, parsed.data.browser);
-        trace(agent.id)('browser.switched', { on: parsed.data.browser });
         // OpenClaw reads the browser profile at start: a rebuild writes it and
         // the sweep then starts (or removes) the browser beside it. A rebuild
         // already under way may have read the old switch: the caller is told
@@ -6982,7 +8091,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
       }
       if (parsed.data.cronTriggers !== undefined) {
-        store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);
         // OpenClaw applies this key without a gateway restart — set it live so
         // the agent can wire a trigger script right away; rebuilds re-assert it.
         let live = false;
@@ -6992,36 +8100,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
         trace(agent.id)('cron.triggers', { enabled: parsed.data.cronTriggers, live });
       }
-
-      if (persona !== undefined) {
-        store.setAgentPersona(agent.id, persona.trim());
-        // Same layer-sync rule as direct file edits: without it, the next
-        // "Apply values" re-renders the persona from the stale layer and
-        // reverts this edit.
-        if (agent.paramFiles) {
-          store.setAgentParamState(agent.id, agent.paramValues ?? {}, {
-            ...agent.paramFiles,
-            persona: persona.trim(),
-          });
-        }
-      }
-
-      if (group !== undefined) store.setAgentGroup(agent.id, group ? group : null);
-
       const filesCapGone = parsed.data.filesMaxMb !== undefined && (await applyFilesCap(store.getAgent(agent.id)!)).gone;
-
-      if (runsHere) store.setAgentMigratedTo(agent.id, null);
-      if (parsed.data.image !== undefined) {
-        store.setAgentImage(agent.id, parsed.data.image);
-        detachClassIfDrifted(agent.id);
-        // Stopped or asleep, it moves onto it when it next starts, as the app says
-        // (HB-0441). Running, the caller rebuilds it or tells the owner to.
-        if (sameImage !== true && (agent.image ?? null) !== parsed.data.image && agent.runtimeRef && store.getAgent(agent.id)?.state === 'STOPPED') oweRebuild(agent.id);
-      }
-      if (sharedPathList) store.setAgentSharedPaths(agent.id, sharedPathList);
-
       if (name !== undefined && name !== agent.name) {
-        store.setAgentName(agent.id, name);
         // And inside OpenClaw, whose console otherwise keeps the old name (or
         // the slug) until the next rebuild. Live, cosmetic, best-effort.
         if (agent.runtimeRef && agent.state === 'RUNNING') {
@@ -7071,23 +8151,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (other.kind !== 'telegram' && connectorFor(other.kind)?.rename) void renameChannelBot({ ...agent, name }, other, name).catch(() => undefined);
         }
       }
-      if (switchingProfile) store.setAgentAIProfile(agent.id, aiProfileId!);
-      if (model !== undefined) {
-        store.setAgentModel(agent.id, model);
-      } else if (switchingProfile && agent.model && target && (dropRuntimePin || modelOverrideProblem(target, agent.model))) {
-        // The switch strands the old pin (new source lacks it, is local, or its
-        // runtime cannot use it there). Drop it so the agent falls back to the
-        // new source's default.
-        store.setAgentModel(agent.id, null);
-      }
-      // A new memory cap: tell the agent its budget (AGENTS.md), off the
-      // request. Last, so the sync reads everything this change stored.
-      if (parsed.data.memoryCap !== undefined && agent.runtimeRef && agent.state === 'RUNNING') void syncDocsHeld(agent);
-      const classDetached = (switchingProfile || model !== undefined) && detachClassIfDrifted(agent.id);
       if (switchingProfile || model !== undefined) recordLedger(req, model !== undefined ? 'model' : 'source-switch', ledgerBefore);
+      const kept = (await Promise.all(detachLimits)).find((r) => r?.memoryPending) ?? ownKept;
+      // A new memory cap of its own: tell the agent its budget (AGENTS.md),
+      // off the request, once its container took it (capOn), as limitsTold
+      // does: one that kept its old limits is not told a budget it does not
+      // have. Last, so the sync reads everything this change stored. A class
+      // dropped asks too (detachClassIfDrifted): one sync.
+      if (capOn) void tellMemoryBudget(agent.id).catch(() => undefined);
 
       return {
         ...publicAgent(store.getAgent(agent.id)!, { classDetached }), ...(sameImage !== undefined ? { sameImage } : {}),
+        ...keptSaid(agent.name, kept),
         ...(filesCapGone ? { filesCapPending: `The limit is saved, but it could not be written to the agent. ${VOLUME_GONE}` } : {}),
         ...(browserPending ? { browserPending } : {}),
       };
@@ -7158,21 +8233,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { path: t.rel, entries: parseListing(res.stdout) };
   });
 
-  const fsStream = async (req: FastifyRequest, reply: FastifyReply, id: string, path: unknown, kind: 'file' | 'archive', inline = false) => {
-    const t = fsAgent(req, reply, id, path); if (!t) return reply;
+  /**
+   * What a download is checked for before a byte streams: the agent and the path, a machine that
+   * streams, and the file (or folder) there, of the kind asked for and not too big. Refused: the
+   * answer is sent, and undefined comes back. The file route's check=1 answers with this alone.
+   */
+  const fsReadable = async (req: FastifyRequest, reply: FastifyReply, id: string, path: unknown, kind: 'file' | 'archive') => {
+    const t = fsAgent(req, reply, id, path); if (!t) return undefined;
     const provider = providerFor(t.agent.hostId);
-    if (!provider.streamFromVolume) return reply.code(501).send({ error: 'Downloads are not available from this machine.' });
+    const streamFrom = provider.streamFromVolume?.bind(provider);
+    if (!streamFrom) { reply.code(501).send({ error: 'Downloads are not available from this machine.' }); return undefined; }
     // Size first, so a runaway folder is refused before a byte streams.
     let st: ExecResult;
     try { st = await provider.execShellOnVolume(t.agent.runtimeRef!, kind === 'file' ? statShell(t.rel) : duShell(t.rel), { readOnly: true }); }
-    catch { return reply.code(502).send({ error: "Couldn't read the agent's files." }); }
-    if (st.code !== 0) return fsFailure(reply, st);
+    catch { reply.code(502).send({ error: "Couldn't read the agent's files." }); return undefined; }
+    if (st.code !== 0) { fsFailure(reply, st); return undefined; }
     const [ftype, fsize] = kind === 'file' ? st.stdout.trim().split('\t') : ['directory', st.stdout.trim()];
-    if (kind === 'file' && ftype !== 'regular file' && ftype !== 'regular empty file') return reply.code(400).send({ error: 'That is a folder — download it as an archive.' });
+    if (kind === 'file' && ftype !== 'regular file' && ftype !== 'regular empty file') { reply.code(400).send({ error: 'That is a folder — download it as an archive.' }); return undefined; }
     const size = Number(fsize) || 0;
-    if (size > FILE_MAX_BYTES) return reply.code(413).send({ error: `Too big to download here (${Math.round(size / 1048576)} MB; the limit is ${FILE_MAX_BYTES / 1048576} MB — HATCHABOT_FILE_MAX_MB).` });
+    if (size > FILE_MAX_BYTES) { reply.code(413).send({ error: `Too big to download here (${Math.round(size / 1048576)} MB; the limit is ${FILE_MAX_BYTES / 1048576} MB — HATCHABOT_FILE_MAX_MB).` }); return undefined; }
+    return { ...t, streamFrom, size };
+  };
+  const fsStream = async (req: FastifyRequest, reply: FastifyReply, id: string, path: unknown, kind: 'file' | 'archive', inline = false) => {
+    const t = await fsReadable(req, reply, id, path, kind); if (!t) return reply;
+    const size = t.size;
     const name = downloadName(t.rel, t.agent.slug) + (kind === 'archive' ? '.tar.gz' : '');
-    const stream = provider.streamFromVolume(t.agent.runtimeRef!, kind === 'file' ? catArgv(t.rel, size) : tarArgv(t.rel));
+    const stream = t.streamFrom(t.agent.runtimeRef!, kind === 'file' ? catArgv(t.rel, size) : tarArgv(t.rel));
     // Opened in the browser (the Files tab's links) when the type is one it
     // shows; always sandboxed (originless: no cookies, no scripts, no reach
     // into the app) and never sniffed, so an agent-written page cannot act
@@ -7198,7 +8284,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     pipeline(stream, exact, () => { /* the error reaches the response through `exact` */ });
     return reply.send(exact);
   };
-  app.get<{ Params: { id: string }; Querystring: { path?: string; inline?: string } }>('/v1/agents/:id/fs/file', NO_COMPRESS, (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'file', req.query.inline === '1'));
+  // check=1: whether the file may be read now, answered with what the download checks first
+  // (there, a file, not too big: its own refusal) and none of its bytes. The Files tab asks it
+  // before a PDF frame or a tab, and after a picture, sound or video fails, and says the reason.
+  // By here the gates have passed: at the public address, a second factor that lapsed got its
+  // 401 (secondFactor 'step-up') before this, which the page answers by asking for it.
+  app.get<{ Params: { id: string }; Querystring: { path?: string; inline?: string; check?: string } }>('/v1/agents/:id/fs/file', NO_COMPRESS, async (req, reply) => {
+    if (req.query.check === '1') return (await fsReadable(req, reply, req.params.id, req.query.path, 'file')) ? reply.code(204).send() : reply;
+    return fsStream(req, reply, req.params.id, req.query.path, 'file', req.query.inline === '1');
+  });
 
   /** Upload one file into a folder of the agent's home (raw body). */
   app.put<{ Params: { id: string }; Querystring: { path?: string; name?: string; overwrite?: string } }>('/v1/agents/:id/fs/file', async (req, reply) => {
@@ -7246,28 +8340,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (busyNow(agent, reply)) return reply;
       // base64 through the shell so arbitrary content can't break quoting.
       const b64 = Buffer.from(content, 'utf8').toString('base64');
-      const path = workspacePath(agent.slug, req.params.name);
       try {
-        const res = await whileBusy(agent.id, async () => {
+        // The files turn first, then the busy flag, as Apply values takes
+        // them: a snapshot by hand reading the files meanwhile kept the old
+        // file with the layer this save stores, or the reverse (HB-0566).
+        const res = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+          const fresh = freshRunning(agent.id, () => 'Start the agent to edit its files.');
           // Version the files BEFORE overwriting — a bad save must be recoverable.
-          await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-edit');
-          return writeFileInAgent(providerFor(agent.hostId), agent.runtimeRef!, path, b64);
-        });
+          await autoSnapshot(snapshotDeps(fresh), agent.id, 'pre-edit');
+          // AGENTS.md in its turn, which the budget's write takes (withAgentsMdTurn).
+          const write = () => writeFileInAgent(providerFor(fresh.hostId), fresh.runtimeRef, workspacePath(fresh.slug, req.params.name), b64);
+          const r = await (req.params.name === 'AGENTS.md' ? withAgentsMdTurn(agent.id, write) : write());
+          // Keep the template layer in step with a direct edit: the layer is
+          // what "Apply values" re-renders from, and a frozen import-time copy
+          // silently REVERTED any approved rewrite on the next value change
+          // (audit 2026-09-03). The edited content becomes the layer — any
+          // {{placeholders}} it still contains keep rendering; prose it
+          // hard-coded stays as written.
+          // Its one key, the rest as it is now: written back whole as read
+          // before the write, a persona changed meanwhile went back (HB-0567).
+          // Before the turn ends, so a snapshot after it has the pair.
+          if (r.code === 0 && store.getAgent(agent.id)?.paramFiles && (req.params.name === 'SOUL.md' || req.params.name === 'AGENTS.md')) {
+            store.setAgentParamFile(agent.id, req.params.name === 'SOUL.md' ? 'soul' : 'agents', content);
+          }
+          return r;
+        }));
         if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
-        // Keep the template layer in step with a direct edit: the layer is
-        // what "Apply values" re-renders from, and a frozen import-time copy
-        // silently REVERTED any approved rewrite on the next value change
-        // (audit 2026-09-03). The edited content becomes the layer — any
-        // {{placeholders}} it still contains keep rendering; prose it
-        // hard-coded stays as written.
-        if (agent.paramFiles && (req.params.name === 'SOUL.md' || req.params.name === 'AGENTS.md')) {
-          store.setAgentParamState(agent.id, agent.paramValues ?? {}, {
-            ...agent.paramFiles,
-            [req.params.name === 'SOUL.md' ? 'soul' : 'agents']: content,
-          });
-        }
         return { saved: true };
       } catch (err) {
+        if (err instanceof TurnRefused) return reply.code(err.status).send({ error: err.message });
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         throw err;
       }
@@ -7287,22 +8388,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
-      if (!agent.parameters?.length) {
-        return reply.code(400).send({
-          error: 'This agent declares no setup fields — add them under 📖 Definition → Setup fields first.',
-        });
-      }
+      const NO_FIELDS = 'This agent declares no setup fields — add them under 📖 Definition → Setup fields first.';
+      const NO_FILE_FIELDS = "All of this agent's setup fields are env credentials or repo bindings — change those under ⚙ Settings → Environment / Data.";
+      if (!agent.parameters?.length) return reply.code(400).send({ error: NO_FIELDS });
       // Env-target fields (Phase 2b) are write-only credentials managed under
       // Settings → Environment, and datasource-target fields materialized as
       // git sources managed under Settings → Data — neither lives in
       // paramValues, and neither may block (as "required") the re-render of
       // the file-target fields.
-      const editableParams = agent.parameters.filter((p) => p.target !== 'env' && p.target !== 'datasource');
-      if (!editableParams.length) {
-        return reply.code(400).send({
-          error: "All of this agent's setup fields are env credentials or repo bindings — change those under ⚙ Settings → Environment / Data.",
-        });
-      }
+      const fileFields = (fields: NonNullable<Agent['parameters']>) => fields.filter((p) => p.target !== 'env' && p.target !== 'datasource');
+      const editableParams = fileFields(agent.parameters);
+      if (!editableParams.length) return reply.code(400).send({ error: NO_FILE_FIELDS });
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to change its setup values.' });
       }
@@ -7332,10 +8428,53 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // become this agent's permanent template layer, and a concurrent file
       // save or restore interleaving with them would freeze a torn layer
       // (audit 2026-09-03).
-      let paramFiles = agent.paramFiles;
       class NoPlaceholders extends Error {}
+      let warning: string | undefined;
+      /**
+       * The values and the layer the files now hold, recorded before the turn
+       * ends: a snapshot waiting on it took the new files with the old values
+       * and layer (HB-0566).
+       */
+      const recordApplied = (fresh: Agent, layer: NonNullable<Agent['paramFiles']>) => {
+        // Persist the freshly seeded layer on a master's first edit, a key at a
+        // time; imported copies already have theirs stored. Its description as
+        // it is now, not as read at the start: one changed during the writes
+        // went back to the old one (HB-0567).
+        if (!fresh.paramFiles) {
+          store.setAgentParamFile(agent.id, 'soul', layer.soul);
+          store.setAgentParamFile(agent.id, 'agents', layer.agents);
+          store.setAgentParamFile(agent.id, 'persona', store.getAgent(agent.id)?.persona || undefined);
+        }
+        const personaLayer = store.getAgent(agent.id)?.paramFiles?.persona;
+        // Checked above when it was the one read then. A newer one that these
+        // values make too long is left as its owner set it, and said: answered
+        // as applied, the description silently kept its old values.
+        if (typeof personaLayer === 'string') {
+          try { store.setAgentPersona(agent.id, renderPersona(personaLayer, resolved)); }
+          catch (err) {
+            if (!(err instanceof TransferError) || personaLayer === layer.persona) throw err;
+            warning = `The files have the new values, but the description was changed meanwhile and was not filled in with them: ${err.userMessage}`;
+          }
+        }
+        store.setAgentParamState(agent.id, resolved);
+      };
       try {
-        const res = await whileBusy(agent.id, async () => {
+        // The files turn first, the busy flag once it is ours: waiting behind a
+        // snapshot does not make the agent busy for everything else.
+        const res = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+          // As it is at its turn, not as read before the wait: a file saved
+          // or values applied meanwhile stored the layer it renders from, and
+          // the old one written over them undid them.
+          const fresh = freshRunning(agent.id, () => 'Start the agent to change its setup values.');
+          // Its fields as they are now too: a definition pushed meanwhile may
+          // have added one. One the caller never saw keeps the value it has,
+          // a reset too: a reset puts back only the fields it showed.
+          if (!fresh.parameters?.length) throw new TurnRefused(400, NO_FIELDS);
+          const fields = fileFields(fresh.parameters);
+          if (!fields.length) throw new TurnRefused(400, NO_FILE_FIELDS);
+          const unseen = Object.fromEntries(Object.entries(fresh.paramValues ?? {}).filter(([key]) => !editableParams.some((p) => p.key === key)));
+          resolved = resolveParamValues(fields, body.reset ? unseen : { ...unseen, ...(vals.data ?? {}) });
+          let paramFiles = fresh.paramFiles;
           if (!paramFiles) {
             // The raw placeholder-bearing layer normally arrives on import.
             // On a MASTER — fields authored here, live files still carrying
@@ -7345,7 +8484,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             // A read that failed refuses the edit: `cat … || true` read an
             // unreadable SOUL.md as missing, and the layer stored without it
             // never configured that file again (audit #014).
-            const read = (name: string) => readCoreFile(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, name).catch((err: unknown) => {
+            const read = (name: string) => readCoreFile(providerFor(fresh.hostId), fresh.runtimeRef!, fresh.slug, name).catch((err: unknown) => {
               if (err instanceof CoreFileTooBigError) throw new TransferError(`${name} is over ${MAX_FILE_BYTES / 1024}KB — trim it before changing its setup values.`);
               throw err;
             });
@@ -7354,7 +8493,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             paramFiles = {
               soul: soul || undefined,
               agents: agentsMd || undefined,
-              persona: agent.persona || undefined,
+              persona: fresh.persona || undefined,
             };
             const PH = /\{\{\s*[a-z][a-z0-9_]{0,31}\s*\}\}/;
             if (![paramFiles.soul, paramFiles.agents, paramFiles.persona].some((t) => typeof t === 'string' && PH.test(t))) {
@@ -7372,7 +8511,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           for (const w of writes) if (Buffer.byteLength(w.content, 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(w.name);
           // The description too: over the limit, the agent's own backup could not be imported (HB-0309).
           if (typeof paramFiles.persona === 'string') renderPersona(paramFiles.persona, resolved);
-          await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-params');
+          await autoSnapshot(snapshotDeps(fresh), agent.id, 'pre-params');
           // All the files or none: a SOUL.md written and an AGENTS.md that
           // failed left the agent half on the new values while its stored
           // values said the old ones (audit #013). What was written goes back
@@ -7380,11 +8519,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // that was not there, is not written back as nothing: the
           // pre-params snapshot is the way back for it.
           const write = (name: string, text: string) =>
-            writeFileInAgent(providerFor(agent.hostId), agent.runtimeRef!, workspacePath(agent.slug, name), Buffer.from(text, 'utf8').toString('base64'));
+            writeFileInAgent(providerFor(fresh.hostId), fresh.runtimeRef!, workspacePath(fresh.slug, name), Buffer.from(text, 'utf8').toString('base64'));
           const written: Array<[string, string | undefined]> = [];
           for (const w of writes) {
             let beforeRead = true;
-            const before = await readCoreFile(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, w.name).catch(() => {
+            const before = await readCoreFile(providerFor(fresh.hostId), fresh.runtimeRef!, fresh.slug, w.name).catch(() => {
               beforeRead = false;
               return undefined;
             });
@@ -7401,7 +8540,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             if (r.code !== 0) {
               let nowRead = true;
               const now = threw
-                ? await readCoreFile(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, w.name).catch(() => {
+                ? await readCoreFile(providerFor(fresh.hostId), fresh.runtimeRef!, fresh.slug, w.name).catch(() => {
                   nowRead = false;
                   return undefined;
                 })
@@ -7414,8 +8553,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             }
             written.push([w.name, before]);
           }
+          recordApplied(fresh, paramFiles);
           return { code: 0, stdout: '', stderr: '', lost: [] as string[] };
-        });
+        }));
         if (res.code !== 0) {
           return reply.code(500).send({
             error: res.lost.length
@@ -7424,6 +8564,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           });
         }
       } catch (err) {
+        if (err instanceof TurnRefused) return reply.code(err.status).send({ error: err.message });
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         if (err instanceof SnapshotError) return reply.code(502).send({ error: `${err.userMessage} Nothing was changed.` });
@@ -7436,15 +8577,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
         throw err;
       }
-      const layer = paramFiles!; // set on entry or seeded inside the guard
-      if (typeof layer.persona === 'string') {
-        store.setAgentPersona(agent.id, renderPersona(layer.persona, resolved));
-      }
-      // Persist the freshly seeded layer alongside the values on a master's
-      // first edit; imported copies already have theirs stored.
-      store.setAgentParamState(agent.id, resolved, agent.paramFiles ? undefined : layer);
       trace(agent.id)('params.applied', { reset: !!body.reset, keys: Object.keys(resolved).length });
-      return { applied: true, values: resolved };
+      return { applied: true, values: resolved, ...(warning ? { warning } : {}) };
     },
   );
 
@@ -7470,6 +8604,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // ---- snapshots (core-file history) ---------------------------------------
 
+  /**
+   * One agent's changes that write its core files (setup values, a definition
+   * pushed to it, a snapshot restored, a file saved, a proposal merged) and
+   * its snapshots taken by hand take turns: a snapshot taken during such a change held some files
+   * from before and some from after (HB-0566). Narrower than the busy flag: a
+   * backup, a task switched on, an app install does not hold a snapshot up.
+   * One waits CORE_FILES_WAIT_MS at most (or `waitMs`, what is left of a
+   * deadline it shares), then is refused (AgentBusyError) and never runs: a
+   * change that hung held every later one up for good. A turn that is free
+   * is taken even with no time left.
+   */
+  const CORE_FILES_WAIT_MS = 2 * 60_000;
+  const coreFileTurns = new Map<string, Promise<void>>();
+  const withCoreFilesTurn = <T>(agentId: string, fn: () => Promise<T>, waitMs = CORE_FILES_WAIT_MS): Promise<T> => {
+    const before = coreFileTurns.get(agentId) ?? Promise.resolve();
+    const turn = new Promise<void>((resolve, reject) => {
+      const late = setTimeout(() => reject(new AgentBusyError('Another change to its files is still running; try again when it ends.')), waitMs);
+      void before.then(() => { clearTimeout(late); resolve(); }, () => {});
+    });
+    const run = turn.then(fn);
+    // The next one waits for the one before this too: one that gave up does
+    // not let it in while that one still runs.
+    const tail = before.then(() => run).then(() => {}, () => {});
+    coreFileTurns.set(agentId, tail);
+    void tail.then(() => { if (coreFileTurns.get(agentId) === tail) coreFileTurns.delete(agentId); });
+    return run;
+  };
+
   app.get<{ Params: { id: string } }>('/v1/agents/:id/snapshots', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
@@ -7481,13 +8643,39 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      // In turn with the changes that write several files (withCoreFilesTurn):
+      // it waits for one under way, and one waits for it (HB-0566).
       try {
-        const snap = await captureSnapshot(snapshotDeps(agent), agent.id, {
-          label: (req.body as { label?: string } | null)?.label,
+        // Its machine as it is at its turn (moved meanwhile); captureSnapshot
+        // judges the rest then (deleted, archived, not running). Under a
+        // change that replaces its files (a rebuild, a move, an archive, a
+        // restore, an app update), they may be half replaced: it is refused.
+        // One that begins while it reads (a Rebuild pressed meanwhile) goes
+        // ahead, and what was read is dropped, not stored. Other work (a
+        // backup, a task switched on, an app install) does not hold it up.
+        // Those that take one inside their own change (a rebuild's, Apply
+        // values') call captureSnapshot.
+        const replacing = (): string | undefined => {
+          if (inflight.has(agent.id)) return 'It is busy (a rebuild); take the snapshot when that ends.';
+          if (archiving.has(agent.id)) return 'It is busy (being archived); take the snapshot when that ends.';
+          const op = store.activeOperationFor(agent.id);
+          if (op && FILES_REPLACED_BY.has(op.kind)) return operationRefusal(store, agent.id) ?? 'Another change is under way — wait for it to finish.';
+          return undefined;
+        };
+        const snap = await withCoreFilesTurn(agent.id, () => {
+          const busy = replacing();
+          if (busy) throw new SnapshotError(busy);
+          const began = filesReplacingCount(agent.id);
+          return captureSnapshot(snapshotDeps(store.getAgent(agent.id) ?? agent), agent.id, {
+            label: (req.body as { label?: string } | null)?.label,
+            torn: () => (filesReplacingCount(agent.id) !== began || replacing()
+              ? 'A rebuild or restore started while the snapshot read its files; take it again.'
+              : undefined),
+          });
         });
         return reply.code(201).send(snap);
       } catch (err) {
-        if (err instanceof SnapshotError) return reply.code(409).send({ error: err.userMessage });
+        if (err instanceof SnapshotError || err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         throw err;
       }
     },
@@ -7512,8 +8700,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // guard, so a restore could interleave with a migrate/adopt/export
       // reading or replacing the same volume. Hold the flag for the write.
       if (busyNow(agent, reply)) return reply;
-      const run = (onOperation?: (id: string) => void) => whileBusy(agent.id, () =>
-        restoreSnapshot({ ...snapshotDeps(agent), requestedBy: ownerIdOf(req), onOperation }, agent.id, req.params.snapId));
+      // The files turn first, then the busy flag, as Apply values takes them.
+      const run = (onOperation?: (id: string) => void) => withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+        // Where it runs as it is at its turn: moved while this waited, the
+        // restore wrote the snapshot to where it was (HB-0566).
+        const fresh = store.getAgent(agent.id);
+        if (!fresh || agentGone(agent.id)) throw new SnapshotError(AGENT_GONE);
+        if (fresh.hostId !== agent.hostId || fresh.runtimeRef !== agent.runtimeRef) throw new SnapshotError('It moved while this waited; restore again.');
+        return restoreSnapshot({ ...snapshotDeps(fresh), requestedBy: ownerIdOf(req), onOperation }, agent.id, req.params.snapId);
+      }));
       try {
         if (waitAsked(req)) return await run();
         // In the background once it has begun (phase 3); its refusals
@@ -7551,6 +8746,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return publicAgent(agent, {
       role,
       deepLink: channel?.deepLink,
+      // As the list says it: the CLI names the bot an agent is on.
+      botUsername: channel?.accountId,
       // Members see declarations, never the owner's applied answers.
       ...(role === 'owner' ? {} : { paramValues: undefined }),
     });
@@ -8002,6 +9199,55 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // A guest's socket is the app's own, at the root — not a worker, node or plugin door.
     if (guest && (m[2] ?? '') !== '') return deny();
     if (socket.destroyed) return;
+    // A guest's consoles are counted from here (not once the gateway answers),
+    // connecting and connected together, so ones opened at the same moment
+    // are counted too; each may hold up to its queue limit, so how many is
+    // bounded (MAX_GUEST_CONSOLES). Past it, room is promised here, so the
+    // next one sees it taken: their least recently active connected one,
+    // unused for GUEST_IDLE_TO_CLOSE_MS and not being answered (promiseRoom:
+    // one unused for under GUEST_ROOM_EVERY_MS at most once in that long), so
+    // a browser gone without a word (a phone that slept) never locks them
+    // out. It is closed once the new one has connected; if that fails,
+    // nothing is. With none to promise it is refused at the door, so tabs in
+    // use cannot close each other in turn. At most MAX_GUEST_CONSOLES of
+    // theirs may be connecting at once; until the gateway answers, the slot
+    // is held by the request: closing the guest's socket aborts it, and so
+    // does GUEST_CONNECT_TIMEOUT_MS.
+    let guestUp: Duplex | undefined;
+    let upReq: ReturnType<typeof httpRequest> | undefined;
+    let forgetGuest: (() => void) | undefined;
+    let connecting: NodeJS.Timeout | undefined;
+    let usedAt = 0; // when the guest last used it (performance.now(): a wall clock set forward makes nothing idle)
+    let spliced: GuestSplice | undefined;
+    let room: RoomPromise | undefined;
+    if (guest) {
+      if (consoleAccess.openGuests(undefined, principal.ownerId, 'connecting') >= MAX_GUEST_CONSOLES) {
+        app.log.warn({ agent: caller.agent.id, userId: principal.ownerId }, 'console.guest_too_many_connecting');
+        return deny();
+      }
+      if (consoleAccess.openGuests(undefined, principal.ownerId) >= MAX_GUEST_CONSOLES) {
+        room = consoleAccess.promiseRoom(principal.ownerId, { idleFor: GUEST_IDLE_TO_CLOSE_MS, every: GUEST_ROOM_EVERY_MS });
+        if (!room) {
+          app.log.warn({ agent: caller.agent.id, userId: principal.ownerId, why: `you have ${MAX_GUEST_CONSOLES} chats open; close one` }, 'console.guest_too_many');
+          return deny();
+        }
+      }
+      // Not connected (it failed, timed out, or the guest left): the room promised goes back.
+      const drop = () => { clearTimeout(connecting); room?.release(); room = undefined; socket.destroy(); upReq?.destroy(); guestUp?.destroy(); };
+      usedAt = performance.now();
+      forgetGuest = consoleAccess.trackGuest(caller.agent.id, principal.ownerId, drop, {
+        connecting: () => !spliced,
+        // Being answered (a reply streaming) is not idle.
+        lastActive: () => spliced?.answering() ? performance.now() : usedAt,
+        evict: () => { if (spliced) spliced.close(1001, 'opened in another tab'); else drop(); },
+      });
+      socket.on('close', () => { forgetGuest!(); drop(); });
+      connecting = setTimeout(() => {
+        app.log.warn({ agent: caller.agent.id, userId: principal.ownerId }, 'console.guest_connect_timeout');
+        drop();
+      }, GUEST_CONNECT_TIMEOUT_MS);
+      connecting.unref?.();
+    }
 
     const qs = url.includes('?') ? url.slice(url.indexOf('?')) : '';
     const up = httpRequest({
@@ -8011,7 +9257,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       method: 'GET',
       headers: { ...consoleHeaders(rawReq.headers, caller.agent, caller.role, principal.ownerId, identity, rawReq.socket.remoteAddress), host: `127.0.0.1:${addr.port}` },
     });
+    upReq = up;
     up.on('upgrade', (upRes, upSocket, upHead) => {
+      if (guest) {
+        clearTimeout(connecting);
+        // The guest left while the gateway was answering: nothing to splice.
+        if (socket.destroyed) { upSocket.destroy(); forgetGuest!(); return; }
+      }
       socket.write(
         [
           `HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage}`,
@@ -8031,18 +9283,33 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       };
       const forgetSocket = consoleSockets.add(entry);
       socket.on('close', forgetSocket);
-      upSocket.on('close', forgetSocket);
-      socket.on('data', () => { entry.lastActive = Date.now(); });
+      // A guest's browser may still be taking what waits for it after the
+      // gateway has closed (spliceGuest drains it, at most GUEST_DRAIN_MS):
+      // it stays counted, and closable, until its own socket ends.
+      if (!guest) upSocket.on('close', forgetSocket);
+      // What an upload's pieces marked is put back if it does not count once
+      // whole (onUploadRefused), but not what else they did meanwhile (GuestActivity).
+      const activity = new GuestActivity(usedAt, entry.lastActive);
+      const markActive = (what?: 'upload' | 'waiting') => {
+        activity.mark(what);
+        ({ usedAt, wallAt: entry.lastActive } = activity);
+      };
       if (guest) {
-        // Whatever the browser sent after its upgrade request goes through the filter too.
+        // Whatever the browser sent after its upgrade request goes through the
+        // filter too: put back before any 'data' listener, which would get it
+        // alone (unshift emits at once to a flowing socket) and lose it.
         if (head?.length) socket.unshift(head);
-        const forget = consoleAccess.trackGuest(caller.agent.id, principal.ownerId, () => { socket.destroy(); upSocket.destroy(); });
+        guestUp = upSocket;
         const refusedOnce = new Set<string>();
-        socket.on('close', forget);
-        upSocket.on('close', forget);
-        spliceGuest(socket, upSocket, {
+        spliced = spliceGuest(socket, upSocket, {
           identity: consoleIdentity(caller.agent.gatewayToken!, 'guest', principal.ownerId),
           scope: { agentId: caller.agent.slug, sessionKey: consoleAccess.guestSessionKey(caller.agent, principal.ownerId) },
+          // The person's own messages, read or waiting: what the idle limit goes by for a guest (HB-0593).
+          onActive: markActive,
+          onUploadRefused: () => {
+            activity.putBack();
+            ({ usedAt, wallAt: entry.lastActive } = activity);
+          },
           // Once per method per connection: the app polls some of them. The
           // timeline gets only what guestConsoleLog lets through (the app's
           // startup calls never, others once a day); the service log gets each.
@@ -8055,7 +9322,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             if (recorded) trace(caller.agent.id)('console.guest_refused', { userId: principal.ownerId, method: recorded });
             else app.log.info({ agent: caller.agent.id, userId: principal.ownerId, method: name }, 'console.guest_refused');
           },
+          // Not passed on (not a JSON object, or Hatchabot's own failure to scrub it): logged.
+          onScrubError: (e) => app.log.error({ err: e, agent: caller.agent.id, userId: principal.ownerId }, 'console.guest_scrub_failed'),
+          // Across the guest's consoles (GUEST_HELD_LIMIT).
+          countHeld: (change) => consoleAccess.addGuestHeld(principal.ownerId, change),
         });
+        // Connected: the console promised as its room is closed now. Used
+        // again meanwhile (rare), it stays, and this one gives way.
+        const promised = room;
+        room = undefined;
+        const kept = promised?.keep();
+        if (kept?.closed) app.log.warn({ agent: kept.closed, userId: principal.ownerId }, 'console.guest_oldest_closed');
+        if (kept?.refused) {
+          const why = `you have ${MAX_GUEST_CONSOLES} chats open; close one`;
+          app.log.warn({ agent: caller.agent.id, userId: principal.ownerId, why }, 'console.guest_too_many');
+          forgetGuest!();
+          spliced.close(1008, `refused: ${why}`);
+          return;
+        }
         // Where the visit came from, so an owner who sees one they don't
         // recognise can tell which device it is (2026-10-10): the browser,
         // the address Tailscale Serve or Funnel forwarded, and the tailnet
@@ -8068,6 +9352,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         void consoleAccess.nameGuests(caller.agent, true).catch(() => {});
         return;
       }
+      socket.on('data', () => markActive());
       if (identity) void consoleAccess.nameGuests(caller.agent).catch(() => {});
       upSocket.on('error', () => socket.destroy());
       socket.on('error', () => upSocket.destroy());
@@ -8418,14 +9703,30 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // before this is replaced: its secrets go unless this one reuses them.
       // One change to the waiting row at a time (appPending.ts): a run that
       // finished meanwhile forgot its request's secrets, which share these refs.
-      await onePendingChange(a.id, async () => {
+      // Deleted or archived while the repository was read: nothing is saved
+      // for it, or the request sat behind a tombstone for good (HB-0569).
+      const gone = () => agentGone(a.id) || store.getAgent(a.id)?.state === 'ARCHIVED';
+      const saved = await onePendingChange(a.id, async () => {
+        if (gone()) return false;
         const was = store.getAppPending(a.id);
         const before = was ? pendingSecretRefs(a.id, was.values) : [];
-        const kept = await stashPendingSecrets(secrets, a.id, rel.manifest, values);
+        const stash = await stashPendingSecrets(secrets, a.id, rel.manifest, values);
+        const kept = stash.values;
+        // And after its secrets were stored: they go again. This request's
+        // secrets share the waiting row's refs, so a ref that row still names
+        // (archived, its row stays) holds what it did; one no row names goes.
+        if (gone()) {
+          const row = store.getAppPending(a.id);
+          const named = new Set(row ? pendingSecretRefs(a.id, row.values) : []);
+          await stash.undo((r) => named.has(r));
+          return false;
+        }
         store.setAppPending(a.id, { source: req.body!.source!, ref, values: { ...kept, ...(req.body?.allowShared ? { __allowShared: true } : {}) } });
         const now = new Set(pendingSecretRefs(a.id, kept));
         for (const r of before) if (!now.has(r)) await secrets.delete(r).catch(() => {});
+        return true;
       });
+      if (!saved) return reply.code(409).send({ error: 'It was deleted or archived meanwhile, so nothing was saved.' });
       trace(a.id)('app.pending', { app: rel.manifest.app });
       // Its state now, not as it was before the fetch: setup that finished
       // during it found no row to install, and this one still saw it setting
@@ -8650,7 +9951,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // in this tick, so nothing can start between the check above and it.
         void whileBusy(agent.id, async () => {
           await syncGitDataSources(d, agent.id, agent.runtimeRef!, trace(agent.id));
-          await syncDataSourceDocs(d, agent.id, agent.runtimeRef!, trace(agent.id)); // AGENTS.md "Data sources" learns the path
+          await syncDataSourceDocs(d, agent.id, agent.runtimeRef!, trace(agent.id), { turn: (write) => withAgentsMdTurn(agent.id, write) }); // AGENTS.md "Data sources" learns the path
         }).catch(() => { /* best-effort; the next rebuild retries and the card shows any error */ });
       }
       return publicAgent(store.getAgent(agent.id)!);
@@ -9070,7 +10371,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = runningAgent(req, req.params.id, reply);
     if (!agent) return reply;
     try {
-      return { crons: await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug), waiting: waitingTasks(agent.id) };
+      return {
+        crons: await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug),
+        waiting: waitingTasks(agent.id),
+        // The tasks told on the owner's phone when they run, and whether a note can reach them (HB-0537).
+        notes: store.cronNotes(agent.id).map((n) => n.jobId),
+        noteReach: ownerNoteReach(agent.ownerId),
+      };
     } catch (err) {
       app.log.warn({ agent: agent.id, err: String((err as Error).message ?? err) }, 'cron list failed');
       // Not "none": the tasks may be fine; they just couldn't be read.
@@ -9096,7 +10403,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // definition can DESCRIBE a schedule, but only a real gateway cron fires.
   app.post<{
     Params: { id: string };
-    Body: { name?: string; message?: string; cron?: string; everyMinutes?: number; tz?: string; announce?: boolean };
+    Body: { name?: string; message?: string; cron?: string; everyMinutes?: number; tz?: string; announce?: boolean; notify?: boolean };
   }>('/v1/agents/:id/crons', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply, 'add a scheduled task');
     if (!agent) return reply;
@@ -9108,6 +10415,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         everyMinutes: z.number().min(0.25).max(60 * 24 * 30).optional(), // 15s floor; 1.5 = every 90s
         tz: z.string().trim().max(64).optional(),
         announce: z.boolean().optional(),
+        notify: z.boolean().optional(),
       })
       .refine((b) => !!b.cron !== !!b.everyMinutes, { message: 'give exactly one of cron / everyMinutes' })
       .safeParse(req.body ?? {});
@@ -9138,7 +10446,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Quiet only until the owner can be reached: the repair pass points it at them then.
     if (out.quieted && out.id) store.addQuietedCron(agent.id, out.id, new Date().toISOString());
     trace(agent.id)('cron.created', { name: parsed.data.name, cron: parsed.data.cron, everyMinutes: parsed.data.everyMinutes });
-    return reply.code(201).send({ created: true, id: out.id });
+    // Told on the phone when it runs (HB-0537): only with the new task's id to keep it under.
+    const noted = parsed.data.notify === true && !!out.id;
+    if (noted) store.setCronNote(agent.id, out.id!, true, Date.now());
+    return reply.code(201).send({ created: true, id: out.id, ...(parsed.data.notify ? { notify: noted } : {}) });
   });
 
   // Per-agent token usage, read from its OpenClaw session store. Accurate usage,
@@ -9368,21 +10679,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const profile = store.getAIProfile(agent.aiProfileId);
       if (!profile) return reply.code(409).send({ error: 'This agent has no AI source.' });
       const model = ((req.body as { model?: string | null } | undefined)?.model ?? null) || null;
-      const problem = modelOverrideProblem(profile, model);
-      if (problem) return reply.code(400).send({ error: problem });
-      // A model Anthropic refuses for the Claude Code version this agent's
-      // OpenClaw presents on a subscription (subscriptionRuntimeProblem).
-      const tooOld = await subscriptionRuntimeProblem(agent, profile, model);
-      if (tooOld) return reply.code(409).send({ error: tooOld });
-      const classDetached = await ledgered(req, 'model', [agent.id], () => { store.setAgentModel(agent.id, model); return detachClassIfDrifted(agent.id); });
+      // Not on the source's menu (400), or a model Anthropic refuses for the
+      // Claude Code version this agent's OpenClaw presents on a subscription
+      // (409) — a cleared pin's default included (modelChoiceProblem, HB-0555).
+      const problem = await modelChoiceProblem(agent, profile, model);
+      if (problem) return reply.code(problem.status).send({ error: problem.error });
+      // A class dropped here takes its memory limits with it (HB-0561).
+      // Its class still applying a change: it leaves once that is done ('pending').
+      const dropped = await ledgered(req, 'model', [agent.id], () => store.transact(() => { store.setAgentModel(agent.id, model); return detachClassIfDrifted(agent.id); }));
+      const classDetached = dropped.detached;
       const applied = effectiveModel(store.getAgent(agent.id)!, profile);
       const how = await applyModelToRuntime(agent.id);
+      const kept = keptSaid(agent.name, await dropped.limits);
       // Recorded, but there is nothing to write it to. Said as an error, or the
       // page reads a change that "applies on its next rebuild" (HB-0373).
-      if (how === 'gone') return reply.code(409).send({ error: `${VOLUME_GONE} The model is recorded, but a Rebuild would make a fresh, empty volume: find out where its files went first.`, model: applied, volumeGone: true, classDetached });
+      if (how === 'gone') return reply.code(409).send({ error: `${VOLUME_GONE} The model is recorded, but a Rebuild would make a fresh, empty volume: find out where its files went first.`, model: applied, volumeGone: true, classDetached, ...kept });
       // failed: the runtime refused it, so the agent still answers on its old
       // model until a retry or a rebuild (the manager said ✅ without it, audit #077).
-      return { model: applied, live: how === 'live', staged: how === 'staged', rebuild: how === 'rebuild', failed: how === 'failed', classDetached };
+      return { model: applied, live: how === 'live', staged: how === 'staged', rebuild: how === 'rebuild', failed: how === 'failed', classDetached, ...kept };
     },
   );
 
@@ -9516,13 +10830,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // unusable (#167). Minting is a no-op while a live token is held.
       if (next.length) await ensureAgentCallToken(a.id, ownerIdOf(req));
     }
+    // The agent list's one query for the owner, peersNotInstalled's rule
+    // (peersCsv), and the members as they are now, after the token awaits.
     const pending = store.agentsWithPeersPending(ownerIdOf(req));
+    const now = new Map(store.listAgents(ownerIdOf(req)).map((a) => [a.id, a]));
+    // One deleted, or being deleted, meanwhile needs nothing, and is not named.
+    const needRebuild = members.flatMap((a) => (pending.has(a.id) && now.has(a.id) && !agentGone(a.id) ? [now.get(a.id)!] : []));
+    // A sleeping agent wakes for a message as it was, at once: the change
+    // waits for its next Start or Rebuild (HB-0465). Said, not left to guess.
+    const asleep = needRebuild.filter((a) => a.state === 'STOPPED' && a.hibernatedAt);
     return {
       connected: b.connect,
       agents: members.length,
       changed,
       grants: b.connect ? members.length * (members.length - 1) : 0,
-      needRebuild: members.filter((a) => pending.has(a.id)).map((a) => ({ id: a.id, name: a.name, state: a.state })),
+      needRebuild: needRebuild.map((a) => ({ id: a.id, name: a.name, state: a.state })),
+      ...(asleep.length ? {
+        note: `${asleep.map((a) => a.name).join(', ')} ${asleep.length > 1 ? 'are' : 'is'} asleep. A sleeping agent wakes for a message as it was; it takes this change at its next Start or Rebuild, and its card says its peers changed.`,
+      } : {}),
       skipped,
     };
   });
@@ -9809,7 +11134,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const model = String(req.query?.model ?? '').trim();
     if (!model) return reply.code(400).send({ error: 'Which model? Add ?model=…' });
-    return assessModelChange(store, agent, store.getAIProfile(agent.aiProfileId), model);
+    const profile = store.getAIProfile(agent.aiProfileId);
+    // problem: what POST /model would refuse it with, null when it would take it (HB-0597).
+    const problem = profile ? (await modelChoiceProblem(agent, profile, model))?.error ?? null : 'This agent has no AI source.';
+    return { ...assessModelChange(store, agent, profile, model), problem, ...(profile && profile.vendor !== 'local' ? { offered: [...new Set([profile.model, ...(profile.models ?? [])])] } : {}) };
   });
 
   // ---- the token steward (docs/features.md, "Token steward") ---------------
@@ -10411,13 +11739,33 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // started posting to the owner instead.
   app.patch<{
     Params: { id: string; jobId: string };
-    Body: { enabled?: boolean; name?: string; message?: string; cron?: string; everyMinutes?: number; tz?: string };
+    Body: { enabled?: boolean; name?: string; message?: string; cron?: string; everyMinutes?: number; tz?: string; notify?: boolean };
   }>(
     '/v1/agents/:id/crons/:jobId',
     async (req, reply) => {
       const agent = runningAgent(req, req.params.id, reply);
       if (!agent) return reply;
       const body = (req.body ?? {}) as Record<string, unknown>;
+      // Told on the owner's phone when it runs (HB-0537): Hatchabot's own
+      // setting, so the task itself is not touched and no CLI starts. A task
+      // that is gone, or OpenClaw's own, is forgotten by the next quick pass.
+      const notify = body.notify;
+      if (notify !== undefined) {
+        if (typeof notify !== 'boolean') return reply.code(400).send({ error: 'notify must be true or false.' });
+        const jobId = req.params.jobId;
+        if (!jobId || jobId.length > 200 || /[\u0000-\u001f]/.test(jobId)) return reply.code(400).send({ error: 'That is not a task id.' });
+      }
+      // Kept once the rest of the request took, not before: an edit refused
+      // or failed still turned the note on or off (HB-0559).
+      const keepNote = () => {
+        if (typeof notify !== 'boolean') return;
+        store.setCronNote(agent.id, req.params.jobId, notify, Date.now());
+        trace(agent.id)('cron.note_set', { id: req.params.jobId, on: notify });
+      };
+      if (typeof notify === 'boolean' && !['enabled', 'name', 'message', 'cron', 'everyMinutes', 'tz'].some((k) => body[k] !== undefined)) {
+        keepNote();
+        return { ok: true, notify };
+      }
       if (['name', 'message', 'cron', 'everyMinutes', 'tz'].some((k) => body[k] !== undefined)) {
         const parsed = z
           .object({
@@ -10452,18 +11800,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           tz,
         };
         const edited = Object.values(change).some((v) => v !== undefined);
+        // The edit took and stays, whatever then happens to the switch: its note goes with it.
+        let editTook = false;
         try {
           if (edited) {
             const out = await whileBusy(agent.id, () => editCron(provider, agent.runtimeRef!, job.id, change, job));
             if (!out.ok) return reply.code(502).send({ error: out.error });
+            editTook = true;
             trace(agent.id)('cron.edited', { id: job.id, name: parsed.data.name ?? job.name, fields: Object.keys(parsed.data) });
           }
-          if (turn === undefined) return { ok: true, edited };
+          if (turn === undefined) { keepNote(); return { ok: true, edited }; }
           if (!(await whileBusy(agent.id, () => setCronEnabled(provider, agent.runtimeRef!, job.id, turn)))) {
+            if (editTook) keepNote();
             return reply.code(502).send({ error: `The task ${edited ? 'was changed, but ' : ''}couldn't be ${turn ? 'enabled' : 'disabled'} — try that again.` });
           }
+          keepNote();
           return { ok: true, edited, enabled: turn };
         } catch (err) {
+          // Busy by then, or the switch threw: the edit still took.
+          if (editTook) keepNote();
           if (err instanceof CronSystemOwnedError) return reply.code(409).send({ error: err.userMessage });
           if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
           throw err;
@@ -10481,6 +11836,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (!ok) {
           return reply.code(502).send({ error: `Couldn't ${enabled ? 'enable' : 'disable'} that task — it may no longer exist.` });
         }
+        keepNote();
         return { ok: true, enabled };
       } catch (err) {
         if (err instanceof CronSystemOwnedError) return reply.code(409).send({ error: err.userMessage });
@@ -10581,6 +11937,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           deleteCron(providerFor(agent.hostId), agent.runtimeRef!, req.params.jobId),
         );
         if (!ok) return reply.code(502).send({ error: "Couldn't delete that task — it may no longer exist." });
+        store.setCronNote(agent.id, req.params.jobId, false, 0);
         return { ok: true };
       } catch (err) {
         if (err instanceof CronSystemOwnedError) return reply.code(409).send({ error: err.userMessage });
@@ -10590,6 +11947,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   );
 
+  /**
+   * The bot this agent holds for setup, or was set up with, when a post
+   * brings that very token again. Compared by hash (sameToken); the token is
+   * never logged.
+   */
+  const sameTokenAgain = async (agentId: string, token: string | undefined): Promise<string | undefined> => {
+    if (!token) return undefined;
+    const held = await deps.channel.heldBot?.(agentId, token).catch(() => undefined);
+    if (held) return held;
+    const ch = store.getChannelForAgent(agentId);
+    const taken = ch ? await secrets.get(ch.secretRef).catch(() => undefined) : undefined;
+    return ch && taken !== undefined && sameToken(taken, token) ? ch.accountId : undefined;
+  };
+
   // The parked-provisioning resume: user pasted their BotFather token.
   app.post<{ Params: { id: string }; Body: { token?: string; fromWorkspace?: string } }>(
     '/v1/agents/:id/channel-token',
@@ -10597,20 +11968,60 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       const body = (req.body ?? {}) as { token?: string; fromWorkspace?: string; webOnly?: boolean };
-      // Only while it is parked on this very step: anywhere else a token was
-      // stashed, nothing ran, and the answer was 202 (HB-0064).
-      if (agent.pendingAction?.type !== 'bot_token') return reply.code(409).send({ error: 'This agent is not waiting for a bot token.' });
+      // Open: parked on this very step and not answered yet. Anywhere else a
+      // token was stashed, nothing ran, and the answer was 202 (HB-0064).
+      const open = () => {
+        const now = store.getAgent(agent.id);
+        const step = now?.pendingAction;
+        return now?.state !== 'DELETING' && now?.state !== 'DELETED' && step?.type === 'bot_token' && !step.received;
+      };
+      // The workspace's bot token, for a reuse post sent again (machine owner only, as below).
+      const workspaceToken = () => {
+        if (!body.fromWorkspace || !ownsLocalHost(req)) return undefined;
+        try { return findExistingBot(body.fromWorkspace)?.botToken; } catch { return undefined; }
+      };
+      // Not open: a post sent again (a proxy's 504 after this server took the
+      // first) is answered as the first was; any other answer is refused.
+      const notOpen = async () => {
+        const now = store.getAgent(agent.id);
+        if (!now || now.state === 'DELETING' || now.state === 'DELETED') return reply.code(409).send({ error: 'It is being deleted.' });
+        // "Go on without a bot" again: only where this agent's step was so answered.
+        if (body.webOnly === true && now?.webOnly && store.telegramSkippedByOwner(agent.id)) return reply.code(202).send({ webOnly: true });
+        const again = await sameTokenAgain(agent.id, body.token?.trim() || workspaceToken());
+        if (again) return reply.code(202).send({ username: again, stepAnswered: true });
+        return reply.code(409).send({ error: now?.pendingAction?.type === 'bot_token' ? 'A bot token came in already, and setup is taking it.' : 'This agent is not waiting for a bot token.' });
+      };
+      // The step stays until setup takes the answer (provision.ts), marked
+      // answered meanwhile: cleared here, a setup still running or a restart
+      // before setup ran left the agent with no step and no setup, and
+      // reconcile failed it (HB-0542). Claimed with no wait between the
+      // check and the mark: two posts at once both passed a check made before
+      // their waits, and the second's token replaced the first's.
+      const claim = () => {
+        const step = store.getAgent(agent.id)!.pendingAction!;
+        store.setAgentPendingAction(agent.id, { ...step, received: true });
+      };
+      // The step put back as it was (not asked again): a Clear stands.
+      const unclaim = () => {
+        const step = store.getAgent(agent.id)?.pendingAction;
+        if (step?.received) store.setAgentPendingAction(agent.id, { type: step.type, instructions: step.instructions }, { keepClear: true });
+      };
+      if (!open()) return notOpen();
       // No bot to give it (the pool is empty and there is no spare token):
       // go on without Telegram — the agent becomes web-only, as if created so,
-      // and provisioning resumes.
+      // and provisioning resumes. A token held from before is not wanted now.
       if (body.webOnly === true) {
         store.setAgentWebOnly(agent.id, true);
-        store.setAgentPendingAction(agent.id, null);
+        claim();
+        deps.channel.discardPending?.(agent.id);
         trace(agent.id)('telegram.skipped', { why: 'no bot available' });
-        kickProvision(agent.id);
+        provisionWhenFree(agent.id);
         return reply.code(202).send({ webOnly: true });
       }
       let token = body.token?.trim();
+      // The bot's name, from Telegram, before the step is claimed: submitToken
+      // then holds the token at once, with no other wait.
+      let checked: string | undefined;
       // A spare pool bot's token pasted here went down the manual path and
       // left its pool row unleased; the pool later leased the same bot to the
       // next agent, which then failed with "already belongs to…" (audit,
@@ -10623,9 +12034,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (err instanceof InvalidBotTokenError) { noteFailure(req, ownerIdOf(req)); return reply.code(400).send({ error: err.userMessage }); }
           throw err;
         }
+        // A token problem, not the agent's state: 400, so a client asks for another (the CLI's tokenTurnedDown).
         if (deps.channel.pool.owns(username)) {
-          return reply.code(409).send({ error: `@${username} is a spare bot in the pool. Use "a ready bot from the pool" instead, or remove it from the pool first.` });
+          return reply.code(400).send({ error: `@${username} is a spare bot in the pool. Use "a ready bot from the pool" instead, or remove it from the pool first.` });
         }
+        checked = username;
       }
 
       // Reuse: the bot a hand-built workspace already owns. Resolved here
@@ -10658,29 +12071,40 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             error: `Something is still polling @${existing.accountId}. Stop it, then try again.`,
           });
         }
+        try { checked = await verifyBotToken(existing.botToken); }
+        catch (err) {
+          if (err instanceof InvalidBotTokenError) return reply.code(400).send({ error: err.userMessage });
+          throw err;
+        }
         token = existing.botToken;
       }
-      if (!token) return reply.code(400).send({ error: 'token required' });
+      if (!token || !checked) return reply.code(400).send({ error: 'token required' });
+      const inUseBy = store.findAgentUsingAccount(checked);
+      if (inUseBy && inUseBy.id !== agent.id) {
+        // Not taken: a later Retry would provision the agent onto the other
+        // agent's bot, and both would poll the same token.
+        return reply.code(400).send({
+          error: `That bot is already connected to "${inUseBy.name}". Each agent needs its own bot — create another with @BotFather.`,
+        });
+      }
+      // After every wait above: checked and claimed together.
+      if (!open()) return notOpen();
+      claim();
+      let username: string;
       try {
-        const { username } = await deps.channel.submitToken(agent.id, token);
-        const inUseBy = store.findAgentUsingAccount(username);
-        if (inUseBy && inUseBy.id !== agent.id) {
-          // submitToken() has already stashed it as this agent's pending
-          // identity. Forget it, or a later Retry provisions the agent onto
-          // the other agent's bot and both poll the same token.
-          deps.channel.discardPending?.(agent.id);
-          return reply.code(400).send({
-            error: `That bot is already connected to "${inUseBy.name}". Each agent needs its own bot — create another with @BotFather.`,
-          });
-        }
-        kickProvision(agent.id);
-        return reply.code(202).send({ username });
+        // Held in memory at once and on disk (telegramManual.ts) for setup to take.
+        ({ username } = await deps.channel.submitToken(agent.id, token, checked));
       } catch (err) {
-        if (err instanceof InvalidBotTokenError) {
-          return reply.code(400).send({ error: err.userMessage });
-        }
+        unclaim();
+        deps.channel.discardPending?.(agent.id);
+        if (err instanceof InvalidBotTokenError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }
+      provisionWhenFree(agent.id);
+      // `stepAnswered`: the step shows as setting up until setup takes the
+      // token, so a step shown after this is a refusal (the CLI's pollAgent;
+      // v2.177 and before showed it until then, and said nothing of it).
+      return reply.code(202).send({ username, stepAnswered: true });
     },
   );
 
@@ -10778,24 +12202,33 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
     if (token) {
       if (throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
-      try {
-        const { username } = await deps.channel.submitToken(agent.id, token);
-        const inUseBy = store.findAgentUsingAccount(username);
-        if (inUseBy && inUseBy.id !== agent.id) {
-          deps.channel.discardPending?.(agent.id);
-          return reply.code(400).send({ error: `That bot is already connected to "${inUseBy.name}". Each agent needs its own bot — create another with @BotFather.` });
-        }
-        // A spare bot's token pasted by hand went down the manual path and
-        // left the pool row unleased; the next lease of that bot then failed
-        // the agent it went to (2026-09-25). The pool is the way to it.
-        if (deps.channel.pool.owns(username)) {
-          deps.channel.discardPending?.(agent.id);
-          return reply.code(409).send({ error: `@${username} is a spare bot in the pool. Leave the token box empty and the agent takes a spare — or remove it from the pool first.` });
-        }
-      } catch (err) {
+      // Every check before the token is held: one refused here is never
+      // written to disk (telegram/pending/<id>), where it outlived the refusal.
+      let username: string;
+      try { username = await verifyBotToken(token); }
+      catch (err) {
         if (err instanceof InvalidBotTokenError) { noteFailure(req, ownerIdOf(req)); return reply.code(400).send({ error: err.userMessage }); }
         throw err;
       }
+      const inUseBy = store.findAgentUsingAccount(username);
+      if (inUseBy && inUseBy.id !== agent.id) {
+        return reply.code(400).send({ error: `That bot is already connected to "${inUseBy.name}". Each agent needs its own bot — create another with @BotFather.` });
+      }
+      // A spare bot's token pasted by hand went down the manual path and
+      // left the pool row unleased; the next lease of that bot then failed
+      // the agent it went to (2026-09-25). The pool is the way to it.
+      if (deps.channel.pool.owns(username)) {
+        return reply.code(400).send({ error: `@${username} is a spare bot in the pool. Leave the token box empty and the agent takes a spare — or remove it from the pool first.` });
+      }
+      // A store that refused it left it held in memory, where the next
+      // attach took it unasked: let go, from memory and disk, before the 500.
+      try { await deps.channel.submitToken(agent.id, token, username); }
+      catch (err) { await deps.channel.discardPending?.(agent.id); throw err; }
+    } else {
+      // From the pool: a token held from an earlier setup (one that failed,
+      // or was answered as the agent got another bot) is not wanted now, and
+      // held, it would win over the pool (composite.ts).
+      deps.channel.discardPending?.(agent.id);
     }
     let result;
     try {
@@ -10804,6 +12237,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (err instanceof ChannelSetupRequired) {
         return reply.code(409).send({ needsToken: true, error: 'No spare bots in the pool. Create one with @BotFather and paste its token.' });
       }
+      // Not taken: held, it would outlive this answer, and win over the pool
+      // at the next setup (composite.ts). Gone from memory and disk first.
+      await deps.channel.discardPending?.(agent.id);
       throw err;
     }
     const clash = store.findAgentUsingAccount(result.accountId);
@@ -10872,7 +12308,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // card. (claimFirstContact waits out the rebuild that is starting now.)
     if (!ownerKnown && agent.runtimeRef) {
       void claimFirstContact(
-        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        { store, provider: providerFor(agent.hostId), providerFor, log: trace(agent.id) },
         { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: result.accountId, forUserId: agent.ownerId, timeoutMs: 30 * 60_000, excludeIds: priorChatIdsOf(result.accountId) },
       ).catch((err) => app.log.error({ err, agentId: agent.id }, 'owner claim after attach failed'));
     }
@@ -11182,9 +12618,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // inside it: two attaches at once (a double-click; the app and the
     // manager) both passed the check above, and the loser deleted the
     // winner's token, which lives under the same key (night review).
-    let outcome: 'ok' | 'has-one' | 'taken';
+    // The agent asked again too: deleted while the platform was asked, the
+    // tombstone got a channel row and a stored token (HB-0568).
+    let outcome: 'ok' | 'has-one' | 'taken' | 'gone' | 'not-ready';
     try {
       outcome = await whileBusy(agent.id, async () => {
+    if (agentGone(agent.id)) return 'gone' as const;
+    const now = store.getAgent(agent.id);
+    if (!now?.runtimeRef || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) return 'not-ready' as const;
     if (store.getChannelForAgent(agent.id, kind)) return 'has-one' as const;
     await secrets.put(secretRef, secretValue);
     try {
@@ -11216,6 +12657,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
       throw err;
     }
+    if (outcome === 'gone') return reply.code(409).send({ error: AGENT_GONE });
+    if (outcome === 'not-ready') return reply.code(409).send({ error: `It changed while ${conn.label} was checked (it is ${String(store.getAgent(agent.id)?.state ?? 'gone').toLowerCase()}): try again once it is running.` });
     if (outcome === 'has-one') return reply.code(409).send({ error: `It already has ${conn.label}. Remove it first to connect a different app.` });
     if (outcome === 'taken') return reply.code(409).send({ error: `That ${conn.label} app was just connected to another agent. Each agent needs its own app.` });
     if (pooled) {
@@ -11391,7 +12834,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const ga = agent.groupAccess?.mode ?? 'members';
       if (ga !== 'off' && !me.result.can_join_groups) warnings.push('Groups are off at BotFather: /setjoingroups → Enable, or it cannot be added to a group.');
       if (ga !== 'off' && !me.result.can_read_all_group_messages) warnings.push('Privacy mode is on: in a group it only sees @mentions and commands. /setprivacy → Disable at BotFather, then remove and re-add it to the group.');
-      const st = (row.settings ?? {}) as Record<string, unknown>;
+      // Judged against the row as it is NOW, as the other apps' are: a bot
+      // swapped in while Telegram was asked got the old bot's name (HB-0598).
+      const nowRow = store.getChannelForAgent(agent.id, 'telegram');
+      if (!nowRow || nowRow.accountId !== row.accountId || nowRow.secretRef !== row.secretRef) return reply.code(409).send({ error: 'Its Telegram bot changed meanwhile — look again.' });
+      const st = (nowRow.settings ?? {}) as Record<string, unknown>;
       store.setChannelSettings(agent.id, 'telegram', { ...st, botName: me.result.first_name, warnings, checkedAt: new Date().toISOString() });
       botNameCache.set(agent.id, { fetchedAt: Date.now(), value: me.result.first_name });
       trace(agent.id)('channel.rechecked', { kind: 'telegram', warnings: warnings.length });
@@ -11727,22 +13174,122 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * one for the same client ID left every agent on the old one, shown with a
    * check mark, until the old was deleted at Google and its tools stopped
    * refreshing (HB-0427). Running agents get it now, one at a time, off the
-   * request; the rest are marked (secretPending) until their next start.
+   * request; the rest are marked (secretPending) until their next start, or
+   * until the pass for what is still owed reaches them running (HB-0463).
    */
   const pushClientSecret = (clientId: string): { pushing: number; waiting: number } => {
-    const ids = new Set(store.markClientSecretChanged('google', clientId, new Date().toISOString())
-      .flatMap((conn) => store.listConnectionAttachments(conn).map((x) => x.agentId)));
-    const holders = [...ids].map((id) => store.getAgent(id)).filter((a): a is Agent => !!a && a.state !== 'DELETED' && a.state !== 'ARCHIVED' && !a.migratedTo);
-    const now = holders.filter((a) => a.state === 'RUNNING' && !!a.runtimeRef && !isBusy(a.id));
-    const waiting = holders.length - now.length;
-    if (holders.length) trace()('google.client_secret_changed', { pushing: now.length, waiting });
-    void (async () => {
-      for (const a of now) {
-        await syncConnections(connSyncDeps(a.hostId), a.id, a.runtimeRef!)
-          .catch((err: unknown) => trace(a.id)('connection.sync_failed', { error: String(err).slice(0, 200) }));
+    store.markClientSecretChanged('google', clientId, new Date().toISOString());
+    const sent = deliverClientSecretNow(clientId);
+    if (sent.pushing + sent.waiting) trace()('google.client_secret_changed', sent);
+    return sent;
+  };
+  /**
+   * Who is still owed the client's last saved secret, from one store query
+   * (the Connections page's secretPending reads the same): an account attached
+   * and never imported, or imported before it. One made with another client
+   * is not owed: only connecting it again mends it (needsReconnect).
+   */
+  type OwedSecret = ReturnType<Store['connectionsOwedClientSecret']>[number];
+  const owedClientSecret = (clientId: string): OwedSecret[] =>
+    store.connectionsOwedClientSecret('google', clientId)
+      .filter((o) => o.state !== 'DELETED' && o.state !== 'ARCHIVED' && !o.migratedTo);
+  /** Failed imports of a new secret in a row, per agent and account, and when the pass tries again: 10 minutes, doubling up to a day. */
+  const secretRetries = new Map<string, { fails: number; at: number }>();
+  const SECRET_RETRY_MS = 10 * 60_000;
+  const SECRET_RETRY_MAX_MS = 24 * 3600_000;
+  /**
+   * An agent's owed accounts, in one connection turn and one exec, judged
+   * again once it is its turn: the agent running and free, each account still
+   * owed (an import that ran meanwhile, a rebuild's included, has it). Only
+   * those accounts are imported, not every one it holds. Each keeps its own
+   * result (materializeConnections): its back-off, its stamp, its Setup log
+   * line. A back-off counts from the pass that tried it (`passAt`), so the
+   * first retry is the next pass ten minutes on, not the one after.
+   */
+  const deliverSecretTo = async (agentId: string, connectionIds: string[], clientId: string, passAt = Date.now()): Promise<void> => {
+    const first = await withConnectionLock(agentId, async (): Promise<boolean> => {
+      const a = store.getAgent(agentId);
+      if (!a || a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id) || a.migratedTo) return false;
+      // Each address before the import, as an attach takes it: a connection
+      // deleted meanwhile has none to read after, and its account stayed.
+      const owed = connectionIds.flatMap((connectionId) => {
+        const o = store.connectionOwedClientSecret('google', clientId, agentId, connectionId);
+        return o ? [{ connectionId, never: !o.materializedAt, email: store.getConnection(connectionId)?.email }] : [];
+      });
+      if (!owed.length) return false;
+      const deps = connSyncDeps(a.hostId);
+      const results = await materializeConnections(deps, { id: a.id, slug: a.slug, runtimeRef: a.runtimeRef }, owed.map((o) => o.connectionId))
+        .catch((err: unknown) => owed.map(({ connectionId }) => ({ connectionId, ok: false, error: String(err).slice(0, 200) })));
+      let anyFirst = false;
+      for (const o of owed) {
+        const r = results.find((x) => x.connectionId === o.connectionId) ?? { ok: false, error: 'import failed' };
+        // Detached or deleted during the import: off again, as an attach does.
+        await offAgainIfDetached(deps, { id: a.id, runtimeRef: a.runtimeRef }, o.connectionId, o.email).catch(() => false);
+        const key = `${agentId}\n${o.connectionId}`;
+        if (r.ok) {
+          secretRetries.delete(key);
+          if (o.never) anyFirst = true;
+          continue;
+        }
+        const fails = (secretRetries.get(key)?.fails ?? 0) + 1;
+        secretRetries.set(key, { fails, at: passAt + Math.min(SECRET_RETRY_MS * 2 ** (fails - 1), SECRET_RETRY_MAX_MS) });
+        trace(a.id)('connection.sync_failed', { error: String(r.error ?? 'import failed').slice(0, 200) });
       }
+      return anyFirst;
+    });
+    // A first import: AGENTS.md names the accounts now, as after an attach (HB-0394). Once for them all.
+    if (first) await syncGoogleDocs(agentId).catch(() => {});
+  };
+  /**
+   * The running, free agents still owed it get it, one at a time, off the
+   * request; a stopped one at its next start, wake or rebuild. One that was
+   * busy, or whose import failed, was never asked again (HB-0463): the
+   * 10-minute pass asks it (clientSecretSweep), backing off one that keeps
+   * failing, and saving the client again, changed or not, asks at once.
+   */
+  const deliverClientSecret = (
+    clientId: string,
+    opts: { backoff?: boolean; owed?: OwedSecret[] } = {},
+  ): { sent: { pushing: number; waiting: number }; done: Promise<void> } => {
+    // The pass hands in the list it pruned its back-offs by: one query a pass.
+    const owed = opts.owed ?? owedClientSecret(clientId);
+    const now = Date.now();
+    const due = owed.filter(({ agentId, connectionId, state, runtimeRef }) => state === 'RUNNING' && !!runtimeRef && !isBusy(agentId)
+      && (!opts.backoff || (secretRetries.get(`${agentId}\n${connectionId}`)?.at ?? 0) <= now));
+    // Grouped by agent: one connection turn, and one AGENTS.md, for its accounts.
+    const byAgent = new Map<string, string[]>();
+    for (const { agentId, connectionId } of due) byAgent.set(agentId, [...(byAgent.get(agentId) ?? []), connectionId]);
+    const done = (async () => {
+      for (const [agentId, connectionIds] of byAgent) await deliverSecretTo(agentId, connectionIds, clientId, now).catch(() => {});
     })().catch(() => {});
-    return { pushing: now.length, waiting };
+    const pushing = new Set(due.map((d) => d.agentId));
+    const waiting = new Set(owed.map((o) => o.agentId).filter((id) => !pushing.has(id)));
+    return { sent: { pushing: pushing.size, waiting: waiting.size }, done };
+  };
+  /** Saving the client: everyone owed is asked at once, a back-off forgotten (the owner may have mended the cause). */
+  const deliverClientSecretNow = (clientId: string): { pushing: number; waiting: number } => {
+    secretRetries.clear();
+    return deliverClientSecret(clientId).sent;
+  };
+  /**
+   * The pass: the running agents still owed the configured client's secret,
+   * from the records, so a restart loses nothing. Not while the last pass
+   * still runs (undefined then); it ends when its imports have.
+   */
+  let secretPassRunning = false;
+  const clientSecretSweep = async (): Promise<{ pushing: number; waiting: number } | undefined> => {
+    if (secretPassRunning) return undefined;
+    secretPassRunning = true;
+    try {
+      const c = await getOAuthClient();
+      if (!c) return undefined;
+      const owed = owedClientSecret(c.clientId);
+      const owedNow = new Set(owed.map(({ agentId, connectionId }) => `${agentId}\n${connectionId}`));
+      for (const key of secretRetries.keys()) if (!owedNow.has(key)) secretRetries.delete(key);
+      const { sent, done } = deliverClientSecret(c.clientId, { backoff: true, owed });
+      await done;
+      return sent;
+    } finally { secretPassRunning = false; }
   };
   /** After an attach or detach: AGENTS.md names the accounts the agent holds (HB-0394). A stopped agent gets it at its next start. */
   const syncGoogleDocs = async (agentId: string): Promise<void> => {
@@ -11866,7 +13413,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     await secrets.put(GOOGLE_CLIENT_REF, JSON.stringify(parsed.data));
     if (breaks) trace()('google.client_replaced', { reconnect: breaks });
     const changed = old?.clientId !== parsed.data.clientId || old?.clientSecret !== parsed.data.clientSecret;
-    return { configured: true, clientId: parsed.data.clientId, reconnect: breaks, ...(changed ? pushClientSecret(parsed.data.clientId) : { pushing: 0, waiting: 0 }) };
+    return { configured: true, clientId: parsed.data.clientId, reconnect: breaks, ...(changed ? pushClientSecret(parsed.data.clientId) : deliverClientSecretNow(parsed.data.clientId)) };
   });
 
   app.delete('/v1/google-oauth/client', async (req, reply) => {
@@ -11981,6 +13528,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get('/v1/connections', async (req) => {
     const mine = store.listConnections(ownerIdOf(req));
     const client = await getOAuthClient();
+    // Who still holds the old client secret: the query the pass that delivers
+    // it reads, so the two cannot disagree (HB-0463).
+    const owedSecret = new Set(client ? store.connectionsOwedClientSecret('google', client.clientId, { ownerId: ownerIdOf(req) }).map((p) => `${p.agentId}\n${p.connectionId}`) : []);
     return {
       connections: mine.map(({ clientId, clientSecretAt, ...c }) => {
         const attachedTo = store
@@ -12003,7 +13553,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             // attachment would false-flag on first load.
             stale: !!at.materializedAt && at.materializedAt < c.createdAt,
             // It holds the client secret from before the last one saved (HB-0427).
-            secretPending: !!clientSecretAt && (!at.materializedAt || at.materializedAt < clientSecretAt),
+            secretPending: owedSecret.has(`${a!.id}\n${c.id}`),
           }));
         // Made with a client other than the one set now: its token no longer
         // works, and only connecting the account again mends it.
@@ -12394,8 +13944,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // ?latest=1: only the newest set's date and flags, no volume list — the
     // home screen polls this for "how old is the last backup", and the full
     // list is ~140 KB on a big fleet (night review).
+    // The host an agent missing from a set is on, named when it is not this machine.
+    const remoteHost = (hostId: string) => {
+      const h = store.getHost(hostId);
+      return h && h.kind !== 'local' ? h.name : undefined;
+    };
     if (req.query?.latest === '1') {
-      return { backups: listBackups().slice(0, 1).map(({ volumes: _v, ...set }) => ({ ...set, volumes: [] })) };
+      // With who that set does not cover, as the full answer has it: the
+      // home screen's machine line reads both (fourteenth review: it fetched
+      // every set for them).
+      const [newest] = listBackups(backupsDir(), { limit: 1 });
+      const missing = newest && !newest.running ? agentsMissingFromSet(newest, store.listAllActiveAgents(), remoteHost) : [];
+      return { backups: newest ? [{ ...newest, volumes: [] }] : [], missing };
     }
     // Match each backed-up volume to a live agent so the panel can offer a
     // per-agent Restore (and show its real name). Backups are machine-level (the
@@ -12405,7 +13965,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // owners' agents all show up as "deleted".
     const all = store.listAllActiveAgents();
     const byArchive = new Map(all.filter((a) => a.runtimeRef).map((a) => [agentArchiveName(a.runtimeRef!), a]));
-    const backups = listBackups().map((set) => ({
+    // With the sets made by another install or under an earlier key, labelled
+    // (BackupSet.foreign): hidden, an install's own vanished after a key change.
+    const backups = listBackups(backupsDir(), { others: true }).map((set) => ({
       ...set,
       volumes: set.volumes.map((v) => {
         const a = byArchive.get(v.file);
@@ -12415,13 +13977,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Who the newest set does NOT cover: an agent on a runner is never in it
     // (the script archives this machine's volumes only), and nothing said so
     // (review, 2026-09-29). The host is named when it is not this machine.
-    const newest = backups[0];
-    const missing = newest && !newest.running
-      ? agentsMissingFromSet(newest, all, (hostId) => {
-          const h = store.getHost(hostId);
-          return h && h.kind !== 'local' ? h.name : undefined;
-        })
-      : [];
+    const newest = backups.find((b) => !b.foreign);
+    const missing = newest && !newest.running ? agentsMissingFromSet(newest, all, remoteHost) : [];
     return { dir: backupsDir(), keepDays: keepDays(), run: backupRunState(), backups, missing };
   });
 
@@ -12477,7 +14034,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       hostView.set(id, { name: h.name, local, ...(reachable !== undefined ? { reachable } : {}) });
     }));
     const drills = listDrills();
-    const r = computeReadiness({ sets: listBackups(), drills, agents, host: (id) => hostView.get(id), now: Date.now() });
+    const r = computeReadiness({ sets: listBackups(backupsDir(), { others: true }), drills, agents, host: (id) => hostView.get(id), now: Date.now() });
     const last = drills[0];
     return {
       ...r,
@@ -12549,7 +14106,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const drillSweep = (now = new Date()): boolean => {
     const every = drillEvery();
     if (every === 'off') return false;
-    const sets = listBackups();
+    const sets = listBackups(backupsDir(), { limit: 1 }); // only the newest is asked about
     const last = listDrills()[0];
     const d = drillDue({
       every, now, newestSet: sets[0], backupRunning: backupRunState().status === 'running', drillRunning: drillRunState().status === 'running',
@@ -12567,9 +14124,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Restore ONE agent's whole volume from a backup set. Destructive and
   // owner-only; it overwrites live memory, so it holds the busy guard for the
   // stop → import → start swap the same way a snapshot restore does.
-  app.post<{ Body: { agentId?: string; date?: string } }>('/v1/backups/restore', async (req, reply) => {
+  app.post<{ Body: { agentId?: string; date?: string; otherKey?: boolean } }>('/v1/backups/restore', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
-    const { agentId, date } = (req.body as { agentId?: string; date?: string } | null) ?? {};
+    const { agentId, date, otherKey } = (req.body as { agentId?: string; date?: string; otherKey?: boolean } | null) ?? {};
     if (!agentId || !date) return reply.code(400).send({ error: 'agentId and date are required.' });
     // Machine-level, like the panel above: the host owner can restore any agent
     // on this box, not only ones they personally own.
@@ -12590,6 +14147,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         afterStart: startHooksFor,
         requestedBy: ownerIdOf(req),
         onOperation,
+        // The owner's yes to a set made by another install or under an earlier key.
+        otherKey: otherKey === true,
       }, agent.id, date));
     try {
       if (waitAsked(req)) return await run();
@@ -12599,7 +14158,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return bg.started ? accepted(reply, bg.opId) : bg.value;
     } catch (err) {
       if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
-      if (err instanceof RestoreError) return reply.code(400).send({ error: err.userMessage });
+      if (err instanceof RestoreError) return reply.code(400).send({ error: err.userMessage, ...(err.code ? { code: err.code } : {}) });
       throw err;
     }
   });
@@ -13169,6 +14728,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // import awaits anything, so GET /v1/moves/:id can answer for it while
       // it has no agent row yet (issue #19, 2026-10-09).
       const receipt = receiveMove(store, moveIdFrom(req.headers[MOVE_HEADER]), ownerId);
+      // Not held while it runs (minutes for a large one, and the source's
+      // delete would be refused as long): one deleted meanwhile is refused where the
+      // agent is written, before its operation begins, so it is this
+      // request's own answer (409), as is one gone by the look above (HB-0570).
       const run = (onOperation?: (id: string) => void) => importAgent(
         // No id yet — trace() picks it up from the orchestrator's log detail.
         { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
@@ -13191,6 +14754,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
         if (err instanceof ImportCleanupPending) return reply.code(503).send({ error: err.message, operation });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
+        if (err instanceof SourceGoneError) return reply.code(409).send({ error: err.userMessage, operation });
         throw err;
       }
     },
@@ -13553,6 +15117,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       for (const ref of created) await secrets.delete(ref).catch(() => {});
       try {
         store.scrubAgentResidue(agent.id);
+        classWrote.delete(agent.id);
+        modelWaitsImage.delete(agent.id);
         store.setAgentState(agent.id, 'DELETING');
         store.setAgentState(agent.id, 'DELETED');
       } catch { /* rollback is best-effort; the import error below is what the user sees */ }
@@ -13634,6 +15200,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           for (const ref of created) await secrets.delete(ref).catch(() => {});
           try {
             store.scrubAgentResidue(clone.id);
+            classWrote.delete(clone.id);
+            modelWaitsImage.delete(clone.id);
             store.setAgentState(clone.id, 'DELETING');
             store.setAgentState(clone.id, 'DELETED');
           } catch { /* best-effort; the error below is what the user sees */ }
@@ -13753,11 +15321,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (layer.soul === undefined && layer.agents === undefined) {
       return reply.code(400).send({ error: 'The master has neither a SOUL.md nor an AGENTS.md to push.' });
     }
-    const results: Array<{ id: string; name: string; ok: boolean; error?: string }> = [];
-    for (const child of children) {
+    type Pushed = { id: string; name: string; ok: boolean; error?: string };
+    // The children together, four at a time: one after another, a request
+    // behind several slow ones waited a turn's whole bound for each. A slot
+    // first, then the child's turn, so one waiting for a slot holds nothing
+    // of the child's; every turn is waited for until one shared deadline.
+    const working = semaphore(4);
+    const deadline = Date.now() + CORE_FILES_WAIT_MS;
+    const inSlot = async <T>(fn: () => Promise<T>): Promise<T> => {
+      await working.acquire();
+      try { return await fn(); } finally { working.release(); }
+    };
+    const settled = await Promise.allSettled(children.map(async (child): Promise<Pushed> => {
       if (child.state !== 'RUNNING' || !child.runtimeRef) {
-        results.push({ id: child.id, name: child.name, ok: false, error: `not running (${child.state})` });
-        continue;
+        return { id: child.id, name: child.name, ok: false, error: `not running (${child.state})` };
       }
       // A child whose long operation is not over (a restore interrupted by a
       // restart, say) has files that are being put right: the transient busy
@@ -13765,38 +15342,37 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // recovery (review 2026-10-23). Refused in the operation's words, as
       // every other file-writing route does.
       const onDisk = operationRefusal(store, child.id);
-      if (onDisk) {
-        results.push({ id: child.id, name: child.name, ok: false, error: onDisk });
-        continue;
-      }
+      if (onDisk) return { id: child.id, name: child.name, ok: false, error: onDisk };
       try {
-        // Same split as the /params route: env creds and datasource repo
-        // bindings never live in paramValues, so a required one must not
-        // fail the resolve and block the push. Resolved against the MASTER's
-        // current declarations, so a field added after derive reaches the
-        // child too (leniently — the child fills its value later; until then
-        // the {{placeholder}} renders verbatim, same as any unknown key).
-        // The fields the child has after this push: the master's, and the
-        // placeholders the pushed text still uses (pushedParameters).
-        // The child's layer after it: the master's files, and the child's own
-        // for a file the master has none of (that file is not written, so the
-        // child's layer is still what it renders from; storing only the
-        // master's dropped it, and Setup values never changed it again —
-        // audit #015).
-        const childLayer = {
-          soul: layer.soul ?? child.paramFiles?.soul,
-          agents: layer.agents ?? child.paramFiles?.agents,
-          persona: layer.persona ?? child.paramFiles?.persona,
-        };
-        const childParams = pushedParameters(master.parameters, childLayer, child.parameters);
-        const pushedParams = childParams
-          .filter((p) => p.target !== 'env' && p.target !== 'datasource')
-          .map((p) => ({ ...p, required: false }));
-        const values = resolveParamValues(pushedParams, child.paramValues ?? {});
-        // Rendered before any file is written: one too long fails this child only (HB-0309).
-        const persona = typeof layer.persona === 'string' ? renderPersona(layer.persona, values) : undefined;
-        await whileBusy(child.id, async () => {
-          await autoSnapshot(snapshotDeps(child), child.id, 'pre-params');
+        const pushedTo = await inSlot(() => withCoreFilesTurn(child.id, () => whileBusy(child.id, async () => {
+          // The child as it is at its turn, not as read before the wait: its
+          // own values applied meanwhile went back to the old ones.
+          const fresh = freshRunning(child.id, (a) => `not running (${a.state})`);
+          // Same split as the /params route: env creds and datasource repo
+          // bindings never live in paramValues, so a required one must not
+          // fail the resolve and block the push. Resolved against the MASTER's
+          // current declarations, so a field added after derive reaches the
+          // child too (leniently — the child fills its value later; until then
+          // the {{placeholder}} renders verbatim, same as any unknown key).
+          // The fields the child has after this push: the master's, and the
+          // placeholders the pushed text still uses (pushedParameters).
+          // The child's layer after it: the master's files, and the child's own
+          // for a file the master has none of (that file is not written, so the
+          // child's layer is still what it renders from; storing only the
+          // master's dropped it, and Setup values never changed it again —
+          // audit #015).
+          const childLayer = {
+            soul: layer.soul ?? fresh.paramFiles?.soul,
+            agents: layer.agents ?? fresh.paramFiles?.agents,
+            persona: layer.persona ?? fresh.paramFiles?.persona,
+          };
+          const childParams = pushedParameters(master.parameters, childLayer, fresh.parameters);
+          const pushedParams = childParams
+            .filter((p) => p.target !== 'env' && p.target !== 'datasource')
+            .map((p) => ({ ...p, required: false }));
+          const values = resolveParamValues(pushedParams, fresh.paramValues ?? {});
+          // Rendered before any file is written: one too long fails this child only (HB-0309).
+          const persona = typeof layer.persona === 'string' ? renderPersona(layer.persona, values) : undefined;
           // The child's "## Data sources" section is platform-maintained and
           // describes the CHILD's own mounts — a wholesale write of the
           // master's file told every child it had the master's repos until
@@ -13804,14 +15380,31 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // back into the pushed content.
           let childAgentsRead = true;
           const childAgentsMd = typeof layer.agents === 'string'
-            ? await readCapped(child, 'AGENTS.md').catch(() => {
+            ? await readCapped(fresh, 'AGENTS.md').catch(() => {
               childAgentsRead = false;
               return undefined;
             })
             : undefined;
-          const childDataSection = extractSection(childAgentsMd ?? '', DATA_SOURCES_HEADING);
+          const childData = readSection(childAgentsMd ?? '', DATA_SOURCES_HEADING);
           // Its Google accounts too: another agent's addresses must not reach it, nor its own go missing (HB-0394).
-          const childGoogleSection = extractSection(childAgentsMd ?? '', GOOGLE_ACCOUNTS_HEADING);
+          const childGoogle = readSection(childAgentsMd ?? '', GOOGLE_ACCOUNTS_HEADING);
+          // One its fences leave unsure is not "none": pushed, it kept the
+          // master's Data sources or dropped its own Google accounts. This
+          // child is not pushed, and says why (eighth review of HB-0520).
+          const unsureHeading = childData.unsure ? DATA_SOURCES_HEADING : childGoogle.unsure ? GOOGLE_ACCOUNTS_HEADING : undefined;
+          if (unsureHeading) throw new Error(`its AGENTS.md has a code fence that doesn't close above "${unsureHeading.replace(/^#+ /, '')}"; fix it and push again`);
+          const childDataSection = childData.text;
+          const childGoogleSection = childGoogle.text;
+          // The master's own fences too: a section of the master's they leave
+          // unsure is not replaced, and its own Google accounts or Data
+          // sources went to the child (HB-0394). Refused, naming the master;
+          // a section the push only removes goes in every copy (ninth review).
+          const masterAgents = typeof layer.agents === 'string' ? applyParamValues(layer.agents, values) : '';
+          const masterUnsure = [childDataSection ? DATA_SOURCES_HEADING : '', childGoogleSection ? GOOGLE_ACCOUNTS_HEADING : '']
+            .find((h) => h && readSection(masterAgents, h).unsure);
+          if (masterUnsure) throw new Error(`${master.name}'s AGENTS.md has a code fence that doesn't close above "${masterUnsure.replace(/^#+ /, '')}"; fix it there and push again`);
+          // Checked before the snapshot: a child not pushed gets none (ninth review).
+          await autoSnapshot(snapshotDeps(fresh), child.id, 'pre-params');
           // Both files or neither: a SOUL.md written and an AGENTS.md that
           // failed left the child half on the new definition, with the
           // bookkeeping below skipped (review, 2026-10-22). What was written
@@ -13821,7 +15414,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // One that was there and empty goes back empty.
           const written: Array<[string, string | undefined]> = [];
           const write = (nameF: string, text: string) =>
-            writeFileInAgent(providerFor(child.hostId), child.runtimeRef!, workspacePath(child.slug, nameF), Buffer.from(text, 'utf8').toString('base64'));
+            writeFileInAgent(providerFor(fresh.hostId), fresh.runtimeRef!, workspacePath(fresh.slug, nameF), Buffer.from(text, 'utf8').toString('base64'));
           try {
             for (const [nameF, text] of [['SOUL.md', layer.soul], ['AGENTS.md', layer.agents]] as const) {
               if (typeof text !== 'string') continue;
@@ -13830,11 +15423,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
                 rendered = replaceSection(rendered, DATA_SOURCES_HEADING, childDataSection);
               }
               if (nameF === 'AGENTS.md') {
-                rendered = childGoogleSection ? replaceSection(rendered, GOOGLE_ACCOUNTS_HEADING, childGoogleSection) : removeSection(rendered, GOOGLE_ACCOUNTS_HEADING);
+                rendered = childGoogleSection ? replaceSection(rendered, GOOGLE_ACCOUNTS_HEADING, childGoogleSection) : removeSectionEverywhere(rendered, GOOGLE_ACCOUNTS_HEADING);
               }
               if (Buffer.byteLength(rendered, 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(nameF); // review R16
               let beforeRead = nameF === 'AGENTS.md' ? childAgentsRead : true;
-              const before = nameF === 'AGENTS.md' ? childAgentsMd : await readCapped(child, nameF).catch(() => {
+              const before = nameF === 'AGENTS.md' ? childAgentsMd : await readCapped(fresh, nameF).catch(() => {
                 beforeRead = false;
                 return undefined;
               });
@@ -13843,7 +15436,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
               // was, it goes back with the others.
               const r = await write(nameF, rendered).catch(async (err: unknown) => {
                 let nowRead = true;
-                const now = await readCapped(child, nameF).catch(() => {
+                const now = await readCapped(fresh, nameF).catch(() => {
                   nowRead = false;
                   return undefined;
                 });
@@ -13858,25 +15451,36 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             if (back.every(Boolean)) throw err;
             throw new Error(`write failed, and ${written.filter((_, i) => !back[i]).map(([n]) => n).join(', ')} could not be put back: restore the pre-params snapshot`);
           }
-        });
-        if (persona !== undefined) store.setAgentPersona(child.id, persona);
-        // The pushed RAW layer becomes the child's new template layer, so its
-        // own Setup-values edits keep working against the CURRENT definition —
-        // and the master's current field declarations come along, so the
-        // child's values panel can ask for any newly-added field.
-        store.setAgentParamState(child.id, values, childLayer);
-        store.setAgentParameters(child.id, childParams.length ? childParams : null);
+          // Recorded before the turn ends, so a snapshot waiting on it takes
+          // these files with these values and this layer (HB-0566).
+          if (persona !== undefined) store.setAgentPersona(child.id, persona);
+          // The pushed RAW layer becomes the child's new template layer, so its
+          // own Setup-values edits keep working against the CURRENT definition —
+          // and the master's current field declarations come along, so the
+          // child's values panel can ask for any newly-added field. A key at a
+          // time: a file the master has none of stays as the child has it now,
+          // not as read before the writes (a description changed meanwhile went back: HB-0567).
+          store.setAgentParamState(child.id, values);
+          for (const key of ['soul', 'agents', 'persona'] as const) {
+            if (typeof layer[key] === 'string') store.setAgentParamFile(child.id, key, layer[key]);
+          }
+          store.setAgentParameters(child.id, childParams.length ? childParams : null);
+          return fresh;
+        }), Math.max(0, deadline - Date.now())));
         // Its OWN managed sections back (its peers, data sources, operator,
         // memory rules): the master's came along in the pushed file and stood
         // until the child's next rebuild (2026-09-28). Best-effort, off the reply.
-        if (child.runtimeRef && child.state === 'RUNNING') void syncDocsHeld(child);
+        if (pushedTo.runtimeRef && pushedTo.state === 'RUNNING') void syncDocsHeld(pushedTo);
         trace(child.id)('definition.pushed', { from: master.id });
-        results.push({ id: child.id, name: child.name, ok: true });
+        return { id: child.id, name: child.name, ok: true };
       } catch (err) {
         // 200: a too-long description's reason (146) and renderedTooBig's were cut mid-word at 120 (HB-0309).
-        results.push({ id: child.id, name: child.name, ok: false, error: String((err as Error).message ?? err).slice(0, 200) });
+        return { id: child.id, name: child.name, ok: false, error: String((err as Error).message ?? err).slice(0, 200) };
       }
-    }
+    }));
+    const results = settled.map((r, i): Pushed => (r.status === 'fulfilled'
+      ? r.value
+      : { id: children[i]!.id, name: children[i]!.name, ok: false, error: String((r.reason as Error)?.message ?? r.reason).slice(0, 200) }));
     return { pushed: results.filter((r) => r.ok).length, results };
   });
 
@@ -13975,20 +15579,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(404).send({ error: 'No such pending proposal.' });
       }
       const stamp = new Date().toISOString().slice(0, 10);
-      const distilledBlock = `\n\n<!-- distilled from ${proposal.childName}, ${stamp} -->\n${proposal.text}\n`;
-      // Keep the master's own template layer coherent: append the SAME block
-      // to the raw placeholder-bearing layer. (Reading the live file back
-      // froze its RENDERED text — placeholders gone — into the layer, so the
-      // next Apply-values had nothing to substitute; 10th audit.)
-      const layerAgents = master.paramFiles?.agents !== undefined
-        ? `${(master.paramFiles.agents ?? '').trimEnd()}${distilledBlock}`
-        : undefined;
+      // The proposal's id marks its block: a write that landed although its
+      // answer was lost reopened the proposal, and the retry appended it a
+      // second time (HB-0571). Found there, it is not written again.
+      const mark = `(proposal ${proposal.id}) -->`;
+      const distilledBlock = `\n\n<!-- distilled from ${proposal.childName}, ${stamp} ${mark}\n${proposal.text}\n`;
       const tooBig = (what: string) => new TransferError(
         `Merged, ${what} would be over ${MAX_FILE_BYTES / 1024}KB, which the master's files cannot be — trim its AGENTS.md before merging more. Nothing was merged; the proposal is still waiting.`,
       );
       try {
-        await whileBusy(master.id, async () => {
-          const path = workspacePath(master.slug, 'AGENTS.md');
+        // The files turn first, then the busy flag, as a file save takes
+        // them: a snapshot by hand reading the files meanwhile kept the old
+        // AGENTS.md with the new layer, or the reverse (HB-0566).
+        await withCoreFilesTurn(master.id, () => whileBusy(master.id, async () => {
+          const fresh = freshRunning(master.id, () => 'Start the master to merge into its playbook.');
+          // Keep the master's own template layer coherent: append the SAME block
+          // to the raw placeholder-bearing layer. (Reading the live file back
+          // froze its RENDERED text — placeholders gone — into the layer, so the
+          // next Apply-values had nothing to substitute; 10th audit.) As it is
+          // at its turn: a file saved meanwhile stored its own.
+          const layerAgents = fresh.paramFiles?.agents !== undefined
+            ? (fresh.paramFiles.agents ?? '').includes(mark) ? fresh.paramFiles.agents : `${(fresh.paramFiles.agents ?? '').trimEnd()}${distilledBlock}`
+            : undefined;
+          const path = workspacePath(fresh.slug, 'AGENTS.md');
           // Read as it is, capped: a corrupt multi-MB AGENTS.md fails loudly,
           // and one that is there but cannot be read (or a read that failed)
           // refuses the merge. `head … || true` read it as empty, and the
@@ -13996,31 +15609,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // Only a file that is not there starts empty.
           let existing: string | undefined;
           try {
-            existing = await readCoreFile(providerFor(master.hostId), master.runtimeRef!, master.slug, 'AGENTS.md');
+            existing = await readCoreFile(providerFor(fresh.hostId), fresh.runtimeRef, fresh.slug, 'AGENTS.md');
           } catch (err) {
             if (err instanceof CoreFileTooBigError) throw new TransferError(`The master's AGENTS.md is over ${MAX_FILE_BYTES / 1024}KB — trim it before merging more.`);
             throw err;
           }
-          const merged = `${(existing ?? '').trimEnd()}${distilledBlock}`;
-          // The result is held to the core-file limit too, not just what was
-          // there: a merge past it made a playbook that editing, snapshots,
-          // export and push all refuse (audit #019).
-          if (Buffer.byteLength(merged, 'utf8') > MAX_FILE_BYTES) throw tooBig('its AGENTS.md');
-          if (layerAgents !== undefined && Buffer.byteLength(layerAgents, 'utf8') > MAX_FILE_BYTES) throw tooBig('its AGENTS.md setup layer');
-          await autoSnapshot(snapshotDeps(master), master.id, 'pre-edit');
-          const b64 = Buffer.from(merged, 'utf8').toString('base64');
-          const r = await writeFileInAgent(providerFor(master.hostId), master.runtimeRef!, path, b64);
-          if (r.code !== 0) throw new Error('write failed');
-        });
+          // Found there: merged already, by a write whose answer was lost.
+          if (!(existing ?? '').includes(mark)) {
+            const merged = `${(existing ?? '').trimEnd()}${distilledBlock}`;
+            // The result is held to the core-file limit too, not just what was
+            // there: a merge past it made a playbook that editing, snapshots,
+            // export and push all refuse (audit #019).
+            if (Buffer.byteLength(merged, 'utf8') > MAX_FILE_BYTES) throw tooBig('its AGENTS.md');
+            if (layerAgents !== undefined && Buffer.byteLength(layerAgents, 'utf8') > MAX_FILE_BYTES) throw tooBig('its AGENTS.md setup layer');
+            await autoSnapshot(snapshotDeps(fresh), master.id, 'pre-edit');
+            const b64 = Buffer.from(merged, 'utf8').toString('base64');
+            const r = await writeFileInAgent(providerFor(fresh.hostId), fresh.runtimeRef, path, b64);
+            if (r.code !== 0) throw new Error('write failed');
+          }
+          // Its one key: a persona changed during the write stays (HB-0567).
+          // Before the turn ends, so a snapshot after it has the pair.
+          if (layerAgents !== undefined) store.setAgentParamFile(master.id, 'agents', layerAgents);
+        }));
       } catch (err) {
         store.reopenProposal(master.id, req.params.pid);
+        if (err instanceof TurnRefused) return reply.code(err.status).send({ error: err.message });
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         if (err instanceof SnapshotError) return reply.code(502).send({ error: `Couldn't read the master's playbook: ${err.userMessage} Nothing was merged; the proposal is still waiting.` });
         throw err;
-      }
-      if (layerAgents !== undefined) {
-        store.setAgentParamState(master.id, master.paramValues ?? {}, { ...master.paramFiles, agents: layerAgents });
       }
       trace(master.id)('proposal.merged', { proposalId: req.params.pid, from: proposal.childName });
       let pushed = 0;
@@ -14123,6 +15740,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (req.query.telegram === '0') {
           return reply.code(400).send({ error: 'This file is a full copy (a Download): it brings the agent back with its own Telegram bot, so "no Telegram" does not apply. Import it without that option; to make a new agent without a bot from it, export it as a template instead.' });
         }
+        // Not held while it runs, as the other import: a source deleted
+        // meanwhile is refused where the agent is written (HB-0570).
         const run = (onOperation?: (id: string) => void) => importAgent(
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
@@ -14143,6 +15762,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
         if (err instanceof ImportCleanupPending) return reply.code(503).send({ error: err.message, operation });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage, operation });
+        if (err instanceof SourceGoneError) return reply.code(409).send({ error: err.userMessage, operation });
         throw err;
       }
     },
@@ -14511,7 +16131,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!store.memberIdentities(agent.id, joined.membershipUserId)[joinKind]
           && agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
         void claimFirstContact(
-          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+          { store, provider: providerFor(agent.hostId), providerFor, log: trace(agent.id) },
           {
             agentId: agent.id,
             runtimeRef: agent.runtimeRef,
@@ -14944,7 +16564,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const open = via ? [via] : unlinked;
       for (const c of open) {
         void claimFirstContact(
-          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+          { store, provider: providerFor(agent.hostId), providerFor, log: trace(agent.id) },
           {
             agentId: agent.id, runtimeRef: agent.runtimeRef,
             accountId: c.kind === 'telegram' ? c.accountId : CHANNEL_ACCOUNT,
@@ -15219,14 +16839,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const [running, target] = await Promise.all([prov.info(a.runtimeRef), prov.currentImageInfo(a.image)]).catch(() => [undefined, undefined]);
     return !!running?.imageId && !!target?.imageId && running.imageId !== target.imageId;
   };
-  const startStopped = async (agent: Agent): Promise<{ ok: boolean; rebuilding?: boolean; agent?: Agent; error?: string }> => {
+  /**
+   * Why Start rebuilds it rather than start its container: a change saved for
+   * its next start, or peers it has not installed, however they changed (a
+   * peer deleted, a change during an operation: HB-0465). The second waits
+   * while a rebuild was refused at render a moment ago (HB-0419), as Start's
+   * own checks do. Peers are judged only when the owner starts it: a wake for
+   * a message, or a budget's resume, starts the container it has, and the
+   * peers wait for Start or a Rebuild.
+   */
+  const rebuildOwedAtStart = (agentId: string, ownerAsked: boolean): string | undefined =>
+    store.getAgent(agentId)?.rebuildOnStart ? 'a change made while it was down'
+      : ownerAsked && !renderRefusedRecently(agentId) && peersNotInstalled(agentId) ? 'its peers changed while it was down'
+      : undefined;
+  const startStopped = async (agent: Agent, opts: { ownerAsked?: boolean } = {}): Promise<{ ok: boolean; rebuilding?: boolean; agent?: Agent; error?: string }> => {
     { const why = startRefusal(agent); if (why) return { ok: false, error: why }; }
     // A stopped agent is never rebuilt on the machine's own initiative (a
     // rebuild starts it). Starting it is the moment: one that needs a
     // REQUIRED rebuild comes up rebuilt instead of as it was, and so does one
     // with a change waiting for this start, whatever the machine's policy: the
     // change is the owner's own, and the old container does not have it (HB-0411).
-    const reasons: string[] = store.getAgent(agent.id)?.rebuildOnStart ? ['a change made while it was down'] : [];
+    const owed = rebuildOwedAtStart(agent.id, !!opts.ownerAsked);
+    const reasons: string[] = owed ? [owed] : [];
     // Refused at render time a moment ago (HB-0419), and nothing was owed: the
     // container it has still works, so this press starts it as it is.
     const mayBeRebuilt = reasons.length > 0 || !renderRefusedRecently(agent.id);
@@ -15275,7 +16909,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     // After the store says RUNNING and the lock is let go, as a wake does:
     // what runs once it is up (the limits check among it) skips busy agents.
-    if (r.ok && r.agent) clearPinsWhenUp(r.agent);
+    // Its budget too (tellMemoryBudget): a cap changed while it was down
+    // went on its container above, but its AGENTS.md still says the old
+    // one, and its environment keeps the cap it was made with, so the live
+    // words. A section that already says its cap is left as it is.
+    if (r.ok && r.agent) {
+      clearPinsWhenUp(r.agent);
+      void tellMemoryBudget(r.agent.id).catch(() => undefined);
+    }
     return r;
   };
   app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
@@ -15286,7 +16927,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
     }
-    const r = await startStopped(agent);
+    const r = await startStopped(agent, { ownerAsked: true });
     if (!r.ok || !r.agent) return reply.code(409).send({ error: r.error ?? 'It could not be started just now — try again shortly.' });
     // Started by hand while a budget has it paused: it runs on until the 1st (budgets.ts).
     // A cheaper model a budget chose is not a pause: Start leaves its model, and the
@@ -15453,8 +17094,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (!r.ok) checkpointWarning = "Archived, but couldn't save the conversation to memory first — the AI source didn't complete (out of credits, expired, or unreachable?).";
       }
       step('archiving — stopping it and handing its bot back');
+      let archived: Awaited<ReturnType<typeof archiveAgent>>;
       try {
-        await archiveAgent(
+        archived = await archiveAgent(
           { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), requestedBy: ownerIdOf(req),
             parkOtherChannels: parkArchivedChannels },
           agent.id,
@@ -15465,8 +17107,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         app.log.error({ agentId: agent.id, err: String(err) }, 'archive failed');
         return reply.code(502).send({ error: "Couldn't archive the agent — try again in a moment." });
       }
-      // Done: the marker (cleared below) is not part of the answer.
-      return { ...publicAgent(store.getAgent(agent.id)!), archiving: undefined, checkpointWarning };
+      // Done: the marker (cleared below) is not part of the answer. Where its
+      // bot went, as it happened (HB-0476): null when it had none to give back.
+      return { ...publicAgent(store.getAgent(agent.id)!), archiving: undefined, checkpointWarning, botReturn: archived.bot ?? null };
     } finally {
       archiving.delete(agent.id);
     }
@@ -15534,7 +17177,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent || agent.state === 'DELETED') return deleteAgent(req, reply);
     if (deletesRunning.has(agent.id)) return reply.code(409).send({ error: 'It is being deleted already: wait for that to finish.' });
     deletesRunning.add(agent.id);
-    try { return await deleteAgent(req, reply); } finally { deletesRunning.delete(agent.id); }
+    try { return await deleteAgent(req, reply); } finally {
+      deletesRunning.delete(agent.id);
+      // Refused before it began (another change held the agent): setup for an
+      // answered bot-token step, skipped while the delete ran, goes on.
+      const after = store.getAgent(agent.id);
+      if (after?.state === 'PROVISIONING' && after.pendingAction?.received) provisionWhenFree(agent.id);
+    }
   });
   const deleteAgent = async (req: FastifyRequest<DeleteRoute>, reply: FastifyReply) => {
     const agent = ownedAgent(req, req.params.id);
@@ -15563,6 +17212,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
     }
     if (agent.state !== 'DELETING') store.setAgentState(agent.id, 'DELETING');
+    // A pasted token held for its setup goes with it, from memory and disk.
+    deps.channel.discardPending?.(agent.id);
     if (agent.runtimeRef) {
       try {
         await providerFor(agent.hostId).destroy(agent.runtimeRef, { purge: true });
@@ -15676,6 +17327,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // An app still waiting to go in, with any secret values it was given.
     await dropAppPending(store, secrets, agent.id);
     store.scrubAgentResidue(agent.id);
+    forgetFilesReplacing(agent.id);
+    classWrote.delete(agent.id);
+    modelWaitsImage.delete(agent.id);
     return publicAgent(store.setAgentState(agent.id, 'DELETED'));
   };
 
@@ -15701,6 +17355,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     /** At boot, after the first reconcile: settle what the last process left running. */
     resumeOperations: async () => {
       await resumeOperations(opsCtx);
+      // A bot-token step answered before the restart: its setup runs now,
+      // with the token held on disk (telegramManual.ts).
+      for (const a of store.listAllActiveAgents()) {
+        if (a.state !== 'PROVISIONING' || !a.pendingAction?.received) continue;
+        // A token answer whose token was never held (the restart came in the
+        // middle of the paste): the owner is asked again.
+        const held = a.webOnly || !deps.channel.waitingFor || await deps.channel.waitingFor(a.id).catch(() => false);
+        if (!held) { store.setAgentPendingAction(a.id, { type: 'bot_token', instructions: a.pendingAction.instructions }); continue; }
+        provisionWhenFree(a.id);
+      }
       // An app waiting for its agent's setup (a new agent "from a repo") went
       // in only when that setup finished in this process: one whose setup
       // ended before a restart (or was settled by it) goes in now.
@@ -15710,6 +17374,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
     /** Ask again, every 10 minutes, the questions a held operation is waiting on. */
     startOperationRetryLoop: (intervalMs?: number) => startOperationRetryLoop(opsCtx, intervalMs),
+    clientSecretSweep,
   };
 }
 
@@ -15718,4 +17383,6 @@ export interface RoutesHandle {
   stashOldPendingSecrets(): Promise<void>;
   resumeOperations(): Promise<void>;
   startOperationRetryLoop(intervalMs?: number): NodeJS.Timeout;
+  /** The pass for a new Google client secret still owed (HB-0463): run every 10 minutes here, and by tests. */
+  clientSecretSweep(): Promise<{ pushing: number; waiting: number } | undefined>;
 }

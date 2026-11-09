@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { backupFacts, checkoutFacts, doctorReport, probeControlPlane, releaseBehind, type DoctorFacts } from '../src/doctor.js';
+import { backupFacts, checkoutFacts, doctorReport, envMap, probeControlPlane, releaseBehind, serviceBackupMark, type DoctorFacts } from '../src/doctor.js';
+import { ownerMark } from '../src/orchestrator/backups.js';
 import { scriptEnv } from './helpers/scriptEnv.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
@@ -199,13 +200,68 @@ describe('doctor reads a backup set\'s age as the app does (HB-0386)', () => {
       writeFileSync(join(dir, '2026-09-13', 'hatchabot.sqlite'), '');
       // 20:00 on the 15th, local: two days by the calendar, three since UTC midnight on the 13th.
       const now = new Date(2026, 8, 15, 20, 0).getTime();
-      const facts = backupFacts(dir, now);
+      const facts = backupFacts(dir, now, undefined);
       expect(facts).toMatchObject({ lastSet: '2026-09-13', ageDays: 2 });
       expect(doctorReport({ ...healthy, backups: facts }).some((l) => /days old/.test(l.text))).toBe(false);
-      expect(backupFacts(dir, new Date(2026, 8, 16, 0, 30).getTime()).ageDays).toBe(3);
+      expect(backupFacts(dir, new Date(2026, 8, 16, 0, 30).getTime(), undefined).ageDays).toBe(3);
     } finally {
       if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('the newest set is this install\'s own: another\'s newer one in a shared folder is passed over (fourth review of HB-0540)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-own-'));
+    try {
+      const mine = ownerMark('not-a-real-key-for-tests')!, theirs = ownerMark('another-made-up-key')!;
+      for (const [d, owner] of [['2026-09-10', mine], ['2026-09-14', theirs]] as const) {
+        mkdirSync(join(dir, d));
+        writeFileSync(join(dir, d, 'hatchabot.sqlite'), '');
+        writeFileSync(join(dir, d, '.backup-owner'), `${owner}\n`);
+      }
+      const now = new Date(2026, 8, 15, 12, 0).getTime();
+      expect(backupFacts(dir, now, mine)).toMatchObject({ lastSet: '2026-09-10', ageDays: 5 });
+      expect(doctorReport({ ...healthy, backups: backupFacts(dir, now, mine) }).some((l) => /days old/.test(l.text))).toBe(true);
+      expect(backupFacts(dir, now, theirs)).toMatchObject({ lastSet: '2026-09-14' });
+      // None of its own: no newest set, not the other's.
+      expect(backupFacts(dir, now, ownerMark('a-third-made-up-key')).lastSet).toBeUndefined();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('an install from before the rename: its AGENTCLAW_SECRET_KEY in the env file marks its own sets (tenth review)', () => {
+    // envMap aliases the env file's old name, as key_owner (scripts/backup-owner.sh) reads either name.
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-legacy-'));
+    try {
+      const file = join(dir, 'legacy-envfile');
+      writeFileSync(file, 'AGENTCLAW_SECRET_KEY=not-a-real-key-for-tests\n');
+      expect(serviceBackupMark(envMap(file))).toBe(ownerMark('not-a-real-key-for-tests'));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('the mark is the service\'s .env key, never the shell\'s: with none in the .env, every set counts as its own', () => {
+    const was = process.env.HATCHABOT_SECRET_KEY;
+    process.env.HATCHABOT_SECRET_KEY = 'a-shell-key-made-up-for-tests';
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-shellkey-'));
+    try {
+      expect(serviceBackupMark({})).toBeUndefined();
+      expect(serviceBackupMark({ HATCHABOT_SECRET_KEY: 'an-env-file-key-made-up' })).toBe(ownerMark('an-env-file-key-made-up'));
+      // The newest set is marked by some install; with the shell's key it read as another's.
+      for (const d of ['2026-11-01', '2026-11-05']) { mkdirSync(join(dir, d)); writeFileSync(join(dir, d, 'hatchabot.sqlite'), ''); }
+      writeFileSync(join(dir, '2026-11-05', '.backup-owner'), '0123456789abcdef\n');
+      expect(backupFacts(dir, new Date(2026, 10, 8, 12).getTime(), serviceBackupMark({})).lastSet).toBe('2026-11-05');
+    } finally {
+      if (was === undefined) delete process.env.HATCHABOT_SECRET_KEY; else process.env.HATCHABOT_SECRET_KEY = was;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('importing doctor takes an old install\'s AGENTCLAW_SECRET_KEY from the environment as its key (envCompat), as the server reads it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-envcompat-'));
+    try {
+      const r = spawnSync(process.execPath, ['--import', 'tsx', '-e', 'import("./src/doctor.ts").then(() => process.stdout.write(process.env.HATCHABOT_SECRET_KEY ?? ""))'], {
+        cwd: process.cwd(), encoding: 'utf8', timeout: 30_000, env: { PATH: process.env.PATH, HOME: dir, AGENTCLAW_SECRET_KEY: 'not-a-real-key-for-tests' },
+      });
+      expect(r.stdout, r.stderr).toBe('not-a-real-key-for-tests');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

@@ -1,4 +1,5 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { safeEqual } from '../util/safeEqual.js';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 
@@ -53,9 +54,7 @@ export function isPublic(req: Rawish | IncomingMessage | undefined | null): bool
   if (socket && publicSockets.has(socket)) return true;
   const mark = r.headers?.[REPLAY_HEADER];
   if (typeof mark !== 'string') return false;
-  // Bytes, not characters: timingSafeEqual throws on a length mismatch (audit, 2026-10-22).
-  const a = Buffer.from(mark), b = Buffer.from(REPLAY_SECRET);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return safeEqual(mark, REPLAY_SECRET);
 }
 
 const last = (v: string | string[] | undefined): string | undefined => {

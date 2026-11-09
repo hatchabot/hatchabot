@@ -27,7 +27,7 @@ goes; you can ask it to save a conversation to memory, download its entire
 chat history, or recover the context of a conversation that was reset. Nothing
 important is trapped in a transcript.
 
-**Not locked to one lab.** Anthropic (subscription or API key), OpenAI, Google Gemini,
+**Not locked to one lab.** Anthropic, OpenAI or Google Gemini through an API key,
 or a local model server with no account at all, per agent. Switch models
 within a source instantly; switching providers takes a rebuild and starts a
 fresh conversation, with memory kept. Put simple agents on a cheap model and the demanding ones on
@@ -48,24 +48,26 @@ setting, not a Google permission, so don't rely on it against someone
 determined) and nothing else. The security posture check tells you, every day, which agents
 have both a wide audience and a powerful capability.
 
-**Claude Max, on purpose.** A Max subscription is consumer pricing — a flat
-monthly plan — and `claude setup-token` turns it into an API-like credential
-Hatchabot can inject into every agent. So a household of always-on agents
-(schedulers polling inboxes, advisors reading mail, a dozen personas) runs on
-one flat fee instead of per-token metering from any lab. For this kind of
-fleet that's the difference between "affordable" and "a bill you watch".
-Usage limits still apply (a burst of simultaneous turns can hit them). Anthropic's
-rules for third-party use of a plan changed several times in 2026. In
-September 2026 such use drew from the plan's normal limits. On 7 October 2026
-Anthropic said the separate "Agent SDK credit" announced earlier is no longer
-available, and that Max and Team plans now include monthly API credits ($100
-or $200 a month on Max) for the Claude API and the Agent SDK, claimed into a
-Claude Console organization and used with an API key from it
-([support.claude.com](https://support.claude.com/en/articles/17154008-monthly-api-credits-for-max-and-team-plans)).
-Such a key is an ordinary API-key source here. Check the plan's current terms
-before relying on it. The
-setup-token is exactly what makes the credential portable: one token per
-account, injected per agent, revocable, never a shared login directory.
+**Claude through an API key.** The dependable way to give a household's
+agents Claude is an Anthropic API key from the Claude Console: it is billed per
+token, and Hatchabot shows what each agent spends and can cap it. A Max or
+Ultra plan includes monthly API credits ($100 a month on Max, $200 on Ultra;
+Team plans have them per seat), claimed into a Claude Console organization and
+spent through an API key from it; unused credits do not roll over
+([support.claude.com](https://support.claude.com/en/articles/17154008-monthly-api-credits-for-max-ultra-and-team-plans)).
+Such a key is an ordinary API-key source here. OpenAI and Gemini keys work the
+same way, and a local model needs no account at all.
+
+Hatchabot can also take a `claude setup-token` from your own Pro or Max plan.
+Don't build on it. Anthropic's terms for Claude Code
+([code.claude.com](https://code.claude.com/docs/en/legal-and-compliance), read
+8 November 2026) say a plan's sign-in is for ordinary use of Claude Code and
+Anthropic's own apps; that software from other developers must use an API key,
+and may not send requests through a Free, Pro, Max or Ultra plan's credentials
+for its users or store those credentials; and that the plans' advertised limits
+assume ordinary, individual use. A fleet of always-on agents is not that, and
+Anthropic says it may enforce these rules without notice. Check the current
+terms before connecting a plan.
 
 **Telegram, on purpose.** It's free, it's on every platform, and bots are a
 first-class part of it: BotFather creates one in a minute, a free account can
@@ -98,8 +100,8 @@ a fleet, by more than one person.
   restore, delete, move between machines — with a snapshot before every change
   and a rollback if a move fails. In plain OpenClaw that's you, a shell, and a
   directory.
-- **Credentials managed once, injected per agent.** One Claude setup-token
-  serves every agent; Google accounts attach per agent, with sending switched
+- **Credentials managed once, injected per agent.** One AI source, such as an
+  API key, serves every agent; Google accounts attach per agent, with sending switched
   off in the mail tool if you like; per-agent secrets are write-only. No keyrings to hand-copy into each
   install.
 - **More than one human.** Owners, members, invites by link or QR, pairing
@@ -143,7 +145,11 @@ when there are several, they matter, and other people talk to them.
 
 Claude and ChatGPT are excellent and change every month, so each point here
 is narrow and dated. Checked 2026-10-07 against Anthropic's and OpenAI's own
-help pages, except where a point gives another date.
+help pages, except where a point gives another date. Remembering you, using
+tools and running scheduled tasks are no longer differences: both do all
+three, and some of their scheduled work runs while your computer is off. What
+is left is where it runs, who can use it, which AI it uses, and running
+several agents as a fleet.
 
 - **The people you invite need no AI account.** Sharing a ChatGPT project
   means each person has a ChatGPT account (a free one is enough, with up to

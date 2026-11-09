@@ -11,7 +11,9 @@ export function installErrorHandler(app: FastifyInstance): void {
     const e = err as Error & { statusCode?: number; userMessage?: string };
     if (e.userMessage) {
       req.log.warn({ err }, 'provider error');
-      return reply.code(e.statusCode && e.statusCode >= 400 && e.statusCode < 500 ? e.statusCode : 500).send({ error: e.userMessage });
+      // 503: worth trying again (TelegramUnavailableError).
+      const code = e.statusCode && ((e.statusCode >= 400 && e.statusCode < 500) || e.statusCode === 503) ? e.statusCode : 500;
+      return reply.code(code).send({ error: e.userMessage });
     }
     if (e.statusCode && e.statusCode >= 400 && e.statusCode < 500) {
       return reply.code(e.statusCode).send({ error: e.message });

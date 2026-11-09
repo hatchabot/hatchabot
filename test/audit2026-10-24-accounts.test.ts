@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { as, makeWorld, MemSecrets, seedRunningAgent, type World } from './support/world.js';
 import { Store } from '../src/store/store.js';
+import { importsTook } from '../src/providers/mockProvider.js';
 import { registerMgmtChat } from '../src/api/mgmtChat.js';
 import * as gitSource from '../src/orchestrator/gitSource.js';
 import { GOOGLE_CLIENT_REF, materializeConnection } from '../src/orchestrator/googleConnections.js';
@@ -35,7 +36,7 @@ describe('classes: what the runtime did with the model (audit #068)', () => {
   it('a class edit the runtime refused is reported per agent, not counted as applied', async () => {
     const w = await classWorld();
     w.store.upsertAgentClass({ id: 'k1', ownerId: w.owner, name: 'Light', model: 'claude-sonnet-5' });
-    w.store.setAgentClass(w.id, 'k1');
+    w.store.setAgentClassIf(w.id, w.store.getAgent(w.id)?.classId ?? null, 'k1');
     w.provider.execResponses.set('models set', { code: 1, stdout: '', stderr: 'gateway not answering' });
     const res = await w.f.inject({ method: 'PUT', url: '/v1/agent-classes/k1', headers: as(), payload: { model: 'claude-haiku-4-5' } });
     expect(res.statusCode).toBe(200);
@@ -58,7 +59,7 @@ describe('classes: what the runtime did with the model (audit #068)', () => {
   it('a model the runtime took is applied, with nothing pending', async () => {
     const w = await classWorld();
     w.store.upsertAgentClass({ id: 'k1', ownerId: w.owner, name: 'Light', model: 'claude-sonnet-5' });
-    w.store.setAgentClass(w.id, 'k1');
+    w.store.setAgentClassIf(w.id, w.store.getAgent(w.id)?.classId ?? null, 'k1');
     const res = await w.f.inject({ method: 'PUT', url: '/v1/agent-classes/k1', headers: as(), payload: { model: 'claude-haiku-4-5' } });
     expect(res.json()).toMatchObject({ applied: 1, needRebuild: 0, skipped: [], modelPending: [] });
     expect(w.store.getAgent(w.id)!.appliedModel).toBe('claude-haiku-4-5');
@@ -87,7 +88,7 @@ describe('classes: the subscription runtime guard (audit #069)', () => {
     const w = await classWorld('subscription');
     tooOld(w);
     w.store.upsertAgentClass({ id: 'k1', ownerId: w.owner, name: 'Deep', model: 'claude-sonnet-5' });
-    w.store.setAgentClass(w.id, 'k1');
+    w.store.setAgentClassIf(w.id, w.store.getAgent(w.id)?.classId ?? null, 'k1');
     const res = await w.f.inject({ method: 'PUT', url: '/v1/agent-classes/k1', headers: as(), payload: { model: 'claude-opus-5-5' } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ applied: 0 });
@@ -248,7 +249,7 @@ describe('Google connections: freshness and an unreadable list (audit #074, #075
     const shell = w.provider.execShell.bind(w.provider);
     w.provider.execShell = async (ref, script, opts) => {
       if (!script.includes('gog auth import')) return shell(ref, script, opts);
-      entered(); await gate; return { code: 0, stdout: '', stderr: '' };
+      entered(); await gate; return { code: 0, stdout: importsTook(script), stderr: '' };
     };
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
@@ -267,7 +268,7 @@ describe('Google connections: freshness and an unreadable list (audit #074, #075
       const listed = await w.f.inject({ method: 'GET', url: '/v1/connections', headers: as() });
       expect(listed.json().connections[0]).toMatchObject({ staleCount: 1, attachedTo: [{ id: 'a1', stale: true }] });
       // A later import reads the new token and is current again.
-      w.provider.execShell = async () => ({ code: 0, stdout: '', stderr: '' });
+      w.provider.execShell = async (_ref, script) => ({ code: 0, stdout: importsTook(script), stderr: '' });
       vi.setSystemTime(new Date('2026-10-20T10:03:00Z'));
       await materializeConnection({ store: w.store, secrets: w.secrets, provider: w.provider }, { id: 'a1', slug: 'kitchen', runtimeRef: w.store.getAgent('a1')!.runtimeRef! }, conn.id);
       const again = await w.f.inject({ method: 'GET', url: '/v1/connections', headers: as() });

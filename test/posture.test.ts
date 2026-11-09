@@ -54,6 +54,47 @@ describe('computePosture — per-agent Telegram exposure', () => {
     expect(report.agents.find((a) => a.id === 'chatty')!.exposure).toBe('medium');
   });
 
+  it('counts guests on Discord, Slack and web chat, not only Telegram, and lists none of them as pending (HB-0575)', () => {
+    const store = baseStore();
+    agent(store, 'shared');
+    store.insertDataSource({ id: 'd1', agentId: 'shared', kind: 'folder', access: 'rw', mountName: 'project', hostPath: '/tmp/made-up-project', createdAt: 'now' } as any);
+    store.insertMembership({ id: 'g1', agentId: 'shared', userId: 'u-disc', role: 'user', status: 'active' });
+    store.bindMemberIdentity('shared', 'u-disc', 'discord', '100000000000000001');
+    store.insertMembership({ id: 'g2', agentId: 'shared', userId: 'u-slack', role: 'user', status: 'active' });
+    store.bindMemberIdentity('shared', 'u-slack', 'slack', 'U0000EXAMPLE');
+    store.insertMembership({ id: 'g3', agentId: 'shared', userId: 'u-web', role: 'user', status: 'active', webChat: true });
+    store.insertMembership({ id: 'g4', agentId: 'shared', userId: 'u-invited', role: 'user', status: 'active' });
+    const row = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'accounts' }).agents.find((a) => a.id === 'shared')!;
+    expect(row.audienceCount).toBe(3);
+    expect(row.exposure).toBe('high');
+    expect(row.reasons).toContain('3 people can message it');
+    const by = Object.fromEntries((row.audience ?? []).map((m) => [m.name, m]));
+    expect(by['u-disc']).toMatchObject({ channels: ['discord'] });
+    expect(by['u-disc']!.pending).toBeUndefined();
+    expect(by['u-slack']).toMatchObject({ channels: ['slack'] });
+    expect(by['u-web']).toMatchObject({ channels: ['web chat'] });
+    expect(by['u-web']!.pending).toBeUndefined();
+    expect(by['u-invited']!.pending).toBe(true);
+  });
+
+  it('a Google connection without Gmail is not reported as able to send mail (HB-0600)', () => {
+    const store = baseStore();
+    agent(store, 'cal');
+    store.insertConnection({ id: 'c-cal', ownerId: OWNER, kind: 'google', email: 'calendar@example.com', services: ['calendar'], secretRef: 's/c-cal' });
+    store.attachConnection('cal', 'c-cal', false);
+    agent(store, 'mail');
+    store.insertConnection({ id: 'c-mail', ownerId: OWNER, kind: 'google', email: 'mail@example.com', services: ['calendar', 'gmail'], secretRef: 's/c-mail' });
+    store.attachConnection('mail', 'c-mail', false);
+    agent(store, 'blocked');
+    store.attachConnection('blocked', 'c-mail', true);
+    const report = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'identity' });
+    const caps = (id: string) => report.agents.find((a) => a.id === id)!.capabilities;
+    expect(caps('cal').some((c) => c.startsWith('send email'))).toBe(false);
+    expect(report.agents.find((a) => a.id === 'cal')!.exposure).toBe('low');
+    expect(caps('mail')).toContain('send email as mail@example.com');
+    expect(caps('blocked').some((c) => c.startsWith('send email'))).toBe(false);
+  });
+
   it('excludes archived agents', () => {
     const store = baseStore();
     agent(store, 'arch', { state: 'ARCHIVED' });

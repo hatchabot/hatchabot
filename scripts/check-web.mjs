@@ -5,6 +5,7 @@ import { readFileSync, readdirSync, writeFileSync, mkdtempSync, rmSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { inlineScripts } from './inline-scripts.mjs';
 
 const dir = mkdtempSync(join(tmpdir(), 'hatchabot-checkweb-'));
 let failed = false;
@@ -58,10 +59,19 @@ function checkHandlers(file, html, js) {
 try {
   for (const file of readdirSync('web').filter((f) => f.endsWith('.html'))) {
     const html = readFileSync(join('web', file), 'utf8');
-    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
-    scripts.forEach((m, i) => {
+    // Every script is a bare <script> (inline-scripts.mjs refuses anything else, so a module,
+    // a src= or a tag it can't read fails here rather than going unchecked).
+    let scripts;
+    try {
+      scripts = inlineScripts(html);
+    } catch (e) {
+      failed = true;
+      console.error(`✗ web/${file}: ${e instanceof Error ? e.message : e}`);
+      continue;
+    }
+    scripts.forEach((code, i) => {
       const tmp = join(dir, `${file}.${i}.js`);
-      writeFileSync(tmp, m[1]);
+      writeFileSync(tmp, code);
       const res = spawnSync(process.execPath, ['--check', tmp], { encoding: 'utf8' });
       if (res.status !== 0) {
         failed = true;
@@ -70,7 +80,7 @@ try {
         console.log(`✓ web/${file} script #${i}`);
       }
     });
-    checkHandlers(file, html, scripts.map((m) => m[1]).join('\n'));
+    checkHandlers(file, html, scripts.join('\n'));
   }
 } finally {
   rmSync(dir, { recursive: true, force: true });

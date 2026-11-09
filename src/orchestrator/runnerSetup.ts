@@ -2,7 +2,8 @@ import { createGzip } from 'node:zlib';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { dockerConnArgs } from '../providers/runnerEndpoint.js';
@@ -27,6 +28,8 @@ const execFileP = promisify(execFile);
 
 export interface RunnerPaths {
   sshDir?: string; // default ~/.ssh — overridable for tests
+  /** Where a note on the key goes (key.pub used unchecked); the journal, through stderr, when not given. */
+  log?: (event: string, detail: Record<string, unknown>) => void;
 }
 
 const KEY_NAME = 'agentclaw_runner';
@@ -46,15 +49,160 @@ function sshDir(p: RunnerPaths = {}): string {
 export async function ensureRunnerKey(p: RunnerPaths = {}): Promise<string> {
   const dir = sshDir(p);
   const key = join(dir, KEY_NAME);
+  let lost = false;
   if (!existsSync(key)) {
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    await execFileP('ssh-keygen', [
-      '-t', 'ed25519', '-N', '', '-f', key, '-C', 'agentclaw control-plane -> runner',
-    ]);
-    await chmod(key, 0o600);
+    // One first setup at a time: two runners added at once both found no key
+    // and ran ssh-keygen on the same path, and the second sat at its
+    // "Overwrite (y/n)?" prompt (HB-0577). The later one waits for the first's.
+    let made = keyMaking.get(key);
+    if (!made) {
+      made = makeRunnerKey(dir, key).finally(() => keyMaking.delete(key));
+      keyMaking.set(key, made);
+    }
+    lost = (await made) === 'lost';
   }
-  return (await readFile(`${key}.pub`, 'utf8')).trim();
+  // key.pub as it is, once this process made the key or found it there. Read
+  // out of the private key only when it is missing (a process stopped
+  // between the two halves), or right after another process's key won the
+  // race: its key.pub may not be in place yet, or be the losing pair's
+  // (HB-0577, sixth review).
+  const onDisk = await readPublic(key);
+  if (onDisk !== undefined && !lost) return onDisk.trim();
+  return (await publicHalf(key, onDisk, p.log ?? noteOnStderr)).trim();
 }
+const keyMaking = new Map<string, Promise<'made' | 'lost'>>();
+const noteOnStderr = (event: string, detail: Record<string, unknown>) => console.warn(`[runner-key] ${event} ${JSON.stringify(detail)}`);
+async function readPublic(key: string): Promise<string | undefined> {
+  return readFile(`${key}.pub`, 'utf8').catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return undefined;
+    throw err;
+  });
+}
+/**
+ * The public half read out of the private key (ssh-keygen -y), and key.pub
+ * written again, whole, when it does not match (HB-0577, fifth review). An
+ * ssh-keygen that fails with key.pub there leaves key.pub as the answer,
+ * noted (sixth review).
+ */
+async function publicHalf(key: string, onDisk: string | undefined, log: NonNullable<RunnerPaths['log']>): Promise<string> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileP('ssh-keygen', ['-y', '-f', key], { timeout: KEYGEN_TIMEOUT_MS, killSignal: 'SIGKILL' }));
+  } catch (err) {
+    // A key that does not read, with no public half beside it, is never put
+    // right by trying again: what to remove is said (seventh review). Not
+    // when ssh-keygen itself is missing, or was stopped.
+    const e = err as NodeJS.ErrnoException & { killed?: boolean };
+    if (onDisk === undefined && e.code !== 'ENOENT' && !e.killed) {
+      throw new Error(`the runner key ${key} cannot be read (it may have been cut short) and has no ${key}.pub beside it; remove ${key} and add the runner again, and a new key is made (runners set up with the old one need the new public key)`, { cause: err });
+    }
+    if (onDisk === undefined) throw err;
+    log('runner_key.public_unchecked', { key: `${key}.pub`, error: String((err as Error)?.message ?? err).slice(0, 200) });
+    return onDisk;
+  }
+  const keyPart = (line: string) => line.trim().split(/\s+/).slice(0, 2).join(' ');
+  if (onDisk !== undefined && keyPart(onDisk) === keyPart(stdout)) return onDisk;
+  const line = `${stdout.trim()}\n`;
+  const tmp = `${key}.pub.new-${randomBytes(6).toString('hex')}`;
+  try {
+    await writeFile(tmp, line, { mode: 0o644, flag: 'wx' });
+    await rename(tmp, `${key}.pub`);
+  } finally {
+    await rm(tmp, { force: true }).catch(() => {});
+  }
+  return line;
+}
+/** How long ssh-keygen may take: it never asks anything here, but a hung one must not hold a setup for ever. */
+const KEYGEN_TIMEOUT_MS = 60_000;
+
+/**
+ * Made under a name of its own, so ssh-keygen never meets a file it would ask
+ * to overwrite. The private half's arrival is the commit: link() puts it in
+ * place only if no key is there. Two processes making it at once (the map
+ * above is one process's) each moved both halves in, and could leave one's
+ * private key with the other's public one (HB-0577 review). The one that
+ * finds a key there drops its own pair ('lost'); publicHalf then reads that
+ * key's. Written to the disk before it is put in place, so the key there is
+ * never one cut short. A filesystem with no hard links (some network or FAT
+ * mounts) gets it renamed into place under a lock file instead: rename
+ * replaces where link() refuses (sixth and seventh reviews).
+ */
+async function makeRunnerKey(dir: string, key: string): Promise<'made' | 'lost'> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  if (existsSync(key)) return 'lost';
+  const tmp = `${key}.new-${randomBytes(6).toString('hex')}`;
+  try {
+    await execFileP('ssh-keygen', [
+      '-t', 'ed25519', '-N', '', '-f', tmp, '-C', 'agentclaw control-plane -> runner',
+    ], { timeout: KEYGEN_TIMEOUT_MS, killSignal: 'SIGKILL' });
+    await chmod(tmp, 0o600);
+    const h = await open(tmp, 'r+');
+    try { await h.sync(); } finally { await h.close(); }
+    try {
+      await link(tmp, key);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') return 'lost';
+      if (!['EPERM', 'ENOTSUP', 'EXDEV'].includes(String(code))) throw err;
+      if ((await renameIfAbsent(tmp, key)) === 'lost') return 'lost';
+    }
+    await rename(`${tmp}.pub`, `${key}.pub`);
+    return 'made';
+  } finally {
+    await rm(tmp, { force: true }).catch(() => {});
+    await rm(`${tmp}.pub`, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * `from` renamed to `to` only if nothing is there, for a filesystem with no
+ * link(): the look and the rename under `<to>.lock`, made exclusively ('wx')
+ * and holding a token of this call's own. A lock older than KEY_LOCK_STALE_MS
+ * was left by a process that stopped while it held it (it holds it for a
+ * moment), and is taken over by renaming it to a name of its own: of two
+ * waiters that found it stale, one rename wins and the other finds nothing
+ * (eighth review). One that renamed a lock made since (fresh) puts it back
+ * only where none is ('wx', with its token): never over one a third has made
+ * meanwhile. Its holder looks for its token in the lock just before its
+ * rename, and starts over when it is not there, so that third and it do not
+ * both rename (ninth review). A token, not the inode: the lock put back on a
+ * filesystem with no link() is a new file.
+ */
+async function renameIfAbsent(from: string, to: string): Promise<'made' | 'lost'> {
+  const lock = `${to}.lock`;
+  const token = randomBytes(12).toString('hex');
+  const holding = async () => (await readFile(lock, 'utf8').catch(() => undefined)) === token;
+  for (let i = 0; ; i++) {
+    try {
+      await writeFile(lock, token, { flag: 'wx', mode: 0o600 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const held = await stat(lock).catch(() => undefined);
+      if (held && Date.now() - held.mtimeMs > KEY_LOCK_STALE_MS) {
+        const away = `${lock}.stale-${randomBytes(6).toString('hex')}`;
+        if (await rename(lock, away).then(() => true, () => false)) {
+          const got = await stat(away).catch(() => undefined);
+          if (got && (got.ino !== held.ino || Date.now() - got.mtimeMs <= KEY_LOCK_STALE_MS)) {
+            const theirs = await readFile(away, 'utf8').catch(() => undefined);
+            if (theirs !== undefined) await writeFile(lock, theirs, { flag: 'wx', mode: 0o600 }).catch(() => {});
+          }
+          await rm(away, { force: true }).catch(() => {});
+        }
+      } else if (i >= 300) throw new Error(`${lock} stays in place; remove it if no Hatchabot is making the runner key`, { cause: err });
+      else await new Promise((r) => setTimeout(r, 100));
+      continue;
+    }
+    try {
+      if (existsSync(to)) return 'lost';
+      if (!(await holding())) continue; // taken meanwhile: start over
+      await rename(from, to);
+      return 'made';
+    } finally {
+      if (await holding()) await rm(lock, { force: true }).catch(() => {});
+    }
+  }
+}
+const KEY_LOCK_STALE_MS = 10_000;
 
 /** `ssh://user@host[:port]` → its parts, or undefined for non-ssh endpoints. */
 export function parseSshEndpoint(

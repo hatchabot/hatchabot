@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Duplex } from 'node:stream';
 import {
-  FrameReader, GUEST_METHODS, LOCAL_BROWSER_ADDRESS, encodeFrame, forwardedClientAddress, guestHttpAllowed, guestHttpPath,
+  FrameReader, GUEST_METHODS, GuestReplies, LOCAL_BROWSER_ADDRESS, encodeFrame, forwardedClientAddress, guestHttpAllowed, guestHttpPath,
   guestRequestVerdict, scrubForGuest, spliceGuest, stripClientIdentity, withConsoleIdentity,
 } from '../src/api/consoleProxy.js';
 
@@ -120,21 +120,24 @@ describe('other people are taken out of what the gateway tells a guest', () => {
   const health = { ok: true, agents: [{ agentId: 'recipe', sessions: { count: 3, recent: [{ key: 'agent:recipe:main' }] } }] };
 
   it('the hello: presence down to the gateway and themselves, no recent sessions', () => {
-    const out = scrubForGuest({ type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', snapshot: { presence: [gw, me, them], health } } }, GUEST, new Map()) as any;
+    const out = scrubForGuest({ type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', snapshot: { presence: [gw, me, them], health } } }, GUEST, new GuestReplies()) as any;
     expect(out.payload.snapshot.presence).toEqual([gw, me]);
     expect(out.payload.snapshot.health.agents[0].sessions.recent).toEqual([]);
     expect(JSON.stringify(out)).not.toContain('agent:recipe:main');
   });
   it('presence and health events, and the reply to their own health call', () => {
-    expect((scrubForGuest({ type: 'event', event: 'presence', payload: { presence: [them, me] } }, GUEST, new Map()) as any).payload.presence).toEqual([me]);
-    expect(JSON.stringify(scrubForGuest({ type: 'event', event: 'health', payload: health }, GUEST, new Map()))).not.toContain('agent:recipe:main');
-    const ids = new Map([['h9', 'health']]);
-    expect(JSON.stringify(scrubForGuest({ type: 'res', id: 'h9', ok: true, payload: health }, GUEST, ids))).not.toContain('agent:recipe:main');
-    expect(ids.has('h9')).toBe(false);
+    expect((scrubForGuest({ type: 'event', event: 'presence', payload: { presence: [them, me] } }, GUEST, new GuestReplies()) as any).payload.presence).toEqual([me]);
+    expect(JSON.stringify(scrubForGuest({ type: 'event', event: 'health', payload: health }, GUEST, new GuestReplies()))).not.toContain('agent:recipe:main');
+    const ids = new GuestReplies();
+    const sent = ids.track('h9', 'health');
+    const reply = scrubForGuest({ type: 'res', id: sent, ok: true, payload: health }, GUEST, ids) as any;
+    expect(JSON.stringify(reply)).not.toContain('agent:recipe:main');
+    expect(reply.id).toBe('h9'); // their own id back
+    expect(ids.size).toBe(0);
   });
   it('anything else passes untouched', () => {
-    expect(scrubForGuest({ type: 'event', event: 'chat', payload: { text: 'hi' } }, GUEST, new Map())).toBeUndefined();
-    expect(scrubForGuest({ type: 'res', id: 'x', ok: true, payload: { sessions: [] } }, GUEST, new Map())).toBeUndefined();
+    expect(scrubForGuest({ type: 'event', event: 'chat', payload: { text: 'hi' } }, GUEST, new GuestReplies())).toBeUndefined();
+    expect(scrubForGuest({ type: 'res', id: 'x', ok: true, payload: { sessions: [] } }, GUEST, new GuestReplies())).toBeUndefined();
   });
 });
 
@@ -240,7 +243,7 @@ describe('the guest hello advertises only what a guest may use (2026-09-30)', ()
     const { scrubForGuest, GUEST_METHODS } = await import('../src/api/consoleProxy.js');
     const allowed = [...GUEST_METHODS][0]!;
     const hello = { type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', features: { methods: [allowed, 'sessions.github.options', 'cron.list', 'config.get'], events: ['chat'] } } };
-    const out = scrubForGuest(hello, GUEST, new Map()) as any;
+    const out = scrubForGuest(hello, GUEST, new GuestReplies()) as any;
     expect(out.payload.features.methods).toEqual([allowed]);
     expect(out.payload.features.events).toEqual(['chat']);
   });
@@ -285,15 +288,22 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
     gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', snapshot: { sessionDefaults: { defaultAgentId: 'main', mainKey: 'main', mainSessionKey: 'agent:main:main' } } } })), false));
     browser.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'req', id: 'a1', method: 'agents.list', params: {} })), true));
     await tick();
-    gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: 'a1', ok: true, payload: list })), false));
-    // The same id again, unasked: passes as it came.
+    const [asked] = texts(gateway.sent);
+    expect(asked).toMatchObject({ type: 'req', method: 'agents.list', params: {} });
+    expect(asked.id).not.toBe('a1'); // sent under the proxy's own id (HB-0592)
+    gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: asked.id, ok: true, payload: list })), false));
+    // The same reply again: nobody is waiting for it, so it is not passed on.
+    gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: asked.id, ok: true, payload: list })), false));
+    // A reply under the guest's own id, unasked: nothing of theirs waits under it; it passes as it came.
     gateway.feed(encodeFrame(0x1, Buffer.from(JSON.stringify({ type: 'res', id: 'a1', ok: true, payload: list })), false));
     await tick();
-    const [hello, mine, unasked] = texts(browser.sent);
+    const [hello, mine, unasked, ...rest] = texts(browser.sent);
     expect(hello.payload.snapshot.sessionDefaults).toMatchObject({ defaultAgentId: 'recipe', mainSessionKey: scope.sessionKey });
+    expect(mine.id).toBe('a1');
     expect(mine.payload.agents.map((a: any) => a.id)).toEqual(['recipe']);
     expect(JSON.stringify(mine)).not.toContain('defaultPermissionMode');
     expect(unasked.payload.agents).toHaveLength(2);
+    expect(rest).toEqual([]);
   });
 
   it('control-ui-config.json: no community invite; the terminal flag is left alone (the app reloads itself when it differs from the page)', async () => {

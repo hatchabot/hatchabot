@@ -1,10 +1,11 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { LOCAL_OWNER, internalPrincipal, type Principal } from './principal.js';
 import { registerAccountRoutes, sessionAccount, signInLocalByLink } from './accountsAuth.js';
 import { registerSigninLink, SIGNIN_LINK_PATH, type LinkSignIn, type SigninLinkDeps } from './signinLink.js';
 import { clearSessionCookies, readSessionCookie, sessionValue, setSessionCookie, upgradeSessionCookie } from './sessionCookie.js';
+import { safeEqual } from '../util/safeEqual.js';
 import { registerOriginCheck } from './requestOrigin.js';
 import { addressBucket, isPublic, publicClientAddress } from './trust.js';
 import { registerPublicAccess } from './publicAccess.js';
@@ -441,19 +442,14 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     const exp = Number(expStr);
     if (!expStr || !sig || !Number.isFinite(exp) || exp < Date.now()) return false;
     const expected = sign(exp);
-    return (
-      sig.length === expected.length &&
-      timingSafeEqual(Buffer.from(sig, 'utf8'), Buffer.from(expected, 'utf8'))
-    );
+    return safeEqual(sig, expected);
   };
 
   app.post<{ Body: { password?: string } }>('/v1/login', async (req, reply) => {
     if (!opts.password) return { ok: true }; // auth disabled
     if (throttled(req, PASSWORD_BUCKET)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const given = (req.body as { password?: string } | null)?.password ?? '';
-    const a = Buffer.from(given, 'utf8');
-    const b = Buffer.from(opts.password, 'utf8');
-    const match = a.length === b.length && timingSafeEqual(a, b);
+    const match = safeEqual(given, opts.password);
     if (!match) {
       // Flat-rate the brute-force path a little; real rate limiting can come
       // with real identity.
@@ -671,8 +667,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (!b64 || !sig) return undefined;
     const payload = Buffer.from(b64, 'base64url').toString('utf8');
     const expected = sign(payload);
-    if (sig.length !== expected.length) return undefined;
-    if (!timingSafeEqual(Buffer.from(sig, 'utf8'), Buffer.from(expected, 'utf8'))) return undefined;
+    if (!safeEqual(sig, expected)) return undefined;
     const [sub, expStr, ...rest] = payload.split(':');
     // NaN never compares true, so a missing exp would fail OPEN — guard it
     // the same way password-mode's validSession does.

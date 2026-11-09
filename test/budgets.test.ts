@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
@@ -12,7 +12,7 @@ import {
   budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, MAX_BUDGET, monthElapsed, monthKey, nextMonth, parseNewAgentBudget, PAUSE_WAIT_MS, pausedReplySweep, pausedReplyText, prevMonth, REPLY_EVERY_MS, runBudgets, suggestBudget, type BudgetDeps,
 } from '../src/orchestrator/budgets.js';
 import { MACHINE_DEFAULTS } from '../src/orchestrator/machineDefaults.js';
-import { primeSpendAlert, stepLine, stepView, STEP_TELL_EVERY_MS } from '../src/orchestrator/budgets.js';
+import { primeSpendAlert, QUEUE_FULL_TOLD, stepLine, stepView, STEP_TELL_EVERY_MS } from '../src/orchestrator/budgets.js';
 import { createAgentRecord } from '../src/orchestrator/provision.js';
 import { evaluateModelChanges, recordChange, rightSizeSavings } from '../src/orchestrator/modelLedger.js';
 import { REST_BY_NAME } from '../src/mgmt/restTools.js';
@@ -305,6 +305,177 @@ describe('runBudgets', () => {
     expect(told[0]!.text).toContain('This Hatchabot has used its $100 budget for October ($110): 2 agents are paused (not me)');
   });
 
+  it('a budget changed while the pass stops an earlier agent: the rest are left alone, and nothing is told for the old one (HB-0574)', async () => {
+    const { store, agent, deps, told } = world();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('m1', 'Errands');
+    agent('m2', 'Pantry');
+    store.setModelProfile('m1', profile(NOW, opus(NOW - DAY, 15)), iso(NOW));
+    store.setModelProfile('m2', profile(NOW, opus(NOW - DAY, 10)), iso(NOW));
+    store.setBudget(MACHINE, OWNER, 20, 'pause', iso(NOW - DAY));
+    const stopped: string[] = [];
+    const warned: string[] = [];
+    deps.warn = (event) => { warned.push(event); };
+    deps.pause = async (a) => {
+      stopped.push(a.id);
+      store.setAgentState(a.id, 'STOPPED');
+      // The owner raises it and sets it to warn while this stop is under way.
+      if (stopped.length === 1) store.setBudget(MACHINE, OWNER, 1000, 'warn', iso(NOW));
+      return true;
+    };
+    const r = await runBudgets(deps, NOW);
+    expect(stopped).toHaveLength(1);
+    expect(r.paused).toEqual(stopped);
+    expect(store.getAgent(stopped[0] === 'm1' ? 'm2' : 'm1')!.state).toBe('RUNNING');
+    expect(told).toEqual([]);
+    expect(warned).toEqual(['budget.revised_during_pass']);
+    // The pass the change queued puts the stopped one back: the budget no longer pauses.
+    const next = await runBudgets(deps, NOW + MIN);
+    expect(next.resumed).toEqual(stopped);
+    expect(store.getAgent(stopped[0]!)!.state).toBe('RUNNING');
+  });
+
+  it('a budget removed while an earlier agent moves to a cheaper model: the rest keep their own (HB-0574)', async () => {
+    const { store, agent, deps, told } = world();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('c1', 'Errands', { model: 'claude-opus-4-8' });
+    agent('c2', 'Pantry', { model: 'claude-opus-4-8' });
+    store.setModelProfile('c1', profile(NOW, opus(NOW - DAY, 15)), iso(NOW));
+    store.setModelProfile('c2', profile(NOW, opus(NOW - DAY, 10)), iso(NOW));
+    store.setBudget(MACHINE, OWNER, 20, 'cheaper', iso(NOW - DAY));
+    const moved: string[] = [];
+    deps.downgrade = async (a) => {
+      moved.push(a.id);
+      store.setAgentModel(a.id, 'claude-haiku-4-5');
+      store.setBudget(MACHINE, OWNER, null, 'warn', iso(NOW));
+      return { from: 'claude-opus-4-8', to: 'claude-haiku-4-5' };
+    };
+    await runBudgets(deps, NOW);
+    expect(moved).toHaveLength(1);
+    expect(store.getAgent(moved[0] === 'c1' ? 'c2' : 'c1')!.model).toBe('claude-opus-4-8');
+    expect(told).toEqual([]);
+  });
+
+  const overtaken = (scope: 'machine' | 'own') => {
+    const w = world();
+    const { store, agent, deps } = w;
+    agent('k1', 'Recipe Box', { model: 'claude-haiku-4-5' });
+    store.setModelProfile('k1', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    // A budget moved it to a cheaper model: the machine's (still reached), or its own, since set to pause.
+    if (scope === 'machine') store.setBudget(MACHINE, OWNER, 20, 'cheaper', iso(NOW - DAY));
+    store.addBudgetPause('k1', '2026-10', scope === 'machine' ? MACHINE : 'k1', iso(NOW - DAY), { fromModel: 'claude-opus-4-8', toModel: 'claude-haiku-4-5' });
+    store.setBudget('k1', OWNER, 20, 'pause', iso(NOW - HOUR));
+    const stopped: string[] = [];
+    const logged: string[] = [];
+    deps.log = (event, d) => { logged.push(`${event}:${String(d.why ?? '')}`); };
+    deps.pause = async (a) => { stopped.push(a.id); return true; };
+    let calls = 0;
+    deps.restoreModel = async (a, pin) => {
+      store.setAgentModel(a.id, pin);
+      // Its own budget raised while its own model was being put back, for the pause.
+      if (++calls === 1) store.setBudget('k1', OWNER, 1000, 'warn', iso(NOW));
+      return true;
+    };
+    deps.downgrade = async (a) => { const from = a.model ?? null; store.setAgentModel(a.id, 'claude-haiku-4-5'); return { from, to: 'claude-haiku-4-5' }; };
+    deps.reapplyCheaper = async (a, model) => { store.setAgentModel(a.id, model); return true; };
+    return { ...w, stopped, logged };
+  };
+
+  it("its own model back for a pause that fails: the cheaper model goes back, and the next pass still counts the machine's switch as the budget's, not the owner's (seventh review)", async () => {
+    const { store, deps, stopped } = overtaken('machine');
+    deps.restoreModel = async (a, pin) => { store.setAgentModel(a.id, pin); return true; };
+    deps.pause = async (a) => { stopped.push(a.id); return false; };
+    await runBudgets(deps, NOW);
+    expect(stopped).toEqual(['k1']);
+    expect(store.getAgent('k1')!.model).toBe('claude-haiku-4-5');
+    const open = () => store.getBudgetPause('k1', '2026-10');
+    expect(open()).toMatchObject({ kind: 'cheaper', scope: MACHINE, toModel: 'claude-haiku-4-5' });
+    expect(open()!.resumedAt).toBeFalsy();
+    // The next pass: the switch is still the machine budget's, and the pause is tried again.
+    await runBudgets(deps, NOW + 10 * MIN, { record: false });
+    expect(open()!.resumedBy).not.toBe('owner');
+    expect(open()!.resumedAt).toBeFalsy();
+    expect(stopped).toEqual(['k1', 'k1']);
+    expect(store.getAgent('k1')!.model).toBe('claude-haiku-4-5');
+    // A cheaper model that does not go back either: the switch closes as the budget's doing.
+    const w = overtaken('machine');
+    w.deps.restoreModel = async (a, pin) => { w.store.setAgentModel(a.id, pin); return true; };
+    w.deps.reapplyCheaper = async () => false;
+    w.deps.pause = async () => false;
+    await runBudgets(w.deps, NOW);
+    expect(w.store.getBudgetPause('k1', '2026-10')).toMatchObject({ resumedBy: 'budget-changed' });
+    expect(w.logged).toContain('budget.model_restored:budget-changed');
+  });
+
+  it("a cheaper model the runtime refuses to take back: the switch closes as the budget's doing, and nothing says it went back to its own model for it (eighth review)", async () => {
+    // As the app does: putting a model back says "Back to its own model" in the model ledger, whatever the runtime did with it.
+    const ledger: string[] = [];
+    const stub = (w: ReturnType<typeof overtaken>) => {
+      w.deps.restoreModel = async (a, pin) => { w.store.setAgentModel(a.id, pin); ledger.push(`Back to its own model: ${pin}`); return true; };
+      w.deps.reapplyCheaper = async () => false; // the runtime refused it: its own pin stays
+    };
+    // A pause that did not take.
+    const w = overtaken('machine');
+    stub(w);
+    w.deps.pause = async () => false;
+    await runBudgets(w.deps, NOW);
+    expect(w.store.getBudgetPause('k1', '2026-10')).toMatchObject({ resumedBy: 'budget-changed' });
+    expect(w.store.getAgent('k1')!.model).toBe('claude-opus-4-8');
+    expect(ledger).toEqual(['Back to its own model: claude-opus-4-8']);
+    // Its own budget changed while its own model went back, the switch the machine's.
+    ledger.length = 0;
+    const v = overtaken('machine');
+    const restore = v.deps.restoreModel!;
+    stub(v);
+    const recorded = v.deps.restoreModel!;
+    v.deps.restoreModel = async (a, pin) => { await restore(a, pin); return recorded(a, pin); };
+    await runBudgets(v.deps, NOW);
+    expect(v.store.getBudgetPause('k1', '2026-10')).toMatchObject({ resumedBy: 'budget-changed' });
+    expect(ledger).toEqual(['Back to its own model: claude-opus-4-8']);
+  });
+
+  it('its own model back, then its budget changed: its switch is closed as the budget\'s doing, not the owner\'s (HB-0574 review)', async () => {
+    const { store, deps, stopped, logged } = overtaken('own');
+    // Its budget, set from cheaper to pause, ends the switch first; that
+    // restore does not take (its machine missed a beat), so the pause puts it
+    // back, and the budget is changed meanwhile.
+    const restore = deps.restoreModel!;
+    let first = true;
+    deps.restoreModel = async (a, pin) => { if (first) { first = false; return false; } return restore(a, pin); };
+    await runBudgets(deps, NOW);
+    expect(store.getBudgetPause('k1', '2026-10')).toMatchObject({ resumedBy: 'budget-changed' });
+    expect(logged).toContain('budget.model_restored:budget-changed');
+    expect(eventLabel('budget.model_restored', { why: 'budget-changed' })).toBe('back on its own model: its budget was changed');
+    await runBudgets(deps, NOW + MIN);
+    expect(stopped).toEqual([]);
+    expect(store.getAgent('k1')!.model).toBe('claude-opus-4-8');
+  });
+
+  it("its own model back, then its budget changed: another budget's switch is not closed, and its cheaper model goes back (HB-0574 review)", async () => {
+    const { store, deps, stopped, logged } = overtaken('machine');
+    await runBudgets(deps, NOW);
+    // The machine's budget still says cheaper, and is reached: back on the cheaper model, its record as it was.
+    expect(store.getAgent('k1')!.model).toBe('claude-haiku-4-5');
+    expect(store.getBudgetPause('k1', '2026-10')).toMatchObject({ scope: MACHINE, kind: 'cheaper', toModel: 'claude-haiku-4-5' });
+    expect(store.getBudgetPause('k1', '2026-10')!.resumedAt).toBeUndefined();
+    expect(logged.filter((l) => l.startsWith('budget.model_restored'))).toEqual([]);
+    await runBudgets(deps, NOW + MIN);
+    expect(stopped).toEqual([]);
+    expect(store.getAgent('k1')!.model).toBe('claude-haiku-4-5');
+    expect(store.getBudgetPause('k1', '2026-10')!.resumedAt).toBeUndefined();
+  });
+
+  it('a budget is read by its key, not by reading every budget (HB-0574 review)', () => {
+    const { store } = world();
+    store.setBudget('a1', OWNER, 50, 'pause', iso(NOW));
+    store.setBudget(MACHINE, OWNER, 500, 'warn', iso(NOW));
+    const all = vi.spyOn(store, 'listBudgets');
+    expect(store.getBudget('a1')).toMatchObject({ scope: 'a1', usd: 50, atLimit: 'pause' });
+    expect(store.getBudget(MACHINE)).toMatchObject({ usd: 500, atLimit: 'warn' });
+    expect(store.getBudget('nobody')).toBeUndefined();
+    expect(all).not.toHaveBeenCalled();
+  });
+
   it('a manager with a budget is never paused, even if a row says pause', async () => {
     const { store, agent, deps } = world();
     agent('ops', 'Hatchabot', { ops: true });
@@ -587,6 +758,42 @@ describe('a paused agent answers on Telegram, once a chat', () => {
     expect(sent).toEqual([{ chat_id: 4242, text: pausedReplyText('Trip Planner', 't1', '2026-10') }]);
     expect(sent[0]!.text).toBe('⏸ Trip Planner is paused: it has used its budget for October. It is back on November 1, or sooner if its owner raises the budget. Messages sent while it is paused may not reach it.');
     expect(await pausedReplySweep(deps, later + 3 * MIN)).toBe(0); // the same messages: answered already
+  });
+
+  it('100 messages waiting: Telegram shows no more without taking them from the agent, so it says so once (HB-0576)', async () => {
+    const store = await paused();
+    const later = NOW + 5 * MIN;
+    const queue = [...Array.from({ length: 100 }, (_, i) => msg(100 + i, 4242, later)), msg(200, 5151, later)];
+    const sent: Array<{ chat_id: number }> = [];
+    const urls: string[] = [];
+    const f = (async (url: string, init?: { body?: string }) => {
+      urls.push(url);
+      if (url.includes('/getUpdates')) return new Response(JSON.stringify({ ok: true, result: queue.slice(0, 100) }));
+      sent.push(JSON.parse(init!.body!));
+      return new Response(JSON.stringify({ ok: true }));
+    }) as unknown as typeof fetch;
+    const logged: Array<{ event: string; detail: Record<string, unknown> }> = [];
+    const deps = { store, secretOf: async () => 'token-x', fetchImpl: f, log: (event: string, detail: Record<string, unknown>) => { logged.push({ event, detail }); } };
+    expect(await pausedReplySweep(deps, later + MIN)).toBe(1);
+    expect(await pausedReplySweep(deps, later + HOUR)).toBe(0);
+    expect(sent.map((m) => m.chat_id)).toEqual([4242]);
+    // Nothing confirmed: no offset, so the agent still gets all of them when it is back.
+    expect(urls.filter((u) => u.includes('/getUpdates')).every((u) => !u.includes('offset'))).toBe(true);
+    const full = logged.filter((l) => l.event === 'budget.paused_reply_queue_full');
+    expect(full).toEqual([{ event: 'budget.paused_reply_queue_full', detail: { agentId: 't1', waiting: 100 } }]);
+    expect(eventLabel(full[0]!.event, full[0]!.detail)).toContain('gets no paused reply until it is back');
+    // Kept on the pause row, beside the chats answered: a restart does not say it again.
+    expect(store.getBudgetPause('t1', '2026-10')!.replies).toMatchObject({ [QUEUE_FULL_TOLD]: { u: 100 }, '4242': { u: 199 } });
+    vi.resetModules();
+    const restarted = await import('../src/orchestrator/budgets.js');
+    await restarted.pausedReplySweep(deps, later + 2 * HOUR);
+    expect(logged.filter((l) => l.event === 'budget.paused_reply_queue_full')).toHaveLength(1);
+    // Paused again later in the month: that pause says it once more.
+    const pause = store.getBudgetPause('t1', '2026-10')!;
+    store.addBudgetPause('t1', '2026-10', pause.scope, iso(later + 3 * HOUR));
+    await restarted.pausedReplySweep(deps, later + 4 * HOUR);
+    await restarted.pausedReplySweep(deps, later + 5 * HOUR);
+    expect(logged.filter((l) => l.event === 'budget.paused_reply_queue_full')).toHaveLength(2);
   });
 
   it('writes again: quiet for 12 hours, then one more reply', async () => {

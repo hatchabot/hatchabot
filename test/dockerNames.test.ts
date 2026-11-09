@@ -56,7 +56,7 @@ function backupRun(refs: string[], volumes: string[], prefix = 'hatchabot') {
   const root = mkdtempSync(join(tmpdir(), 'hb-dnames-bk-')); dirs.push(root);
   const install = join(root, 'install'); const bin = join(root, 'bin'); const home = join(root, 'home'); const backups = join(root, 'backups');
   for (const d of [join(install, 'scripts'), join(install, 'data'), bin, home]) mkdirSync(d, { recursive: true });
-  writeFileSync(join(install, 'scripts', 'backup-volumes.sh'), readFileSync('scripts/backup-volumes.sh'), { mode: 0o755 });
+  for (const f of ['backup-volumes.sh', 'backup-owner.sh']) writeFileSync(join(install, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
   writeFileSync(join(install, '.env'), 'HATCHABOT_SECRET_KEY=not-a-real-key\n');
   const db = new Database(join(install, 'data', 'hatchabot.sqlite'));
   db.exec('CREATE TABLE agents (id TEXT, state TEXT, runtime_ref TEXT)');
@@ -104,7 +104,7 @@ function uninstallLookups(refs: string[], prefix = 'hatchabot') {
   const root = mkdtempSync(join(tmpdir(), 'hb-dnames-un-')); dirs.push(root);
   const install = join(root, 'install'); const bin = join(root, 'bin'); const home = join(root, 'home');
   for (const d of [join(install, 'scripts'), join(install, 'data'), bin, home]) mkdirSync(d, { recursive: true });
-  writeFileSync(join(install, 'scripts', 'uninstall.sh'), readFileSync('scripts/uninstall.sh'), { mode: 0o755 });
+  for (const f of ['uninstall.sh', 'backup-owner.sh']) writeFileSync(join(install, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
   writeFileSync(join(install, '.env'), `HATCHABOT_SECRET_KEY=not-a-real-key\nHATCHABOT_PREFIX=${prefix}\n`);
   const db = new Database(join(install, 'data', 'hatchabot.sqlite'));
   db.exec('CREATE TABLE agents (id TEXT, state TEXT, runtime_ref TEXT, image TEXT)');

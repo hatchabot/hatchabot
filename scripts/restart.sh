@@ -59,8 +59,12 @@ PUBLIC_URL="$( { sed -n 's/^HATCHABOT_PUBLIC_URL=//p' "$HOME/.config/hatchabot/e
   | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' | tail -n1 || true)"
 # 60s, not 30: the DGX control plane takes ~40s to serve, and the old cap
 # printed a scary failure for a boot that was going fine.
+# Each request has its own deadline, and the wait a total one: a listener that
+# took the connection and never answered held one curl, and the upgrade
+# waiting on this restart, with no end (HB-0553).
+DEADLINE=$((SECONDS + 60))
 for _ in $(seq 1 60); do
-  if curl -sfk -o /dev/null "${LISTENER}/healthz"; then
+  if curl -sfk --connect-timeout 3 --max-time 5 -o /dev/null "${LISTENER}/healthz"; then
     if [ -n "$PUBLIC_URL" ]; then
       echo "Hatchabot is up — ${PUBLIC_URL}  (listener: ${LISTENER})"
     else
@@ -69,6 +73,7 @@ for _ in $(seq 1 60); do
     fi
     exit 0
   fi
+  [ "$SECONDS" -lt "$DEADLINE" ] || break
   sleep 1
 done
 echo "Service was restarted but isn't answering at ${LISTENER}."

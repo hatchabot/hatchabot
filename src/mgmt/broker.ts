@@ -101,14 +101,15 @@ export interface ApiClient {
   getHealth(id: string): Promise<HealthResult>;
   getUsage(id: string): Promise<UsageResult>;
   availableModels(profileId: string): Promise<string[]>;
-  startAgent(id: string): Promise<void>;
+  /** The start's answer: a 202 with `rebuilding` carries the rebuild's operation (followed by start_agent). */
+  startAgent(id: string): Promise<unknown>;
   stopAgent(id: string): Promise<void>;
   /** Accepted, not done: the answer may carry the rebuild's operation (followed by #rebuild). */
   rebuildAgent(id: string, opts?: { stoppedWaits?: boolean }): Promise<unknown>;
   /** What became of the change, for the done message (live, staged, waiting); throws when the runtime refused it. */
   setModel(id: string, model: string): Promise<string | void>;
   /** What the card for "this agent → that model" should say (GET /v1/agents/:id/model-check). Optional: older fakes. */
-  modelCheck?(id: string, model: string): Promise<{ from: string; evidence: string; warnings: string[]; downgrade: boolean }>;
+  modelCheck?(id: string, model: string): Promise<{ from: string; evidence: string; warnings: string[]; downgrade: boolean; problem?: string | null; offered?: string[] }>;
   approvePairing(id: string, code: string): Promise<void>;
   denyPairing(id: string, code: string): Promise<void>;
   removeMember(id: string, userId: string): Promise<void>;
@@ -189,6 +190,8 @@ export interface BrokerOptions {
  *  reading a document, not a verb) and a working notice while they execute. */
 export const AUTHORING_TOOLS = new Set(['create_agent', 'update_definition', 'build_image']);
 const AUTHORING_TTL_MS = 600_000;
+/** start_agent's answer when a change was waiting for its start, and it could not be followed. */
+const REBUILT_AT_START = 'It is being rebuilt as it starts (a change was waiting for its start).';
 
 class BrokerError extends Error {
   constructor(readonly code: ErrCode, message: string) {
@@ -645,16 +648,28 @@ export class Broker {
       case 'set_model': {
         const model = args.model;
         if (typeof model !== 'string' || !model) throw new BrokerError('INVALID_INPUT', 'Missing model.');
-        const allowed = await this.api.availableModels(agent.aiProfileId);
-        if (!allowed.includes(model)) {
-          throw new BrokerError(
-            'INVALID_INPUT',
-            `"${model}" isn't offered by this agent's source. Options: ${allowed.join(', ') || '(none)'}.`,
-          );
-        }
         // The scorecard's evidence on the card, and a downgrade's risks stated
         // plainly (docs/features.md, "Right-size"): the owner still decides.
         const check = await this.api.modelCheck?.(agent.id, model).catch(() => undefined);
+        // Checked as Confirm will check it: the source's own menu and the
+        // runtime it runs (the server's model-check). The vendor's catalogue
+        // let through a model off the menu that Confirm then refused, and
+        // refused one on the menu it had not listed (HB-0597). It stands in
+        // only when the server does not say.
+        if (check && check.problem !== undefined) {
+          if (check.problem) {
+            const options = check.offered?.length ? ` Options: ${check.offered.join(', ')}.` : '';
+            throw new BrokerError('INVALID_INPUT', `${check.problem}${options}`);
+          }
+        } else {
+          const allowed = await this.api.availableModels(agent.aiProfileId);
+          if (!allowed.includes(model)) {
+            throw new BrokerError(
+              'INVALID_INPUT',
+              `"${model}" isn't offered by this agent's source. Options: ${allowed.join(', ') || '(none)'}.`,
+            );
+          }
+        }
         return { ...base, model, ...(check ? { check: { from: check.from, evidence: check.evidence, warnings: check.warnings ?? [], downgrade: !!check.downgrade } } : {}) };
       }
       case 'approve_member': {
@@ -731,8 +746,10 @@ export class Broker {
       // A long change answers 202 { operation } and goes on in the background
       // (operations.ts, phase 3): follow it, so "done" means done.
       const followed = await followOperation(out, (path) => raw.call(this.api, 'GET', path));
-      if (followed) return followed;
+      // What the answer itself says goes with it: a clone's lines on what it
+      // could not copy were dropped once its setup was followed (HB-0572).
       const done = REST_BY_NAME.get(name)?.done?.(out);
+      if (followed) return [followed, done].filter(Boolean).join('\n');
       if (r.rest.rebuild && r.agentId) {
         const rebuilt = await this.#rebuild(r.agentId, { afterChange: true });
         return [done, rebuilt].filter(Boolean).join('\n') || undefined;
@@ -799,8 +816,16 @@ export class Broker {
         if (Object.keys(patch).length) await this.api.patchAgent(r.agentId, patch);
         return;
       }
-      case 'start_agent':
-        return this.api.startAgent(r.agentId);
+      case 'start_agent': {
+        // A change was waiting for its start: it comes up rebuilt, in the
+        // background. Followed, as rebuild_agent is: a ✅ at once said started
+        // while it was still queued, or about to fail (HB-0562).
+        const out = await this.api.startAgent(r.agentId);
+        if (!(out as { rebuilding?: boolean } | null)?.rebuilding) return;
+        const raw = this.api.raw;
+        if (!raw) return REBUILT_AT_START;
+        return (await followOperation(out, (path) => raw.call(this.api, 'GET', path))) ?? REBUILT_AT_START;
+      }
       case 'stop_agent':
         return this.api.stopAgent(r.agentId);
       case 'rebuild_agent':

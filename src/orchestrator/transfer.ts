@@ -32,6 +32,7 @@ import { MAX_DATA_SOURCES, MAX_MOUNT_NAME } from './dataSourceLimits.js';
 import { GIT_MOUNT_NAME_RE, normalizeGitUrl } from './gitSource.js';
 import { STATE_CACHE_EXCLUDES } from '../providers/volumeCopy.js';
 import { manifestSchema as appManifestSchema } from './apps.js';
+import { TelegramUnavailableError } from '../channels/telegramManual.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -339,21 +340,53 @@ const ManifestSchema = z.object({
 });
 
 /** Uncompressed ceiling — a gzip bomb must not OOM the control plane. */
-const MAX_STATE_BYTES = 256 * 1024 * 1024;
+export const MAX_STATE_BYTES = 256 * 1024 * 1024;
 
 /**
  * Largest raw (gzipped-tar) state that still fits under MAX_STATE_BYTES once
- * base64-inflated (×4/3) and wrapped in the manifest JSON. Beyond this the
+ * base64-inflated (×4/3) and wrapped in a small manifest. Beyond this the
  * export would either produce a file no import could ever accept, or trip
  * Node's max-string-length inside JSON.stringify with an opaque RangeError —
- * so we refuse it up front with a message the owner can act on.
+ * so we refuse it up front with a message the owner can act on. The manifest
+ * itself can be bigger than the 8 KB this sets aside (64 environment values of
+ * 8 KB each): stateAllowance has the exact limit for a given manifest.
  */
-const MAX_RAW_STATE_BYTES = Math.floor((MAX_STATE_BYTES - 8192) * 0.75);
+export const MAX_RAW_STATE_BYTES = Math.floor((MAX_STATE_BYTES - 8192) * 0.75);
 
-function tooLarge(bytes: number): TransferError {
+/**
+ * The largest raw state a manifest of `metaBytes` (its JSON with an empty
+ * state) can carry and still be read back under MAX_STATE_BYTES: the state
+ * goes in as base64, 4 bytes for every 3 or part of 3, none of them escaped.
+ * Never more than MAX_RAW_STATE_BYTES, which the import holds the state to.
+ * Without it, an export with large environment values came out over the
+ * importer's ceiling: a copy this same version could not import (HB-0582).
+ */
+export function stateAllowance(metaBytes: number): number {
+  return Math.max(0, Math.min(MAX_RAW_STATE_BYTES, Math.floor((MAX_STATE_BYTES - metaBytes) / 4) * 3));
+}
+
+/** Under this much room for the state, the settings and environment values are what fill the file. */
+export const NO_ROOM_BYTES = 1e6;
+
+/**
+ * The refusal of a state over `limit`. An allowance next to nothing means the
+ * agent's settings and environment values (`metaBytes`, the manifest without
+ * its state) alone fill the file: said as such, with their size, not as a
+ * limit of "about 0 MB" for the state (eleventh review). Refused before the
+ * state is measured, so its size is not named (twelfth review).
+ */
+export function tooLarge(bytes: number, limit = MAX_RAW_STATE_BYTES, metaBytes = 0): TransferError {
+  if (limit < NO_ROOM_BYTES) {
+    return new TransferError(
+      `This agent's settings and environment values alone come to about ${(metaBytes / 1e6).toFixed(0)} MB, ` +
+        `next to the ${(MAX_STATE_BYTES / 1e6).toFixed(0)} MB a single file can hold, so there is no room for its ` +
+        `saved state. Remove its largest environment values, then try again.`,
+    );
+  }
   return new TransferError(
     `This agent's saved state is ${(bytes / 1e6).toFixed(0)} MB — too large to move as ` +
-      `a single file (the limit is about ${(MAX_RAW_STATE_BYTES / 1e6).toFixed(0)} MB). Trim old ` +
+      `a single file (the limit is about ${(limit / 1e6).toFixed(0)} MB` +
+      `${limit < MAX_RAW_STATE_BYTES ? ' with its settings and environment values' : ''}). Trim old ` +
       `sessions, or keep the bulk data in a shared folder instead of the agent's own volume.`,
   );
 }
@@ -363,12 +396,14 @@ function tooLarge(bytes: number): TransferError {
  * the agent keeps running. The raw size answers when it is already under the
  * limit (compression only shrinks it); only a bigger volume pays for a trial
  * compress, and that runs beside the live agent, not after stopping it.
- * Undefined when it can't be measured: the check after the real tar still holds.
+ * `limit`: what this agent's state may weigh (stateAllowance), so the raw size
+ * answers only when it fits that. Undefined when it can't be measured: the
+ * check after the real tar still holds.
  */
-export async function estimateStateBytes(provider: ProvisionDeps['provider'], runtimeRef: string): Promise<number | undefined> {
+export async function estimateStateBytes(provider: ProvisionDeps['provider'], runtimeRef: string, limit = MAX_RAW_STATE_BYTES): Promise<number | undefined> {
   const script =
     `s=$(du -sb /home/node 2>/dev/null | cut -f1); ` +
-    `if [ -n "$s" ] && [ "$s" -le ${MAX_RAW_STATE_BYTES} ]; then echo "$s"; ` +
+    `if [ -n "$s" ] && [ "$s" -le ${Math.max(0, Math.floor(limit))} ]; then echo "$s"; ` +
     `else tar cz ${STATE_CACHE_EXCLUDES.join(' ')} -C /home/node . 2>/dev/null | wc -c; fi`;
   try {
     const res = await provider.execShellOnVolume(runtimeRef, script, { readOnly: true });
@@ -422,48 +457,11 @@ export async function exportAgent(
     }
   }
 
-  // Too big to travel: say so BEFORE the stop. The size check below used to
-  // come after the stop and a full tar (up to a minute of downtime on the
-  // biggest agents) only to refuse (review, 2026-09-29).
-  const estimate = await estimateStateBytes(provider, agent.runtimeRef);
-  if (estimate !== undefined && estimate > MAX_RAW_STATE_BYTES) throw tooLarge(estimate);
-
-  // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
-  // of an export is usually that the agent is about to live somewhere else.
-  const wasRunning = agent.state === 'RUNNING';
-  await stopAndConfirm(provider, agent.runtimeRef);
-  if (wasRunning) store.setAgentState(agentId, 'STOPPED');
-  // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
-  // which owns its own undo) would strand a running agent silently STOPPED —
-  // it stops answering Telegram with no error the owner ever sees. Put it back.
-  const restoreIfRunning = async () => {
-    if (!wasRunning) return;
-    // Only claim RUNNING if the container actually came back — matching
-    // migrate's undo. Setting RUNNING after a swallowed start() failure would
-    // leave the DB lying (RUNNING over a stopped container) until reconcile.
-    try {
-      await provider.start(agent.runtimeRef!);
-      store.setAgentState(agentId, 'RUNNING');
-    } catch (startErr) {
-      log('export.restart_failed', { agentId, error: String(startErr) });
-    }
-  };
-
-  let state: Buffer;
-  try {
-    state = await provider.exportState(agent.runtimeRef);
-  } catch (err) {
-    // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
-    // which owns its own undo) would strand a running agent silently STOPPED.
-    await restoreIfRunning();
-    throw err;
-  }
-  if (state.length > MAX_RAW_STATE_BYTES) {
-    await restoreIfRunning();
-    throw tooLarge(state.length);
-  }
-  // Read BEFORE the manifest is assembled: a lookup failure only costs the
-  // recipe (noted in the file), never the export.
+  // The file, all but its state, assembled once BEFORE the stop: what it
+  // weighs is what the state may add to it. Each of these is a read (the
+  // image's labels, the store, a data source's key) that does not need the
+  // agent stopped; a lookup failure only costs the recipe (noted in the file),
+  // never the export.
   const dataVersion = await provider.info(agent.runtimeRef).then((i) => i.openclawVersion, () => undefined);
   let image: ExportManifest['image'];
   if (agent.image) {
@@ -548,8 +546,64 @@ export async function exportAgent(
     })),
     envVars,
     image,
-    state: state.toString('base64'),
+    state: '',
   };
+  // Too big to travel: say so BEFORE the stop. The size check after the tar
+  // used to be the first (up to a minute of downtime on the biggest agents,
+  // only to refuse; review, 2026-09-29), and the first one here bounded the
+  // rest of the file from the whole agent and profile rows, reading its
+  // memberships, app and data sources twice, plus room for what came after
+  // (reviews of HB-0582). Now it is this file's own measure: the agent is
+  // stopped only for what this file can carry, and the check after the tar
+  // holds the state to the same.
+  const metaBytes = Buffer.byteLength(JSON.stringify(manifest), 'utf8');
+  const allowance = stateAllowance(metaBytes);
+  // No room at all beside them: refused at once, not after measuring the
+  // volume (a trial compress of it) only to refuse it (twelfth review).
+  if (allowance < NO_ROOM_BYTES) throw tooLarge(0, allowance, metaBytes);
+  const estimate = await estimateStateBytes(provider, agent.runtimeRef, allowance);
+  if (estimate !== undefined && estimate > allowance) throw tooLarge(estimate, allowance, metaBytes);
+
+  // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
+  // of an export is usually that the agent is about to live somewhere else.
+  const wasRunning = agent.state === 'RUNNING';
+  await stopAndConfirm(provider, agent.runtimeRef);
+  if (wasRunning) store.setAgentState(agentId, 'STOPPED');
+  // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
+  // which owns its own undo) would strand a running agent silently STOPPED —
+  // it stops answering Telegram with no error the owner ever sees. Put it back.
+  const restoreIfRunning = async () => {
+    if (!wasRunning) return;
+    // Only claim RUNNING if the container actually came back — matching
+    // migrate's undo. Setting RUNNING after a swallowed start() failure would
+    // leave the DB lying (RUNNING over a stopped container) until reconcile.
+    try {
+      await provider.start(agent.runtimeRef!);
+      store.setAgentState(agentId, 'RUNNING');
+    } catch (startErr) {
+      log('export.restart_failed', { agentId, error: String(startErr) });
+    }
+  };
+
+  let state: Buffer;
+  try {
+    state = await provider.exportState(agent.runtimeRef);
+  } catch (err) {
+    // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
+    // which owns its own undo) would strand a running agent silently STOPPED.
+    await restoreIfRunning();
+    throw err;
+  }
+  // The whole file, not the state alone, must fit what an import reads back
+  // (HB-0582): the allowance measured above, of this same manifest, and never
+  // over MAX_RAW_STATE_BYTES (stateAllowance). Late, so the agent goes back to
+  // how it was.
+  if (state.length > allowance) {
+    await restoreIfRunning();
+    throw tooLarge(state.length, allowance, metaBytes);
+  }
+  manifest.exportedAt = new Date().toISOString(); // when the state was taken; the same length as the one measured
+  manifest.state = state.toString('base64');
   const data = gzipSync(Buffer.from(JSON.stringify(manifest), 'utf8'));
   // A sleeping agent stays down as an ordinary stopped one: asleep, the wake
   // poll here kept reading its bot and started it the moment a message came,
@@ -811,7 +865,10 @@ async function importAgentInner(
   if (manifest.channel && opts.verifyToken) {
     let username: string;
     try { username = await opts.verifyToken(manifest.channel.botToken); }
-    catch { throw new TransferError('Telegram rejected the bot token in this file. Export the agent again, or import it and add a bot afterwards.'); }
+    catch (err) {
+      if (err instanceof TelegramUnavailableError) throw new TransferError('Telegram did not answer, so the bot token in this file could not be checked. Try the import again in a moment.');
+      throw new TransferError('Telegram rejected the bot token in this file. Export the agent again, or import it and add a bot afterwards.');
+    }
     if (username.toLowerCase() !== manifest.channel.accountId.toLowerCase()) {
       throw new TransferError(`The token in this file belongs to @${username}, not @${manifest.channel.accountId}.`);
     }
@@ -851,7 +908,8 @@ async function importAgentInner(
   // The checks above wait on the network: the machine may have been removed
   // meanwhile, and an agent placed on it was stranded (HB-0275).
   if (!store.getHost(host.id)) throw new TransferError('The machine it was going to was removed meanwhile. Import it again onto another.');
-  store.insertAgent(agent);
+  // And its source, deleted meanwhile: refused, not an agent on nothing (HB-0570).
+  store.insertAgentOnSource(agent);
   if (image.pin) store.setAgentImage(agent.id, image.pin);
   // Before provisioning reads them: the container is made with these limits.
   const limits = importedLimits(manifest.agent, !!opts.mayBuild);

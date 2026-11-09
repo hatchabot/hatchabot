@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
+import { regexpEscape } from '../src/domain/regexpEscape.js';
 
 // Every test here runs real shell scripts in a sandbox; vitest's 5 s is not
 // enough under load on the self-hosted runner (2026-10-23).
@@ -88,11 +89,11 @@ describe('scripts/build-runtime-image.sh (audit, 2026-10-29)', () => {
     const w = world({ manifest: true });
     const tag = (env: Record<string, string>) => /would build hatchabot-runtime:(\S+)/.exec(w.run({ ...env, DRYRUN: '1' }).stdout)?.[1];
     const node26 = tag({ NODE_IMAGE: 'node:26-slim' }), node24 = tag({ NODE_IMAGE: 'node:24-slim' });
-    expect(node26).toMatch(new RegExp(`^${w.openclaw.replace(/\./g, '\\.')}-custom-\\d+$`));
+    expect(node26).toMatch(new RegExp(`^${regexpEscape(w.openclaw)}-custom-\\d+$`));
     expect(node24).toMatch(/-custom-\d+$/);
     expect(node26).not.toBe(node24);
     expect(tag({ NODE_IMAGE: 'node:26-slim' })).toBe(node26);
-    expect(tag({ BAKED_PLUGINS: 'fixture=fixture-plugin', EXTRA_PACKAGES: 'tcpdump' })).toMatch(new RegExp(`^${w.openclaw.replace(/\./g, '\\.')}-plus-tcpdump-custom-\\d+$`));
+    expect(tag({ BAKED_PLUGINS: 'fixture=fixture-plugin', EXTRA_PACKAGES: 'tcpdump' })).toMatch(new RegExp(`^${regexpEscape(w.openclaw)}-plus-tcpdump-custom-\\d+$`));
     // Another OpenClaw is made to build with them: its own version tag. A tag given is the tag.
     expect(tag({ NODE_IMAGE: 'node:26-slim', OPENCLAW_VERSION: '2026.10.1' })).toBe('2026.10.1');
     expect(tag({ NODE_IMAGE: 'node:26-slim', IMAGE_TAG: `${w.openclaw}-node26` })).toBe(`${w.openclaw}-node26`);
@@ -110,7 +111,7 @@ describe('scripts/build-runtime-image.sh (audit, 2026-10-29)', () => {
     const tag = (packages: string) => /would build hatchabot-runtime:(\S+)/.exec(w.run({ EXTRA_PACKAGES: packages, DRYRUN: '1' }).stdout)?.[1];
     const prefix = 'libicu-dev libssl-dev libsqlite3-dev build-essential ';
     const a = tag(prefix + 'curl'), b = tag(prefix + 'wget');
-    expect(a).toMatch(new RegExp(`^${w.openclaw.replace(/\./g, '\\.')}-plus-libicu-dev-libssl-dev-libsqlite3-dev-bui-\\d+$`));
+    expect(a).toMatch(new RegExp(`^${regexpEscape(w.openclaw)}-plus-libicu-dev-libssl-dev-libsqlite3-dev-bui-\\d+$`));
     expect(b).toMatch(/-plus-libicu-dev-libssl-dev-libsqlite3-dev-bui-\d+$/);
     expect(a).not.toBe(b);
     expect(tag(prefix + 'curl')).toBe(a);

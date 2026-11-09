@@ -142,7 +142,7 @@ describe('a class memory cap', () => {
       expect(made.statusCode).toBe(200);
       const cls = made.json().class;
       expect(cls.memoryCap).toBe('6g');
-      store.setAgentClass('own', cls.id);
+      store.setAgentClassIf('own', store.getAgent('own')?.classId ?? null, cls.id);
       // A member with its own cap keeps it; one without follows the class.
       const put = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as(OWNER), payload: { memoryCap: '8g' } });
       expect(put.statusCode).toBe(200);
@@ -168,7 +168,7 @@ describe('a class memory cap', () => {
     const { store, f, provider, refs, done } = await world();
     try {
       const cls = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as(OWNER), payload: { name: 'Quants', memoryCap: '6g' } })).json().class;
-      store.setAgentClass('own', cls.id);
+      store.setAgentClassIf('own', store.getAgent('own')?.classId ?? null, cls.id);
       const update = provider.updateMemory.bind(provider);
       provider.updateMemory = async () => { throw new ProviderError('docker update: daemon gone', 'Its machine did not answer.'); };
       const first = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as(OWNER), payload: { memoryCap: '8g' } });
@@ -188,12 +188,12 @@ describe('a class memory cap', () => {
     const { store, f, provider, refs, done } = await world();
     try {
       const cls = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as(OWNER), payload: { name: 'Quants', memoryCap: '6g' } })).json().class;
-      store.setAgentClass('own', cls.id);
+      store.setAgentClassIf('own', store.getAgent('own')?.classId ?? null, cls.id);
       const del = await f.inject({ method: 'DELETE', url: `/v1/agent-classes/${cls.id}`, headers: as(OWNER) });
       expect(del.json()).toEqual({ removed: true, skipped: [] });
       expect(provider.memoryUpdates).toEqual([{ runtimeRef: refs.own, cap: defaultMemoryCap() }]);
       const again = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as(OWNER), payload: { name: 'Quants', memoryCap: '6g' } })).json().class;
-      store.setAgentClass('own', again.id);
+      store.setAgentClassIf('own', store.getAgent('own')?.classId ?? null, again.id);
       provider.updateMemory = async () => { throw new ProviderError('docker update: daemon gone', 'Its machine did not answer.'); };
       const failed = await f.inject({ method: 'DELETE', url: `/v1/agent-classes/${again.id}`, headers: as(OWNER) });
       expect(failed.json().skipped).toEqual(['own: Its machine did not answer.']);

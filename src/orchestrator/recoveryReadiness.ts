@@ -52,9 +52,19 @@ export interface AgentReadiness {
   hostId: string;
   /** The machine it lives on, when that is a runner. */
   runner?: { name: string; reachable?: boolean };
-  latestUsable?: { date: string; ageDays: number; sizeBytes: number; complete: boolean | null };
-  /** The sets a restore can use for it, newest first: the guided restore's choices. */
-  restorable: Array<{ date: string; sizeBytes: number; complete: boolean | null; drill?: 'passed' | 'failed' }>;
+  /**
+   * The newest set a restore could use (Restore…'s first choice), otherKey
+   * when another install made it. The status reads this install's own sets
+   * only (computeReadiness).
+   */
+  latestUsable?: { date: string; ageDays: number; sizeBytes: number; complete: boolean | null; otherKey?: true };
+  /**
+   * This install's own newest set a restore could use: what Restore… picks
+   * first, before another install's newer one (eighth review).
+   */
+  ownLatest?: { date: string; ageDays: number; sizeBytes: number; complete: boolean | null };
+  /** The sets a restore can use for it, newest first: the guided restore's choices (this install's own kept first, up to 14). */
+  restorable: Array<{ date: string; sizeBytes: number; complete: boolean | null; drill?: 'passed' | 'failed'; otherKey?: true }>;
   leftOut: LeftOut;
   drill?: { at: string; set: string; passed: boolean; restored: boolean | null; checks: string[] };
   status: ReadinessStatus;
@@ -83,11 +93,16 @@ export function setAgeDays(date: string, now: number): number {
 /**
  * Whether a restore can use this set for the volume: its archive is there,
  * and the set's record allows it — complete, from before the record, or
- * incomplete with this volume captured whole (and not among the failed).
+ * incomplete with this volume captured whole. Captured whole wins over failed:
+ * a later run of the same day that failed on it keeps the earlier run's whole
+ * archive (the script replaces one only by renaming a whole one over it) and
+ * names the volume in both lists; read as failed, the day's good archive was
+ * hidden and an older day's offered instead (HB-0471).
  */
 export function usableFor(set: BackupSet, vol: string): boolean {
   if (set.running) return false;
   if (!set.volumes.some((v) => v.file === `${vol}.tgz`)) return false;
+  if (set.captured?.includes(vol)) return true;
   if ((set.failedVolumes ?? []).includes(vol)) return false;
   if (set.complete !== false) return true;
   // Incomplete: the record must say this one was captured (a record from
@@ -131,7 +146,11 @@ export function computeReadiness(input: {
 }): ReadinessResult {
   const { now } = input;
   const finished = input.sets.filter((s) => !s.running).sort((a, b) => b.date.localeCompare(a.date));
-  const newest = finished[0];
+  // A set made by another install or under an earlier key (BackupSet.foreign)
+  // is a copy a restore can use, labelled, but never this machine's newest
+  // set, nor one that "left out" an agent it was never this install's to take.
+  const own = finished.filter((s) => !s.foreign);
+  const newest = own[0];
   const newestFresh = !!newest && setAgeDays(newest.date, now) <= STALE_DAYS;
   const drills = [...input.drills].sort((a, b) => b.id.localeCompare(a.id));
   const setStart = (s: BackupSet) => Date.parse(s.startedAt ?? '') || Date.parse(`${s.date}T00:00:00`);
@@ -148,15 +167,30 @@ export function computeReadiness(input: {
       const d = drills.find((r) => r.set === date && r.volumes.some((v) => v.volume === vol));
       return d ? (d.volumes.find((v) => v.volume === vol)!.passed ? 'passed' : 'failed') : undefined;
     };
-    const restorable = finished.filter((s) => usableFor(s, vol)).slice(0, RESTORABLE_MAX).map((s) => {
+    // Another install's sets are cut first: this install's own fill the list,
+    // up to RESTORABLE_MAX, then the newest of the others. Newest first
+    // overall, 15 newer foreign sets cut the own one from it, and Restore…
+    // had no own set to pick (tenth review).
+    const usable = finished.filter((s) => usableFor(s, vol));
+    const kept = new Set([...usable.filter((s) => !s.foreign), ...usable.filter((s) => s.foreign)].slice(0, RESTORABLE_MAX));
+    const restorable = usable.filter((s) => kept.has(s)).map((s) => {
       const d = drillOf(s.date);
-      return { date: s.date, sizeBytes: s.volumes.find((v) => v.file === `${vol}.tgz`)?.sizeBytes ?? 0, complete: s.complete ?? null, ...(d ? { drill: d } : {}) };
+      return {
+        date: s.date, sizeBytes: s.volumes.find((v) => v.file === `${vol}.tgz`)?.sizeBytes ?? 0, complete: s.complete ?? null,
+        ...(d ? { drill: d } : {}), ...(s.foreign ? { otherKey: true as const } : {}),
+      };
     });
-    const best = restorable[0];
-    const latestUsable = best ? { date: best.date, ageDays: setAgeDays(best.date, now), sizeBytes: best.sizeBytes, complete: best.complete } : undefined;
+    const first = restorable[0];
+    const latestUsable = first ? { date: first.date, ageDays: setAgeDays(first.date, now), sizeBytes: first.sizeBytes, complete: first.complete, ...(first.otherKey ? { otherKey: true as const } : {}) } : undefined;
+    // Ready, stale or covered by this install's own sets only: another
+    // install's set (or one made under an earlier key) that holds an archive
+    // of the same name is a restore choice, labelled, never its proof.
+    const ownSet = own.find((s) => usableFor(s, vol));
+    const best = ownSet ? { date: ownSet.date, ageDays: setAgeDays(ownSet.date, now), sizeBytes: ownSet.volumes.find((v) => v.file === `${vol}.tgz`)?.sizeBytes ?? 0, complete: ownSet.complete ?? null } : undefined;
+    const otherCopy = first?.otherKey && (!best || first.date > best.date) ? first.date : '';
 
     // The recent sets it was due in: made after the agent was.
-    const due = finished.slice(0, RECENT_SETS).filter((s) => !Number.isFinite(made) || setStart(s) > made);
+    const due = own.slice(0, RECENT_SETS).filter((s) => !Number.isFinite(made) || setStart(s) > made);
     const leftOut: LeftOut = { count: 0, of: due.length, asleep: 0, failed: 0, missing: 0, other: 0 };
     for (const s of due) {
       if (usableFor(s, vol)) continue;
@@ -167,13 +201,15 @@ export function computeReadiness(input: {
       else leftOut.other++;
     }
 
+    // This install's records only (listDrills filters by owner as the sets
+    // are): another install's newest record naming the volume is not its proof.
     const rec = drills.find((r) => r.volumes.some((v) => v.volume === vol));
     const rv = rec?.volumes.find((v) => v.volume === vol);
     const drill = rec && rv ? { at: rec.finishedAt || rec.startedAt, set: rec.set, passed: rv.passed, restored: rv.restored, checks: drillChecks(rv) } : undefined;
 
     const newAgent = !best && (!newest || (Number.isFinite(made) && made >= setStart(newest)));
     const status: ReadinessStatus = !best ? (newAgent && newest ? 'new' : 'not covered')
-      : latestUsable!.ageDays > STALE_DAYS ? 'stale'
+      : best.ageDays > STALE_DAYS ? 'stale'
       : drill && !drill.passed ? 'drill failed'
       : !drill ? 'never drilled'
       : 'ready';
@@ -187,10 +223,11 @@ export function computeReadiness(input: {
     const leftWords = leftOut.count ? ` — left out of ${leftOut.count === leftOut.of ? (leftOut.count === 1 ? 'the last backup' : `the last ${leftOut.count} backups`) : `${leftOut.count} of the last ${plural(leftOut.of, 'backup')}`}: ${why.join('; ')}` : '';
     const runnerWords = runner?.reachable === false ? ` ${runner.name} is not answering now.` : '';
     const drillWords = drill ? (drill.passed ? `last drill ${drill.at.slice(0, 10)} passed` : `the last drill (${drill.at.slice(0, 10)}) failed: ${drill.checks.filter((c) => !/read whole|files found/.test(c)).join(', ') || 'see Settings → Backups'}`) : 'never drilled';
-    const line = status === 'new' ? 'Not backed up yet — it was made after the last backup.'
-      : status === 'not covered' ? `No backup holds it${leftWords}.${runnerWords}`
-      : status === 'stale' ? `Its newest backup is from ${best!.date} (${plural(latestUsable!.ageDays, 'day')} ago)${leftWords}.${runnerWords}`
-      : `Recoverable from ${best!.date} · ${drillWords}`;
+    const otherWords = otherCopy ? ` A ${best ? 'newer ' : ''}copy made by another install, or under an earlier key, is from ${otherCopy}.` : '';
+    const line = status === 'new' ? `Not backed up yet — it was made after the last backup.${otherWords}`
+      : status === 'not covered' ? `${otherCopy ? 'None of this install\'s backups holds it' : 'No backup holds it'}${leftWords}.${runnerWords}${otherWords}`
+      : status === 'stale' ? `Its newest backup is from ${best!.date} (${plural(best!.ageDays, 'day')} ago)${leftWords}.${runnerWords}${otherWords}`
+      : `Recoverable from ${best!.date} · ${drillWords}${otherWords ? `.${otherWords}` : ''}`;
 
     // The fold: an agent's own alert only while the machine's newest set is
     // fresh and left it out. When the whole machine is late, its own alert
@@ -203,6 +240,7 @@ export function computeReadiness(input: {
       agentId: a.id, name: a.name, hostId: a.hostId,
       ...(runner ? { runner } : {}),
       ...(latestUsable ? { latestUsable } : {}),
+      ...(best ? { ownLatest: best } : {}),
       restorable, leftOut,
       ...(drill ? { drill } : {}),
       status, line,

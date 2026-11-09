@@ -40,19 +40,13 @@ mkdir -p ~/.config/systemd/user
 # metacharacters (& | \) so a clone path containing them can't corrupt the
 # generated unit.
 sed_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
-# The PATH goes inside the units' quoted Environment="PATH=…" (a node in a
-# folder with a space in its name split the unquoted one, and the service
-# could not start, audit #044): a backslash or a quote escaped, and % doubled
-# (systemd reads %h and the like there).
-systemd_quoted() { printf '%s' "$1" | sed -e 's/[\\"]/\\&/g' -e 's/%/%%/g'; }
-# The install folder too, as systemd reads it where it goes (audit,
-# 2026-10-29): % doubled everywhere (a folder named install-%q was read as
-# another folder); in ExecStart's quoted words a backslash or a quote escaped,
-# and in its arguments (not the program, which is taken as written) a $
-# doubled, since systemd expands ${NAME} there.
-DIR_ESC="$(sed_escape "$(printf '%s' "$(pwd)" | sed -e 's/%/%%/g')")"
+# The PATH goes inside the units' quoted Environment="PATH=…" (audit #044), and
+# the install folder where each goes (audit, 2026-10-29): systemd_quoted,
+# systemd_arg and systemd_path, shared by every unit writer.
+. scripts/systemd-quote.sh
+DIR_ESC="$(sed_escape "$(systemd_path "$(pwd)")")"
 EXE_DIR_ESC="$(sed_escape "$(systemd_quoted "$(pwd)")")"
-ARG_DIR_ESC="$(sed_escape "$(systemd_quoted "$(pwd)" | sed -e 's/\$/$$/g')")"
+ARG_DIR_ESC="$(sed_escape "$(systemd_arg "$(pwd)")")"
 PATH_ESC="$(sed_escape "$(systemd_quoted "$SERVICE_PATH")")"
 for u in hatchabot.service hatchabot-backup.service; do
   sed -e "/^ExecStart=/s|__HATCHABOT_DIR__|$EXE_DIR_ESC|" -e "/^ExecStart=/s|__HATCHABOT_DIR__|$ARG_DIR_ESC|g" \

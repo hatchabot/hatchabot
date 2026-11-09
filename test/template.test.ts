@@ -87,6 +87,36 @@ describe('exportTemplate', () => {
     }
   });
 
+  it("the owner's sections leave the export even where the agent's code fences do not balance (HB-0520 review)", async () => {
+    const { store, provider } = await world();
+    const agentsMd = [
+      '# My instructions',
+      '```bash',
+      'an example I never closed',
+      '````',
+      '## About the operator',
+      'Pat Example, pat@example.com, on Example Street.',
+      '````',
+      'Important text of mine at the end',
+      // From here the other way round: the stricter reading takes these as real.
+      '```',
+      '## About the operator',
+      'A second copy: Pat Example again.',
+      '',
+      '## Data sources',
+      '- `/data/example-family-photos` — folder',
+      '',
+      '## Notes',
+      'Mine to keep',
+      '',
+    ].join('\n');
+    provider.execResponses.set('sh', { code: 0, stdout: agentsMd, stderr: '' });
+    const m = parseTemplate((await exportTemplate({ store, provider }, 'a1')).data);
+    const out = m.files['AGENTS.md']!;
+    for (const leak of ['Pat Example', 'pat@example.com', 'example-family-photos', '## About the operator', '## Data sources']) expect(out).not.toContain(leak);
+    for (const kept of ['an example I never closed', 'Important text of mine at the end', 'Mine to keep']) expect(out).toContain(kept);
+  });
+
   it('writes sharedMemory as a constant true for older importers, and imports a file without it (HB-0094)', async () => {
     const { store, provider } = await world(); // its agent is stored as "private", as before v2.107.0
     const { data } = await exportTemplate({ store, provider }, 'a1');
@@ -382,6 +412,10 @@ describe('an export says what it cannot carry (workflow audit, 2026-10-10)', () 
     expect(out.edited).toEqual(['AGENTS.md']);
     // Still the layer, placeholders and all (#164).
     expect(parseTemplate(out.data).files['AGENTS.md']).toBe('Answer in a {{style}} voice.\n');
+    // A code fence above that does not close the way it opens: the "Scheduled results" Hatchabot wrote is still not an edit (ninth review).
+    store.setAgentParamState('a1', { style: 'calm' }, { soul: 'A {{style}} advisor.', agents: 'Answer in a {{style}} voice.\n```bash\nls\n````\n' });
+    live['AGENTS.md'] = 'Answer in a calm voice.\n```bash\nls\n````\n\n## Scheduled results\n- web chat\n';
+    expect((await exportTemplate({ store, provider }, 'a1', { includeMemory: false })).edited).toEqual([]);
     // An agent with no setup layer exports its live files: nothing to say.
     store.setAgentParameters('a1', null);
     expect((await exportTemplate({ store, provider }, 'a1', { includeMemory: false })).edited).toEqual([]);

@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, scrypt as scryptCb } from 'node:crypto';
 import { promisify } from 'node:util';
 import { loopbackIsRemote } from './auth.js';
 import { isPublic } from './trust.js';
@@ -8,6 +8,7 @@ import type { LocalAccount } from '../domain/types.js';
 import type { Principal } from './principal.js';
 import type { LinkSignIn } from './signinLink.js';
 import { setSessionCookie as setSessionCookieAs } from './sessionCookie.js';
+import { safeEqual } from '../util/safeEqual.js';
 
 /**
  * Accounts mode (HATCHABOT_AUTH=accounts): the middle rung between one shared
@@ -35,9 +36,8 @@ export async function hashPassword(password: string, salt = randomBytes(16).toSt
 export async function verifyPassword(password: string, hash: string, salt: string): Promise<boolean> {
   const key = await scrypt(password, salt, KEYLEN);
   const expected = Buffer.from(hash, 'hex');
-  // Length-mismatched buffers make timingSafeEqual throw; a stored hash of the
-  // wrong shape is simply a non-match.
-  return key.length === expected.length && timingSafeEqual(key, expected);
+  // A stored hash of the wrong shape is simply a non-match.
+  return safeEqual(key, expected);
 }
 
 /** Usernames are free-form but predictable: no spaces, no colons (the cookie separator). */
@@ -189,8 +189,7 @@ export function sessionAccount(store: Store, secret: Buffer, token: string | und
   const account = store.localAccount(accountId);
   if (!account || account.disabled) return undefined;
   const expected = signSession(secret, accountId, account.pwHash, exp, store.sessionEpoch(accountId));
-  if (sig.length !== expected.length) return undefined;
-  return timingSafeEqual(Buffer.from(sig, 'utf8'), Buffer.from(expected, 'utf8')) ? accountId : undefined;
+  return safeEqual(sig, expected) ? accountId : undefined;
 }
 
 /** The session cookie (sessionCookie.ts: `__Host-` over HTTPS). */

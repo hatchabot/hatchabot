@@ -275,6 +275,12 @@ export interface Agent {
 export interface PendingAction {
   type: 'bot_token';
   instructions: string;
+  /**
+   * A token was pasted and is held (on disk) for setup to take: the agent is
+   * not waiting on its owner. Setup clears the step when it takes the token,
+   * or asks again (without this) when it cannot.
+   */
+  received?: boolean;
 }
 
 /**

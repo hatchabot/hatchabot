@@ -10,10 +10,11 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { inlineScripts } from '../scripts/inline-scripts.mjs';
 import { resolveParamValues, type TemplateParam } from '../src/orchestrator/template.js';
 
 const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
-const js = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join('\n');
+const js = inlineScripts(html).join('\n');
 function source(name: string): string {
   const m = new RegExp(`^(?:async )?function ${name}\\([^\\n]*\\) \\{\\n[\\s\\S]*?^\\}`, 'm').exec(js);
   if (!m) throw new Error(`no function ${name} in web/index.html`);
@@ -23,13 +24,13 @@ function source(name: string): string {
 type El = {
   value: string; textContent: string; innerHTML: string; hidden: boolean; disabled: boolean; checked: boolean; title: string;
   style: Record<string, string>; dataset: Record<string, string>; isConnected: boolean; childElementCount: number;
-  focus(): void; querySelectorAll(sel: string): unknown[];
+  focus(): void; querySelectorAll(sel: string): unknown[]; contains(el: unknown): boolean;
 };
 function element(): El {
   let inner = '';
   const el: El = {
     value: '', textContent: '', hidden: false, disabled: false, checked: false, title: '', style: {}, dataset: {}, isConnected: true,
-    childElementCount: 0, focus() {}, querySelectorAll: () => [],
+    childElementCount: 0, focus() {}, querySelectorAll: () => [], contains: () => false,
     get innerHTML() { return inner; },
     set innerHTML(v: string) {
       inner = v;
@@ -71,18 +72,21 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
     agents: AGENTS.map((a) => ({ ...a })), profiles: PROFILES, agentClasses: [], appConfig: { authMode: 'accounts' },
     api: async (url: string, init?: { method?: string; body?: Record<string, unknown> }) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, prompt: () => '', toast: noop, refresh: async () => {},
-    editDlg: { close: () => closed.push('edit') }, inviteDlg: { showModal: noop }, proposalsDlg: { showModal: noop },
+    editDlg: { open: false, close: () => closed.push('edit') }, v2AgentDlg: { open: false }, v2AgentId: null, editParamsFills: 0, searchTests: new Set(), inviteDlg: { showModal: noop }, proposalsDlg: { showModal: noop },
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), ago: () => 'just now',
     sourceOptionLabel: (p: { name: string }) => p.name, localClashWarning: () => '', confirmRebuild: () => true,
     showEditTab: noop, populateImagePicker: async () => {}, embedModeText: () => '', renderSetupValues: noop, renderBotWho: noop,
     renderEditMembers: async () => {}, renderParamList: noop, renderDataList: noop, renderEnvList: noop, renderClassList: noop,
     v2ChannelKinds: () => ['telegram'], location: { origin: 'https://hatchabot.example' }, navigator: {}, document: { querySelectorAll: () => [] },
     editAgentId: 'a1', editLoaded: null, editLoadGen: 0, editReverting: new Set(), EDIT_REVERTING: 'Reverting…',
+    v2SheetSaving: () => noop, v2SheetBaseline: noop, V2_SHEET_FORMS: [], // the sheet's record of unsaved edits (HB-0475): not what these check
+    onRepoPublic: noop, onParamTypeChange: noop, v2CtlDrawn: () => '',
     invWebFor: null, invShare: null, proposalsMasterId: null, proposalsGen: 0,
     spendRange: 'week', spendAgents: [], spendChartSeq: 0, spendChartHTML: (d: unknown) => JSON.stringify(d),
     ...extra,
   });
-  for (const n of names) vm.runInContext(source(n), c);
+  // Whose forms an answer is drawn in, and where it is said: the page's own helpers (forAgent, agentPrefix).
+  for (const n of ['agentPrefix', 'forAgent', ...names]) vm.runInContext(source(n), c);
   return { c: c as Record<string, any>, $, calls, closed };
 }
 
@@ -155,7 +159,7 @@ describe('Files: a read older than the last one lands nowhere (audit #048)', () 
 
 describe('Bulk actions: the class read once, as the model and image are (audit #049)', () => {
   it('a class changed in the menu while Apply works leaves the later agents on the one applied', async () => {
-    const { c, $, calls } = page(['faApply'], {
+    const { c, $, calls } = page(['faApply', 'faResultLine', 'reasonFor', 'reasonsSaid'], {
       faSelected: () => [{ dataset: { id: 'a1' } }, { dataset: { id: 'a2' } }],
       agentClasses: [{ id: 'class-school' }, { id: 'class-sport' }],
     });
@@ -236,8 +240,8 @@ describe('Proposals: a master opened before lists nothing over the one open now 
 
 describe('The spend chart: the newest range or pick is the one drawn (audit #065)', () => {
   it("a week asked first and answered last leaves the day's chart", async () => {
-    const { c } = page(['loadSpendChart']);
-    const box = element();
+    const { c } = page(['loadSpendChart', 'drawSpendChart', 'spendChartWidth', 'spendChartsPrune'], { spendChartFit: null, spendChartsSeen: new Set(), phoneQuery: null });
+    const box = Object.assign(element(), { querySelector: () => null });
     box.dataset = { agent: '' };
     const week = gate();
     c.api = async (url: string) => url.includes('range=week') ? week.p : { range: 'day', totals: { cost: 1 } };
@@ -255,11 +259,90 @@ describe('The spend chart: the newest range or pick is the one drawn (audit #065
     slow.fail(new Error('Bad Gateway')); await failing;
     expect(box.innerHTML).toContain('"month"');
   });
+  it('a read that fails lets its chart go: not watched, nothing left to fit', async () => {
+    const watching = new Set<unknown>();
+    const fit = { observe: (el: unknown) => watching.add(el), unobserve: (el: unknown) => watching.delete(el) };
+    const { c } = page(['loadSpendChart', 'drawSpendChart', 'spendChartWidth', 'spendChartsPrune'], { spendChartFit: fit, spendChartsSeen: new Set() });
+    const box = Object.assign(element(), { querySelector: () => null });
+    box.dataset = { agent: '' };
+    c.api = async () => ({ range: 'week', totals: { cost: 7 } });
+    await c.loadSpendChart(box);
+    expect(c.spendChartsSeen.has(box) && watching.has(box)).toBe(true);
+    c.api = async () => { throw new Error('Bad Gateway'); };
+    await c.loadSpendChart(box);
+    expect(box.innerHTML).toContain('Bad Gateway');
+    expect((box as unknown as { _spend: unknown })._spend).toBeNull();
+    expect(c.spendChartsSeen.has(box) || watching.has(box)).toBe(false);
+  });
+});
+
+describe('The spend chart on a phone: fitted again a frame after its width changes (review 2026-11-08)', () => {
+  type Pic = { innerHTML: string };
+  type Box = { clientWidth: number; isConnected: boolean; _spend: { W: number; boxW: number; d: { range: string } } | null; pic: Pic; querySelector(sel: string): Pic | null };
+  const setup = () => {
+    const frames: Array<() => void> = [], unobserved: Box[] = [];
+    const { c } = page(['spendChartResized', 'spendChartsRefit', 'spendChartsPrune'], {
+      spendChartsSeen: new Set(), spendChartsDue: new Set(), requestAnimationFrame: (f: () => void) => frames.push(f),
+      spendChartWidth: (el: Box) => el.clientWidth - 24, spendChartSVG: (_d: unknown, W: number) => `<svg ${W}>`,
+      spendChartFit: { unobserve: (el: Box) => unobserved.push(el) },
+    });
+    const box = (w: number): Box => {
+      const pic = { innerHTML: '<svg old>' };
+      const b: Box = { clientWidth: w, isConnected: true, _spend: { W: w - 24, boxW: w, d: { range: 'week' } }, pic, querySelector: (sel) => sel === '.spendsvg' ? pic : null };
+      c.spendChartsSeen.add(b);
+      return b;
+    };
+    return { c, box, frames, unobserved };
+  };
+  it('its height changed by drawing it: nothing to do (no loop)', () => {
+    const { c, box, frames } = setup();
+    c.spendChartResized([{ target: box(300) }]);
+    expect(frames).toHaveLength(0);
+  });
+  it('its width changed: only its picture drawn, in the next frame, once, and only the box that changed', () => {
+    const { c, box, frames } = setup();
+    const a = box(300), other = box(300);
+    other.clientWidth = 280; other._spend!.boxW = 280; // changed too, but not reported: left alone
+    a.clientWidth = 340;
+    c.spendChartResized([{ target: a }]); c.spendChartResized([{ target: a }]);
+    expect(frames).toHaveLength(1);
+    expect(a.pic.innerHTML).toBe('<svg old>');
+    frames[0]!();
+    expect(a.pic.innerHTML).toBe('<svg 316>');
+    expect(a._spend).toMatchObject({ W: 316, boxW: 340 });
+    expect(other.pic.innerHTML).toBe('<svg old>');
+    c.spendChartResized([{ target: a }]);
+    expect(frames).toHaveLength(1);
+  });
+  it('hidden when refitted: fitted once it shows, at whatever width (it may have missed a change)', () => {
+    const { c, box, frames } = setup();
+    const a = box(300);
+    a.clientWidth = 0;
+    c.spendChartsRefit([a]);
+    expect(a._spend!.boxW).toBe(0);
+    a.clientWidth = 300; // shown again at the width it had
+    c.spendChartResized([{ target: a }]);
+    expect(frames).toHaveLength(1);
+  });
+  it('a chart gone from the page, or in a dialog that closed, is let go and no longer watched', () => {
+    const { c, box, unobserved } = setup();
+    const gone = box(300), kept = box(300), shut = box(300);
+    gone.isConnected = false;
+    c.spendChartsRefit([gone, kept, shut]);
+    expect([...c.spendChartsSeen]).toEqual([kept, shut]);
+    c.spendChartsPrune({ contains: (el: Box) => el === shut });
+    expect([...c.spendChartsSeen]).toEqual([kept]);
+    expect(unobserved).toEqual([gone, shut]);
+    expect(gone._spend).toBeNull();
+    expect(shut._spend).toBeNull();
+    expect((shut as unknown as { innerHTML: string }).innerHTML).toContain('Loading…'); // opened again, never a stale chart
+    expect(kept._spend).not.toBeNull();
+  });
 });
 
 describe('The spend chart: tokens with no known price are never $0 (audit #062)', () => {
   const render = (d: Record<string, unknown>) => {
-    const { c } = page(['spendChartHTML'], {
+    const { c } = page(['spendChartHTML', 'spendChartSVG', 'spendChartWords'], {
       SPEND_PARTS: [['cacheWrite', 'Cache writes', '#c9822b'], ['cacheRead', 'Cache reads', '#4f9a8f'], ['output', 'Output', '#7a6fd6'], ['input', 'New input', '#8a8f98']],
       SPEND_RANGE_LABELS: [['day', '1 day']], SPEND_RANGE_WORDS: { day: ['the last 24 hours', '24 hours'] }, spendPickOpen: false,
       v2Money: (v: number) => '$' + v.toFixed(2), fmtTokens: (v: number) => String(v), fmtN: String,
@@ -332,5 +415,28 @@ describe('The setup form for a child, an import or a share (audit #066, #067)', 
     // A field with no default left blank, and a credential, are still left out.
     expect('nickname' in cleared).toBe(false);
     expect('apiKey' in cleared).toBe(false);
+  });
+});
+
+describe('an error goes where it is seen (forAgent, as shipped)', () => {
+  it("A's pin refused with B's Overview open (A's forms parked, out of sight): a toast with A's name", async () => {
+    const toasts: string[] = [];
+    const refused = gate();
+    const { c, $ } = page(['saveImagePin'], { toast: (t: string) => toasts.push(t), v2AgentDlg: { open: true }, v2AgentId: 'a1', api: () => refused.p });
+    $('editImage').value = 'hatchabot-runtime:candidate';
+    const pending = c.saveImagePin();
+    c.v2AgentId = 'a2'; // B's Overview: the edit forms stay A's (editAgentId), and editErr is parked with them
+    refused.fail(new Error('No such image on this machine.')); await pending;
+    expect(toasts).toEqual(['Homework Helper: No such image on this machine.']);
+    expect($('editErr').textContent).toBe('');
+  });
+  it("A's own tab of forms in sight: under them, and no toast", async () => {
+    const toasts: string[] = [];
+    const { c, $ } = page(['saveImagePin'], { toast: (t: string) => toasts.push(t), v2AgentDlg: { open: true }, v2AgentId: 'a1' });
+    $('v2Pane').contains = (el: unknown) => el === $('editErr');
+    c.api = async () => { throw new Error('No such image on this machine.'); };
+    $('editImage').value = 'hatchabot-runtime:candidate';
+    await c.saveImagePin();
+    expect([$('editErr').textContent, toasts]).toEqual(['No such image on this machine.', []]);
   });
 });
