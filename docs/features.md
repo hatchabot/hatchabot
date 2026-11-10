@@ -301,14 +301,18 @@ with the list, at most every 30 seconds). Nothing is added under the tiles,
 and a click on a tile does what it always does.
 
 **The tile's tooltip** has three parts. First, what the agent is doing: its
-name and status, any alerts, and its last line. Then what it costs: the cost
-line, its monthly budget, and its spending alarm (both shown even in a window
-with no use). Last, its runtime: the OpenClaw version, its model and whether
-an update is ready, how long its OpenClaw process has been up ("Up 3 h 12
-min"), how often it restarted by itself since its last rebuild with how the
-last run ended ("last exit 135: a memory fault"; 137 is killed for memory),
-and its Telegram bot. The agent list carries `startedAt`, `restarts` and
-`lastExitCode` for this (read with the list, from Docker).
+name and status, up to three alerts ("+2 more on its page" past that), and
+its last line, cut to two lines. Then what it costs: the cost line, its
+monthly budget, and its spending alarm (both shown even in a window with no
+use). Last, its runtime: its model and how long its OpenClaw process has been
+up ("claude-sonnet-5 · up 3 h 12 min"), the OpenClaw version and whether an
+update is ready, how often it restarted by itself since its last rebuild with
+how the last run ended ("last: a memory fault", exit 135; "killed, usually for
+memory" is 137), and its Telegram bot. The agent list carries `startedAt`,
+`restarts` and `lastExitCode` for this (read with the list, from Docker). The
+tooltip opens below the icon, or above it when there is no room below, never
+over it, and pressing an icon hides it, so the groups stay in sight while you
+drag the icon to one.
 
 - *Who sees which line*: what that person could already read in the agent's
   console. The owner's console reads every conversation, so the owner sees
@@ -346,9 +350,7 @@ again when you pick it).
 - **An address per console** (v2.140.0): `…/#console=<agent>` opens
   Hatchabot on that agent's console, signing in first when needed. The
   address bar shows it while the console is open, so a reload comes back to
-  it and it can be bookmarked; the browser tab takes the agent's name. The
-  console's **New tab** button opens that address, with Hatchabot's tabs
-  around it, rather than OpenClaw's bare page.
+  it and it can be bookmarked; the browser tab takes the agent's name.
 - A web-chat guest's chat stays a single console.
 
 ### Resources
@@ -382,9 +384,10 @@ web/index.html.
   at 1.25× — priced at the model's list price, as everywhere else in the app
   (Usage, Right-size). A local model is $0 and gets no chip; a model with no
   known price gets no chip, and the tooltip says "no price known".
-- *The tooltip*, in every view: "≈ $18 in the last 7 days at API prices (≈ $77
-  a month)" and, on a Claude plan, "on your Claude plan — counts against its
-  limits" (a plan is not billed per token, but this is the room it takes).
+- *The tooltip*, in every view: "≈ $18/wk at API prices (≈ $77/mo)" (another
+  window: "≈ $1.20/3h … at this pace") and, on a Claude plan, "Counts against
+  your Claude plan" (a plan is not billed per token, but this is the room it
+  takes).
 - *View by → Cost*: bands of a week's cost, written like the chips —
   **>$100/wk**, **$50–100/wk**, **$10–50/wk**, **<$10/wk** — then *No price
   known* and *No usage*. Each band's header shows its count and its total
@@ -1610,8 +1613,9 @@ in · off · one server), and **Who can reach it** — one setting for every app
 Telegram adds **Rich messages**; the token stays under the Telegram tab.
 Members, invites and people you already know are under **Sharing** for every
 app, and adding a known person admits them on every app the agent has that
-they are known on. Under Settings → **Messaging**, Telegram, Slack and Discord
-share one layout too: a status line, *Add a bot*, and the pool in the same groups
+they are known on. Settings → **Messaging** shows one of Telegram, Slack and
+Discord at a time, picked from its **Show** list (the one you looked at last,
+or the one a link names). The three share one layout too: a status line, *Add a bot*, and the pool in the same groups
 (free / in use, yours / shared), with a re-check on every spare. What the
 platforms keep different, and why, is the ledger in `docs/channel-parity.md`.
 

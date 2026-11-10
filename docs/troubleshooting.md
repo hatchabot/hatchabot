@@ -1388,10 +1388,10 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### Settings has no Telegram, Discord or Slack tab
 - **Check:** ⚙ Settings shows a **Messaging** tab between Classes and Connections, and no tab named Telegram, Discord or Slack.
-- **Cause:** on a release after v2.175.0 the three are one tab, Messaging: Telegram's spare bots first, then Slack's apps, then Discord's bots, each under its heading, with every control as it was. Older notes and messages that say Settings → Telegram (or Discord, Slack) mean that part of it.
-- **Fix:** open Settings → Messaging and scroll to the app. A link to the old tab opens Messaging at that part.
-- **Fixed in:** `v2.176.0`
-- **Code:** `web/index.html` — `V2_SETTINGS`, `V2_SETTINGS_HEAD`, `showTab`
+- **Cause:** on a release after v2.175.0 the three are one tab, Messaging, with every control as it was. From v2.176.0 to v2.178.1 it stacks Telegram's spare bots, then Slack's apps, then Discord's bots, each under its heading. Since v2.178.2 it shows one of them at a time, picked from the **Show** list at its top. Older notes and messages that say Settings → Telegram (or Discord, Slack) mean that part of it.
+- **Fix:** open Settings → Messaging and pick the app in **Show** (before v2.178.2, scroll to it). A link to the old tab opens Messaging on that app.
+- **Fixed in:** `v2.176.0` (one tab), `v2.178.2` (one app at a time)
+- **Code:** `web/index.html` — `V2_SETTINGS`, `v2SettingsShown`, `showTab`
 
 ### Discord or Slack ended up connected to a different agent than the one the sheet named
 - **Check:** the agent named in the Connect sheet has no Discord or Slack row, while another agent you had just clicked does; Activity shows the connect on that other agent.
@@ -2226,7 +2226,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `src/orchestrator/eventLabels.ts` — `runtime.self_restarted`; `src/config/envCatalog.ts` — `HATCHABOT_AGENT_MEMORY`
 
-### An agent's tooltip says "Restarted by itself once … (last exit 135: a memory fault)"
+### An agent's tooltip says "Restarted by itself once … (last: a memory fault)" (before v2.178.1: "last exit 135: a memory fault")
 - **Check:** the tile's tooltip (its runtime part) and `runtime.self_restarted` with `exitCode: 135` in its Setup log; the container log stops with no error just before.
 - **Cause:** OpenClaw's process got SIGBUS. Seen once each on two new agents within 15 minutes of their first start (OpenClaw 2026.9.6), during first-day database maintenance; Docker starts it again and nothing is lost. A chat turn in progress is restarted, and may end without a reply.
 - **Fix:** none needed if it doesn't recur; resend a message that got no answer. If it keeps happening, note what ran just before (a scheduled command, a model call) and rebuild the agent.

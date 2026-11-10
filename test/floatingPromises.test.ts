@@ -105,18 +105,21 @@ const floatingInSrc = () => (srcFloating ??= sourceFiles('src').flatMap((p) => {
   return /\bvoid\b/.test(text) ? floating(p, text) : [];
 }));
 
+// The one parse of src/ runs in whichever test comes first: 7.2 s on CI with the machine
+// busy (2026-11-09, HB-0505), so both allow 30 s.
+const PARSE_MS = 30_000;
 describe('void calls cannot end the process (HB-0374)', () => {
   it('every one in src/ handles a rejection, or is listed with why it cannot reject', () => {
     const bad = floatingInSrc()
       .filter((f) => !Object.hasOwn(CANNOT_REJECT, f.root))
       .map((f) => `${f.at} void ${f.root}(...)`);
     expect(bad).toEqual([]);
-  });
+  }, PARSE_MS);
 
   it('every name on the list is still used, so a stale reason does not linger', () => {
     const roots = new Set(floatingInSrc().map((f) => f.root));
     expect(Object.keys(CANNOT_REJECT).filter((k) => !roots.has(k))).toEqual([]);
-  });
+  }, PARSE_MS);
 
   it('tells the shapes apart', () => {
     const roots = (code: string) => floating('x.ts', code).map((f) => f.root);

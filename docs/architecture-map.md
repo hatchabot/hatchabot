@@ -262,7 +262,7 @@ written into OpenClaw by the seed, so channel changes usually need a rebuild.
 - `src/store/store.ts` — `channels`, `discord_bots`, `memberships`, `member_identities`, `invites`, `pairing_windows`: where it is stored.
 - `web/join.html` — `postJoin`, `joinWeb`, `joinWebAccount`, `initWebChat`: the page an invite link opens.
 - `src/api/publicAccess.ts` — `factorRefusal`: what `/v1/join` says to a good sign-in refused for want of a second factor.
-- `web/index.html` — `v2LoadChans`, `v2AddTelegram`, `chanConnect`, `openChanSetup`, `loadPool`, `addPoolBot`, `invite`, `renderEditMembers`, `approve`, `denyPair`: the Messaging pane, pool and members. Settings → Messaging (`V2_SETTINGS`, `showTab`) holds the spare bots of Telegram (`loadPool`), Slack and Discord (`loadPoolPane`), in that order, each under its heading (`V2_SETTINGS_HEAD`); a link to `'slack'` or `'discord'` lands scrolled to its part.
+- `web/index.html` — `v2LoadChans`, `v2AddTelegram`, `chanConnect`, `openChanSetup`, `loadPool`, `addPoolBot`, `invite`, `renderEditMembers`, `approve`, `denyPair`: the Messaging pane, pool and members. Settings → Messaging (`V2_SETTINGS`, `showTab`) holds the spare bots of Telegram (`loadPool`), Slack and Discord (`loadPoolPane`), one at a time: `v2SettingsShown` picks the pane (the one a link names, else the last shown) and `#v2MsgApp` is the list that changes it.
 
 ## Web chat and the OpenClaw console
 

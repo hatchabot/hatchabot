@@ -2,6 +2,26 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.178.3] — 2026-11-09
+
+### Removed
+- **The console's New tab button.** It opened the same conversation again in another browser tab, while the console stayed open in this one. To bookmark a console, or come back to it with a reload, use the address bar: it shows the console's own address (`…/#console=<agent>`) while the console is open. To open another agent, use **＋** in the console.
+
+## [2.178.2] — 2026-11-09
+
+### Changed
+- **Settings → Messaging shows one app at a time.** Telegram, Slack and Discord were stacked in one long scroll. A **Show** list at the top of the tab now picks one of them; only it is shown, and only it is loaded. The tab opens on the app you looked at last (Telegram the first time), and a link that names an app opens on that app.
+
+## [2.178.1] — 2026-11-09
+
+### Fixed
+- **An icon's tooltip no longer gets in the way of dragging the icon to another group.** It ran to about twenty lines for a busy agent and, low on the screen, was pushed up over the icon itself and the groups around it. It also stayed up while the icon was pressed. Now:
+  - it says the same in fewer lines: the model and uptime on one line, the cost as "≈ $31/wk at API prices (≈ $134/mo)", a shorter restart note, the last message cut to two lines, and at most three alerts, then "+N more on its page";
+  - it is a little wider, so fewer lines wrap;
+  - it opens above the icon when there is no room below, never over it;
+  - pressing an icon hides it, so the groups stay in sight while you drag.
+- A test that reads all of the code took longer than its 5 seconds on a busy CI machine and failed a pull request that changed no code; it now allows 30.
+
 ## [2.178.0] — 2026-11-08
 
 Fixes from a deep audit of v2.177.0, a look at every screen on a phone, and the code-scanning alerts on the public repo. Changes made at the same moment no longer undo each other or mix agents up, answers say what really happened, upgrades and backups tell the machine's faults from a release's, and every screen fits a phone 360 px wide.

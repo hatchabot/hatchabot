@@ -81,6 +81,9 @@ describe('an import that does not finish is heard only once its one-shot is gone
   it('a clean import is not held by the removal of its finished one-shot', async () => {
     const r = await removedWhenSettled(provider('cat > /dev/null').importState(REF, Buffer.from('fixture archive')));
     expect(r).toMatchObject({ ok: true, removed: false });
+    // The removal goes on after the answer: wait for it, or the stub's `rm` writes into the
+    // folder while the cleanup removes it (ENOTEMPTY on CI, 2026-11-09, HB-0505).
+    await vi.waitFor(() => expect(existsSync(join(dir, 'removed'))).toBe(true), { timeout: 10_000, interval: 50 });
   });
 
   it('writeToVolume (stdin to a one-shot): a timeout waits for the removal too', async () => {

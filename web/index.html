@@ -518,8 +518,11 @@
   /* Every section of a settings tab in its own card: a tab should read as a
      few things you can act on, not one column of text (Chris, 2026-09-20). */
   .v2card { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:10px 0; background:var(--panel) }
-  /* A link to a later part of a joined tab (Settings → Messaging → Discord) scrolls it to the top: clear of the panel's sticky bar. */
+  /* A link to a later part of a joined tab (Settings → Advanced → Runtime images) scrolls it to the top: clear of the panel's sticky bar. */
   #aiDlg > section[role="tabpanel"] { scroll-margin-top:calc(72px + var(--safe-top)) }
+  /* Settings → Messaging: one app at a time, picked here. */
+  .v2msgpick { display:flex; align-items:center; gap:8px; margin:0 0 12px; font-size:14px }
+  .v2msgpick select { width:auto; min-width:9em }
   /* Settings → Security: the posture report's groups and the per-agent rows. */
   .posture-group { margin-top:12px }
   .posture-label { font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--dim); margin-bottom:4px }
@@ -622,7 +625,8 @@
             display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden }
   .v2agent.v2child .v2name::before { content:"↳ "; color:var(--dim) }
   /* Activity view: the agent's last line, in the hover tooltip. */
-  .v2tipprev { display:block; margin-top:6px; color:var(--dim); font-style:italic }
+  /* Two lines at most (Chris, 2026-11-09: a tall tooltip covered the groups an icon is dragged to); the tile's label reads it all. */
+  .v2tipprev { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; margin-top:5px; color:var(--dim); font-style:italic }
   .v2ic::after { content:""; position:absolute; inset:-5px; border-radius:22px; border:2px solid transparent; pointer-events:none }
   .v2st-working .v2ic::after { border-color:var(--warn); border-style:dashed; animation:v2spin 6s linear infinite }
   .v2st-blocked .v2ic::after { border-color:var(--bad) }
@@ -818,11 +822,11 @@
   .v2caret { position:fixed; width:3px; background:var(--accent); border-radius:2px; z-index:1000; pointer-events:none }
   body.v2dragging, body.v2dragging * { cursor:grabbing !important }
   .v2tip { position:fixed; z-index:1002; background:var(--text); color:var(--bg); font-size:12.5px; padding:6px 9px; border-radius:8px;
-           max-width:260px; pointer-events:none; box-shadow:0 8px 24px rgba(0,0,0,.3); line-height:1.35 }
+           max-width:min(320px, calc(100vw - 16px)); pointer-events:none; box-shadow:0 8px 24px rgba(0,0,0,.3); line-height:1.3 }
   .v2tip b { display:block }
   .v2tip ul { margin:4px 0 0; padding-left:16px }
   /* Its parts (cost, runtime), each under a faint rule. */
-  .v2tipsec { display:block; margin-top:6px; padding-top:6px; border-top:1px solid color-mix(in srgb, var(--bg) 22%, transparent) }
+  .v2tipsec { display:block; margin-top:5px; padding-top:5px; border-top:1px solid color-mix(in srgb, var(--bg) 22%, transparent) }
   /* the agent sheet */
   .v2sheet { width:min(860px, 100vw); max-width:none; height:100%; max-height:none; margin:0 0 0 auto; border-radius:0; padding:0;
              border:0; border-left:1px solid var(--line); display:none; flex-direction:column }
@@ -1207,7 +1211,6 @@
     <button id="consoleApproveBtn" class="cbtn primary" hidden onclick="approveConsoleBrowser(this)"
             title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner."><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span class="lbl-long">Approve this browser</span><span class="lbl-short">Approve</span></button>
     <span id="consoleChans" style="display:contents"></span>
-    <button id="consoleNewTab" class="cbtn" title="Open this console in its own browser tab — its address opens it again, and can be bookmarked"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg><span class="lbl">New tab</span></button>
     <button class="cbtn" onclick="closeConsole()" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </div>
   <div id="consoleProps" hidden></div>
@@ -1747,6 +1750,10 @@
 <dialog id="aiDlg" style="width:min(780px,94vw)">
   <h3 style="margin:0 0 10px">Settings</h3>
   <div class="tabs" role="tablist" id="v2SettingsTabs" aria-label="Settings"></div>
+  <label class="v2msgpick" id="v2MsgPick" hidden>Show
+    <select id="v2MsgApp" onchange="showTab(this.value)">
+      <option value="pool">Telegram</option><option value="slack">Slack</option><option value="discord">Discord</option>
+    </select></label>
 
   <section id="paneAi" role="tabpanel">
     <div class="sub">
@@ -4447,7 +4454,7 @@ const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: '
 /**
  * The Settings panel's tabs, grouped by what people come to do:
  * "You" joins the account and the operator profile; Messaging joins the spare
- * bots of Telegram, Slack and Discord; Hosts joins runners and other servers.
+ * bots of Telegram, Slack and Discord, one at a time; Hosts joins runners and other servers.
  * Old deep links (openAiDlg('hosts'), openAiDlg('discord')) land on their
  * group, scrolled to their part.
  */
@@ -4457,6 +4464,7 @@ const V2_SETTINGS = [
   ['classes', 'Classes', ['classes']],
   // One tab for the three chat apps (the owner, 2026-11-07), Telegram first:
   // each is a pool of spare bots drawn the same way, so they read as one place.
+  // It shows one of them at a time, picked from a list (v2SettingsShown).
   ['messaging', 'Messaging', ['pool', 'slack', 'discord']],
   ['conn', 'Connections', ['conn']],
   // Runners only: the household's way to add a machine. Other servers moved to Advanced (v2.157.0).
@@ -4469,8 +4477,23 @@ const V2_SETTINGS = [
 ];
 /** Tab names that are gone, and the pane they open now: old links keep working. */
 const V2_SETTINGS_ALIAS = { images: 'runtime', telegram: 'pool' };
-const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you', pool: 'Telegram', slack: 'Slack', discord: 'Discord' };
+// Messaging's panes have none: it shows one at a time, named in its list.
+const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you' };
 let v2SettingsGroup = 'ai';
+/**
+ * The panes of group g to show. Messaging shows one app at a time (the owner,
+ * 2026-11-09: all three were "too much on one screen"): the one a link names
+ * (openAiDlg('discord')), else the one shown last, remembered per browser.
+ */
+const V2_MSG_KEY = 'hb-settings-messaging';
+function v2SettingsShown(g, name) {
+  if (g[0] !== 'messaging') return g[2];
+  let pick = g[2].includes(name) ? name : null;
+  if (!pick) { try { pick = localStorage.getItem(V2_MSG_KEY); } catch { /* a private window */ } }
+  if (!g[2].includes(pick)) pick = g[2][0];
+  try { localStorage.setItem(V2_MSG_KEY, pick); } catch { /* a private window */ }
+  return [pick];
+}
 /**
  * Wrap each heading-delimited run of a settings pane in a card, so a tab reads
  * as sections with edges instead of one scroll. Done in the DOM rather than in
@@ -4500,19 +4523,23 @@ function showTab(name) {
   name = V2_SETTINGS_ALIAS[name] ?? name;
   const g = V2_SETTINGS.find(([k, , panes]) => k === name || panes.includes(name)) ?? V2_SETTINGS[0];
   v2SettingsGroup = g[0];
+  const shown = v2SettingsShown(g, name);
   // Each pane's loader; a folded Advanced drawer loads when it is opened.
-  for (const pane of g[2]) { if (!settingsAdvFolded(pane)) loadSettingsPane(pane); v2Sectionise($(TABS[pane])); }
-  for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !g[2].includes(key);
-  for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = g[2].length < 2;
+  for (const pane of shown) { if (!settingsAdvFolded(pane)) loadSettingsPane(pane); v2Sectionise($(TABS[pane])); }
+  for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !shown.includes(key);
+  // A pane alone needs no heading: the tab, or the Messaging list, names it.
+  for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = shown.length < 2;
+  $('v2MsgPick').hidden = g[0] !== 'messaging';
+  if (g[0] === 'messaging') $('v2MsgApp').value = shown[0];
   $('v2SettingsTabs').innerHTML = V2_SETTINGS.map(([k, label]) =>
     `<button class="tab" role="tab" aria-selected="${k === g[0]}" onclick="showTab('${k}')">${label}</button>`).join('');
   settingsAdvUnfold(name);
   // On a phone the row scrolls: keep the open tab (Advanced is last) in sight —
   // after the dialog has opened (openAiDlg shows the tab first).
   setTimeout(() => $('v2SettingsTabs').querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }), 0);
-  // A link to a later part of a joined tab (openAiDlg('discord')) lands on that part, not on the tab's top.
+  // A link to a later part of a joined tab (openAiDlg('runtime')) lands on that part, not on the tab's top.
   // After the row's: its "nearest" would scroll the panel back up to the tabs.
-  if (g[2].indexOf(name) > 0) setTimeout(() => $(TABS[name])?.scrollIntoView?.({ block: 'start' }), 0);
+  if (shown.indexOf(name) > 0) setTimeout(() => $(TABS[name])?.scrollIntoView?.({ block: 'start' }), 0);
 }
 function loadSettingsPane(name) {
   if (name === 'access') { void loadAccounts(); void loadSecondFactor(); void loadReach(true); }
@@ -11525,10 +11552,6 @@ async function openGateway(id, slug) {
     consoleGuest = false;
     $('consoleGearBtn').style.display = '';
     renderConsoleChannels(a);
-    // Hatchabot's own address for it, never the frame's: a gateway not rebuilt
-    // takes its token in the fragment, and a new tab keeps that in the
-    // browser's history (HB-0023). consoleMark sets the same below.
-    $('consoleNewTab').onclick = () => window.open(consoleAddress(slug || id), '_blank', 'noopener');
     const fr = $('consoleFrame');
     // The spinner stays until the console's page has loaded (or 15 s): a blank
     // frame for several seconds looked like nothing had happened.
@@ -11600,11 +11623,13 @@ function consoleTabFor(id, slug) {
 }
 /**
  * A console's own address (Chris, 2026-10-07): …/#console=<slug> opens Hatchabot
- * on that agent's console — bookmarkable, and what "New tab" opens. While a
- * console is shown the address bar carries it (replaced, never a history
- * entry), so a reload comes back to it; the browser tab is named after it.
+ * on that agent's console, and can be bookmarked. While a console is shown the
+ * address bar carries it (replaced, never a history entry), so a reload comes
+ * back to it; the browser tab is named after it. Hatchabot's address, never the
+ * frame's: a gateway not rebuilt takes its token in the frame's fragment (HB-0023).
+ * The console's "New tab" button, which opened this address, is gone (the owner,
+ * 2026-11-09: it only opened the same conversation again).
  */
-const consoleAddress = (slug) => `${location.origin}${location.pathname}${location.search}#console=${encodeURIComponent(slug)}`;
 let consolePageTitle = null;
 function consoleMark(id) {
   const a = (agents || []).find(x => x.id === id);
@@ -11613,7 +11638,6 @@ function consoleMark(id) {
   try { history.replaceState(null, '', `${location.pathname}${location.search}#console=${encodeURIComponent(key)}`); } catch { /* keep going */ }
   if (consolePageTitle === null) consolePageTitle = document.title;
   document.title = `${a.name} · Hatchabot`;
-  $('consoleNewTab').onclick = () => window.open(consoleAddress(key), '_blank', 'noopener');
 }
 function consoleUnmark() {
   if (/(?:^#|&)console=/.test(location.hash)) { try { history.replaceState(null, '', location.pathname + location.search); } catch {} }
@@ -14116,8 +14140,10 @@ function v2CostLine(a) {
   if (!c || !c.tier) return '';
   if (c.local) return 'Runs on a local model: no API cost';
   if (!c.priced) return 'Cost: no price known for its model';
-  return `≈&nbsp;${v2Money(c.cost)} in ${v2CostWindow().replace(/ /g, '&nbsp;')} at API prices (≈&nbsp;${v2Money(c.monthly)}&nbsp;a&nbsp;month${['1w', '1m'].includes(v2Costs?.period || '1w') ? '' : ' at that pace'})`
-    + (c.plan ? `<br>on ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan — counts against its limits` : '');
+  // Short, like the chips (2026-11-09): "≈ $31/wk at API prices (≈ $134/mo)".
+  const period = v2Costs?.period || '1w', per = period === '1w' ? '/wk' : (v2Costs?.suffix || '');
+  return `≈&nbsp;${v2Money(c.cost)}${per} at API prices${period === '1m' ? '' : ` (≈&nbsp;${v2Money(c.monthly)}/mo${period === '1w' ? '' : ' at this pace'})`}`
+    + (c.plan ? `<br>Counts against ${v2Mine(a) ? 'your' : 'its owner\'s'} Claude plan` : '');
 }
 /** The tooltip's budget and spending alarm, shown even in a window with no use. */
 function v2SpendLines(a) {
@@ -14139,13 +14165,15 @@ const V2_EXIT_WORDS = { 0: 'it quit by itself', 1: 'an error', 134: 'it aborted'
 /** The tooltip's runtime lines: version and model, uptime, restarts, Telegram. */
 function v2RuntimeLines(a) {
   const out = [];
-  const what = [a.openclawVersion ? `OpenClaw ${a.openclawVersion}` : '', a.model || '', a.updateAvailable ? 'update ready' : ''].filter(Boolean);
-  if (what.length) out.push(what.map(esc).join(' · '));
-  if (a.state === 'RUNNING' && a.startedAt) out.push(`Up ${v2Uptime(a.startedAt)}`);
+  // Two lines where there were three (2026-11-09): "claude-sonnet-5 · up 3 h", then "OpenClaw 2026.9.8 · update ready".
+  const up = a.state === 'RUNNING' && a.startedAt ? v2Uptime(a.startedAt) : '';
+  if (a.model) out.push(esc(a.model) + (up ? ` · up ${up}` : '')); else if (up) out.push(`Up ${up}`);
+  const version = [a.openclawVersion ? `OpenClaw ${esc(a.openclawVersion)}` : '', a.updateAvailable ? 'update ready' : ''].filter(Boolean);
+  if (version.length) out.push(version.join(' · '));
   if (a.restarts) {
     const word = V2_EXIT_WORDS[a.lastExitCode];
-    out.push(`Restarted by itself ${a.restarts === 1 ? 'once' : `${a.restarts} times`} since its last rebuild`
-      + (a.lastExitCode !== undefined ? ` (last exit ${a.lastExitCode}${word ? ': ' + word : ''})` : ''));
+    out.push(`Restarted by itself ${a.restarts === 1 ? 'once' : `${a.restarts} times`} since rebuild`
+      + (a.lastExitCode !== undefined ? ` (last: ${word || `exit ${a.lastExitCode}`})` : ''));
   }
   if (a.botUsername) out.push(`On Telegram as @${esc(a.botUsername)}`); // an agent without Telegram says nothing about it (Chris, 2026-10-03)
   return out;
@@ -14336,7 +14364,7 @@ function v2ShowTip(el) {
   const sec = (lines, cls) => lines.length ? `<span class="v2tipsec ${cls}">${lines.join('<br>')}</span>` : '';
   const cost = v2CostLine(a);
   tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.ops ? `<span class="v2tipops">★ ${esc(V2_OPS_TIP)}</span>` : ''}${!v2Mine(a) ? 'Shared with you.' : ''}`
-    + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '')
+    + (st.why.length ? `<ul>${st.why.slice(0, 3).map(w => `<li>${esc(w)}</li>`).join('')}${st.why.length > 3 ? `<li>+${st.why.length - 3} more on its page</li>` : ''}</ul>` : '')
     + (() => {
       // A needs-you line is already in the list above: don't say it twice (2026-10-04).
       const prev = v2PreviewOf(a), at = v2Recent?.get(a.id)?.at;
@@ -14349,11 +14377,15 @@ function v2ShowTip(el) {
   const r = el.querySelector('.v2ic').getBoundingClientRect();
   const w = tip.offsetWidth;
   tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + 'px';
-  tip.style.top = Math.max(8, Math.min(innerHeight - tip.offsetHeight - 8, r.bottom + 10)) + 'px';
+  // Below the icon; with no room there, above it: pushed up to fit, it covered the
+  // icon and the groups around it, where the icon is dragged to (Chris, 2026-11-09).
+  const h = tip.offsetHeight, below = r.bottom + 10, above = r.top - 10 - h;
+  tip.style.top = (below + h <= innerHeight - 8 ? below : above >= 8 ? above : Math.max(8, Math.min(innerHeight - h - 8, below))) + 'px';
 }
-document.addEventListener('mouseover', (e) => { const el = e.target.closest?.('.v2agent'); if (el && !v2drag.active) v2ShowTip(el); });
+document.addEventListener('mouseover', (e) => { const el = e.target.closest?.('.v2agent'); if (el && !v2drag.active && !v2drag.st) v2ShowTip(el); });
 document.addEventListener('mouseout', (e) => { if (e.target.closest?.('.v2agent')) $('v2Tip').hidden = true; });
-document.addEventListener('focusin', (e) => { const el = e.target.closest?.('.v2agent'); if (el) v2ShowTip(el); else $('v2Tip').hidden = true; });
+// Focus from a press is not the keyboard's: the press has just hidden the tooltip for a drag.
+document.addEventListener('focusin', (e) => { const el = e.target.closest?.('.v2agent'); if (el && e.target.matches?.(':focus-visible')) v2ShowTip(el); else $('v2Tip').hidden = true; });
 window.addEventListener('scroll', () => { $('v2Tip').hidden = true; }, { passive: true });
 
 // ---- drag to rearrange ------------------------------------------------------------
@@ -14363,6 +14395,7 @@ window.addEventListener('scroll', () => { $('v2Tip').hidden = true; }, { passive
 const v2drag = { st: null, active: false, suppress: false };
 $('v2groups').addEventListener('pointerdown', (e) => {
   const el = e.target.closest('.v2agent');
+  if (el) $('v2Tip').hidden = true; // a press may start a drag: the groups it goes to stay in sight
   if (!el || e.button !== 0 || el.dataset.v2fixed) return;
   const a = v2Find(el.dataset.v2id); if (!a) return;
   const st = { el, a, x0: e.clientX, y0: e.clientY, pid: e.pointerId, touch: e.pointerType === 'touch', held: e.pointerType !== 'touch' };
@@ -15277,7 +15310,6 @@ function openGuestConsole(a, sessionKey) {
   $('consoleChans').innerHTML = '';
   $('consoleProps').hidden = true;
   $('consoleCover').hidden = true;
-  $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
   $('consoleFrame').src = url;
   renderConsoleTabs();
   $('consoleDlg').showModal();

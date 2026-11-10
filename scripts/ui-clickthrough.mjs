@@ -1849,48 +1849,58 @@ const SCENARIOS = String.raw`(() => {
     },
     settingsMessagingTab: async () => {
       // The owner (2026-11-07): Settings → Telegram, Slack and Discord on one tab, Messaging; every control kept.
+      // The owner (2026-11-09): all three at once was "too much on one screen" — one at a time, picked from a list.
       const el = (id) => document.getElementById(id);
       const seen = (e) => (e.checkVisibility ? e.checkVisibility() : e.offsetParent !== null);
       const selected = () => document.querySelector('#v2SettingsTabs .tab[aria-selected="true"]')?.textContent;
+      const panes = ['panePool', 'paneSlack', 'paneDiscord'].map(el);
+      const showing = () => panes.filter((x) => !x.hidden && seen(x)).map((x) => x.id);
+      const pick = (v) => { el('v2MsgApp').value = v; el('v2MsgApp').dispatchEvent(new Event('change')); };
+      const n = (re) => calls('GET', re).length;
       try {
+        localStorage.removeItem('hb-settings-messaging');
         await openAiDlg();
         const tabs = [...document.querySelectorAll('#v2SettingsTabs .tab')].map((b) => b.textContent);
         ok('one Messaging tab, none for Telegram, Slack or Discord: ' + tabs.join(' | '), tabs.includes('Messaging') && !tabs.some((x) => /^(Telegram|Slack|Discord)$/.test(x)));
         eq('between Classes and Connections', tabs.slice(tabs.indexOf('Classes'), tabs.indexOf('Classes') + 3), ['Classes', 'Messaging', 'Connections']);
-        const n = (re) => calls('GET', re).length;
+        ok('no app list on the AI tab', !seen(el('v2MsgPick')));
         const before = [n(/\/v1\/pool$/), n(/\/v1\/slack-apps$/), n(/\/v1\/discord-bots$/)];
         byText('#v2SettingsTabs .tab', 'Messaging').click();
-        const panes = ['panePool', 'paneSlack', 'paneDiscord'].map(el);
-        ok('all three show', panes.every((x) => !x.hidden && seen(x)));
-        ok('Telegram, then Slack, then Discord', (panes[0].compareDocumentPosition(panes[1]) & Node.DOCUMENT_POSITION_FOLLOWING) && (panes[1].compareDocumentPosition(panes[2]) & Node.DOCUMENT_POSITION_FOLLOWING));
-        eq('each under its heading', panes.map((x) => x.querySelector('.v2settingshead')?.textContent), ['Telegram', 'Slack', 'Discord']);
-        ok('the headings show', panes.every((x) => seen(x.querySelector('.v2settingshead'))));
-        const ids = ['poolStatus', 'poolOwnOnly', 'poolToken', 'poolAddBtn', 'poolList', 'botInvDrawer', 'spoolBot', 'spoolApp', 'spoolAddBtn', 'spoolList', 'dpoolToken', 'dpoolAddBtn', 'dpoolList'];
-        ok('every control is there: ' + ids.filter((id) => !panes.some((x) => x.contains(el(id)))).join(', '), ids.every((id) => panes.some((x) => x.contains(el(id)))));
-        await until(() => n(/\/v1\/pool$/) > before[0] && n(/\/v1\/slack-apps$/) > before[1] && n(/\/v1\/discord-bots$/) > before[2]);
-        // Their handlers still answer: an empty Add says what is missing.
+        ok('the app list shows', seen(el('v2MsgPick')));
+        eq('it lists Telegram, Slack and Discord', [...el('v2MsgApp').options].map((o) => o.textContent), ['Telegram', 'Slack', 'Discord']);
+        eq('Telegram first, alone', [el('v2MsgApp').value, showing()], ['pool', ['panePool']]);
+        ok('above the pane', el('v2MsgPick').getBoundingClientRect().bottom <= panes[0].getBoundingClientRect().top + 1);
+        ok('no heading repeats the list', panes.every((x) => !x.querySelector('.v2settingshead') || !seen(x.querySelector('.v2settingshead'))));
+        await until(() => n(/\/v1\/pool$/) > before[0]);
+        eq('only Telegram is read', [n(/\/v1\/slack-apps$/), n(/\/v1\/discord-bots$/)], before.slice(1));
+        pick('slack');
+        eq('Slack alone, the tab still Messaging', [showing(), selected()], [['paneSlack'], 'Messaging']);
+        await until(() => n(/\/v1\/slack-apps$/) > before[1]);
         el('spoolBot').value = ''; el('spoolApp').value = ''; el('spoolAddBtn').click();
         await until(() => el('spoolErr').textContent.includes('Paste both tokens'));
+        pick('discord');
+        eq('Discord alone', showing(), ['paneDiscord']);
+        await until(() => n(/\/v1\/discord-bots$/) > before[2]);
         el('dpoolToken').value = ''; el('dpoolAddBtn').click();
         await until(() => el('dpoolErr').textContent.includes('Paste the bot token'));
         el('spoolErr').textContent = ''; el('dpoolErr').textContent = '';
-        byText('#v2SettingsTabs .tab', 'AI').click();
-        ok('another tab hides all three', panes.every((x) => x.hidden));
+        const ids = ['poolStatus', 'poolOwnOnly', 'poolToken', 'poolAddBtn', 'poolList', 'botInvDrawer', 'spoolBot', 'spoolApp', 'spoolAddBtn', 'spoolList', 'dpoolToken', 'dpoolAddBtn', 'dpoolList'];
+        ok('every control is there: ' + ids.filter((id) => !panes.some((x) => x.contains(el(id)))).join(', '), ids.every((id) => panes.some((x) => x.contains(el(id)))));
+        byText('#v2SettingsTabs .tab', 'You').click();
+        ok('another tab hides the list and all three', !seen(el('v2MsgPick')) && panes.every((x) => x.hidden));
+        ok('a tab of two parts keeps its headings', seen(el('paneAccess').querySelector('.v2settingshead')) && seen(el('paneOperator').querySelector('.v2settingshead')));
         aiDlg.close();
-        // Every way in that named one of the three lands on Messaging; one to a later part lands on it.
-        for (const link of ['pool', 'telegram', 'slack', 'discord', 'messaging']) {
+        await openAiDlg('messaging');
+        eq('Messaging opens on the app shown last', [selected(), el('v2MsgApp').value, showing()], ['Messaging', 'discord', ['paneDiscord']]);
+        aiDlg.close();
+        // Every way in that names one of the three opens Messaging on it.
+        for (const [link, want] of [['pool', 'pool'], ['telegram', 'pool'], ['slack', 'slack'], ['discord', 'discord']]) {
           await openAiDlg(link);
-          eq(link + ' opens', selected(), 'Messaging');
+          eq(link + ' opens', [selected(), el('v2MsgApp').value, showing()], ['Messaging', want, [TABS[want]]]);
           aiDlg.close();
         }
-        await openAiDlg('discord');
-        await sleep(50);
-        // Scrolled to it: its heading below the panel's sticky bar and on screen (Discord is last, so it may stop short of the top).
-        const bar = aiDlg.querySelector('.v2pbar').getBoundingClientRect(), box = aiDlg.getBoundingClientRect();
-        const head = el('paneDiscord').querySelector('.v2settingshead').getBoundingClientRect();
-        ok('openAiDlg(discord) shows Discord: its heading at ' + Math.round(head.top) + ', the bar ends at ' + Math.round(bar.bottom) + ', scrolled ' + aiDlg.scrollTop, aiDlg.scrollTop > 0 && head.top >= bar.bottom && head.bottom <= box.bottom);
-        aiDlg.close();
       } finally {
+        try { localStorage.removeItem('hb-settings-messaging'); } catch {}
         if (aiDlg.open) aiDlg.close();
       }
     },
@@ -2713,8 +2723,7 @@ const SCENARIOS = String.raw`(() => {
         await until(() => consoleDlg.open && consoleAgentId === A.id, 20000);
         ok('the address opened its console', true);
         ok('the browser tab is named after it: ' + document.title, document.title.startsWith(A.name));
-        document.getElementById('consoleNewTab').click();
-        ok('New tab opens the console\'s own address: ' + opened[0], opened[0] === location.origin + location.pathname + location.search + '#console=' + encodeURIComponent(key));
+        ok('no New tab button (the owner, 2026-11-09)', !document.getElementById('consoleNewTab') && ![...consoleDlg.querySelectorAll('.console-bar button')].some((b) => /new tab/i.test(b.textContent)));
         closeConsole();
         await until(() => !location.hash.includes('console='));
         eq('closing gives the page its title back', document.title, title);
@@ -2757,11 +2766,8 @@ const SCENARIOS = String.raw`(() => {
         await openGateway('a1', a.slug);
         await until(() => document.getElementById('consoleDlg').open);
         ok('not rebuilt: the token rides in the fragment as before', document.getElementById('consoleFrame').getAttribute('src').endsWith('#token=made-up-console-token'));
-        // A new tab keeps its address in the browser's history: never the token's (HB-0023).
-        const opened = []; const realOpen = window.open;
-        window.open = (u) => { opened.push(String(u)); return null; };
-        try { document.getElementById('consoleNewTab').click(); } finally { window.open = realOpen; }
-        ok('New tab carries no token: ' + opened[0], opened.length === 1 && !opened[0].includes('token') && opened[0].includes('#console='));
+        // The address bar keeps its address in the browser's history: never the token's (HB-0023).
+        ok('the address bar carries no token: ' + location.hash, !location.href.includes('token') && location.hash.includes('console='));
       } finally {
         if (document.getElementById('consoleDlg').open) closeConsole();
         delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/gateway'];
@@ -3933,11 +3939,11 @@ const SCENARIOS = String.raw`(() => {
         for (const v of ['group', 'activity', 'cost']) {
           v2SetView(v); await sleep(30);
           const meal = tipText('Meal Planner');
-          ok(v + ': the week and the month: ' + meal, meal.includes('≈ $18 in the last 7 days at API prices (≈ $77 a month)'));
-          ok(v + ': the plan note', meal.includes('on your Claude plan — counts against its limits'));
+          ok(v + ': the week and the month: ' + meal, meal.includes('≈ $18/wk at API prices (≈ $77/mo)'));
+          ok(v + ': the plan note', meal.includes('Counts against your Claude plan'));
         }
         v2SetView('group');
-        ok('no plan note on an API-priced agent', tipText('Car Upkeep').includes('≈ $52 in the last 7 days') && !tipText('Car Upkeep').includes('Claude plan'));
+        ok('no plan note on an API-priced agent', tipText('Car Upkeep').includes('≈ $52/wk') && !tipText('Car Upkeep').includes('Claude plan'));
         ok('no price known', tipText('Travel Planner').includes('no price known'));
         ok('a local model', tipText('Stock Watcher').includes('local model'));
         ok('nothing for a quiet week', !tipText('Tax Filing').includes('API prices'));
@@ -4001,7 +4007,7 @@ const SCENARIOS = String.raw`(() => {
         ok('under the window\'s smallest chip: none', !chipOf('Garden Notes'));
         const heads = [...document.querySelectorAll('#v2groups .v2ghead h3')].map((h) => h.textContent);
         ok('bands for 3 hours: ' + heads.join(' | '), heads.includes('>$2/3h') && heads.includes('$1–2/3h') && heads.includes('$0.20–1/3h') && heads.includes('No usage'));
-        ok('the tooltip says the window', tipText('Meal Planner').includes('≈ $1.20 in the last 3 hours at API prices (≈ $288 a month at that pace)'));
+        ok('the tooltip says the window: ' + tipText('Meal Planner'), tipText('Meal Planner').includes('≈ $1.20/3h at API prices (≈ $288/mo at this pace)'));
         ok('and the tile out loud', tile('Homework Helper').getAttribute('aria-label').includes('about $2.50 in the last 3 hours at API prices'));
         v2SetView('group'); await sleep(30);
         eq('the chips follow it in every view', chipOf('Homework Helper')?.textContent, '$3/3h');
@@ -5182,9 +5188,9 @@ const SCENARIOS = String.raw`(() => {
         const tip = tipText('Meal Planner');
         ok('its cost: ' + tip, tip.includes('at API prices'));
         ok('its spending alarm', tip.includes('🔔 Alarm every $50 · next at $50'));
-        ok('OpenClaw version, model, update', tip.includes('OpenClaw 2026.9.6 · claude-sonnet-5 · update ready'));
-        ok('its uptime', tip.includes('Up 3 h 12 min'));
-        ok('the restart and how it ended', tip.includes('Restarted by itself once since its last rebuild (last exit 135: a memory fault)'));
+        ok('its model and uptime on one line', tip.includes('claude-sonnet-5 · up 3 h 12 min'));
+        ok('OpenClaw version and update', tip.includes('OpenClaw 2026.9.6 · update ready'));
+        ok('the restart and how it ended', tip.includes('Restarted by itself once since rebuild (last: a memory fault)'));
         ok('no persona any more', !tip.includes('Plans the week'));
         v2ShowTip(tile('Meal Planner'));
         const parts = [...document.querySelectorAll('#v2Tip .v2tipsec')].map((s) => s.classList.contains('v2tipcost') ? 'cost' : 'runtime');
@@ -5192,9 +5198,74 @@ const SCENARIOS = String.raw`(() => {
         eq('two parts, cost first', parts, ['cost', 'runtime']);
         const tax = tipText('Tax Filing');
         ok('the alarm shows without use in the window: ' + tax, tax.includes('🔔 Alarm every $20'));
-        ok('days of uptime', tax.includes('Up 3 days'));
+        ok('days of uptime', /up 3 days/i.test(tax));
         ok('no restart line when it never restarted', !tax.includes('Restarted'));
       } finally { await costCleanup(); await agentsCleanup(); }
+    },
+    // Chris, 2026-11-09: the tooltip was so big it was hard to drag an icon to another group. Pushed up
+    // to fit, it covered the icon and the groups around it, and it stayed up while the icon was pressed.
+    tooltipCompact: async () => {
+      const tip = document.getElementById('v2Tip');
+      const mins = (m) => new Date(Date.now() - m * 60000).toISOString();
+      const recent = v2Recent, pad = document.body.style.paddingBottom;
+      const overlaps = (a, b) => a.top < b.bottom && a.bottom > b.top && a.left < b.right && a.right > b.left;
+      try {
+        await withAgents((a) => a.name === 'Meal Planner' ? { ...a, state: 'RUNNING', openclawVersion: '2026.9.8', model: 'claude-sonnet-5', updateAvailable: true,
+            startedAt: mins(200), restarts: 3, lastExitCode: 137,
+            // Five reasons of different kinds (each kind is one reason).
+            stuck: [{ id: 'ti_1', kind: 'channel-retry', text: 'Stuck: Telegram message retried 6 times since 08:19' }], pendingAction: { type: 'bot_token' },
+            botNamePending: { name: 'Meals' }, memoryCapHits: 3, imageTrial: true, image: 'hatchabot-runtime:trial' } : undefined);
+        const meal = agents.find((a) => a.name === 'Meal Planner');
+        const why = v2Status(meal).why.length;
+        v2ShowTip(tile('Meal Planner'));
+        const items = [...tip.querySelectorAll('li')].map((li) => li.textContent);
+        ok('more than three reasons to show: ' + why, why > 3);
+        eq('three reasons, then how many more', items.length, 4);
+        eq('the count of the rest', items[3], '+' + (why - 3) + ' more on its page');
+        const run = tip.querySelector('.v2tiprun').textContent;
+        ok('model and uptime on one line: ' + run, run.includes('claude-sonnet-5 · up 3 h 20 min') && run.includes('OpenClaw 2026.9.8 · update ready'));
+        ok('the restart in short', run.includes('Restarted by itself 3 times since rebuild (last: killed, usually for memory)'));
+        // The last line: two lines at most; the tile's label still reads it all.
+        const said = 'Robin: can we swap Thursday for the lentil soup, and is there anything on the list we already have in the pantry?';
+        v2Recent = new Map([[agents.find((a) => a.name === 'Homework Helper').id, { at: mins(2), said }]]);
+        v2ShowTip(tile('Homework Helper'));
+        const prev = tip.querySelector('.v2tipprev'), lh = parseFloat(getComputedStyle(tip).lineHeight);
+        ok('the whole line is there', prev.textContent.includes(said));
+        ok('shown on two lines at most: ' + prev.getBoundingClientRect().height + ' for ' + lh, prev.getBoundingClientRect().height <= 2 * lh + 1 && prev.scrollHeight > prev.clientHeight);
+        // Low on the screen: above the icon, not pushed up over it.
+        document.body.style.paddingBottom = '2000px';
+        const t = tile('Meal Planner');
+        window.scrollBy(0, t.querySelector('.v2ic').getBoundingClientRect().bottom - (innerHeight - 30));
+        v2ShowTip(t);
+        const ic = t.querySelector('.v2ic').getBoundingClientRect(), r = tip.getBoundingClientRect();
+        ok('no room below (' + Math.round(innerHeight - ic.bottom) + ' px for ' + Math.round(r.height) + ')', innerHeight - ic.bottom - 18 < r.height);
+        ok('so it is above the icon: ' + Math.round(r.bottom) + ' ≤ ' + Math.round(ic.top), r.bottom <= ic.top);
+        for (const x of document.querySelectorAll('#v2groups .v2agent')) {
+          const b = x.querySelector('.v2ic').getBoundingClientRect();
+          if (b.top < 0 || b.bottom > innerHeight) continue;
+          v2ShowTip(x);
+          const tr = tip.getBoundingClientRect();
+          if (b.top - 18 < tr.height && innerHeight - b.bottom - 18 < tr.height) continue; // no room either way
+          ok(x.textContent.trim().slice(0, 30) + ': its tooltip leaves the icon in sight', !overlaps(tr, b));
+        }
+        window.scrollTo(0, 0); document.body.style.paddingBottom = pad;
+        // A press may start a drag: the tooltip goes, and comes back only on the next hover.
+        const d = document.querySelector('#v2groups .v2agent:not([data-v2fixed])');
+        ok('a tile that can be dragged', !!d);
+        v2ShowTip(d); ok('shown on hover', !tip.hidden);
+        const b = d.getBoundingClientRect(), at = { bubbles: true, button: 0, pointerId: 7, pointerType: 'mouse', clientX: b.left + 10, clientY: b.top + 10 };
+        d.dispatchEvent(new PointerEvent('pointerdown', at));
+        ok('a press hides it', tip.hidden);
+        d.querySelector('.v2ic').dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        ok('moving over the icon while pressed does not bring it back', tip.hidden);
+        window.dispatchEvent(new PointerEvent('pointerup', at));
+        ok('the press is over', !v2drag.st && !v2drag.active);
+        d.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        ok('the next hover shows it', !tip.hidden);
+      } finally {
+        tip.hidden = true; window.scrollTo(0, 0); document.body.style.paddingBottom = pad;
+        v2Recent = recent; await agentsCleanup();
+      }
     },
   });
   // Runners and browsers (2026-10-09): what the server could not do is said, not dropped.
