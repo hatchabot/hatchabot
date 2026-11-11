@@ -2812,6 +2812,24 @@ export class Store {
     return this.listAccounts(ownerId).filter((a) => wanted.has(a.ownerId));
   }
 
+  /**
+   * Everyone who can sign in here, marked which way: Google accounts by the
+   * email their last sign-in recorded, password accounts by username. A Google
+   * account and a password account named with the same email are two
+   * accounts, never one person (2026-11-10). Disabled accounts are left out.
+   */
+  listSignInAccounts(): Array<{ id: string; kind: 'google' | 'password'; email?: string; username?: string; displayName?: string }> {
+    const google = (
+      this.db
+        .prepare(`SELECT owner_id, email FROM accounts WHERE owner_id LIKE 'user-%' AND email IS NOT NULL ORDER BY email`)
+        .all() as Array<{ owner_id: string; email: string }>
+    ).map((r) => ({ id: r.owner_id, kind: 'google' as const, email: r.email }));
+    const local = this.listLocalAccounts()
+      .filter((a) => !a.disabled)
+      .map((a) => ({ id: a.id, kind: 'password' as const, username: a.username, ...(a.displayName ? { displayName: a.displayName } : {}) }));
+    return [...google, ...local];
+  }
+
   // ---- agent shares (the inbox) -------------------------------------------
 
   insertShare(s: {

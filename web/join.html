@@ -2,19 +2,37 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>
+  // The app's light or dark choice, before first paint: this page is on the
+  // same site, so it reads the same setting, light by default as the app is
+  // (2026-11-10: the page was always dark). Storage can throw: it still paints.
+  let theme = 'light'; try { theme = localStorage.getItem('theme') || 'light'; } catch {}
+  document.documentElement.dataset.theme = theme;
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Join an agent — Hatchabot</title>
+<link rel="icon" href="/icons/icon-192.png?v=2">
 <style>
-  :root {
+  /* The app's two themes (web/index.html), the tokens this page uses. */
+  :root, :root[data-theme="dark"] {
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
     --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
-    --bad: #e06c5f;
+    --bad: #e06c5f; color-scheme: dark;
   }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --panel: #ffffff; --panel-2: #f1f3f5; --line: #e2e5ea;
+    --text: #1a1c20; --dim: #6b7079; --accent: #e8a33d; --accent-ink: #14161a;
+    --bad: #cc4b3e; color-scheme: light;
+  }
+  [hidden] { display: none !important; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
   .wrap { max-width: 440px; margin: 0 auto; padding: 48px 20px; }
-  h1 { font-size: 20px; margin: 0 0 6px; } h1 b { color: var(--accent); }
+  /* The app's wordmark: the egg and "Hatcha<b>bot</b>" in the one gold. */
+  h1 { display: flex; align-items: center; gap: 10px; font-size: 22px; font-weight: 650; letter-spacing: .2px; margin: 0 0 6px; }
+  h1 img { border-radius: 8px; display: block; }
+  h1 b { color: var(--accent); font-weight: 700; }
   .card { background: var(--panel); border: 1px solid var(--line);
           border-radius: 14px; padding: 20px; margin-top: 18px; }
   .agent { font-size: 22px; font-weight: 700; margin: 4px 0 12px; }
@@ -30,6 +48,8 @@
     text-decoration: none; display: block; }
   .btn.alt { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
   .err { color: var(--bad); font-size: 14px; margin-top: 10px; min-height: 1em; }
+  .hint { color: var(--dim); font-size: 13px; text-align: center; margin-top: 8px; }
+  .hint a { color: inherit; }
   .steps { font-size: 14.5px; color: var(--dim); padding-left: 18px; }
   .steps li { margin: 6px 0; }
   .ways { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
@@ -39,7 +59,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Hatcha<b>bot</b></h1>
+  <h1><img src="/icons/icon-192.png?v=2" alt="" width="30" height="30"><span>Hatcha<b>bot</b></span></h1>
   <div class="card" id="card"><div style="color:var(--dim)">Checking your invite…</div></div>
 </div>
 <script>
@@ -116,7 +136,7 @@ async function setupSignIn(onToken = join) {
       },
     });
     google.accounts.id.renderButton(document.getElementById('gsi'),
-      { theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'filled_black' : 'outline', size: 'large', text: 'signin_with' });
+      { theme: document.documentElement.dataset.theme === 'dark' ? 'filled_black' : 'outline', size: 'large', text: 'signin_with' });
   };
   document.head.appendChild(s);
 }
@@ -165,62 +185,96 @@ async function join(idToken) {
 }
 /**
  * An invite to chat on the web (2026-09-29): no app to pick, no pairing. They
- * sign in to this Hatchabot — Google in identity mode, their account here in
- * accounts mode (an existing session is used as is) — and are in at once.
+ * sign in to this Hatchabot and are in at once: with Google on a Google
+ * install, with a username and password where this Hatchabot has password
+ * accounts (accounts mode, or Google with them added), or as whoever this
+ * browser is signed in as already. On a Google install the page offered only
+ * Google (2026-11-10): someone with a password account could not join at all.
  */
 function initWebChat(info) {
+  const google = info.authMode === 'identity';
+  const passwords = info.authMode === 'accounts' || !!info.localAccounts;
+  webYou = info.signedInAs || '';
+  if (info.own) {
+    card.innerHTML = `
+      <div class="agent">${esc(info.agentName)}</div>
+      <div class="notice">This is your own agent, so you can already chat with it. Send this link to the person it is for.</div>
+      <a class="btn" href="/">Open Hatchabot</a>`;
+    return;
+  }
+  const googleHint = !google ? '' : webYou || passwords ? 'Or sign in with Google:' : 'Sign in with Google to join:';
   card.innerHTML = `
     <div style="color:var(--dim);font-size:14px">You've been invited to chat on the web with</div>
     <div class="agent">${esc(info.agentName)}</div>
     <div class="notice">
-      You chat with it on this Hatchabot, in its own chat window — no chat app needed —
-      and you see only your own conversations. You'll need to reach this machine at its
-      secure (https) address (the person who invited you will have set that up). You'll be
-      a member: you can chat and ask it to use its tools, but not schedule tasks or
-      change its settings.<br><br>
+      You chat with it here, in conversations of your own, as a member: you can chat and
+      ask it to use its tools, but not schedule tasks or change its settings.<br><br>
       <b>Heads up:</b> it is a shared agent. Things you tell it may be remembered and
       shared with the other people who use it.
     </div>
     <label>Your name (so it knows who's writing)</label>
     <input id="name" maxlength="64" placeholder="e.g. Sam">
-    ${info.authMode === 'identity' ? `<div id="gsi" style="display:flex;justify-content:center;margin:16px 0 4px"></div>
-      <div style="color:var(--dim);font-size:13px;text-align:center">Sign in with Google to join.</div>`
-      : `<div id="acct" hidden>
-          <div class="notice" style="margin-bottom:0">Sign in with the account you have on this Hatchabot.
-            No account yet? Ask the person who invited you to make you one, then open this link again.</div>
-          <label>Username</label><input id="user" autocomplete="username">
-          <label>Password</label><input id="pass" type="password" autocomplete="current-password">
-        </div>
-        <div class="notice" id="factorNote" role="alert" hidden></div>
-        <button id="joinBtn">Join</button>`}
+    <div class="notice" id="factorNote" role="alert" hidden></div>
+    ${passwords ? `<div id="acct" hidden>
+        <div class="notice" style="margin-bottom:0">Sign in with the account you have on this Hatchabot.
+          No account yet? Ask the person who invited you to make you one, then open this link again.</div>
+        <label>Username</label><input id="user" autocomplete="username">
+        <label>Password</label><input id="pass" type="password" autocomplete="current-password">
+      </div>` : ''}
+    ${passwords || webYou ? '<button id="joinBtn"></button>' : ''}
+    ${passwords && webYou ? '<div class="hint" id="otherWrap"><a href="#" id="otherAcct">Not you? Sign in with your own account</a></div>' : ''}
+    ${google ? `<div class="hint" style="margin-top:16px">${googleHint}</div><div id="gsi" style="display:flex;justify-content:center;margin:8px 0 4px"></div>` : ''}
     <div class="err" id="err"></div>`;
-  if (info.authMode === 'identity') { setupSignIn(joinWeb); return; }
-  document.getElementById('joinBtn').onclick = () => joinWebAccount();
+  // Signed in already (or signed in, short of the second factor): join with that session; else the form.
+  setWebMode(webYou || info.factor || !passwords ? 'session' : 'form');
+  if (info.factor) showFactorNote(info.factor);
+  const btn = document.getElementById('joinBtn');
+  if (btn) btn.onclick = () => joinWebAccount();
+  const other = document.getElementById('otherAcct');
+  if (other) other.onclick = (e) => { e.preventDefault(); webYou = ''; setWebMode('form'); document.getElementById('user').focus(); };
+  if (google) setupSignIn(joinWeb);
 }
 
-/** Accounts mode: join with the session this browser has; asked to sign in only when there is none, told why when the second factor is what is missing. */
+/** Who this browser is signed in as here (the label the invite answered), and which way the button joins. */
+let webYou = '', webMode = 'session';
+function setWebMode(mode) {
+  webMode = mode;
+  const acct = document.getElementById('acct'), btn = document.getElementById('joinBtn'), other = document.getElementById('otherWrap');
+  if (acct) acct.hidden = mode !== 'form';
+  if (other) other.hidden = mode === 'form' || !webYou;
+  if (btn) btn.textContent = mode === 'form' ? 'Sign in and join' : webYou ? `Join as ${webYou}` : 'Join';
+}
+
+/** Signed in, but this address wants a second factor first (HB-0400): what to do, and the app when it can help. */
+function showFactorNote(f) {
+  const note = document.getElementById('factorNote');
+  // The app can ask for a factor, or add one after a link; otherwise it would only refuse them too.
+  const appHelps = f.secondFactor === 'required' || f.secondFactor === 'enrol';
+  note.innerHTML = esc(f.error) + (appHelps ? '<a class="btn alt" href="/" target="_blank" rel="noopener">Open Hatchabot</a>' : '');
+  note.hidden = false;
+}
+
+/** Join with the session this browser has, or sign in with the form first; told why when the second factor is what is missing. */
 async function joinWebAccount() {
-  const btn = document.getElementById('joinBtn'), err = document.getElementById('err');
-  const acct = document.getElementById('acct'), note = document.getElementById('factorNote');
+  const btn = document.getElementById('joinBtn'), err = document.getElementById('err'), note = document.getElementById('factorNote');
   btn.disabled = true; err.textContent = ''; note.hidden = true;
   try {
-    if (!acct.hidden) {
+    if (webMode === 'form') {
       const r = await fetch('/v1/login', { method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ username: document.getElementById('user').value, password: document.getElementById('pass').value }) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || 'Sign-in failed');
+      webYou = '';
     }
     const out = await postJoin();
-    if (out.signIn) { acct.hidden = false; btn.textContent = 'Sign in and join'; document.getElementById('user').focus(); return; }
-    // Signed in, but this address wants a second factor first (HB-0400). The password was right: don't ask for it again.
-    if (out.secondFactor) {
-      acct.hidden = true; btn.textContent = 'Join';
-      // The app can ask for a factor, or add one after a link; otherwise it would only refuse them too.
-      const appHelps = out.secondFactor === 'required' || out.secondFactor === 'enrol';
-      note.innerHTML = esc(out.error) + (appHelps ? '<a class="btn alt" href="/" target="_blank" rel="noopener">Open Hatchabot</a>' : '');
-      note.hidden = false;
+    if (out.signIn) {
+      webYou = '';
+      if (!document.getElementById('acct')) throw new Error('Sign in with Google below to join.');
+      setWebMode('form'); document.getElementById('user').focus();
       return;
     }
+    // Signed in, but the factor is missing. The password was right: don't ask for it again.
+    if (out.secondFactor) { setWebMode('session'); showFactorNote(out); return; }
     webChatDone(out);
   } catch (e) { err.textContent = e.message; }
   finally { btn.disabled = false; }

@@ -38,9 +38,9 @@ describe('inlineScripts: the page code check-web and the web tests read (HB-0620
     expect(() => inlineScripts('<script>x = "<!--<script>";</script>y();</script>')).toThrow(/no script open/);
   });
 
-  it('reads the real pages: three scripts in index.html, one in join.html', () => {
+  it('reads the real pages: three scripts in index.html, two in join.html', () => {
     expect(inlineScripts(readFileSync('web/index.html', 'utf8'))).toHaveLength(3);
-    expect(inlineScripts(readFileSync('web/join.html', 'utf8'))).toHaveLength(1);
+    expect(inlineScripts(readFileSync('web/join.html', 'utf8'))).toHaveLength(2);
   });
 
   it('stays quick on hostile text', () => {

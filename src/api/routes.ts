@@ -1083,6 +1083,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const local = store.listHosts(ownerId).find((h) => h.kind === 'local');
     return !!local && local.ownerId === ownerId;
   };
+  /** Password accounts sign in here: accounts mode, or Google sign-in with them added (docs/identity.md). */
+  const localAccountsOn = (): boolean =>
+    deps.authMode === 'accounts' || (deps.authMode === 'identity' && process.env.HATCHABOT_LOCAL_ACCOUNTS === '1');
   /**
    * Agent caps, checked by EVERY path that creates or revives a live agent
    * (create, import, restore from file, clone, derive, accept a shared
@@ -2031,7 +2034,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     needsSetup: deps.authMode === 'accounts' && store.countLocalAccounts() === 0,
     // Google sign-in and local accounts can run together: the login screen
     // needs to know whether to offer both.
-    localAccounts: deps.authMode === 'accounts' || (deps.authMode === 'identity' && process.env.HATCHABOT_LOCAL_ACCOUNTS === '1'),
+    localAccounts: localAccountsOn(),
     // Under a rootless daemon or Docker Desktop nobody is "on this machine"
     // (agents share its loopback): the first account needs the setup code
     // even at localhost.
@@ -15819,6 +15822,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /** Someone who signs in here: a Google account (identity mode) or a local account. */
   const isAccountId = (userId: string): boolean => /^user-./.test(userId) || !!store.localAccount(userId);
+  /** How a person who signs in here is shown to themselves: a password account's name, a Google account's email. */
+  const accountLabel = (userId: string): string | undefined => {
+    const local = store.localAccount(userId);
+    return local ? (local.displayName || local.username) : store.emailForOwner(userId);
+  };
 
   /**
    * The account behind a join request (2026-09-29): a Google sign-in made on
@@ -15975,6 +15983,81 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   );
 
+  /**
+   * The people on this Hatchabot an agent can be shared with for web chat
+   * without a link (2026-11-10): the owner picks one and the agent is on their
+   * home screen at once. The machine's owner is offered everyone who signs in
+   * here; anyone else the machine's owner, the people they have swapped agents
+   * with and the people already in one of their agents, not the whole
+   * household (as /v1/accounts). Each is marked Google or password: the two
+   * are separate accounts even under one email.
+   */
+  const webChatPeople = (req: FastifyRequest, agent: Agent) => {
+    const me = ownerIdOf(req);
+    let people = store.listSignInAccounts().filter((p) =>
+      p.id !== me && p.id !== agent.ownerId && (p.kind === 'google' ? deps.authMode === 'identity' : localAccountsOn()));
+    if (!ownsLocalHost(req)) {
+      const hostOwner = store.listHosts(me).find((h) => h.kind === 'local')?.ownerId;
+      const known = new Set(store.listRelatedAccounts(me, hostOwner ? [hostOwner] : []).map((a) => a.ownerId));
+      if (hostOwner) known.add(hostOwner);
+      for (const a of store.listAgents(me)) {
+        for (const m of store.listMemberships(a.id)) if (m.status === 'active') known.add(m.userId);
+      }
+      people = people.filter((p) => known.has(p.id));
+    }
+    return people.map((p) => {
+      const m = store.getMembership(agent.id, p.id);
+      return {
+        userId: p.id,
+        kind: p.kind,
+        label: p.kind === 'google' ? p.email! : (p.displayName || p.username!),
+        ...(p.kind === 'password' && p.displayName ? { username: p.username } : {}),
+        shared: !!m && m.status === 'active' && m.webChat,
+      };
+    });
+  };
+  const NO_ACCOUNTS_HERE = 'Chat on the web needs people to sign in to this Hatchabot — switch it to accounts or Google sign-in first (⚙ Settings → Access).';
+
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/web-chat/people', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if ((deps.authMode ?? 'password') === 'password') return reply.code(400).send({ error: NO_ACCOUNTS_HERE });
+    if (agent.ops) return reply.code(400).send({ error: OPS_ALONE });
+    return { people: webChatPeople(req, agent) };
+  });
+
+  /** Share an agent with one of those people: a member with web chat on, as a web chat link would make them. */
+  app.post<{ Params: { id: string }; Body: { userId?: string; name?: string } }>('/v1/agents/:id/web-chat/people', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if ((deps.authMode ?? 'password') === 'password') return reply.code(400).send({ error: NO_ACCOUNTS_HERE });
+    if (agent.ops) return reply.code(400).send({ error: OPS_ALONE });
+    const parsed = z.object({ userId: z.string().min(1).max(200), name: z.string().trim().max(64).optional() }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    // Only someone the list offers this caller: an id sent by hand is not a
+    // way to find out who has an account here.
+    const person = webChatPeople(req, agent).find((p) => p.userId === parsed.data.userId);
+    if (!person) return reply.code(404).send({ error: 'Nobody by that name signs in to this Hatchabot.' });
+    if (person.shared) return { userId: person.userId, webChat: true, already: true };
+    const name = (parsed.data.name || person.label.split('@')[0] || person.label).slice(0, 64);
+    store.transact(() => {
+      const m = store.getMembership(agent.id, person.userId);
+      // Already in on a chat app: web chat is added to the seat they have.
+      if (m?.status === 'active') store.setMembershipWebChat(agent.id, person.userId, true);
+      else if (m) store.reactivateMembership(agent.id, person.userId, name, true);
+      else {
+        store.insertMembership({
+          id: randomUUID(), agentId: agent.id, userId: person.userId, role: 'user',
+          displayName: name, status: 'active', joinedAt: new Date().toISOString(), webChat: true,
+        });
+      }
+    });
+    trace(agent.id)('member.web_chat_shared', { userId: person.userId });
+    // Their name goes on the gateway's list now, before they open it (as a join does).
+    if (agent.state === 'RUNNING') void consoleAccess.ensureReady(agent, 'grant').catch(() => {});
+    return reply.code(201).send({ userId: person.userId, webChat: true, name: store.getMembership(agent.id, person.userId)?.displayName ?? name });
+  });
+
   app.delete<{ Params: { id: string; userId: string } }>(
     '/v1/agents/:id/members/:userId',
     async (req, reply) => {
@@ -16027,10 +16110,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       ...(c.kind === 'discord' && Array.isArray(c.settings?.servers)
         ? { servers: (c.settings.servers as Array<{ name?: string }>).map((g) => String(g.name ?? '')).filter(Boolean).slice(0, 5) } : {}),
     }));
+    if (!check.webChat) return { valid: true, agentName: agent.name, sharedMemory: agent.sharedMemory, channels };
+    // A web-chat invite: the page asks them to sign in, not to pick an app —
+    // or, when this browser is signed in here already, offers to join as that
+    // person (2026-11-10: on a Google install the page only ever offered
+    // Google, so someone with a password account could not join at all).
+    const joining = await joiningAccount(req, undefined, { acceptingWebChat: true })
+      .catch((): { accountId?: string; factorRefusal?: { error: string; secondFactor: string } } => ({}));
+    const you = joining.accountId;
+    if (you || joining.factorRefusal) reply.header('cache-control', 'no-store');
     return {
       valid: true, agentName: agent.name, sharedMemory: agent.sharedMemory, channels,
-      // A web-chat invite: the page asks them to sign in, not to pick an app.
-      ...(check.webChat ? { webChat: true, authMode: deps.authMode ?? 'password' } : {}),
+      webChat: true, authMode: deps.authMode ?? 'password', localAccounts: localAccountsOn(),
+      ...(you ? { signedInAs: accountLabel(you) ?? 'your account here', ...(you === agent.ownerId ? { own: true } : {}) } : {}),
+      // Signed in, but this address wants their second factor first (HB-0400): said at once.
+      ...(joining.factorRefusal ? { factor: joining.factorRefusal } : {}),
     };
   });
 

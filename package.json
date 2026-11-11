@@ -1,6 +1,6 @@
 {
   "name": "hatchabot",
-  "version": "2.178.3",
+  "version": "2.179.0",
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",

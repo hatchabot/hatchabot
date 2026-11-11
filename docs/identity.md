@@ -181,6 +181,11 @@ that, rather than a bare 401.
 This is the shape for a household where one person can manage a Google project
 and nobody else should have to.
 
+A Google sign-in and a password account are always two accounts, each with its
+own agents, sources and settings, even when the password account's username is
+the same email: Hatchabot never joins them by address. The share picker
+(Sharing → Members) marks each person Google or password for that reason.
+
 ### No public sign-up, on purpose
 
 The login screen has no "create an account" button once account #1 exists.

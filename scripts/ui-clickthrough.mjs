@@ -2773,6 +2773,45 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/gateway'];
       }
     },
+    // 2026-11-10: Sharing → someone on this Hatchabot, no link. Google and password accounts told apart;
+    // one who has it already is not offered; the share goes by id and the members list follows.
+    webChatSharePerson: async () => {
+      try {
+        window.__override['/v1/agents/a1/members'] = [
+          { userId: 'o1', role: 'owner', status: 'active', channelUserId: '11', identities: {}, account: true, webChat: false }];
+        window.__override['/v1/agents/a1/web-chat/people'] = { people: [
+          { userId: 'user-sam', kind: 'google', label: 'sam@example.com', shared: false },
+          { userId: 'acct-sam', kind: 'password', label: 'sam@example.com', shared: false },
+          { userId: 'acct-robin', kind: 'password', label: 'Robin', username: 'robin', shared: false },
+          { userId: 'acct-jo', kind: 'password', label: 'Jo', shared: true }] };
+        openV2Agent('a1', 'sharing');
+        const row = await until(() => { const r = document.getElementById('tgShareRow'); return r && !r.hidden ? r : null; });
+        const opts = [...document.querySelectorAll('#tgSharePerson option')].map((o) => o.textContent);
+        eq('who is offered', opts.slice(1), ['sam@example.com · Google', 'sam@example.com · password', 'Robin (robin) · password']);
+        ok('the row sits above Invite…', row.compareDocumentPosition(document.getElementById('tgInviteRow')) & Node.DOCUMENT_POSITION_FOLLOWING);
+        document.getElementById('tgShareBtn').click();
+        await until(() => document.getElementById('tgShareNote').textContent.includes('Choose who'));
+        eq('nothing sent without a choice', calls('POST', /\/web-chat\/people$/).length, 0);
+        const reads = calls('GET', /\/v1\/agents\/a1\/members$/).length;
+        document.getElementById('tgSharePerson').value = 'acct-robin';
+        document.getElementById('tgShareBtn').click();
+        const sent = await until(() => calls('POST', /\/v1\/agents\/a1\/web-chat\/people$/)[0]);
+        eq('shared by id', sent.body, { userId: 'acct-robin' });
+        await until(() => calls('GET', /\/v1\/agents\/a1\/members$/).length > reads);
+        ok('the members list is read again', true);
+        v2Close();
+        // Nobody to offer: no row.
+        window.__override['/v1/agents/a1/web-chat/people'] = { people: [{ userId: 'acct-jo', kind: 'password', label: 'Jo', shared: true }] };
+        const asks = calls('GET', /\/web-chat\/people$/).length;
+        openV2Agent('a1', 'sharing');
+        await until(() => calls('GET', /\/web-chat\/people$/).length > asks);
+        await sleep(50);
+        ok('everyone has it: no row', document.getElementById('tgShareRow').hidden);
+      } finally {
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/members']; delete window.__override['/v1/agents/a1/web-chat/people'];
+      }
+    },
     // The owner's Members list: a badge on who has web chat, and the switch — turning it ON repeats the rights warning.
     webChatToggle: async () => {
       try {
@@ -2823,9 +2862,8 @@ const SCENARIOS = String.raw`(() => {
         await invite('a1', 'Homework Helper');
         await until(() => inviteDlg.open);
         const web = document.getElementById('invWeb');
-        ok('the web way shows', !web.hidden && web.textContent.includes('Chat on the web — for people you trust'));
-        ok('it says they need to reach this machine', web.textContent.includes('Tailscale'));
-        ok("it says what they get: a member's rights", /They will have a member's rights, exactly like a Telegram\s+member: they can chat and ask it to use its tools, but not schedule tasks or change its settings/.test(web.textContent));
+        ok('the web way shows', !web.hidden && web.textContent.includes('Chat on the web.'));
+        ok("it says what they get, briefly: a member's rights", /with a member's rights: no scheduling, no settings/.test(web.textContent) && web.textContent.replace(/\s+/g, ' ').trim().length < 300);
         ok('no longer says it hands over your rights', !/your rights|hand your laptop/.test(web.textContent));
         eq('only the plain invite so far', calls('POST', /\/v1\/agents\/a1\/invites$/).map((c) => c.body), [{}]);
         document.getElementById('invWebBtn').click();
@@ -7052,8 +7090,9 @@ const SCENARIOS = String.raw`(() => {
       // HB-0400: the real web/join.html in a frame. A right password that the public address refuses
       // for want of a second factor must say so, not bring the same form back with no message.
       const NO_SIGN_IN = { status: 401, body: { error: 'Sign in to this Hatchabot first.', signIn: true } };
-      const open = async (answers) => {
-        window.__answer = { 'GET /v1/invites/srcdoc': [{ body: { valid: true, webChat: true, agentName: 'Homework Helper', authMode: 'accounts' } }], ...answers };
+      const INVITE = { valid: true, webChat: true, agentName: 'Homework Helper', authMode: 'accounts', localAccounts: true };
+      const open = async (answers, invite = {}) => {
+        window.__answer = { 'GET /v1/invites/srcdoc': [{ body: { ...INVITE, ...invite } }], ...answers };
         const frame = document.createElement('iframe');
         frame.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:800px;background:#fff;z-index:99999';
         frame.srcdoc = window.__joinPage.replace('<head>', () => '<head><script>window.fetch = (...a) => parent.fetch(...a);<\/script>');
@@ -7066,7 +7105,7 @@ const SCENARIOS = String.raw`(() => {
       try {
         // A factor they have but did not give here.
         frame = await open({
-          'POST /v1/join': [NO_SIGN_IN,
+          'POST /v1/join': [
             { status: 401, body: { error: 'This address also asks for your second factor.', secondFactor: 'required' } },
             { status: 401, body: { error: 'This address also asks for your second factor.', secondFactor: 'required' } },
             { status: 201, body: { agentName: 'Homework Helper', agentId: 'a1', webChat: true } }],
@@ -7077,9 +7116,7 @@ const SCENARIOS = String.raw`(() => {
         const btn = () => d.getElementById('joinBtn');
         const note = () => d.getElementById('factorNote');
         const settled = () => !btn().disabled;
-        ok('the form starts hidden', form().hidden);
-        btn().click();
-        await until(() => !form().hidden && settled());
+        ok('not signed in: the form shows at once', !form().hidden);
         eq('no session: the sign-in form', btn().textContent, 'Sign in and join');
         ok('with nothing to explain yet', note().hidden);
         // A wrong password says so and leaves the form.
@@ -7090,6 +7127,7 @@ const SCENARIOS = String.raw`(() => {
         eq('the wrong password is reported', d.getElementById('err').textContent, 'Invalid username or password.');
         ok('and the form stays', !form().hidden && note().hidden);
         // The right password: told what is missing, and not asked for the password again.
+        await until(settled);
         btn().click();
         await until(() => !note().hidden);
         await until(settled);
@@ -7101,7 +7139,7 @@ const SCENARIOS = String.raw`(() => {
         ok('it offers the app, in a tab of its own', link && link.getAttribute('href') === '/' && link.target === '_blank' && link.rel.includes('noopener'));
         // Pressed again without the factor: the message stays, and no password goes out.
         btn().click();
-        await until(() => calls('POST', /^\/v1\/join$/).length >= 3 && settled());
+        await until(() => calls('POST', /^\/v1\/join$/).length >= 2 && settled());
         ok('still told', !note().hidden && form().hidden);
         eq('no second password', logins(), before + 2);
         // Back from the app with the factor given: in, by the same page.
@@ -7109,21 +7147,72 @@ const SCENARIOS = String.raw`(() => {
         await until(() => d.getElementById('card').textContent.includes('You\'re in'));
         frame.remove();
 
-        // No factor yet, and no way to add one here: the words alone; the app would only refuse them.
-        frame = await open({
-          'POST /v1/join': [{ status: 401, body: { error: 'Ask whoever runs this Hatchabot for a reset link.', secondFactor: 'enrol-link' } }, NO_SIGN_IN],
-        });
+        // Signed in, no factor yet, and no way to add one here: said as the page opens, the words alone.
+        frame = await open({ 'POST /v1/join': [NO_SIGN_IN] },
+          { factor: { error: 'Ask whoever runs this Hatchabot for a reset link.', secondFactor: 'enrol-link' } });
         d = frame.contentDocument;
-        btn().click();
-        await until(() => !note().hidden);
-        ok('the words: ' + note().textContent, note().textContent.includes('reset link'));
+        ok('the words at once: ' + note().textContent, !note().hidden && note().textContent.includes('reset link'));
         ok('no link to the app', !note().querySelector('a'));
-        await until(settled);
+        ok('no form: they are signed in', form().hidden);
+        eq('the button joins with their session', btn().textContent, 'Join');
         // The session then ended: back to the form, and the old message goes.
         btn().click();
         await until(() => !form().hidden);
         ok('the message goes with it', note().hidden);
         eq('the form asks again', btn().textContent, 'Sign in and join');
+      } finally {
+        if (frame) frame.remove();
+        window.__answer = {};
+      }
+    },
+    // 2026-11-10: on a Google install the page offered only Google, so someone with a password account
+    // could not join, and someone signed in already had to sign in again. It also follows the app's theme.
+    joinPageWaysIn: async () => {
+      const open = async (invite, answers = {}) => {
+        window.__answer = { 'GET /v1/invites/srcdoc': [{ body: { valid: true, webChat: true, agentName: 'Homework Helper', ...invite } }], ...answers };
+        const frame = document.createElement('iframe');
+        frame.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:800px;background:#fff;z-index:99999';
+        frame.srcdoc = window.__joinPage.replace('<head>', () => '<head><script>window.fetch = (...a) => parent.fetch(...a);<\/script>');
+        document.body.appendChild(frame);
+        await until(() => frame.contentDocument && frame.contentDocument.querySelector('#card .agent'));
+        return frame;
+      };
+      let frame;
+      try {
+        // Google with password accounts, nobody signed in: the form and Google both.
+        frame = await open({ authMode: 'identity', localAccounts: true });
+        let d = frame.contentDocument;
+        eq('the theme is the app\'s', d.documentElement.dataset.theme, (() => { try { return localStorage.getItem('theme') || 'light'; } catch { return 'light'; } })());
+        ok('the egg and the wordmark', !!d.querySelector('h1 img') && d.querySelector('h1').textContent.includes('Hatchabot'));
+        ok('a password account can sign in', !d.getElementById('acct').hidden && d.getElementById('joinBtn').textContent === 'Sign in and join');
+        ok('Google too', !!d.getElementById('gsi') && d.getElementById('card').textContent.includes('Or sign in with Google:'));
+        frame.remove();
+
+        // Google only, signed in already: join as them, no second sign-in.
+        frame = await open({ authMode: 'identity', localAccounts: false, signedInAs: 'sam@example.com' },
+          { 'POST /v1/join': [{ status: 201, body: { agentName: 'Homework Helper', agentId: 'a1', webChat: true } }] });
+        d = frame.contentDocument;
+        eq('join as who they are', d.getElementById('joinBtn').textContent, 'Join as sam@example.com');
+        ok('no password form on a Google-only install', !d.getElementById('acct'));
+        d.getElementById('name').value = 'Sam';
+        d.getElementById('joinBtn').click();
+        await until(() => d.getElementById('card').textContent.includes('You\'re in'));
+        const posted = calls('POST', /^\/v1\/join$/).pop().body;
+        eq('joined with the session, no Google token', [posted.name, 'idToken' in posted && posted.idToken !== undefined], ['Sam', false]);
+        frame.remove();
+
+        // Password accounts, signed in as someone else: they can switch to their own.
+        frame = await open({ authMode: 'accounts', signedInAs: 'Robin' });
+        d = frame.contentDocument;
+        ok('joins as the signed-in person, form hidden', d.getElementById('joinBtn').textContent === 'Join as Robin' && d.getElementById('acct').hidden);
+        d.getElementById('otherAcct').click();
+        ok('not them: the form', !d.getElementById('acct').hidden && d.getElementById('joinBtn').textContent === 'Sign in and join' && d.getElementById('otherWrap').hidden);
+        frame.remove();
+
+        // Their own agent: said, no form.
+        frame = await open({ authMode: 'identity', signedInAs: 'owner@example.com', own: true });
+        d = frame.contentDocument;
+        ok('your own agent', d.getElementById('card').textContent.includes('This is your own agent') && !d.getElementById('joinBtn'));
       } finally {
         if (frame) frame.remove();
         window.__answer = {};

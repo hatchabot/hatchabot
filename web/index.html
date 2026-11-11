@@ -1668,9 +1668,17 @@
       <label>👤 Members <span style="color:var(--dim)">— who may talk to this agent</span></label>
       <div id="tgMemberList" style="margin-bottom:6px"></div>
       <div id="tgKnownPeople" style="margin-bottom:6px"></div>
+      <!-- No link (2026-11-10): someone who already signs in here gets it on their home screen at once. -->
+      <div id="tgShareRow" hidden style="margin-bottom:8px">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="tgSharePerson" aria-label="Someone on this Hatchabot" style="flex:1 1 14em;min-width:0;width:auto"></select>
+          <button id="tgShareBtn" onclick="shareWebChatWith()">Share</button>
+        </div>
+        <div class="sub" id="tgShareNote" style="margin-top:4px">They chat with it on the web, with a member's rights. It appears on their home screen straight away.</div>
+      </div>
       <div id="tgInviteRow" style="display:flex;gap:8px;align-items:center">
         <button onclick="invite(editAgentId, $('editName')?.value || '')">Invite…</button>
-        <span class="sub">Someone new starts by messaging the bot; Invite mints them the link.</span>
+        <span class="sub">For someone new: a link to join.</span>
       </div>
     </div>
 
@@ -2887,13 +2895,8 @@
   <!-- The third way (2026-09-29): chat here, signed in. A guest's web turn has a
        member's rights (step 2), said before the link exists. -->
   <div id="invWeb" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
-    <div class="sub"><b>Chat on the web — for people you trust.</b> They sign in to this
-      Hatchabot and chat with the agent in OpenClaw's own chat, seeing only their own
-      conversations; no chat app needed. They need to reach this machine at its https
-      address (Tailscale).</div>
-    <div class="sub" id="invWebWarn" style="margin-top:4px">They will have a member's rights, exactly like a Telegram
-      member: they can chat and ask it to use its tools, but not schedule tasks or change its settings.
-      You see their conversations in your console; they see neither yours nor each other's.</div>
+    <div class="sub"><b>Chat on the web.</b> They sign in here and chat in conversations of their own,
+      with a member's rights: no scheduling, no settings. You see their conversations; they don't see yours.</div>
     <div class="invite-link" id="invWebLink" hidden></div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
       <button id="invWebBtn" onclick="makeWebChatInvite()">Make a web chat link</button>
@@ -10568,12 +10571,14 @@ async function renderEditMembers() {
   // Your Hatchabot agent runs your machine: no invites, no members (2026-09-30).
   const opsAgent = !!agents.find(x => x.id === forId)?.ops;
   if ($('tgInviteRow')) $('tgInviteRow').hidden = opsAgent;
+  if (opsAgent && $('tgShareRow')) $('tgShareRow').hidden = true;
   if (opsAgent) {
     el.innerHTML = '<div class="sub">Your Hatchabot agent is yours alone — nobody else can be let in.</div>';
     if ($('tgKnownPeople')) $('tgKnownPeople').innerHTML = '';
     return;
   }
   try {
+    void loadWebChatPeople(forId);
     const ms = (members[forId] = await api(`/v1/agents/${forId}/members`));
     if (editAgentId !== forId) return;
     el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
@@ -11234,6 +11239,44 @@ async function makeWebChatInvite() {
 async function copyWebChatInvite() {
   const ok = await copyText($('invWebLink').textContent);
   toast(ok ? 'Web chat link copied — it works once, for 48 hours' : 'Select the link and copy it manually');
+}
+
+/**
+ * Members → "someone on this Hatchabot": the people the agent can be shared
+ * with for web chat, no link (2026-11-10). Each says Google or password: they
+ * are separate accounts even under one email. Nobody to offer: no row.
+ */
+const SHARE_NOTE = "They chat with it on the web, with a member's rights. It appears on their home screen straight away.";
+async function loadWebChatPeople(forId) {
+  const row = $('tgShareRow');
+  if (!row) return;
+  row.hidden = true;
+  const a = agents.find((x) => x.id === forId);
+  if (appConfig.authMode === 'password' || !a || a.ops || !v2Mine(a)) return;
+  let people = [];
+  try { people = (await api(`/v1/agents/${forId}/web-chat/people`)).people || []; } catch { return; }
+  if (editAgentId !== forId) return;
+  const open = people.filter((p) => !p.shared);
+  if (!open.length) return;
+  const kind = { google: 'Google', password: 'password' };
+  $('tgSharePerson').innerHTML = '<option value="">Share with someone on this Hatchabot…</option>' + open.map((p) =>
+    `<option value="${esc(p.userId)}">${esc(p.label)}${p.username ? ` (${esc(p.username)})` : ''} · ${kind[p.kind] || esc(p.kind)}</option>`).join('');
+  $('tgShareBtn').disabled = false;
+  $('tgShareNote').textContent = SHARE_NOTE;
+  row.hidden = false;
+}
+async function shareWebChatWith() {
+  const forId = editAgentId, sel = $('tgSharePerson'), userId = sel.value;
+  if (!userId) { $('tgShareNote').textContent = 'Choose who to share it with first.'; return; }
+  const who = sel.selectedOptions[0]?.textContent.split(' · ')[0] || 'them';
+  $('tgShareBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${forId}/web-chat/people`, { method: 'POST', body: { userId } });
+    toast(`Shared with ${who}: it's on their home screen now`);
+    if (editAgentId === forId) await renderEditMembers();
+  } catch (e) {
+    if (editAgentId === forId) { $('tgShareNote').textContent = e.message; $('tgShareBtn').disabled = false; }
+  }
 }
 
 // Robust clipboard copy. navigator.clipboard exists ONLY in a secure context

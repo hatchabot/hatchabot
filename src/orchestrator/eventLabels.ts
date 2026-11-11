@@ -246,6 +246,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'member.web_chat_joined': 'someone joined to chat on the web',
   'member.web_chat_on': 'web chat turned on for a member',
   'member.web_chat_off': 'web chat turned off for a member',
+  'member.web_chat_shared': 'shared with someone on this Hatchabot for web chat',
   'member.known_admitted': (d) => `${String(d.displayName ?? d.name ?? 'someone known')} let straight in`,
   'member.owner_self_claim': 'its owner claimed it',
   'member.revoked': (d) => `${String(d.displayName ?? d.name ?? 'someone')} removed`,

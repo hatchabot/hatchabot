@@ -1897,6 +1897,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.173.0`
 - **Code:** `web/join.html` — `joinWebAccount`, `postJoin`; `src/api/routes.ts` — `joinForWebChat`, `joiningAccount`; `src/api/publicAccess.ts` — `factorRefusal`, `refuseSession`
 
+### A web-chat invite only offers "Sign in with Google", and someone with a username and password cannot join
+- **Check:** this Hatchabot uses Google sign-in with password accounts as well (`HATCHABOT_AUTH=identity` and `HATCHABOT_LOCAL_ACCOUNTS=1`), and the person signs in with a username and password; or they are signed in here already and the page still asks for Google.
+- **Cause:** before v2.179.0 the join page chose its sign-in by the install's mode alone: on a Google install it offered only Google, though Hatchabot would have taken their password account or the session they already had.
+- **Fix:** upgrade: the page offers the password form where password accounts sign in, and **Join as …** when the browser is signed in here already. Or skip the link: in the agent's **Sharing** → **Members**, pick them from **Share with someone on this Hatchabot…** and the agent is on their home screen at once. Without upgrading, give them a Google account to sign in with, or add them on a chat app first and then use **Allow web chat…** in Members.
+- **Fixed in:** `v2.179.0`
+- **Code:** `web/join.html` — `initWebChat`, `setWebMode`, `joinWebAccount`; `src/api/routes.ts` — `'/v1/invites/:code'`, `joiningAccount`, `webChatPeople`
+
+### Signed in with a password account named with my email, I don't see the agents of my Google sign-in (or the other way round)
+- **Check:** the install has Google sign-in and password accounts; the password account's username is the same email as the Google account.
+- **Cause:** they are two accounts. Hatchabot never joins a Google sign-in and a password account by their address: each has its own agents, AI sources, settings and memberships.
+- **Fix:** nothing is wrong. Sign in the way that owns what you want to see. To give the other account an agent, share it with that account (Sharing → Members → **Share with someone on this Hatchabot…**, where each person is marked Google or password), or send that account a copy with **📨 Send to someone here**.
+- **Fixed in:** —
+- **Code:** `src/store/store.ts` — `identityOwnerForEmail`, `listSignInAccounts`
+
 ### Settings says "invitation not accepted yet" for someone who has used Hatchabot for months, and "Send a reset link" is gone
 - **Check:** in Settings, under "Accounts on this machine", the row has the chip and **Copy invitation**, with no agent count. They or the owner asked for a reset link recently, and it was not used. The link copied may say it has expired.
 - **Cause:** the roster called any code on the row an invitation, and an expired code stays on the row. A reset link is a code too, as is an invitation never claimed past its 48 hours.

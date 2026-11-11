@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.179.0] — 2026-11-10
+
+### Added
+- **Share an agent with someone already on this Hatchabot, no link.** In the agent's **Sharing** → **Members**, pick them from **Share with someone on this Hatchabot…** and press **Share**: the agent is on their home screen straight away, to chat with on the web with a member's rights, as a web chat link would give them. Each person is marked **Google** or **password**, because a Google sign-in and a password account are two separate accounts even under one email. The machine's owner sees everyone who signs in here; anyone else sees only the machine's owner and the people they already share with.
+
+### Fixed
+- **A web chat link on a Google sign-in install could only be used with Google.** Someone with a username and password there had no way to join, and someone already signed in had to sign in again. The page now offers the password form wherever password accounts sign in, and **Join as …** when the browser is signed in already. On your own agent it says so.
+- **The invite page was always dark.** It now follows the app's light or dark setting, with the app's egg and wordmark.
+
+### Changed
+- **The invite dialog's web chat text is two short sentences**, and Members → **Invite…** says it is for someone new.
+
 ## [2.178.3] — 2026-11-09
 
 ### Removed
