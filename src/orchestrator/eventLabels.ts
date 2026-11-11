@@ -264,6 +264,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'migrate.rolled_back': 'move rolled back',
   'model.live_set_failed': 'the running agent did not take the new model — it applies at the next rebuild',
   'model.volume_gone': 'the new model could not be written: its volume is gone',
+  'model.list_set': "its source's model list was written to it: the models it can switch to",
+  'model.list_set_failed': "its source's model list could not be written to it — it gets the list at its next rebuild",
   'model.apply_deferred': 'the new model was saved while another change was under way — it applies with that change or the next rebuild',
   'model.apply_failed': (d) => `its class's model ${String(d.model ?? '')} did not go on: the rebuild it waited for did not put it on, nor did a try after it — Rebuild it to apply`,
   'model.changed': (d) => `model changed: ${String(d.from ?? 'unknown')} → ${String(d.to ?? '')}`,

@@ -9893,6 +9893,48 @@ const SCENARIOS = String.raw`(() => {
         aiRowsDrawn = {}; await refresh(true); renderAiList();
       }
     },
+    aiExtrasOnePerModelAndFull: async () => {
+      // HB-0669: the add menu offers one id per model and says when the list is full; Sync adds only what fits.
+      const p = profiles.find((x) => x.mine !== false);
+      const path = '/v1/ai-profiles/' + p.id;
+      const base = await (await fetch('/v1/ai-profiles')).json();
+      const server = (models) => { window.__override['/v1/ai-profiles'] = base.map((x) => x.id === p.id ? { ...x, model: 'claude-sonnet-5', models } : x); };
+      const box = () => $('aiExtras-' + p.id);
+      const adder = () => [...box().querySelectorAll('select[data-add] option')].map((o) => o.value).filter(Boolean);
+      const toastText = () => document.getElementById('toast').textContent;
+      const many = Array.from({ length: 15 }, (_, i) => 'claude-test-' + (i + 10));
+      const open = async () => { await refresh(true); aiRowsDrawn = {}; await openAiDlg('ai'); await until(() => $('aiModel-' + p.id).tagName === 'SELECT'); };
+      try {
+        window.__override[path + '/available-models'] = { models: ['claude-sonnet-5', 'claude-haiku-4-5-20251001', 'claude-sonnet-4-5-20250929', 'claude-opus-4-8'], stale: [], source: 'runtime' };
+        server(['claude-sonnet-5', 'claude-haiku-4-5']);
+        await open();
+        eq('a dated id of a model on the list is not offered again', adder(), ['claude-opus-4-8', 'claude-sonnet-4-5-20250929']);
+        aiDlg.close();
+        // Full: the default and 15 more.
+        server(['claude-sonnet-5', ...many]);
+        await open();
+        ok('a full list says so', !!box().querySelector('[data-list-full]'));
+        eq('and offers nothing more', adder(), []);
+        box().querySelector('[data-remove="claude-test-10"]').click();
+        ok('one removed: the menu is back', !box().querySelector('[data-list-full]') && adder().length > 0);
+        aiDlg.close();
+        // Sync: a dated id the runtime folded is kept, not doubled; new ones fill the list to 16 and the rest are named.
+        const listed = ['claude-sonnet-5', 'claude-haiku-4-5-20251001', ...many.slice(0, 12)];
+        server(listed);
+        await refresh(true);
+        window.__override[path + '/available-models'] = { models: ['claude-sonnet-5', 'claude-haiku-4-5', ...many.slice(0, 12), 'claude-test-new-1', 'claude-test-new-2', 'claude-test-new-3'], stale: [], source: 'runtime' };
+        const n = calls('PATCH', new RegExp(path + '$')).length;
+        await syncModels(p.id, 'A source');
+        eq('Sync adds what fits', calls('PATCH', new RegExp(path + '$')).slice(n).map((c) => c.body.models), [[...listed, 'claude-test-new-1', 'claude-test-new-2']]);
+        ok('and names the rest: ' + toastText(), toastText().includes('1 not added, the list is full') && toastText().includes('claude-test-new-3'));
+      } finally {
+        if (applyModelDlg.open) applyModelDlg.close();
+        if (aiDlg.open) aiDlg.close();
+        delete window.__override['/v1/ai-profiles']; delete window.__override[path + '/available-models'];
+        delete availableModels[p.id]; delete staleModels[p.id];
+        aiRowsDrawn = {}; await refresh(true); renderAiList();
+      }
+    },
     connectedSheetIgnoresALateAnswer: async () => {
       // Review of HB-0411: a slow older check landing after a newer "now" does not take it back.
       const list = await (await fetch('/v1/agents')).json();

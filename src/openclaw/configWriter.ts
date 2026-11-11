@@ -20,6 +20,7 @@ const hasBinding = (agentId: string, channel: string, accountId: string): string
  *   channels.telegram.accounts.<id>       — bot token + DM policy
  *   agents.defaults.models.<model>        — switchable models (/model picker);
  *                                           claude-cli runtime for subscription auth
+ *   agents.defaults.modelPolicy.allow     — the same list, on 2026.9+ (hasModelPolicy)
  *   auth.profiles                         — oauth profile for subscription auth
  *   gateway.mode / gateway.auth           — headless gateway inside the runtime
  *
@@ -140,6 +141,50 @@ export const EMBED_MODEL_PATH = '/opt/agentclaw/models/embeddinggemma-300m-qat-Q
  */
 export function needsPortHeal(version: string | undefined): boolean {
   return memoryKeyPrefix(version) === 'memory.search';
+}
+/**
+ * Does this OpenClaw choose an agent's selectable models from
+ * `agents.defaults.modelPolicy.allow` (HB-0666)? 2026.9.6 and 2026.9.8 do
+ * (checked 2026-11-11): with the list set, the model picker offers exactly
+ * it; without, the primary and the claude-cli catalogue, not the source's
+ * list; and OpenClaw's upgrade of an older volume fills the list once and
+ * never again. 2026.7.1 and 2026.6.11 refuse the key ("Unrecognized key:
+ * modelPolicy"), which fails the whole config set; 2026.8 was not checked.
+ * So only 2026.9 and later, and an unknown version counts as old.
+ */
+export function hasModelPolicy(version: string | undefined): boolean {
+  const m = /^(\d{4})\.(\d+)/.exec(version ?? '');
+  return !!m && (Number(m[1]) > 2026 || (Number(m[1]) === 2026 && Number(m[2]) >= 9));
+}
+/**
+ * An agent's switchable models, as the build writes them and a live change
+ * writes them again (HB-0666, HB-0668): `agents.defaults.models`, which the
+ * /model picker lists, each model on the claude-cli runtime under a
+ * machine-login subscription (without it a model is listed but unusable);
+ * and, on a runtime with a model policy, `agents.defaults.modelPolicy.allow`
+ * set to the same list, without which the models a source gained after the
+ * agent's upgrade could not be picked. `--replace`: these paths are
+ * Hatchabot's (the source is the truth), and without it OpenClaw refuses a
+ * set that would drop entries, e.g. re-seeding an imported volume whose old
+ * install had more models. Primary first, deduped.
+ */
+export function switchableModelCommands(o: {
+  provider: string;
+  model?: string;
+  models?: string[];
+  claudeCliRuntime: boolean;
+  openclawVersion?: string;
+}): ConfigCommand[] {
+  const all = [...new Set([o.model, ...(o.models ?? [])].filter((m): m is string => !!m))].map((m) => `${o.provider}/${m}`);
+  if (!all.length) return [];
+  const entry = o.claudeCliRuntime ? { agentRuntime: { id: 'claude-cli' } } : {};
+  const cmds: ConfigCommand[] = [
+    { argv: ['config', 'set', 'agents.defaults.models', JSON.stringify(Object.fromEntries(all.map((m) => [m, entry]))), '--replace'] },
+  ];
+  if (hasModelPolicy(o.openclawVersion)) {
+    cmds.push({ argv: ['config', 'set', 'agents.defaults.modelPolicy.allow', JSON.stringify(all), '--replace'] });
+  }
+  return cmds;
 }
 /**
  * Would running `to` strand data written by `from`? Only going DOWN across
@@ -559,11 +604,6 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (prefixedModel) {
     cmds.push({ argv: ['config', 'set', 'agents.defaults.model.primary', prefixedModel] });
   }
-  // Primary first, deduped: patch.models may or may not repeat patch.model.
-  const allModels = [
-    ...new Set([patch.model, ...(patch.models ?? [])].filter((m): m is string => !!m)),
-  ].map((m) => `${provider}/${m}`);
-
   if (provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
     // Subscription via a `claude setup-token` token (macOS hosts — the login
     // lives in the Keychain, so there is no ~/.claude to mount). The gateway
@@ -598,31 +638,17 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     });
   }
 
-  if (allModels.length) {
-    // The /model picker in chat lists configured models, so every switchable
-    // model needs its entry here. Under subscription auth each one also rides
-    // the claude-cli runtime — without that a model is listed but unusable.
-    // (agents.defaults.modelPolicy would be the precise allowlist, but
-    // 2026.6.11 rejects the key: "Unrecognized key: modelPolicy".)
-    // Only the Anthropic subscription path rides the claude-cli runtime; a
-    // local model is served directly by its provider.
-    const entry =
-      provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && !patch.setupToken
-        ? { agentRuntime: { id: 'claude-cli' } }
-        : {};
-    // --replace: this path is Hatchabot-owned (the profile is the source of
-    // truth), and without it OpenClaw refuses a set that would drop entries —
-    // e.g. re-seeding an imported volume whose old install had more models.
-    cmds.push({
-      argv: [
-        'config',
-        'set',
-        'agents.defaults.models',
-        JSON.stringify(Object.fromEntries(allModels.map((m) => [m, entry]))),
-        '--replace',
-      ],
-    });
-  }
+  // The switchable models, and on 2026.9+ the allowlist the picker offers
+  // from (HB-0666). Only the Anthropic machine-login subscription rides the
+  // claude-cli runtime; a setup token, an API key or a local model is served
+  // by its provider directly.
+  cmds.push(...switchableModelCommands({
+    provider,
+    model: patch.model,
+    models: patch.models,
+    claudeCliRuntime: provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && !patch.setupToken,
+    openclawVersion: patch.openclawVersion,
+  }));
 
   // Event-triggered tasks: convergent like richMessages — an explicit opt-in
   // writes true, everything else re-asserts false on every provision/rebuild.

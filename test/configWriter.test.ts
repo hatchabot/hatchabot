@@ -7,7 +7,9 @@ import {
   batchConfigCommands,
   buildConfigCommands,
   describeConfigCommands,
+  hasModelPolicy,
   seedInvocation,
+  switchableModelCommands,
 } from '../src/openclaw/configWriter.js';
 
 const argFor = (cmds: ReturnType<typeof buildConfigCommands>, path: string): string | undefined =>
@@ -108,6 +110,47 @@ describe('local embedding provider (image-baked)', () => {
     expect(paths).toContain('agents.defaults.memorySearch.local.modelPath');
     expect(paths).not.toContain('plugins');
     expect(batched.some((c) => c.argv.join(' ') === 'plugins enable llama-cpp')).toBe(true);
+  });
+});
+
+describe('the model allowlist (HB-0666)', () => {
+  const build = (openclawVersion?: string) => buildConfigCommands({
+    agentId: 'a1', model: 'claude-sonnet-5', models: ['claude-fable-5-2', 'claude-sonnet-5', 'claude-opus-5-5'], authMode: 'api-key', openclawVersion,
+  });
+  const ALLOW = 'agents.defaults.modelPolicy.allow';
+
+  it('on OpenClaw 2026.9 and later: the allowlist is the models map, primary first, set right after it', () => {
+    for (const v of ['2026.9.6', '2026.9.8', '2026.10.1-beta.1', '2027.1.0']) {
+      const cmds = build(v);
+      const keys = Object.keys(JSON.parse(argFor(cmds, 'agents.defaults.models')!));
+      expect(keys, v).toEqual(['anthropic/claude-sonnet-5', 'anthropic/claude-fable-5-2', 'anthropic/claude-opus-5-5']);
+      const allow = cmds.find((c) => c.argv[2] === ALLOW)!;
+      expect(JSON.parse(allow.argv[3]!), v).toEqual(keys);
+      expect(allow.argv, v).toContain('--replace');
+      expect(cmds.indexOf(allow), v).toBe(cmds.findIndex((c) => c.argv[2] === 'agents.defaults.models') + 1);
+    }
+  });
+
+  it('not on an older or unknown runtime, which refuses the key and with it the whole batch', () => {
+    for (const v of [undefined, '', 'mock', '2026.6.11', '2026.7.1-2', '2026.8.3']) {
+      expect(argFor(build(v), ALLOW), String(v)).toBeUndefined();
+      expect(hasModelPolicy(v), String(v)).toBe(false);
+    }
+  });
+
+  it('goes into the one batched set as an array, as OpenClaw 2026.9.8 takes it', () => {
+    const batch = batchConfigCommands(build('2026.9.8')).find((c) => c.argv.includes('--batch-json'))!;
+    const ops = JSON.parse(batch.argv[batch.argv.indexOf('--batch-json') + 1]!) as Array<{ path: string; value: unknown }>;
+    expect(ops.find((o) => o.path === ALLOW)?.value).toEqual(['anthropic/claude-sonnet-5', 'anthropic/claude-fable-5-2', 'anthropic/claude-opus-5-5']);
+  });
+
+  it('a live write is what the build writes: claude-cli under a machine login, and nothing for no models', () => {
+    const cmds = switchableModelCommands({ provider: 'anthropic', model: 'claude-fable-5-2', models: ['claude-sonnet-5'], claudeCliRuntime: true, openclawVersion: '2026.9.8' });
+    const models = JSON.parse(cmds[0]!.argv[3]!);
+    expect(Object.keys(models)).toEqual(['anthropic/claude-fable-5-2', 'anthropic/claude-sonnet-5']);
+    expect(models['anthropic/claude-sonnet-5']).toEqual({ agentRuntime: { id: 'claude-cli' } });
+    expect(JSON.parse(cmds[1]!.argv[3]!)).toEqual(Object.keys(models));
+    expect(switchableModelCommands({ provider: 'anthropic', claudeCliRuntime: false, openclawVersion: '2026.9.8' })).toEqual([]);
   });
 });
 

@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.179.1] — 2026-11-11
+
+### Fixed
+- **On OpenClaw 2026.9 an agent could not pick some of its AI source's models.** Fable, Opus 5.5 or Sonnet 5.5 could be missing from its `/model` menu, though the source listed them. From 2026.9, OpenClaw offers only the models on its own allowlist, which its upgrade filled once from the models the agent had then, and Hatchabot never wrote it. A rebuild, a model change in the app and a saved source list now write the allowlist from the source. A model change writes it before the model, so the agent no longer runs a model its own menu leaves out. An agent already affected gets the fix at its next rebuild, model change or save of its source's list. Older OpenClaw has no allowlist, and nothing is written there.
+- **A model added to an AI source reached its agents only at their next rebuild.** A saved list is now written to each of the source's agents at once, one after another. An agent whose model is about to change gets the list with the rebuild that change waits for.
+- **Fable 5.2 had no price**, so its use counted toward no cost or budget, and **Sonnet 5.5's cache reads were priced at twice what Anthropic charges.** Fable 5.2 is now $8 in and $40 out per million tokens, with cache reads at $0.20; Sonnet 5.5's cache reads are $0.10. Prices were checked against Anthropic's pricing page on 2026-11-11.
+- **A Claude source's "Add a model" menu offered the same model twice**, with and without a date (`claude-haiku-4-5` and `claude-haiku-4-5-20251001`), and each took one of the 16 places on the list. The menu now offers each model once and says when the list is full. **⟳ Sync** adds what fits and names the rest, where it used to fail on a long list.
+- A test of the owner's first greeting gave the code 60 ms of wall-clock time and failed on a busy CI machine with no code at fault; it now allows 5 seconds.
+
 ## [2.179.0] — 2026-11-10
 
 ### Added

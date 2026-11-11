@@ -813,7 +813,7 @@ describe('the claim says hello', () => {
 
     const sent: string[] = [];
     const provider = {
-      execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests: [{ id: '424242', code: 'C6STF628', meta: { firstName: 'Christopher' } }] }), stderr: '' }),
+      execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests: [{ id: '424242', code: 'C6STF628', meta: { firstName: 'Robin' } }] }), stderr: '' }),
       execShellOnVolume: async () => ({ code: 0, stdout: 'set', stderr: '' }),
       exec: async (_ref: string, argv: string[]) => {
         if (argv[0] === 'message') sent.push(argv[argv.indexOf('-m') + 1]!);
@@ -821,12 +821,15 @@ describe('the claim says hello', () => {
       },
     } as never;
 
+    // The window is wall-clock time from its opening: 60 ms ran out before the
+    // first poll on a busy CI machine (main's run of v2.179.0, HB-0673). The
+    // request is there at once and the sleep is a stub, so 5 s costs nothing.
     const bound = await claimFirstContact(
       { store, provider, sleep: async () => {} },
-      { agentId: 'a1', runtimeRef: 'docker://a1', accountId: 'bot', forUserId: 'o', timeoutMs: 60, pollIntervalMs: 5 },
+      { agentId: 'a1', runtimeRef: 'docker://a1', accountId: 'bot', forUserId: 'o', timeoutMs: 5_000, pollIntervalMs: 5 },
     );
     expect(bound).toBe('424242');
-    expect(sent.join(' ')).toContain('Christopher');
+    expect(sent.join(' ')).toContain('Robin');
     expect(sent.join(' ')).toMatch(/Connected/);
   }, 10_000);
 });

@@ -6435,10 +6435,14 @@ function renderExtras(id) {
         style="border:none;background:none;cursor:pointer;color:var(--dim);font-size:16px;line-height:1;padding:0 3px">×</button>
     </span>`).join('');
 
-  const opts = avail.filter(m => m !== dflt && !chosen.includes(m)).sort(byModelName);
+  // By the model, not its spelling: a dated id of a model already here is the same model (HB-0669).
+  const taken = new Set([dflt, ...chosen].map(modelKeyOf));
+  const opts = avail.filter(m => !taken.has(modelKeyOf(m))).sort(byModelName);
   const ctrlStyle = 'font-size:12px;padding:4px 7px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--text)';
   let adder;
-  if (opts.length) {
+  if (1 + chosen.length >= MAX_SOURCE_MODELS) {
+    adder = `<span class="sub" data-list-full>The list is full: a source holds ${MAX_SOURCE_MODELS} models, its default among them. Remove one to add another.</span>`;
+  } else if (opts.length) {
     adder = `<select data-add aria-label="Add a switchable model" style="${ctrlStyle}">
       <option value="" disabled selected>＋ Add a model…</option>
       ${opts.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')}
@@ -6595,20 +6599,31 @@ async function syncModels(id, name) {
   availableModels[id] = served; availableSource[id] = r.source; staleModels[id] = r.stale ?? [];
 
   const listed = [p.model, ...(p.models ?? [])].filter(Boolean);
-  const adds = served.filter(m => !listed.includes(m));
   const confident = r.source === 'runtime' || p.vendor === 'local' || p.vendor === 'google';
-  const drops = confident ? listed.filter(m => m !== p.model && !served.includes(m)) : [];
+  // A runtime's answer offers one id per model (HB-0669): what it does not serve is
+  // what it calls stale, not a dated id it folded into the undated one.
+  const unserved = m => (r.source === 'runtime' ? (r.stale ?? []).includes(m) : !served.includes(m));
+  const drops = confident ? listed.filter(m => m !== p.model && unserved(m)) : [];
+  const kept = listed.filter(m => !drops.includes(m));
+  const keptKeys = new Set(kept.map(modelKeyOf));
+  const adds = served.filter(m => !keptKeys.has(modelKeyOf(m)));
+  // Within the cap, or the save is refused: the rest are named, for the owner to choose.
+  const room = Math.max(0, MAX_SOURCE_MODELS - new Set(kept).size);
+  const leftOut = adds.splice(room);
+  const fullNote = leftOut.length ? `${leftOut.length} not added, the list is full (a source holds ${MAX_SOURCE_MODELS} models): ${leftOut.join(', ')}` : '';
   if (!adds.length && !drops.length) {
-    toast(`${name} is already in sync${r.source === 'curated' ? ' with the curated list (no live agent to ask yet)' : ''}.`);
+    if (fullNote) toast(`${name}: ${fullNote}`, 9000);
+    else toast(`${name} is already in sync${r.source === 'curated' ? ' with the curated list (no live agent to ask yet)' : ''}.`);
     renderAiList();
     return;
   }
-  const next = [...new Set([p.model, ...listed.filter(m => !drops.includes(m)), ...adds])].filter(Boolean);
+  const next = [...new Set([p.model, ...kept, ...adds])].filter(Boolean);
   try {
     await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { models: next } });
     const bits = [];
     if (adds.length) bits.push(`added ${adds.join(', ')}`);
     if (drops.length) bits.push(`dropped ${drops.join(', ')}`);
+    if (fullNote) bits.push(fullNote);
     toast(`${name}: ${bits.join(' · ')}${r.source === 'curated' ? ' (from the curated list — no live agent to ask yet)' : ''}`, 8000);
     try { profiles = await api('/v1/ai-profiles'); } catch { /* keep last-known */ }
     renderAiList();
@@ -7642,6 +7657,10 @@ async function rehostAgent(id, name) {
 // default and every conversation broke on compaction (see runtimeModels.ts).
 /** Model lists read alphabetically, numbers as numbers (opus-4-8 before opus-4-10) (Chris, 2026-10-07). */
 function byModelName(a, b) { return String(a).localeCompare(String(b), 'en', { numeric: true }); }
+/** A model's own id, as the server's modelKey has it: no `anthropic/`, no date (claude-haiku-4-5-20251001 is claude-haiku-4-5). */
+function modelKeyOf(m) { return String(m).replace(/^[a-z-]+\//, '').replace(/-\d{8}$/, ''); }
+/** The most models a source lists, its default among them (the server's limit on PATCH /v1/ai-profiles/:id). */
+const MAX_SOURCE_MODELS = 16;
 // The fallback for a new source: covers the server's CURATED_ANTHROPIC_MODELS and never
 // claude-opus-5 (test/driftGuards.test.ts). A saved source lists what its runtime really serves.
 const CLAUDE_MODELS = ['claude-fable-5', 'claude-haiku-4-5', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8',
@@ -9618,7 +9637,7 @@ let usageAgentId = null;
 // agents the model's rate so they can judge; never multiplied into a fake total.
 const MODEL_PRICES = {
   'claude-opus-5-5': [4, 20], 'claude-opus-5': [5, 25], 'claude-opus-4-8': [5, 25], 'claude-opus-4-7': [5, 25], 'claude-opus-4-6': [5, 25],
-  'claude-sonnet-5-5': [2, 10], 'claude-sonnet-5': [2, 10], 'claude-sonnet-4-6': [3, 15], 'claude-haiku-4-5': [1, 5], 'claude-fable-5-1': [10, 50], 'claude-fable-5': [10, 50],
+  'claude-sonnet-5-5': [2, 10], 'claude-sonnet-5': [2, 10], 'claude-sonnet-4-6': [3, 15], 'claude-haiku-4-5': [1, 5], 'claude-fable-5-2': [8, 40], 'claude-fable-5-1': [10, 50], 'claude-fable-5': [10, 50],
 };
 // ---- Model prices (Settings → AI sources) ---------------------------------------
 // GET /v1/model-prices: the server's own price list (pricing.ts), so the panel
@@ -9814,8 +9833,7 @@ function billingLine(agentId, models) {
   if (p.kind === 'subscription') return `included (${esc(p.name)})`;
   // By the model's own id, as the server prices it (modelKey): a transcript's
   // "anthropic/…" prefix or dated id found no price (HB-0067).
-  const key = (m) => String(m).replace(/^[a-z-]+\//, '').replace(/-\d{8}$/, '');
-  const priced = models.map(m => MODEL_PRICES[key(m)] ? `${esc(m)} at $${MODEL_PRICES[key(m)][0]}/$${MODEL_PRICES[key(m)][1]} per 1M in/out` : null).filter(Boolean);
+  const priced = models.map(m => MODEL_PRICES[modelKeyOf(m)] ? `${esc(m)} at $${MODEL_PRICES[modelKeyOf(m)][0]}/$${MODEL_PRICES[modelKeyOf(m)][1]} per 1M in/out` : null).filter(Boolean);
   return priced.length ? priced.join(' · ') : 'API key';
 }
 async function openUsage(id, name) {

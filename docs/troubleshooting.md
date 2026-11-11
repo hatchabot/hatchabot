@@ -1377,6 +1377,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.178.0`
 - **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id'` (DELETE), `'/v1/agents/:id'` (PATCH), `'/v1/agents/restore'`, `'/v1/agents/import'`, `holdSource`, `withSourceHold`, `switchAgentToSource`, `applyClassToAgent`, `applyCurrentLimits`; `src/store/store.ts` — `setAgentAIProfile`, `insertAgentOnSource`, `SourceGoneError`; `src/orchestrator/transfer.ts` — `importAgent`; `src/orchestrator/template.ts` — `importTemplate`
 
+### On OpenClaw 2026.9 an agent can't select some of its source's models (Fable, Opus 5.5 or Sonnet 5.5 missing from /model)
+- **Check:** the agent runs OpenClaw 2026.9.x. In its console, `openclaw models list` shows fewer models than its AI source lists, and `openclaw config get agents.defaults.modelPolicy --json` has an `allow` list without the missing ones. A rebuild does not change it.
+- **Cause:** from 2026.9, OpenClaw offers an agent only the models on `agents.defaults.modelPolicy.allow`. Its upgrade of an older volume filled that list once, from the models the agent had then. Hatchabot wrote only `agents.defaults.models`, so models added to the source later were never allowed. A model change from the app set the model anyway, so the agent could run a model its own picker did not show.
+- **Fix:** upgrade, then rebuild the agent, change its model in the app, or save its source's model list (each writes the allowlist from the source). Before the fix, set it by hand in the agent's console to the source's models, each with `anthropic/` in front: `openclaw config set agents.defaults.modelPolicy.allow '["anthropic/claude-sonnet-5","anthropic/claude-opus-5-5"]' --replace`, listing every model you want, then check with `openclaw models list`. Older OpenClaw (2026.7 and earlier) has no allowlist and refuses the key; nothing is written there.
+- **Fixed in:** `v2.179.1`
+- **Code:** `src/openclaw/configWriter.ts` — `switchableModelCommands`, `hasModelPolicy`, `buildConfigCommands`; `src/orchestrator/provision.ts` — `switchableModelsFor`; `src/api/routes.ts` — `applyModelNow`, `applyModelToRuntime`
+
+### A model added to an AI source does not show in a running agent's model picker until it is rebuilt
+- **Check:** the source's list in Settings → AI sources has the model; the agent's `/model` menu, or `openclaw config get agents.defaults.models --json` in its console, does not.
+- **Cause:** saving a source's list only stored it. The agent's own list was written when it was built.
+- **Fix:** upgrade. A saved list is now written to each of the source's agents at once, running or stopped, one agent after another. An agent whose model is about to change (its pin was dropped from the list, or a source switch waits) gets the list with the rebuild that change waits for, which its page shows. Its Setup log shows `model.list_set`, or `model.list_set_failed` when the write failed; then it gets the list at its next rebuild.
+- **Fixed in:** `v2.179.1`
+- **Code:** `src/api/routes.ts` — `'/v1/ai-profiles/:id'` (PATCH), `pushModelList`, `applyModelListNow`, `runtimeVersionOf`
+
+### A Claude source's "Add a model" menu offers the same model twice (`claude-haiku-4-5` and `claude-haiku-4-5-20251001`), or ⟳ Sync fails on a long list
+- **Check:** the menu shows ids that end in a date beside the same model without one. A source's list holds at most 16 models, its default among them; a Sync that would pass 16 was refused.
+- **Cause:** the menu listed every id the agent's runtime catalogues, and some models are catalogued twice, with and without a date. Each took a place on the list. The editor did not say when the list was full, and Sync added every model it found.
+- **Fix:** upgrade. The menu offers each model once (the undated id where there is one), says when the list is full, and Sync adds what fits and names the rest. A dated id already on a list stays until you remove it; remove the duplicate by hand to free its place.
+- **Fixed in:** `v2.179.1`
+- **Code:** `src/orchestrator/modelOptions.ts` — `foldDatedIds`; `src/api/routes.ts` — `'/v1/ai-profiles/:id/available-models'`; `web/index.html` — `renderExtras`, `syncModels`, `MAX_SOURCE_MODELS`
+
 ## Telegram, Discord and Slack
 
 ### A new agent has no Telegram bot, and no Telegram link to tap
@@ -4773,6 +4794,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** close and open Settings. Since the fix, the poll reads a chart again at most once a minute while its Costs drawer is open and on screen. If that read fails, the chart stays as drawn with a short note under it.
 - **Fixed in:** `v2.178.0`
 - **Code:** `web/index.html` — `loadSourceUsage`, `loadSpendChart`
+
+### Fable 5.2 has "no price known", or Sonnet 5.5's cache reads cost twice what Anthropic charges
+- **Check:** Settings → AI sources → Model prices has no Fable 5.2 row, or lists Sonnet 5.5's cache reads at $0.20 per million tokens.
+- **Cause:** the price list was last read from Anthropic's pricing page on 2026-10-03, before Fable 5.2, and gave Sonnet 5.5 the usual tenth for a cache read where Anthropic charges a twentieth.
+- **Fix:** upgrade. Fable 5.2 is priced at $8 in and $40 out per million tokens, cache reads at $0.20; Sonnet 5.5's cache reads at $0.10. Within ten minutes, costs and budget spend for the last 30 days are worked out again at these prices (from the hourly token counts); older days keep what they were counted at.
+- **Fixed in:** `v2.179.1`
+- **Code:** `src/orchestrator/pricing.ts` — `MODEL_PRICES`, `CACHE_READ_SHARE`; `src/orchestrator/modelOptions.ts` — `MODEL_CATALOG`
 
 ## Scheduled tasks
 

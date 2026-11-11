@@ -55,6 +55,7 @@ import {
   checkpointMemory,
   effectiveModel,
   prefixedModelRef,
+  switchableModelsFor,
   recordApplied,
   forgetEmbedDecision,
   buildRuntimeSpec,
@@ -130,7 +131,7 @@ import { OPS_DIGEST_MESSAGE, OPS_SUGGEST_MESSAGE } from '../ops/opsAgent.js';
 import { buildScorecard } from '../orchestrator/modelScorecard.js';
 import { assessModelChange, backfillModelLedger, evaluateModelChanges, fileGuardProposals, recordChanges, rightSizeSavings, snapshotModels, EARLY_TURNS as EARLY_TURNS_N, VERDICT_AFTER_DAYS as VERDICT_DAYS, type ChangeMeta, type ModelFigures } from '../orchestrator/modelLedger.js';
 import type { PendingConfirm } from '../mgmt/pendingStore.js';
-import { LOCAL_MODEL, modelOption, modelOptionsFor, openclawAtLeast, SUBSCRIPTION_MIN_OPENCLAW, subscriptionModelProblem } from '../orchestrator/modelOptions.js';
+import { foldDatedIds, LOCAL_MODEL, modelOption, modelOptionsFor, openclawAtLeast, SUBSCRIPTION_MIN_OPENCLAW, subscriptionModelProblem } from '../orchestrator/modelOptions.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_SEARCHES, readSearchPrice, saveSearchPrice, SEARCH_CHECKS, searchUsageReport } from '../orchestrator/searchUsage.js';
@@ -183,7 +184,7 @@ import { notifyAgentChat, ownerChatRoutes, tellOwner } from '../channels/notify.
 import { exportAgent, ImageDecisionNeeded, ImportCleanupPending, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
 import { eventLabel, IN_PROGRESS } from '../orchestrator/eventLabels.js';
-import { moveCrossesDown, needsPortHeal } from '../openclaw/configWriter.js';
+import { batchConfigCommands, hasModelPolicy, moveCrossesDown, needsPortHeal, seedInvocation } from '../openclaw/configWriter.js';
 
 /** The largest file (or folder as .tar.gz) that moves through an agent's Files tab, either way. */
 const FILE_MAX_BYTES = Math.max(1, Number(process.env.HATCHABOT_FILE_MAX_MB ?? 512)) * 1024 * 1024;
@@ -2150,16 +2151,27 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // its old key before that build was accepted (concurrency review,
     // 2026-10-09). The operation writes the model from the store; one that
     // already had written it leaves the change for the next rebuild.
+    if (a.state !== 'RUNNING' && a.state !== 'STOPPED') return 'none';
+    // On 2026.9+ the picker offers only the allowlist, and `models set` to a
+    // model off it succeeds without adding it: the agent then ran a model its
+    // own picker did not show (HB-0666). So the list goes first, as the build
+    // writes it. Read before the busy check, so nothing waits between that
+    // check and the write.
+    const version = await runtimeVersionOf(a);
     if (isBusy(agentId) || inflight.has(agentId)) {
       trace(agentId)('model.apply_deferred', { why: 'busy' });
       return 'none';
     }
     const ref = prefixedModelRef(a, p);
     const provider = providerFor(a.hostId);
+    const list = hasModelPolicy(version) ? batchConfigCommands(switchableModelsFor(a, p, version))[0] : undefined;
     let res;
-    if (a.state === 'RUNNING') res = await provider.exec(a.runtimeRef, ['models', 'set', ref]);
-    else if (a.state === 'STOPPED') res = await provider.execShellOnVolume(a.runtimeRef, `openclaw models set '${ref.replace(/'/g, '')}' >/dev/null`, { image: a.image ?? undefined });
-    else return 'none';
+    if (a.state === 'RUNNING') {
+      res = list ? await provider.exec(a.runtimeRef, list.argv) : undefined;
+      if (!res || res.code === 0) res = await provider.exec(a.runtimeRef, ['models', 'set', ref]);
+    } else {
+      res = await provider.execShellOnVolume(a.runtimeRef, `${list ? `${seedInvocation(list)} >/dev/null && ` : ''}openclaw models set '${ref.replace(/'/g, '')}' >/dev/null`, { image: a.image ?? undefined });
+    }
     // Not "try again, or Rebuild": a rebuild makes a fresh, empty volume, the
     // agent healthy with no memory that saying so is there to prevent (HB-0373).
     if (res.volumeMissing) { trace(agentId)('model.volume_gone', { model: ref }); return 'gone'; }
@@ -2172,6 +2184,46 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (now && nowProfile && now.aiProfileId === a.aiProfileId && effectiveModel(now, nowProfile) === effectiveModel(a, p)) recordApplied(store, agentId);
     else if (now) store.setAgentApplied(agentId, a.aiProfileId, effectiveModel(a, p));
     return a.state === 'RUNNING' ? 'live' : 'staged';
+  };
+  /**
+   * The OpenClaw an agent's runtime runs: its container's label, else its
+   * image's. Unknown when neither answers, which counts as old.
+   */
+  const runtimeVersionOf = async (a: Agent): Promise<string | undefined> => {
+    const prov = providerFor(a.hostId);
+    const running = a.runtimeRef ? (await prov.info(a.runtimeRef).catch(() => undefined))?.openclawVersion : undefined;
+    return running ?? (await prov.currentImageInfo(a.image ?? undefined).catch(() => undefined))?.openclawVersion;
+  };
+  /**
+   * A source's model list changed: each of its agents gets the new list now,
+   * as a rebuild would write it (HB-0668), in its model queue, so it runs
+   * after any model change already waiting. Only where the runtime runs the
+   * model the source now gives the agent: one whose model moves, or whose
+   * source switch waits, is owed a rebuild (pendingModel says so) and gets
+   * the list with it. Mid-operation (busy), the operation writes the list.
+   */
+  const applyModelListNow = async (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed'> => {
+    const a = store.getAgent(agentId);
+    const p = a && store.getAIProfile(a.aiProfileId);
+    if (!a || !p || !a.runtimeRef || a.migratedTo || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return 'none';
+    if (a.appliedProfileId !== a.aiProfileId || a.appliedModel !== effectiveModel(a, p)) return 'none';
+    const version = await runtimeVersionOf(a);
+    if (isBusy(agentId) || inflight.has(agentId)) return 'none';
+    const list = batchConfigCommands(switchableModelsFor(a, p, version))[0];
+    if (!list) return 'none';
+    const provider = providerFor(a.hostId);
+    const res = a.state === 'RUNNING'
+      ? await provider.exec(a.runtimeRef, list.argv)
+      : await provider.execShellOnVolume(a.runtimeRef, `${seedInvocation(list)} >/dev/null`, { image: a.image ?? undefined });
+    if (res.code !== 0) { trace(agentId)('model.list_set_failed', { stderr: (res.stderr || res.stdout).slice(0, 200) }); return 'failed'; }
+    trace(agentId)('model.list_set', { models: new Set([effectiveModel(a, p), ...(p.models ?? [])]).size, allowlist: hasModelPolicy(version) });
+    return a.state === 'RUNNING' ? 'live' : 'staged';
+  };
+  /** Every agent on a source, one after another, so a long list does not start a crowd of one-shots. Never rejects. */
+  const pushModelList = async (profileId: string): Promise<void> => {
+    for (const a of store.listAllActiveAgents().filter((x) => x.aiProfileId === profileId)) {
+      await inQueue(modelApplies, a.id, () => applyModelListNow(a.id)).catch((err) => trace(a.id)('model.list_set_failed', { error: String((err as Error)?.message ?? err).slice(0, 200) }));
+    }
   };
 
   /**
@@ -5902,8 +5954,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return reply.code(201).send(safe);
   });
 
-  // Update the switchable-model list on a profile. Running agents pick the
-  // change up on their next rebuild (config is written at provision time).
+  // Update the switchable-model list on a profile. Its agents get the new
+  // list at once, where their runtime runs the model the source gives them
+  // (pushModelList, HB-0668); one owed a model change or a source switch gets
+  // it with the rebuild that change waits for.
   app.patch<{ Params: { id: string }; Body: { models?: string[] } }>(
     '/v1/ai-profiles/:id',
     async (req, reply) => {
@@ -5984,6 +6038,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // onto our new default at its next rebuild.
         store.clearStaleAgentModels(fresh.id, [fresh.model, ...(fresh.models ?? [])], ownerIdOf(req));
       }
+      // Off the request: one config write per agent, one agent at a time.
+      if ('models' in ((req.body ?? {}) as object)) void pushModelList(profile.id).catch(() => undefined);
       const updated = store.getAIProfile(profile.id)!;
       const { secretRef: _s, ...safe } = updated;
       return safe;
@@ -6372,6 +6428,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const how = await applyModelToRuntime(a.id);
         if (how === 'live') live++; else if (how === 'staged') staged++; else if (how === 'gone') volumeGone++;
       }
+      // The list changed too (the new default, the held models): every agent
+      // on the source gets it, after the switched ones took their model (HB-0668).
+      void pushModelList(profile.id).catch(() => undefined);
       const kept = await limitsSaid(limits);
 
       const { secretRef: _s, ...safe } = store.getAIProfile(profile.id)!;
@@ -6508,7 +6567,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // menu rather than keep presenting a model that breaks on compaction.
         const listed = [profile.model, ...(profile.models ?? [])].filter(Boolean) as string[];
         const stale = [...new Set(listed.filter((m) => !usable.includes(m)))];
-        return { models: usable, stale, source: 'runtime' as const, ...(v ? { openclawVersion: v } : {}) };
+        // Offered once per model: a dated id where the undated one is served
+        // too only spent a place in the list (HB-0669). Stale is still read
+        // against everything served, so a dated id a source lists is not junk.
+        return { models: foldDatedIds(usable), stale, source: 'runtime' as const, ...(v ? { openclawVersion: v } : {}) };
       }
     }
     // Fallback: a curated current list (no live agent to ask yet, e.g. the

@@ -8,7 +8,7 @@ import { MODEL_CATALOG, modelKey, modelOption } from './modelOptions.js';
  * test keeps it and modelOptions' MODEL_CATALOG pricing every model alike.
  */
 /** When these were last checked against Anthropic's pricing page (PRICES_SOURCE). */
-export const PRICES_CHECKED = '2026-10-03';
+export const PRICES_CHECKED = '2026-11-11';
 export const PRICES_SOURCE = 'https://platform.claude.com/docs/en/about-claude/pricing';
 /** A cache write (Anthropic's 5-minute cache) as a multiple of the input price. */
 export const CACHE_WRITE_MULTIPLIER = 1.25;
@@ -29,12 +29,15 @@ export const MODEL_PRICES: Record<string, [number, number]> = {
   'claude-sonnet-4-6': [3, 15],
   'claude-sonnet-4-5': [3, 15],
   'claude-haiku-4-5': [1, 5],
+  'claude-fable-5-2': [8, 40],
   'claude-fable-5-1': [10, 50],
   'claude-fable-5': [10, 50],
 };
 
 /** A cache read as a share of the input price: a tenth, except where Anthropic lists less. */
-export const CACHE_READ_SHARE: Record<string, number> = { 'claude-opus-5-5': 0.05, 'claude-fable-5-1': 0.025 };
+// Sonnet 5.5 reads cache at a twentieth like Opus 5.5 (it was priced at a tenth
+// here until 2026-11-11); Fable 5.1 and 5.2 at a fortieth.
+export const CACHE_READ_SHARE: Record<string, number> = { 'claude-opus-5-5': 0.05, 'claude-sonnet-5-5': 0.05, 'claude-fable-5-2': 0.025, 'claude-fable-5-1': 0.025 };
 
 /**
  * A model's price, under any spelling the code meets (`anthropic/…`, a dated

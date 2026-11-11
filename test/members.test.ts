@@ -310,11 +310,11 @@ describe('"That\'s me — link & approve" (account-level Telegram link)', () => 
 
   it('asSelf absorbs the duplicate member a pre-link approval minted', async () => {
     const { store, provider, opts } = await setup();
-    // The rbc scenario: fresh account approved itself normally first → duplicate
-    // member "Christopher" alongside the unbound owner seat.
+    // The scenario: fresh account approved itself normally first → duplicate
+    // member "Robin" alongside the unbound owner seat.
     store.insertMembership({
       id: 'dup', agentId: 'a1', userId: 'member-x', role: 'user',
-      displayName: 'Christopher', channelUserId: '555', status: 'active',
+      displayName: 'Robin', channelUserId: '555', status: 'active',
     });
     // A second agent of the same owner with an unbound seat gets bound too.
     store.insertAgent({

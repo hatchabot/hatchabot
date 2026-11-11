@@ -55,6 +55,11 @@ describe('estimateCost', () => {
     expect(estimateCost([{ model: 'claude-opus-4-8', ...call }]).low).toBeCloseTo(0.5, 6);   // a tenth of $5
     expect(estimateCost([{ model: 'claude-opus-5-5', ...call }]).low).toBeCloseTo(0.2, 6);   // a twentieth of $4
     expect(estimateCost([{ model: 'claude-fable-5-1', ...call }]).low).toBeCloseTo(0.25, 6); // a fortieth of $10
+    // HB-0667: Fable 5.2 ($8 in, $40 out) reads cache at a fortieth; Sonnet 5.5 at a twentieth.
+    expect(estimateCost([{ model: 'claude-fable-5-2', ...call }]).low).toBeCloseTo(0.2, 6);
+    expect(estimateCost([{ model: 'anthropic/claude-sonnet-5-5', ...call }]).low).toBeCloseTo(0.1, 6);
+    expect(estimateCost([{ model: 'claude-fable-5-2', tokens: 1_000_000, input: 1_000_000, output: 0 }]).low).toBeCloseTo(8, 6);
+    expect(estimateCost([{ model: 'claude-fable-5-2', tokens: 1_000_000, input: 0, output: 1_000_000 }]).low).toBeCloseTo(40, 6);
   });
 });
 

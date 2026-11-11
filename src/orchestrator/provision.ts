@@ -9,7 +9,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { SourceGoneError, type Store } from '../store/store.js';
 import { embedDefault } from '../embedder/embedder.js';
-import { needsPortHeal } from '../openclaw/configWriter.js';
+import { needsPortHeal, switchableModelCommands, type ConfigCommand } from '../openclaw/configWriter.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { ChannelRooms, OpenClawConfigPatch, RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
@@ -855,13 +855,7 @@ export async function buildRuntimeSpec(
         }),
         // Model refs are provider-prefixed; a Google profile configured as
         // `anthropic/gemini-…` provisions healthy and fails on first use.
-        provider: local
-          ? 'ollama'
-          : profile.vendor === 'google'
-            ? 'google'
-            : profile.vendor === 'openai'
-              ? 'openai'
-              : 'anthropic',
+        provider: modelProviderOf(profile),
         // A local model server is reached on the jail's own gateway address.
         baseUrl: ops && local ? (profile.baseUrl ?? 'http://172.17.0.1:11434/v1').replace(/\/\/172\.17\.0\.1(?=[:/])/, `//${ops.host}`) : profile.baseUrl,
         ops: ops && { mcpUrl: ops.mcpUrl, token: ops.token },
@@ -1573,10 +1567,38 @@ export function prefixedModelRef(
   agent: { model?: string },
   profile: { vendor: string; model: string; models?: string[] },
 ): string {
-  // The same mapping the build uses: OpenAI was missing, so a live model
-  // change on an OpenAI source set `anthropic/gpt-…` (night review, 2026-09-28).
-  const provider = profile.vendor === 'local' ? 'ollama' : profile.vendor === 'google' ? 'google' : profile.vendor === 'openai' ? 'openai' : 'anthropic';
-  return `${provider}/${effectiveModel(agent, profile)}`;
+  return `${modelProviderOf(profile)}/${effectiveModel(agent, profile)}`;
+}
+
+/**
+ * The provider a source's model refs carry. One mapping for the build and a
+ * live change: OpenAI was missing from the live one, so a model change on an
+ * OpenAI source set `anthropic/gpt-…` (night review, 2026-09-28).
+ */
+export function modelProviderOf(profile: { vendor: string }): 'ollama' | 'google' | 'openai' | 'anthropic' {
+  return profile.vendor === 'local' ? 'ollama' : profile.vendor === 'google' ? 'google' : profile.vendor === 'openai' ? 'openai' : 'anthropic';
+}
+
+/**
+ * The switchable-model commands the build writes for this agent on this
+ * source, for a live write of the same (HB-0666, HB-0668): its model first,
+ * then the source's list, on the claude-cli runtime under a machine-login
+ * subscription (no stored setup token), and the allowlist where the runtime
+ * has one.
+ */
+export function switchableModelsFor(
+  agent: { model?: string },
+  profile: { vendor: string; kind: string; model: string; models?: string[]; secretRef?: string },
+  openclawVersion: string | undefined,
+): ConfigCommand[] {
+  const provider = modelProviderOf(profile);
+  return switchableModelCommands({
+    provider,
+    model: effectiveModel(agent, profile),
+    models: profile.models,
+    claudeCliRuntime: provider === 'anthropic' && profile.kind === 'subscription' && !profile.secretRef,
+    openclawVersion,
+  });
 }
 
 /**
