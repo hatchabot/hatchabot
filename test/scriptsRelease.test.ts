@@ -266,6 +266,55 @@ describe('scripts/release.sh refuses a commit whose channels.json would put a ch
   });
 });
 
+describe('scripts/release.sh refuses a release whose browser image was last refreshed over 14 days ago (HB-0677)', () => {
+  const dockerfile = (date: string) => `FROM example\nARG CHROMIUM_REFRESH=${date}\nRUN echo "chromium as of \${CHROMIUM_REFRESH}"\n`;
+  const withBrowser = (w: ReturnType<typeof world>, date: string) => {
+    mkdirSync(join(w.work, 'docker'), { recursive: true });
+    writeFileSync(join(w.work, 'docker', 'Dockerfile.browser'), dockerfile(date));
+  };
+  const TODAY = { HATCHABOT_RELEASE_TODAY: '2026-11-30' };
+
+  it('15 days old: refused, with what to do, and no tag', () => {
+    const w = world();
+    withBrowser(w, '2026-11-15');
+    w.landed('9.8.7');
+    const r = w.release(['9.8.7'], TODAY);
+    expect(r.status, out(r)).toBe(1);
+    expect(r.stderr).toMatch(/browser was last refreshed on 2026-11-15, over 14 days ago: set CHROMIUM_REFRESH in docker\/Dockerfile\.browser to today/);
+    expect(w.originTag('v9.8.7')).toBe('');
+  });
+
+  it('14 days old, or of today: tagged', () => {
+    const w = world();
+    withBrowser(w, '2026-11-16');
+    w.landed('9.8.7');
+    const r = w.release(['9.8.7'], TODAY);
+    expect(r.status, out(r)).toBe(0);
+    const t = world();
+    withBrowser(t, '2026-11-30');
+    t.landed('9.8.7');
+    expect(t.release(['9.8.7'], TODAY).status).toBe(0);
+  });
+
+  it('a tag already made is not judged by it (--tagged, the public workflow), nor a tree with no browser image', () => {
+    const w = world();
+    withBrowser(w, '2026-01-01');
+    const sha = w.landed('9.8.7');
+    w.git(w.work, 'tag', '-a', 'v9.8.7', '-m', 'hatchabot v9.8.7', sha); w.git(w.work, 'push', '-q', 'origin', 'v9.8.7');
+    const r = w.run('release-check.sh', ['9.8.7', '--tagged', '--repo', 'example-owner/example'], TODAY);
+    expect(r.status, out(r)).toBe(0);
+    const none = world();
+    none.landed('9.8.7');
+    expect(none.release(['9.8.7'], TODAY).status).toBe(0);
+  });
+
+  it('the real Dockerfile carries the date, and its RUN uses it (else Docker\'s cache answers with the old Chromium)', () => {
+    const real = readFileSync('docker/Dockerfile.browser', 'utf8');
+    expect(real).toMatch(/^ARG CHROMIUM_REFRESH=\d{4}-\d{2}-\d{2}$/m);
+    expect(real).toMatch(/^RUN .*\$\{CHROMIUM_REFRESH\}/m);
+  });
+});
+
 describe('scripts/release-check.sh (the public repo\'s release workflow runs it too, --tagged)', () => {
   it('--tagged: the tag on origin names a commit on main; that commit is checked, and CI is not asked', () => {
     const w = world();

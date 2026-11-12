@@ -16078,7 +16078,7 @@ async function v2LoadBrowser(id) {
   try {
     const b = await api(`/v1/agents/${id}/browser`);
     if (!el) return;
-    el.textContent = !b.on ? '' : b.running ? '· running' : '· starting (within a minute of the agent)';
+    el.textContent = !b.on ? '' : b.running ? `· running${b.chromium ? ` (Chromium ${b.chromium})` : ''}` : '· starting (within a minute of the agent)';
     el.style.color = b.on && b.running ? 'var(--ok)' : '';
   } catch { if (el) el.textContent = ''; }
 }

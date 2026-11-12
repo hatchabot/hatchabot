@@ -27,6 +27,12 @@ typed into, near the top of the page's structure. On five test pages
 text boxes and the button but lost the radio buttons and checkboxes. The
 agent can still ask for it, read by read.
 
+Whether whole tasks come out cheaper with it has to be measured with a model
+driving. `node scripts/browser-cost.mjs` does that on a test agent: three
+tasks (read a page, fill in a form, follow a link and read), each with both
+kinds of read, the tokens of each turn and whether the task was done. It
+spends real AI turns (six by default) on the default AI source.
+
 ## How it works
 
 - Each agent with the browser on gets **its own Chromium**, in a container
@@ -62,7 +68,12 @@ agent can still ask for it, read by read.
   never another Hatchabot's on the same Docker.
 - Its image (`hatchabot-browser:<hash>`, Chromium on Debian) is built on that
   machine the first time an agent there needs it (a minute or two); runners
-  build their own. A build that fails is tried again after a minute, then
+  build their own. It holds the Chromium Debian had that day. A release
+  whose image file is new (its refresh date is moved at least every 14
+  days) has each machine build again within a minute of upgrading, so the
+  Chromium stays current; the image it replaces is removed. `hatchabot
+  browser "<agent>"` and the agent's Advanced tab say which Chromium is
+  running. A build that fails is tried again after a minute, then
   after twice as long each time (up to an hour): the Setup log says "its
   browser did not start" once per try, with the build's error.
 - If you switch it while a rebuild is already under way, the switch is saved

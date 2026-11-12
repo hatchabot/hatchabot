@@ -3228,7 +3228,7 @@ async function main() {
         return;
       }
       const b: any = await (await api(ctx, `/v1/agents/${a.id}/browser`)).json();
-      console.log(`"${a.name}": browser ${b.on ? (b.running ? 'on, running' : 'on, not running yet') : 'off'}`);
+      console.log(`"${a.name}": browser ${b.on ? (b.running ? 'on, running' : 'on, not running yet') : 'off'}${b.chromium ? ` (Chromium ${b.chromium})` : ''}`);
       return;
     }
     case 'memory': {

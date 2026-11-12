@@ -105,7 +105,7 @@ import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type R
 import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, TtlCache, windowPricing, spendSeries, SPEND_RANGES, isSpendRange, isCostPeriod, type AgentCost } from '../orchestrator/agentCosts.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
-import { browserImage, browserSweep, containerOf } from '../orchestrator/browser.js';
+import { browserImage, browserSweep, containerOf, browserRefreshDate } from '../orchestrator/browser.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { CACHE_READ_DEFAULT, CACHE_WRITE_MULTIPLIER, estimateCost, priceList, pricesNothing, PRICES_CHECKED, PRICES_SOURCE } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
@@ -4356,7 +4356,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const p = agent.runtimeRef ? providerFor(agent.hostId) : undefined;
     const c = containerOf(agent.runtimeRef, p);
     const b = p && c ? (await p.listBrowsers?.().catch(() => []))?.find((x) => x.agentContainer === c) : undefined;
-    return { on: !!agent.browser, running: !!b?.running, image: browserImage().image };
+    // Which Chromium it is, and the day the image's was last refreshed (HB-0677).
+    const chromium = b?.running && c ? await p?.browserVersion?.(c).catch(() => undefined) : undefined;
+    const refreshed = browserRefreshDate();
+    return { on: !!agent.browser, running: !!b?.running, image: browserImage().image, ...(chromium ? { chromium } : {}), ...(refreshed ? { refreshed } : {}) };
   });
 
   // A started or woken agent may carry sessions pinned to a runtime its config

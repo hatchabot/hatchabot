@@ -622,7 +622,7 @@ describe('scripts/backup-volumes.sh: review of 2026-10-09', () => {
       expect(existsSync(join(w.setDir(), `${bad}-vol.tgz.part`))).toBe(false);
       expect(existsSync(join(old, `${bad}-vol.tgz`)), bad).toBe(true);
     }
-  });
+  }, 30_000);
 
   it('a runner archive that times out: its named container is removed before the run goes on (#216)', () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);

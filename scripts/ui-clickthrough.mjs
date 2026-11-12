@@ -4322,6 +4322,11 @@ const SCENARIOS = String.raw`(() => {
         window.__override['/v1/agents/a1/browser'] = { on: true, running: true };
         await v2LoadBrowser('a1');
         ok('a running browser says so: ' + $('v2BrowserState').textContent, /running/.test($('v2BrowserState').textContent));
+        ok('with no Chromium version known, none is shown', !/Chromium/.test($('v2BrowserState').textContent));
+        // Which Chromium it is (HB-0677): a machine keeps the one of its image's build day.
+        window.__override['/v1/agents/a1/browser'] = { on: true, running: true, chromium: '154.0.8037.92', refreshed: '2026-11-11' };
+        await v2LoadBrowser('a1');
+        ok('and which Chromium: ' + $('v2BrowserState').textContent, /running \(Chromium 154\.0\.8037\.92\)/.test($('v2BrowserState').textContent));
       } finally {
         a1.browser = was;
         delete window.__override['/v1/agents/a1/browser'];

@@ -404,6 +404,8 @@ export interface RuntimeProvider {
   ensureBrowser?(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'>;
   stopBrowser?(agentContainer: string): Promise<void>;
   listBrowsers?(): Promise<Array<{ name: string; agentContainer: string; running: boolean }>>;
+  /** The Chromium an agent's running browser is ("154.0.8037.92"), or undefined when it cannot be asked. */
+  browserVersion?(agentContainer: string): Promise<string | undefined>;
   /** A runner's copy of the memory search key files, after they changed here (no-op on this machine). */
   pushEmbedKeys?(files: import('../embedder/embedder.js').EmbedKeyFiles): Promise<void>;
   /** The engine container's live memory and CPU (from `docker stats`), for the health loop's memory guard. */

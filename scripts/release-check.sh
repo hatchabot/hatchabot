@@ -85,6 +85,25 @@ grep -qF "## [$VERSION]" "$AT/CHANGELOG.md" || die "CHANGELOG.md at ${SHA:0:9} h
 [ -n "$(printf '%s' "$SECTION" | tr -d '[:space:]')" ] || die "The CHANGELOG section for $VERSION is empty."
 if [ -n "$NOTES" ]; then printf '%s\n' "$SECTION" | sed -e '/./,$!d' > "$NOTES"; fi
 
+# The agents' browser (docker/Dockerfile.browser): a machine builds its image
+# once, with the Chromium of that day, and builds again only when the file
+# changes. So the file's CHROMIUM_REFRESH date is moved now and then, and a
+# release whose date is over 14 days old is refused: machines would keep a
+# Chromium with known holes for reading pages anyone wrote (HB-0677).
+# Not for a tag already made (--tagged): that one is checked, not chosen.
+# A tree without the file or the line has no browser image to refresh.
+if [ "$TAGGED" = 0 ] && git show "$SHA:docker/Dockerfile.browser" > "$AT/Dockerfile.browser" 2>/dev/null; then
+  REFRESH="$(sed -nE 's/^ARG CHROMIUM_REFRESH=([0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]]*$/\1/p' "$AT/Dockerfile.browser" | sed -n 1p)"
+  if [ -n "$REFRESH" ]; then
+    # GNU date, then BSD's (macOS); HATCHABOT_RELEASE_TODAY is the tests' clock.
+    TODAY="${HATCHABOT_RELEASE_TODAY:-$(date -u +%Y-%m-%d)}"
+    LIMIT="$(date -u -d "$TODAY 14 days ago" +%Y-%m-%d 2>/dev/null || date -u -j -v-14d -f %Y-%m-%d "$TODAY" +%Y-%m-%d)"
+    if [ "$REFRESH" \< "$LIMIT" ]; then
+      die "The agents' browser was last refreshed on $REFRESH, over 14 days ago: set CHROMIUM_REFRESH in docker/Dockerfile.browser to today, land it, and release that."
+    fi
+  fi
+fi
+
 if [ "$TAGGED" = 1 ]; then
   say "✓ $TAG: ${SHA:0:9} is on main, package.json and CHANGELOG say $VERSION"
 else

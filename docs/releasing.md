@@ -618,6 +618,14 @@ image pin is missing.
 - **What Dependabot does not see:** `ARG NODE_IMAGE=` in
   `docker/Dockerfile.runtime` and `CHROME_IMAGE` in
   `scripts/ui-clickthrough.mjs` (with the matching `pull` in `ci.yml`). Bump those by hand, as below.
+- **The agents' browser:** `ARG CHROMIUM_REFRESH=` in
+  `docker/Dockerfile.browser` is a date, not a pin. Its image installs the
+  Chromium Debian has on the day a machine builds it, and a machine builds
+  it once, so moving the date is what gets every machine a current
+  Chromium (each builds again, a minute or two, and replaces its running
+  browsers). `scripts/release.sh` refuses a release whose date is over 14
+  days old: set it to today, land that, release. An exact version cannot be
+  pinned: Debian removes a Chromium version when the next one arrives.
 - **By hand (and the emergency path, when an action or image must move
   today):** check the upstream release (its notes, and that the tag belongs
   to the project's own repository), then resolve it yourself:

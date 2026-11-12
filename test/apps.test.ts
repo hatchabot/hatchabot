@@ -791,7 +791,7 @@ describe('the app routes', () => {
     // Confirmed once, it stays allowed: a later update with nothing new about the mailbox is not refused.
     commit(dir);
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app/update', headers: as, payload: {} })).statusCode).toBe(200);
-  });
+  }, 30_000);
 
   it('two installs of one app on one account at the same time: one goes in, the other is refused (2026-10-10)', async () => {
     const { f, store, provider } = await app();

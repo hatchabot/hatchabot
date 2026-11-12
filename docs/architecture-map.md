@@ -325,12 +325,13 @@ installed source and docs to diagnose problems.
 Off by default; one Chromium container per agent that has it on, in the
 agent's network namespace (docs/browser.md).
 
-- `src/orchestrator/browser.ts` — `browserSweep`, `browserImage`, `BROWSER_CDP_URL`, `containerOf`: keeping the browsers in step with the agents, each beside its agent's container as the provider names it.
-- `src/providers/localDockerProvider.ts` — `ensureBrowser`, `stopBrowser`, `listBrowsers`, `containerName`: the containers.
+- `src/orchestrator/browser.ts` — `browserSweep`, `browserImage`, `browserRefreshDate`, `BROWSER_CDP_URL`, `containerOf`: keeping the browsers in step with the agents, each beside its agent's container as the provider names it.
+- `src/providers/localDockerProvider.ts` — `ensureBrowser`, `stopBrowser`, `listBrowsers`, `browserVersion`, `containerName`: the containers; a new image's build removes the ones it replaces.
 - `src/openclaw/configWriter.ts` — `browser.enabled`: OpenClaw's attach-only profile, or the tool off.
 - `src/api/routes.ts` — `'/v1/agents/:id/browser'`, `browsersNow`: the switch (PATCH `browser`), its state, the sweep.
 - `web/index.html` — `v2SetBrowser`, `v2LoadBrowser`: the Advanced tab's Browser row.
-- `docker/Dockerfile.browser`: its image.
+- `docker/Dockerfile.browser`: its image. `CHROMIUM_REFRESH` is the day its Chromium was last refreshed; `scripts/release-check.sh` refuses a release where it is over 14 days old.
+- `scripts/browser-cost.mjs` — `TASKS`, `MODES`, `used`, `table`: what three browsing tasks cost in tokens, default page reads against "efficient" ones (a measurement with AI turns, not a live test).
 
 ## Memory and the memory search service
 

@@ -43,6 +43,11 @@ export function browserImage(): { dockerfile: string; image: string } {
   return cached;
 }
 
+/** The day the browser image's Chromium was last refreshed (its Dockerfile's CHROMIUM_REFRESH), or undefined. */
+export function browserRefreshDate(dockerfile: string = browserImage().dockerfile): string | undefined {
+  return /^ARG CHROMIUM_REFRESH=(\d{4}-\d{2}-\d{2})\s*$/m.exec(dockerfile)?.[1];
+}
+
 /**
  * The container a runtime ref names, by its provider's rule: a legacy
  * docker://<uuid> agent's container is not its bare fragment (HB-0325).

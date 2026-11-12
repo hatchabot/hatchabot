@@ -7,7 +7,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { buildConfigCommands } from '../src/openclaw/configWriter.js';
-import { BROWSER_CDP_URL, browserImage, browserSweep, containerOf } from '../src/orchestrator/browser.js';
+import { BROWSER_CDP_URL, browserImage, browserSweep, containerOf, browserRefreshDate } from '../src/orchestrator/browser.js';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 /**
@@ -241,6 +241,37 @@ exit 0
     expect(run).toContain('hatchabot.browser-with=2026-10-08T10:00:00Z');
     expect(run).toContain('hatchabot.browser-prefix=hatchabot');
     expect(run).not.toMatch(/-v |--volume|\/home\/node/); // nothing of the agent's
+  });
+  it('a new image\'s build removes the images it replaces, and says which Chromium runs (HB-0677)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-browser-img-'));
+    const bin = join(dir, 'docker');
+    const log = join(dir, 'argv.log');
+    const mine = browserImage().image;
+    writeFileSync(bin, `#!/usr/bin/env bash
+echo "$*" >> ${JSON.stringify(log)}
+case "$*" in
+  "inspect hatchabot-a1 --format"*) echo "true|2026-10-08T10:00:00Z" ;;
+  "inspect hatchabot-a1-browser"*) exit 1 ;;
+  "image inspect"*) exit 1 ;;
+  "build -t"*) cat > /dev/null ;;
+  "images hatchabot-browser "*) echo "${mine}"; echo "hatchabot-browser:0123456789ab"; echo "hatchabot-browser:<none>" ;;
+  "exec hatchabot-a1-browser chromium --version") echo "Chromium 154.0.8037.92 built on Debian GNU/Linux 12 (bookworm)" ;;
+  "exec "*) exit 1 ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    chmodSync(bin, 0o755);
+    const p = new LocalDockerProvider({ docker: bin, image: 'test-image:latest' });
+    expect(await p.ensureBrowser(spec)).toBe('started');
+    const lines = readFileSync(log, 'utf8').split('\n');
+    expect(lines).toContain('rmi hatchabot-browser:0123456789ab');
+    expect(lines.filter((l) => l.startsWith('rmi '))).toHaveLength(1); // not its own, not an untagged one
+    expect(await p.browserVersion('hatchabot-a1')).toBe('154.0.8037.92');
+    expect(await p.browserVersion('hatchabot-none')).toBeUndefined();
+  });
+  it('the image file carries the day its Chromium was last refreshed', () => {
+    expect(browserRefreshDate()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(browserRefreshDate('FROM x\nRUN y\n')).toBeUndefined();
   });
   it('lists only this install\'s browsers: another install on the same Docker keeps its own (2026-10-09)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hb-browser-ps-'));

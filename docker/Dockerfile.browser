@@ -5,7 +5,15 @@
 # Pinned to the multi-arch index digest (#46, 2026-10-09); Dependabot proposes
 # bumps. A bump changes this file, so every machine builds the new image.
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
-RUN apt-get update \
+# Chromium is the newest Debian has on the day a machine builds this image,
+# and an image is built once. Moving this date changes the file, so every
+# machine builds again and gets the current Chromium; used in the RUN below so
+# that Docker's build cache does not answer with the old one.
+# scripts/release-check.sh refuses a release whose date is over 14 days old
+# (HB-0677). Move it to today when it does.
+ARG CHROMIUM_REFRESH=2026-11-11
+RUN echo "chromium as of ${CHROMIUM_REFRESH}" \
+ && apt-get update \
  && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -m -u 1000 -s /usr/sbin/nologin browser

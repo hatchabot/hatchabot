@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.181.0] — 2026-11-11
+
+### Added
+- **An agent's browser says which Chromium it runs**: on the agent's Advanced tab and in `hatchabot browser "<agent>"`.
+
+### Changed
+- **The agents' browser gets a current Chromium with a release, instead of keeping the one from the day its image was first built.** A machine built the browser image once and never again, so its Chromium missed every later security fix. The image file now carries a refresh date; this release moves it, so each machine builds the image again within a minute of upgrading (a minute or two, once) and its running browsers are replaced. A release whose date is over 14 days old is refused. The image a new build replaces is removed (about a gigabyte each).
+
+### For developers
+- `scripts/browser-cost.mjs` measures what three browsing tasks cost in tokens with OpenClaw's default page reads against its "efficient" ones. It spends real AI turns; docs/browser.md.
+
 ## [2.180.0] — 2026-11-11
 
 ### Changed

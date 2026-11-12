@@ -2421,6 +2421,20 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (!IMAGE_REF_RE.test(image)) throw new ProviderError(`bad browser image ${image}`, 'The browser image name is not valid.');
     const res = await this.#runStdin(['build', '-t', image, '-'], Buffer.from(dockerfile));
     if (res.code !== 0) throw new ProviderError(`browser image build failed: ${res.stderr.slice(-500)}`, "Could not build the agent's browser (its image).");
+    // The images this one replaces (a moved CHROMIUM_REFRESH, a changed
+    // Dockerfile): about a gigabyte each, and nothing else removes them
+    // (HB-0677). Docker refuses one a browser still runs from (another
+    // install's on this Docker, at another version); the next build tries
+    // again. One removed from under an idle install is built again by it.
+    const repo = image.slice(0, image.lastIndexOf(':'));
+    const old = await this.#docker(['images', repo, '--format', '{{.Repository}}:{{.Tag}}']);
+    for (const ref of old.stdout.split('\n').map((l) => l.trim())) {
+      if (ref && ref !== image && IMAGE_REF_RE.test(ref) && ref.startsWith(`${repo}:`)) await this.#docker(['rmi', ref]);
+    }
+  }
+  async browserVersion(agentContainer: string): Promise<string | undefined> {
+    const r = await this.#docker(['exec', this.#browserName(agentContainer), 'chromium', '--version']);
+    return r.code === 0 ? /(\d+\.\d+\.\d+\.\d+)/.exec(r.stdout)?.[1] : undefined;
   }
   async ensureBrowser(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'> {
     const agent = spec.agentContainer;

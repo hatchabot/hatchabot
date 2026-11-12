@@ -2416,6 +2416,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.169.0`
 - **Code:** `src/openclaw/workspace.ts` — `peerToolsSection`, `peerOneLine`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`
 
+### `scripts/release.sh` refuses: "The agents' browser was last refreshed on …, over 14 days ago"
+- **Check:** `grep CHROMIUM_REFRESH docker/Dockerfile.browser` shows a date more than 14 days before today.
+- **Cause:** on purpose. A machine builds the browser image once and keeps that day's Chromium until the image file changes. A release with an old date would leave every machine on a Chromium with known holes.
+- **Fix:** set `ARG CHROMIUM_REFRESH=` to today's date, run the gates, land it with `scripts/land.sh` as part of the version commit (or as the next patch version), then release.
+- **Fixed in:** `v2.181.0` (the check)
+- **Code:** `scripts/release-check.sh`; `docker/Dockerfile.browser`; `src/orchestrator/browser.ts` — `browserRefreshDate`
+
 ### An agent's browser opens no site: "strict browser SSRF policy requires an IP-literal URL"
 - **Check:** in the agent, `openclaw config get browser` shows an `ssrfPolicy` block; `openclaw browser open https://…` answers "Navigation blocked: strict browser SSRF policy requires an IP-literal URL because browser DNS rebinding protections are unavailable for hostname-based navigation".
 - **Cause:** `browser.ssrfPolicy` was set by hand (in the console, or with `openclaw config set`). With it written at all, even as `dangerouslyAllowPrivateNetwork: false`, OpenClaw 2026.9.8 refuses every address that is a name. Hatchabot never writes it: left unset, OpenClaw already refuses private addresses (the LAN, this machine, the browser's own control port).
