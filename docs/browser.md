@@ -15,23 +15,35 @@ minute of it coming back.
 
 For sites the agent has to *use*: a form to fill, a page behind a click, a
 site without an API. Not for looking things up: web search does that for a
-fraction of the cost. A browsing question is expensive: each page reaches the
-model as a large outline of the page, often several times per answer. In the
-first trial one question took 315,000 tokens (2026-10-08).
+fraction of the cost. **A browsing task is expensive.** The model uses the
+browser tool many times in one task, and each of those calls sends the
+whole conversation so far, page reads included. Measured on a test agent
+(2026-11-12, OpenClaw 2026.9.8, each task once per kind of read):
+
+| Task | Default reads | "Efficient" reads |
+| --- | --- | --- |
+| Read one page | 1.3 million tokens, 30 model calls | 0.34 million, 13 calls |
+| Fill in a form and submit it | 3.5 million, 63 calls: not done in 10 minutes | 2.5 million, 50 calls |
+| Follow a link and read | 1.8 million, 41 calls | 3.0 million, 61 calls: not done in 10 minutes |
+
+About 96% of those tokens are the conversation read again from the prompt
+cache; a call averaged 26,000 to 55,000 tokens, depending on the task.
 
 A page read is up to 40,000 characters (about 10,000 tokens), cut off there.
 OpenClaw has a smaller "efficient" read (8,000 characters at most), which
 Hatchabot does not make the default: it keeps only what can be clicked or
 typed into, near the top of the page's structure. On five test pages
 (2026-11-11) it dropped all of an article's text, and on a form it kept the
-text boxes and the button but lost the radio buttons and checkboxes. The
-agent can still ask for it, read by read.
+text boxes and the button but lost the radio buttons and checkboxes. With a
+model driving (the table above) it saved no clear amount: 89% of the
+default's tokens over the three tasks, much less on one, much more on
+another, and each kind of read left one task undone. The agent can still
+ask for it, read by read.
 
-Whether whole tasks come out cheaper with it has to be measured with a model
-driving. `node scripts/browser-cost.mjs` does that on a test agent: three
-tasks (read a page, fill in a form, follow a link and read), each with both
-kinds of read, the tokens of each turn and whether the task was done. It
-spends real AI turns (six by default) on the default AI source.
+`node scripts/browser-cost.mjs` measures it again on a test agent: the three
+tasks, each with both kinds of read, the tokens of each turn and whether the
+task was done. It spends real AI turns (six by default) on the default AI
+source; `--only` and `--modes` run part of it.
 
 ## How it works
 
@@ -53,10 +65,26 @@ spends real AI turns (six by default) on the default AI source.
     left unset, as Hatchabot leaves it. Do not set it by hand: with it
     written, OpenClaw 2026.9.8 refuses every address that is a name
     ("strict browser SSRF policy requires an IP-literal URL");
-  - tabs it leaves idle are closed (`browser.tabCleanup`).
+  - and a page cannot send it there by itself. OpenClaw checks page loads
+    only while the agent is acting on a page; a page whose own timer moved
+    it to a LAN address afterwards reached that address (2026-11-12). So
+    Chromium runs as a user of its own, and before it starts Hatchabot sets
+    a firewall rule in the network it shares with the agent: that user
+    cannot open a connection to a private address (loopback, the LAN, the
+    tailnet, link-local). The agent itself keeps its reach (a model on your
+    LAN, say). Where the rule cannot be set, the browser does not start;
+    see the troubleshooting entry "browser fence failed";
+  - tabs it leaves idle for two hours are closed, and a conversation keeps
+    at most eight (OpenClaw's `browser.tabCleanup`: on by default, and
+    Hatchabot sets it on; OpenClaw 2026.9.8 has no setting for the times).
 - **Memory goes with open tabs, not with the browser.** Measured 2026-11-11
   (Chromium 154): just started, 160 MB; eleven ordinary pages open, the whole
-  1 GB; those tabs closed, 250 MB. So it is not stopped while idle.
+  1 GB; those tabs closed, 250 MB. So it is not stopped while idle. At
+  its limit it slows rather than fails: with sixteen pages open it stayed
+  at the limit, nothing was killed, and the page in use read normally
+  (Chromium 156, 2026-11-12). In real use tabs did not pile up: after
+  three browsing conversations, two tabs were open and the browser held
+  510 MB.
 - It runs headless, with Chromium's own sandbox off (normal inside a
   container); the container is the boundary: no extra privileges, a read-only
   system, nothing of the agent's mounted.
@@ -83,10 +111,13 @@ spends real AI turns (six by default) on the default AI source.
 
 ## Checking it
 
-- `hatchabot browser "<agent>"` — on or off, running or not.
+- `hatchabot browser "<agent>"` — on or off, running or not, and its Chromium.
+- `hatchabot doctor` — the Chromium the agents' browsers run on this
+  machine; it warns when one still runs an older image, or when the image
+  is over 30 days old (upgrade for a current Chromium).
 - In the agent: `openclaw browser status --json` shows the `hatchabot` profile
   attached; `openclaw browser open <url>` then `openclaw browser snapshot`
   reads a page without the model.
 - The live test `browser` (docs/live-tests.md) does both, and checks the
-  isolation and that scripts and private addresses are refused, on a test
-  agent.
+  isolation, that scripts and private addresses are refused, and that a
+  page sending itself to one later does not reach it, on a test agent.

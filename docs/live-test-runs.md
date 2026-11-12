@@ -222,3 +222,20 @@ tests that run on their own.
 | 2026-11-07 | google-plain-request | pass | v2.175.0 | 1 | OpenClaw 2026.9.8 |
 | 2026-11-07 | candidate-gate | pass | v2.175.0 | 2 | OpenClaw 2026.9.8 |
 | 2026-11-07 | regress-autonomous | pass | v2.175.0 | 7 | OpenClaw 2026.9.8 |
+| 2026-11-12 | browser | pass | v2.181.0 | 3 | OpenClaw 2026.9.8 |
+| 2026-11-12 | upgrade-check | pass | v2.181.0 | 1 |  |
+| 2026-11-12 | privacy | fail | v2.181.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-12 | runner-scenarios | pass | v2.181.0 | 11 | OpenClaw 2026.9.8 |
+| 2026-11-12 | transfer | pass | v2.181.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-11-12 | apps | pass | v2.181.0 | 4 | OpenClaw 2026.9.8 |
+| 2026-11-12 | console | pass | v2.181.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-11-12 | google-plain-request | pass | v2.181.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-12 | candidate-gate | pass | v2.181.0 | 2 | OpenClaw 2026.9.8 |
+| 2026-11-12 | regress-autonomous | pass | v2.181.0 | 6 | OpenClaw 2026.9.8 |
+| 2026-11-12 | restore-drill | pass | v2.181.0 | 3 | OpenClaw 2026.9.8 |
+| 2026-11-12 | smoke-adopt | pass | v2.181.0 | 2 |  |
+| 2026-11-12 | clean-install | pass | v2.181.0 | 9 |  |
+| 2026-11-12 | clean-install-ubuntu-2204 | fail | v2.181.0 | 6 |  |
+| 2026-11-12 | clean-install-debian-12 | pass | v2.181.0 | 8 |  |
+| 2026-11-12 | privacy | pass | v2.181.0 | 1 | OpenClaw 2026.9.8; rerun: Guest (Hatchabot's own default member name) is ignored, HB-0682 |
+| 2026-11-12 | clean-install-ubuntu-2204 | pass | v2.181.0 | 8 | rerun: the first run's VM stopped by itself at load 14 |

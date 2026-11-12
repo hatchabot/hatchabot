@@ -6,7 +6,10 @@
  * AI TURNS on the install's default AI source: three tasks, each done once
  * per mode (six turns by default; a browsing turn has cost 315,000 tokens).
  *
- *   node scripts/browser-cost.mjs [--runs <n>] [--only read,form,path] [--out <file>] [--keep]
+ *   node scripts/browser-cost.mjs [--runs <n>] [--only read,form,path] [--modes default,efficient] [--out <file>] [--keep]
+ *
+ * --only and --modes finish a run cut short without paying again for the
+ * turns it did.
  *
  * A web-only test agent, "zz browser cost …", gets its browser switched on.
  * Per mode it sets (or removes) browser.snapshotDefaults.mode in the agent
@@ -18,6 +21,7 @@
  * Each task's answer is checked: a cheaper mode that fails the task is not
  * cheaper. The pages are public and were read on 2026-11-11.
  */
+import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { api, cleanupAgents, createAgent, hbt, inAgent, log, requireRoom, settle, sleep } from './live-lib.mjs';
 
@@ -27,6 +31,7 @@ const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 
 const keep = argv.includes('--keep');
 const runs = Math.max(1, Math.min(5, Number(flag('--runs') ?? 1) || 1));
 const only = flag('--only')?.split(',').map((s) => s.trim()).filter(Boolean);
+const onlyModes = flag('--modes')?.split(',').map((s) => s.trim()).filter(Boolean);
 const outFile = flag('--out');
 
 const WITH = 'Use your browser tool for this, not web search and not web fetch. ';
@@ -107,10 +112,12 @@ async function browserUp(agent, secs = 180) {
 async function main() {
   const tasks = TASKS.filter((t) => !only || only.includes(t.key));
   if (!tasks.length) throw new Error(`--only names no task (${TASKS.map((t) => t.key).join(', ')})`);
+  const modes = MODES.filter((m) => !onlyModes || onlyModes.includes(m.key));
+  if (!modes.length) throw new Error(`--modes names no mode (${MODES.map((m) => m.key).join(', ')})`);
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
   if (existing.length) throw new Error(`An agent from an earlier run is still there: ${existing.map((a) => a.name).join(', ')}. Delete it first.`);
   await requireRoom(1);
-  log(`${tasks.length} task(s) × ${MODES.length} modes × ${runs} run(s) = ${tasks.length * MODES.length * runs} AI turns on the default AI source`);
+  log(`${tasks.length} task(s) × ${modes.length} mode(s) × ${runs} run(s) = ${tasks.length * modes.length * runs} AI turns on the default AI source`);
   let agent = await createAgent(`${PREFIX} ${Date.now().toString(36)}`);
   const on = await api(`/v1/agents/${agent.id}`, { method: 'PATCH', body: { browser: true } });
   if (on.status >= 300) throw new Error(`browser on: ${on.status} ${JSON.stringify(on.json)}`);
@@ -120,7 +127,7 @@ async function main() {
   const rows = [];
   for (let run = 1; run <= runs; run++) {
     // The second run the other way round: whichever mode goes first pays for a cold prompt cache.
-    for (const mode of run % 2 ? MODES : [...MODES].reverse()) {
+    for (const mode of run % 2 ? modes : [...modes].reverse()) {
       const set = await inAgent(agent, mode.set, 120_000);
       if (set.code !== 0 && mode.key !== 'default') throw new Error(`${mode.key}: ${set.out.slice(-300)}`);
       // A restart, not a rebuild: the setting is read when its gateway starts, and a rebuild would write Hatchabot's own again.
@@ -128,14 +135,28 @@ async function main() {
       if (s.code !== 0 || t.code !== 0) throw new Error(`restart: ${`${s.out} ${t.out}`.slice(-300)}`);
       agent = await settle(agent.id, 'RUNNING', 10);
       if (!(await browserUp(agent))) throw new Error('its browser did not start');
-      const held = await inAgent(agent, ['openclaw', 'config', 'get', 'browser'], 120_000);
+      // Right after a start its settings can be locked a while ("undergoing offline maintenance", 2026-11-12).
+      let held;
+      for (let i = 0; i < 12; i++) {
+        held = await inAgent(agent, ['openclaw', 'config', 'get', 'browser'], 120_000);
+        if (!/offline maintenance|could not be read/.test(held.out)) break;
+        await sleep(10_000);
+      }
       const efficient = /"mode":\s*"efficient"/.test(held.out);
       if (efficient !== (mode.key === 'efficient')) throw new Error(`the agent does not hold the ${mode.key} setting: ${held.out.slice(0, 300)}`);
       for (const task of tasks) {
         const before = await usage(agent);
-        const began = Date.now();
-        const turn = await inAgent(agent, ['openclaw', 'agent', '--agent', agent.slug, '--session-id', `cost-${mode.key}-${task.key}-${run}-${Date.now().toString(36)}`,
-          '--message', task.ask, '--json', '--timeout', '600'], 660_000);
+        // Right after the restart its gateway may not answer yet (the first
+        // run, 2026-11-12: "Gateway not reachable … ECONNREFUSED", 0 tokens).
+        // Such a try reached no model, so it is tried again.
+        let turn, began;
+        for (let i = 0; i < 8; i++) {
+          began = Date.now();
+          turn = await inAgent(agent, ['openclaw', 'agent', '--agent', agent.slug, '--session-id', `cost-${mode.key}-${task.key}-${run}-${Date.now().toString(36)}`,
+            '--message', task.ask, '--json', '--timeout', '600'], 660_000);
+          if (!/Gateway not reachable|ECONNREFUSED/.test(turn.out)) break;
+          await sleep(15_000);
+        }
         const seconds = Math.round((Date.now() - began) / 1000);
         await sleep(3000); // the last call's row is written as the turn ends
         const u = used(before, await usage(agent));
@@ -145,6 +166,10 @@ async function main() {
         rows.push(row);
         log(`${row.ok ? '✓' : '✗'} ${task.key} / ${mode.key}: ${n(u.tokens)} tokens in ${u.calls} call(s), ${seconds} s${row.ok ? '' : ` — ${reply.slice(-300).replace(/\s+/g, ' ')}`}`);
       }
+      // HB-0678 on the way: what the mode's conversations left open, before the next restart replaces the browser.
+      const tabs = (await inAgent(agent, ['openclaw', 'browser', 'tabs'], 120_000)).out.match(/\[use: /g)?.length ?? '?';
+      const mem = spawnSync('docker', ['stats', '--no-stream', '--format', '{{.MemUsage}}', `${String(agent.runtimeRef || '').replace(/^docker:\/\//, '')}-browser`], { encoding: 'utf8', timeout: 60_000 }).stdout?.trim() || '?';
+      log(`after the ${mode.key} tasks: ${tabs} tab(s) open, browser memory ${mem}`);
     }
   }
   const md = table(rows);
@@ -152,7 +177,7 @@ async function main() {
   const tot = (key) => rows.filter((r) => r.mode === key).reduce((s, r) => s + r.tokens, 0);
   const done = (key) => rows.filter((r) => r.mode === key && r.ok).length;
   const d = tot('default'), e = tot('efficient');
-  if (d > 0 && e > 0) console.log(`efficient used ${Math.round((e / d) * 100)}% of the default's tokens; tasks done: default ${done('default')}, efficient ${done('efficient')}, of ${rows.length / 2} each.`);
+  if (d > 0 && e > 0) console.log(`efficient used ${Math.round((e / d) * 100)}% of the default's tokens; tasks done: default ${done('default')}, efficient ${done('efficient')}, of ${rows.length / modes.length} each.`);
   if (outFile) { writeFileSync(outFile, `${md}\n`); log(`written to ${outFile}`); }
   if (rows.some((r) => r.tokens === 0)) throw new Error('a turn shows no tokens: the usage read did not see it, so the numbers above are not to be trusted');
 }

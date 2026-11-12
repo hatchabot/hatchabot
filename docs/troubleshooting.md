@@ -671,6 +671,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.158.3`
 - **Code:** `scripts/privacy-check.mjs` — `hookStatus`
 
+### The privacy check finds a person's name "Gu…(5)" in dozens of old code files, and the push or the `privacy` live test fails
+- **Check:** every hit is `[person name] 'Gu…(5)'`, in files such as `src/orchestrator/invite.ts`; the install has a member who joined without giving a name.
+- **Cause:** Hatchabot names such a member "Guest", and the check read that member's name as a private one. The word is all over Hatchabot's own code.
+- **Fix:** "Guest" is in `scripts/privacy-ignore.txt`, so the check never counts it as private; update the checkout (`git pull`), then push or rerun `node scripts/live.mjs run privacy`. The check runs from the checkout, so no release is needed. Before any `kit values sync`, the checkout must have it too, or the publisher's gate would block the next release on it.
+- **Fixed in:** —
+- **Code:** `scripts/privacy-ignore.txt`; `src/orchestrator/invite.ts` — `'Guest'`; `scripts/privacy-check.mjs` — `matchers`
+
 ### A clean-install live test says "Not a pass: this run ended on vX, and the release under test is vY"
 - **Check:** the last line of its run, `── N passed, 0 failed · vX · logs: … ──`, against `package.json`'s version; `docs/live-test-runs.md` has a `skip` row with "ended on vX" in its note.
 - **Cause:** the clean installs take the public stable and upgrade to the public latest, not this checkout. The release under test is not public yet, or failed to publish, or `latest` has moved past it. These runs used to be recorded as passes on the checkout's version, so the gate cleared on older code.
@@ -2450,6 +2457,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade (one sweep per machine, with back-off), then fix what the build error names, such as disk space or network.
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/orchestrator/browser.ts` — `browserSweep`
+
+### An agent's browser does not start: "browser fence failed"
+- **Check:** the Setup log says "its browser did not start" with `browser fence failed:` and an iptables error, such as `can't initialize iptables table` or `Permission denied`.
+- **Cause:** since v2.182.0, before an agent's browser starts, Hatchabot sets a firewall rule that keeps the browser off private addresses (your LAN, this machine, the tailnet), in the network the browser shares with its agent. It does this from a short-lived container with the `NET_ADMIN` capability. Where that can't be done (a kernel without nftables or connection tracking, or a Docker that refuses the capability), the browser is not started rather than started without the rule. A page could otherwise send it to a private address on its own, after the agent has finished with the page (HB-0679).
+- **Fix:** on that machine, `docker run --rm --cap-add NET_ADMIN --entrypoint iptables <the hatchabot-browser image> -S` should list rules, not an error; fix what the error names (load the kernel's `nf_tables` and `nf_conntrack` modules, or allow the capability). Until then, switch the browser off for agents on that machine. Hatchabot tries again after a minute, then after twice as long each time, up to an hour.
+- **Fixed in:** —
+- **Code:** `src/orchestrator/browser.ts` — `BROWSER_FENCE_SCRIPT`, `browserSweep`; `src/providers/localDockerProvider.ts` — `ensureBrowser`
 
 ### An older agent's browser never starts: "its browser did not start: agent container … is not running" while the agent runs
 - **Check:** the name in that line is a bare id (no `hatchabot-` or `agentclaw-` in front), and `docker ps --format '{{.Names}}'` shows the agent's container as `agentclaw-` and that id's first 12 characters.

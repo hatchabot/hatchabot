@@ -19,6 +19,7 @@ import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet
 import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
 import { adminAccounts, evaluateSafeguards, hostOf, publicConfig, type SafeguardCheck } from './api/safeguards.js';
 import { autoUpgradeStatus } from './ops/autoUpgrade.js';
+import { browserImage, browserRefreshDate } from './orchestrator/browser.js';
 import { COMPRESSED_SWAP_FIX, type LimitsCheckSummary, describeCompressedSwap, effectiveSwapAllowance, formatSwapAllowance, parseSwapAllowance, parseSwapProbe, SWAP_PROBE_SCRIPT, type CompressedSwap } from './orchestrator/swap.js';
 
 export interface DoctorFacts {
@@ -38,6 +39,12 @@ export interface DoctorFacts {
   containers?: { running: number; total: number;
     /** RUNNING agent containers still on docker's shared bridge network (made before v1.16's isolation). */
     sharedNetwork?: number };
+  /**
+   * The agents' own browsers (docs/browser.md) running on this machine: their
+   * Chromium, how many still run an image other than this release's, and the
+   * day this release's image was refreshed (HB-0677).
+   */
+  browsers?: { running: number; versions: string[]; oldImage: number; refreshed?: string; refreshedDays?: number };
   /**
    * Which release this install runs and what it is meant to run: the channel
    * chosen last (data/channel), and the release that channel names as far as
@@ -90,6 +97,7 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
     if (!f.runtimeImage) out.push({ level: 'fail', text: 'Runtime image hatchabot-runtime:latest is missing — agents cannot start', fix: './scripts/build-runtime-image.sh (pulls the published image, builds only if that fails)' });
     else out.push({ level: 'ok', text: `Runtime image: OpenClaw ${f.runtimeImage.openclawVersion ?? '?'}${f.runtimeImage.sizeGb ? ` · ${f.runtimeImage.sizeGb.toFixed(1)} GB` : ''}` });
     if (f.containers) out.push({ level: 'ok', text: `Agent containers: ${f.containers.running} running of ${f.containers.total}` });
+    if (f.browsers?.running) out.push(...browserLines(f.browsers));
     if (f.containers?.sharedNetwork) {
       out.push({
         level: 'warn',
@@ -169,6 +177,31 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
 }
 
 /** One line on compressed swap: the machine's state, and a warning when agents are set to swap and cannot. */
+/** The agents' browsers: which Chromium runs, and whether it is current (HB-0677). */
+export function browserLines(b: NonNullable<DoctorFacts['browsers']>): DoctorLine[] {
+  const out: DoctorLine[] = [{ level: 'ok', text: `Agents' browsers: ${b.running} running · Chromium ${b.versions.join(', ') || '?'}${b.refreshed ? ` (image of ${b.refreshed})` : ''}` }];
+  if (b.oldImage) out.push({ level: 'warn', text: `${b.oldImage} agent browser${b.oldImage > 1 ? 's run' : ' runs'} an older image than this release's`, fix: 'Hatchabot replaces it within a minute while its agent runs; if it stays, the Setup log says why ("its browser did not start").' });
+  if (b.refreshedDays !== undefined && b.refreshedDays > 30) out.push({ level: 'warn', text: `The agents' browser image is from ${b.refreshed}, ${b.refreshedDays} days ago: its Chromium misses the security fixes since`, fix: 'hatchabot upgrade — each release carries a Chromium at most 14 days old' });
+  return out;
+}
+
+/**
+ * This install's running browsers (by its prefix label; one from before the
+ * label, by its agent's name), and the Chromium of one per image: `chromium
+ * --version` once per image, not once per browser.
+ */
+export function browserFacts(docker: (args: string[]) => string | undefined, prefix: string, now = Date.now(), img = browserImage()): DoctorFacts['browsers'] {
+  const ps = docker(['ps', '--filter', 'label=hatchabot.role=browser', '--format', '{{.Names}}|{{.Image}}|{{ .Label "hatchabot.browser-prefix" }}']);
+  const rows = (ps ?? '').split('\n').filter(Boolean).map((l) => l.split('|'))
+    .filter(([name = '', , p = '']) => p === prefix || ((!p || p === '<no value>') && name.startsWith(`${prefix}-`)));
+  const byImage = new Map<string, string>();
+  for (const [name = '', image = ''] of rows) if (!byImage.has(image)) byImage.set(image, name);
+  const versions = [...new Set([...byImage.values()].map((name) => /(\d+\.\d+\.\d+\.\d+)/.exec(docker(['exec', name, 'chromium', '--version']) ?? '')?.[1]).filter((v): v is string => !!v))];
+  const refreshed = browserRefreshDate(img.dockerfile);
+  const refreshedDays = refreshed ? Math.floor((now - Date.parse(`${refreshed}T00:00:00Z`)) / 86_400_000) : undefined;
+  return { running: rows.length, versions, oldImage: rows.filter(([, image]) => image !== img.image).length, refreshed, refreshedDays };
+}
+
 export function swapLine(sw: NonNullable<DoctorFacts['swap']>): DoctorLine {
   const n = sw.agentsWithAllowance;
   const who = n === undefined ? '' : ` · ${n} agent${n === 1 ? ' has' : 's have'} a swap allowance${sw.containersWithSwap !== undefined ? ` (${sw.containersWithSwap} container${sw.containersWithSwap === 1 ? '' : 's'} running with swap)` : ''}${sw.fleet !== 'off' ? `; machine setting ${sw.fleet}` : ''}`;
@@ -653,6 +686,8 @@ export async function gatherFacts(urlIn?: string, envIn?: Record<string, string>
     db: { path: dbPath, present: existsSync(dbPath), sizeMb: existsSync(dbPath) ? statSync(dbPath).size / 1e6 : undefined },
     service, controlPlane, diskFreeGb, backups, tailscale,
     containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length, sharedNetwork },
+    // A doctor that cannot read the image file still reports the rest.
+    browsers: dockerDaemon.ok ? (() => { try { return browserFacts(docker, prefix); } catch { return undefined; } })() : undefined,
     checkout: checkoutFacts(),
     swap: await swapFacts(env, dbPath, prefix, dockerDaemon.ok).catch(() => undefined),
     publicAccess: await publicAccessFacts(env, dbPath, port).catch(() => undefined),

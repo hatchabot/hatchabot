@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { backupFacts, checkoutFacts, doctorReport, envMap, probeControlPlane, releaseBehind, serviceBackupMark, type DoctorFacts } from '../src/doctor.js';
+import { backupFacts, browserFacts, checkoutFacts, doctorReport, envMap, probeControlPlane, releaseBehind, serviceBackupMark, type DoctorFacts } from '../src/doctor.js';
 import { ownerMark } from '../src/orchestrator/backups.js';
 import { scriptEnv } from './helpers/scriptEnv.js';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -48,6 +48,48 @@ describe('hatchabot doctor report', () => {
     const lines = doctorReport({ ...healthy, envFile: { ...healthy.envFile, password: false, authMode: 'identity' }, backups: { dir: '/b', lastSet: '2026-09-01', ageDays: 12 } });
     expect(lines.some((l) => /No app password/.test(l.text))).toBe(false);
     expect(lines.find((l) => /12 days old/.test(l.text))?.level).toBe('warn');
+  });
+});
+
+describe('the agents\' browsers (HB-0677)', () => {
+  const img = { image: 'hatchabot-browser:aaaaaaaaaaaa', dockerfile: 'FROM x\nARG CHROMIUM_REFRESH=2026-11-12\n' };
+  const fake = (ps: string) => {
+    const calls: string[][] = [];
+    const docker = (args: string[]) => {
+      calls.push(args);
+      if (args[0] === 'ps') return ps;
+      if (args[0] === 'exec' && args[1] === 'hatchabot-a-browser') return 'Chromium 156.0.8078.79 built on Debian GNU/Linux 12 (bookworm)';
+      if (args[0] === 'exec') return 'Chromium 154.0.8037.92 built on Debian GNU/Linux 12 (bookworm)';
+      return undefined;
+    };
+    return { docker, calls };
+  };
+  const at = Date.parse('2026-11-20T12:00:00Z');
+  it('this install\'s browsers only, Chromium read once per image, the image\'s age', () => {
+    const f = fake([
+      'hatchabot-a-browser|hatchabot-browser:aaaaaaaaaaaa|hatchabot',
+      'hatchabot-b-browser|hatchabot-browser:aaaaaaaaaaaa|hatchabot',
+      'hatchabot-c-browser|hatchabot-browser:bbbbbbbbbbbb|<no value>',
+      'other-d-browser|hatchabot-browser:aaaaaaaaaaaa|other',
+    ].join('\n'));
+    const b = browserFacts(f.docker, 'hatchabot', at, img)!;
+    expect(b).toEqual({ running: 3, versions: ['156.0.8078.79', '154.0.8037.92'], oldImage: 1, refreshed: '2026-11-12', refreshedDays: 8 });
+    expect(f.calls.filter((c) => c[0] === 'exec')).toHaveLength(2);
+  });
+  it('says which Chromium runs; warns of a browser on an older image, and of an image over 30 days old', () => {
+    const lines = doctorReport({ ...healthy, browsers: { running: 2, versions: ['156.0.8078.79'], oldImage: 0, refreshed: '2026-11-12', refreshedDays: 3 } });
+    expect(lines.find((l) => /Agents' browsers/.test(l.text))).toEqual({ level: 'ok', text: "Agents' browsers: 2 running · Chromium 156.0.8078.79 (image of 2026-11-12)" });
+    expect(lines.some((l) => l.level === 'warn')).toBe(false);
+    const old = doctorReport({ ...healthy, browsers: { running: 2, versions: ['154.0.8037.92'], oldImage: 1, refreshed: '2026-09-01', refreshedDays: 80 } }).filter((l) => l.level === 'warn');
+    expect(old.map((l) => l.text)).toEqual([
+      '1 agent browser runs an older image than this release\'s',
+      'The agents\' browser image is from 2026-09-01, 80 days ago: its Chromium misses the security fixes since',
+    ]);
+    expect(old[1]?.fix).toMatch(/hatchabot upgrade/);
+  });
+  it('no line where no agent has its browser on', () => {
+    expect(doctorReport({ ...healthy, browsers: { running: 0, versions: [], oldImage: 0 } }).some((l) => /browser/i.test(l.text))).toBe(false);
+    expect(browserFacts(fake('').docker, 'hatchabot', at, img)).toMatchObject({ running: 0, versions: [], oldImage: 0 });
   });
 });
 

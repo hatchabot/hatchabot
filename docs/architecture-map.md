@@ -67,7 +67,7 @@ the doctor command prints what is wrong with an install.
 - `scripts/upgrade-check.sh` — `CREATE TABLE IF NOT EXISTS`: checks that databases from older releases still open.
 - `bin/hatchabot.mjs` — `tsx`, `process.argv`: the hatchabot command; runs the CLI under tsx.
 - `src/cli.ts` — `parseArgs`, `matchAgent`, `'upgrade'`, `'doctor'`, `'reach'`: every CLI command, dispatched by name. `pickProfile` (the ⭐ default unless `--profile`, which takes an id or a name only one source has; create, app create, adopt, switch-source `--to`), `saveTarget` (`backup`/`get`: the destination made ready before the server is asked, replaced only once the download is complete; `renameRefused`: a file it could not replace), `agentsFilter` (`--agents`: given and empty is refused), `pairingTargets` (the agents a bare `hatchabot pairing` asks), `doLogin` and `writeConfigValues` (`login` saves the server chosen with one credential, in one write), `archivedBotLine` (`archive` prints where the server says the bot went).
-- `src/doctor.ts` — `gatherFacts`, `backupFacts`, `doctorReport`, `publicAccessLines`, `swapLine`: what `hatchabot doctor` checks and prints (the newest backup set is this install's own, by `ownerMark`). `serviceUrl` and `servicePort` (the listener the `.env` describes), `doctorTarget` (`--url`, or a saved URL only when it is another machine's; `addressesOf` resolves a saved name, bounded), `serviceDockerEnv` (the `.env`'s `DOCKER_*` over the shell's), `probeControlPlane` (one deadline for the whole answer).
+- `src/doctor.ts` — `gatherFacts`, `backupFacts`, `doctorReport`, `publicAccessLines`, `swapLine`, `browserFacts`, `browserLines`: what `hatchabot doctor` checks and prints (the newest backup set is this install's own, by `ownerMark`). `serviceUrl` and `servicePort` (the listener the `.env` describes), `doctorTarget` (`--url`, or a saved URL only when it is another machine's; `addressesOf` resolves a saved name, bounded), `serviceDockerEnv` (the `.env`'s `DOCKER_*` over the shell's), `probeControlPlane` (one deadline for the whole answer).
 - `src/ops/autoUpgrade.ts` — `autoUpgradeStatus`: whether automatic upgrades are set up (used by doctor).
 - `src/domain/appVersion.ts` — `APP_VERSION`: the running version.
 
@@ -325,12 +325,12 @@ installed source and docs to diagnose problems.
 Off by default; one Chromium container per agent that has it on, in the
 agent's network namespace (docs/browser.md).
 
-- `src/orchestrator/browser.ts` — `browserSweep`, `browserImage`, `browserRefreshDate`, `BROWSER_CDP_URL`, `containerOf`: keeping the browsers in step with the agents, each beside its agent's container as the provider names it.
-- `src/providers/localDockerProvider.ts` — `ensureBrowser`, `stopBrowser`, `listBrowsers`, `browserVersion`, `containerName`: the containers; a new image's build removes the ones it replaces.
+- `src/orchestrator/browser.ts` — `browserSweep`, `browserImage`, `browserRefreshDate`, `BROWSER_CDP_URL`, `containerOf`: keeping the browsers in step with the agents, each beside its agent's container as the provider names it. `BROWSER_FENCE_SCRIPT`, `BROWSER_UID`, `BROWSER_FENCED_V4`: the rule that keeps the browser's user (not the agent's) off private addresses in the network they share.
+- `src/providers/localDockerProvider.ts` — `ensureBrowser`, `stopBrowser`, `listBrowsers`, `browserVersion`, `containerName`: the containers; the fence is set before each browser starts (none without it); a new image's build removes the ones it replaces.
 - `src/openclaw/configWriter.ts` — `browser.enabled`: OpenClaw's attach-only profile, or the tool off.
 - `src/api/routes.ts` — `'/v1/agents/:id/browser'`, `browsersNow`: the switch (PATCH `browser`), its state, the sweep.
 - `web/index.html` — `v2SetBrowser`, `v2LoadBrowser`: the Advanced tab's Browser row.
-- `docker/Dockerfile.browser`: its image. `CHROMIUM_REFRESH` is the day its Chromium was last refreshed; `scripts/release-check.sh` refuses a release where it is over 14 days old.
+- `docker/Dockerfile.browser`: its image (Chromium as user 1001, and iptables for the fence). `CHROMIUM_REFRESH` is the day its Chromium was last refreshed; `scripts/release-check.sh` refuses a release where it is over 14 days old.
 - `scripts/browser-cost.mjs` — `TASKS`, `MODES`, `used`, `table`: what three browsing tasks cost in tokens, default page reads against "efficient" ones (a measurement with AI turns, not a live test).
 
 ## Memory and the memory search service

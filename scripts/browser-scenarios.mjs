@@ -5,7 +5,9 @@
  * OpenClaw's browser tool then opens and reads a real page through it. Its
  * isolation is checked (none of the agent's files, its memory limit,
  * listening on the agent's loopback only, out of a neighbour's reach), its
- * settings hold it to the least (no scripts, no private addresses), it
+ * settings hold it to the least (no scripts, no private addresses), a
+ * page that sends itself to a private address later does not reach it (the
+ * fence, HB-0679; the page's script is sent over the DevTools port), it
  * follows an agent restart, and switching it off removes it. No AI turns:
  * the browser is driven with `openclaw browser`.
  *
@@ -120,6 +122,50 @@ async function main() {
       ['browser.ssrfPolicy is left unset (written, no site with a name opens)', !/"ssrfPolicy"/.test(cfg.out)],
       ['a LAN address is refused', /blocked by policy/i.test(lan.out), lan.out.slice(-200)],
       ['its own control port is refused as a page', /blocked by policy/i.test(own.out), own.out.slice(-200)],
+    ];
+  });
+  await scenario('B2c fenced: a page that sends itself to a private address later does not reach it; the agent itself still does (HB-0679)', async () => {
+    // OpenClaw guards page loads only while an action runs: a page's timer
+    // sent the tab to a LAN address afterwards, and the request went out
+    // (2026-11-12). The fence holds the browser's own user off private
+    // addresses. A listener in the agent's namespace, as the agent's user
+    // (the agents' network lets no neighbour in), stands in for a device: on
+    // loopback (the agent's own ports) and on the agent's private address.
+    const c = containerOf(agent);
+    const uid = docker('exec', `${c}-browser`, 'id', '-u').out.trim();
+    const [, ip] = docker('inspect', c, '--format', '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{$v.IPAddress}}{{"\\n"}}{{end}}').out.trim().split('\n')[0]?.split(' ') ?? [];
+    const port = 39000 + Math.floor(Math.random() * 900);
+    docker('exec', '-d', c, 'node', '-e', `const h = []; require('node:http').createServer((q, s) => {
+      if (q.url === '/hits') return s.end(JSON.stringify(h));
+      h.push(q.url); s.setHeader('content-type', 'text/html'); s.end('<h1>a private device</h1>');
+    }).listen(${port}, '0.0.0.0');`);
+    await sleep(2000);
+    const targets = { loopback: `http://127.0.0.1:${port}`, 'own address': `http://${ip}:${port}` };
+    const fetchAll = (paths) => inAgent(agent, ['node', '--input-type=module', '-e',
+      `for (const u of ${JSON.stringify(paths)}) console.log(u, await fetch(u).then((r) => r.status, (e) => 'failed ' + (e.cause?.code || e.name)));`], 60_000);
+    const agentItself = await fetchAll(Object.values(targets).map((t) => `${t}/agent-itself`));
+    // What the page's own script does (it is not the agent's: evaluate is off), sent over the DevTools port.
+    const inject = (id, url) => inAgent(agent, ['node', '--input-type=module', '-e', `
+      const t = (await (await fetch('http://127.0.0.1:9222/json')).json()).find((x) => x.type === 'page' && x.id === ${JSON.stringify(id)});
+      if (!t) { console.log('no tab'); process.exit(1); }
+      const ws = new WebSocket(t.webSocketDebuggerUrl);
+      ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: ${JSON.stringify(`setTimeout(() => { location.href = ${JSON.stringify(url)}; }, 2000); 'set'`)} } }));
+      ws.onmessage = (m) => { if (JSON.parse(m.data).id === 1) { console.log('set'); ws.close(); } };`], 60_000);
+    const injected = [];
+    for (const t of Object.values(targets)) {
+      // The tab it opens: `open` prints its DevTools id.
+      const opened = await inAgent(agent, ['openclaw', 'browser', 'open', PAGE], 120_000);
+      const id = /^id:\s*([0-9A-F]{16,})\s*$/m.exec(opened.out)?.[1] ?? '';
+      await sleep(3000);
+      injected.push((await inject(id, `${t}/late-navigation`)).out.trim());
+      await sleep(6000);
+    }
+    const hits = (await inAgent(agent, ['node', '-e', `fetch('${targets.loopback}/hits').then((r) => r.text()).then(console.log)`], 60_000)).out;
+    return [
+      [`Chromium runs as its own user (${uid || '?'}), not the agent's`, uid === '1001'],
+      ['the agent itself reaches both (so the listener was there to reach)', /agent-itself 200[\s\S]*agent-itself 200/.test(agentItself.out) && (hits.match(/agent-itself/g) ?? []).length === 2, `${agentItself.out} ${hits}`.slice(-300)],
+      ['the page\'s late navigations were sent', injected.every((o) => /^set$/m.test(o)), injected.join(' | ').slice(-300)],
+      ['neither reached it: loopback, nor the agent\'s private address', /agent-itself/.test(hits) && !/late-navigation/.test(hits), hits.slice(-300)],
     ];
   });
   await scenario('B3 the agent restarts: its browser follows, and still works', async () => {

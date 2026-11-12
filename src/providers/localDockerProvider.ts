@@ -25,6 +25,7 @@ const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB)
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
 import { batchConfigCommands, buildConfigCommands, describeConfigCommands, seedInvocation, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 import { publishedRuntimeImage, type PublishedImage } from '../orchestrator/releaseManifest.js';
+import { BROWSER_FENCE_SCRIPT, BROWSER_UID } from '../orchestrator/browser.js';
 
 const execFileP = promisify(execFile);
 
@@ -2457,11 +2458,23 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (cur.code === 0 && bRunning === 'true' && bWith === startedAt && bImage === spec.image && memoryOk) return 'running';
     if (cur.code === 0) await this.#docker(['rm', '-f', name]);
     await this.#ensureBrowserImage(spec.image, spec.dockerfile);
+    // The fence first (HB-0679): set before Chromium makes its first request,
+    // or the browser is not started. It lives in the agent's network
+    // namespace, so it lasts as long as the agent runs; a restarted agent has
+    // a new one, and gets its new browser and fence here again.
+    const fence = await this.#docker([
+      'run', '--rm', '--network', `container:${agent}`, '--label', 'hatchabot.role=browser-fence',
+      '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--security-opt', 'no-new-privileges',
+      '--user', '0:0', '--entrypoint', 'sh', spec.image, '-c', BROWSER_FENCE_SCRIPT,
+    ], IO_TIMEOUT_MS);
+    if (fence.code !== 0 || !/^FENCED$/m.test(fence.stdout)) {
+      throw new ProviderError(`browser fence failed: ${`${fence.stderr} ${fence.stdout}`.trim().slice(-500)}`, "Could not keep the agent's browser off private addresses, so it was not started.");
+    }
     const run = await this.#docker([
       'run', '-d', '--name', name, '--network', `container:${agent}`,
       '--label', 'hatchabot.role=browser', '--label', `hatchabot.browser-of=${agent}`, '--label', `hatchabot.browser-with=${startedAt}`,
       '--label', `hatchabot.browser-prefix=${this.prefix}`, '--label', `hatchabot.browser-memory=${spec.memory}`,
-      '--read-only', '--tmpfs', '/tmp:size=256m', '--tmpfs', '/profile:size=512m,uid=1000,gid=1000',
+      '--read-only', '--tmpfs', '/tmp:size=256m', '--tmpfs', `/profile:size=512m,uid=${BROWSER_UID},gid=${BROWSER_UID}`,
       '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
       '--memory', spec.memory, '--pids-limit', '512', '--shm-size', '256m',
       spec.image,

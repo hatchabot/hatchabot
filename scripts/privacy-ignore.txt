@@ -21,3 +21,6 @@ Default
 Family
 Household
 Money
+# The name Hatchabot itself gives a member who joins without one
+# (src/orchestrator/invite.ts), and a word all over its code (HB-0682).
+Guest

@@ -2,6 +2,21 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.182.0] — 2026-11-12
+
+### Security
+- **A web page can no longer send an agent's browser to a private address on its own.** OpenClaw refuses a private address (your LAN, this machine, the tailnet) that the agent asks for, but it watches page loads only while the agent is acting on a page. A page whose own timer moved it to a LAN address afterwards reached that address. Nothing came back to the agent, but the request landed. Chromium now runs as a user of its own, and before it starts Hatchabot sets a firewall rule, in the network it shares with the agent, that keeps that user off private addresses. The agent itself keeps its reach, for example to a model on your LAN. The browser image changes, so each machine builds it again once (a minute or two) and its running browsers are replaced. Where the rule cannot be set, the browser does not start: see the troubleshooting entry "browser fence failed".
+
+### Added
+- **`hatchabot doctor` says which Chromium the agents' browsers run**, and warns when one still runs an older image or when the browser image is over 30 days old.
+
+### Documented
+- docs/browser.md: what a browsing task costs, measured with a model driving: 0.3 to 3.5 million tokens per task, mostly the conversation read again from the prompt cache. OpenClaw's "efficient" page reads saved no clear amount (89% of the default's tokens over three tasks, each kind of read leaving one task undone), so the default stays. A browser full to its memory limit slows rather than fails, and in real use its tabs did not pile up.
+
+### For developers
+- The `browser` live test checks it on a real install (scenario B2c).
+- `scripts/browser-cost.mjs` waits for the agent after its restart, logs the browser's open tabs and memory, and runs part of the measurement with `--only` and `--modes`.
+
 ## [2.181.0] — 2026-11-11
 
 ### Added

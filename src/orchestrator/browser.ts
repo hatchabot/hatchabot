@@ -43,6 +43,42 @@ export function browserImage(): { dockerfile: string; image: string } {
   return cached;
 }
 
+/**
+ * The user Chromium runs as in its image: not the agent's (1000), so a rule in
+ * the network namespace they share can hold the browser alone (HB-0679).
+ */
+export const BROWSER_UID = 1001;
+/**
+ * Where the browser may not open a connection: this machine and the agent's
+ * own ports (loopback), the LAN, the tailnet (100.64/10), link-local (cloud
+ * metadata), and the reserved rest. Docker's own DNS (127.0.0.11) stays open.
+ */
+export const BROWSER_FENCED_V4 = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.168.0.0/16', '198.18.0.0/15', '224.0.0.0/4', '240.0.0.0/4'];
+export const BROWSER_FENCED_V6 = ['::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8'];
+/**
+ * The fence (HB-0679), run as root with NET_ADMIN only, once per browser start,
+ * in a throwaway container in the agent's network namespace, before Chromium
+ * starts. OpenClaw refuses a private address the agent asks for, and guards
+ * page loads while an action runs; a page that sends itself to one LATER (a
+ * timer) went out unguarded and reached it (2026-11-12). This holds the
+ * browser's user off those addresses in the kernel; the agent (another user)
+ * keeps its own reach (Ollama on the LAN, say). Its own chain, flushed and
+ * filled again, so a second run leaves one copy. Prints FENCED when the rule
+ * is in place; anything else, and the browser is not started.
+ */
+export const BROWSER_FENCE_SCRIPT = `set -e
+fence() {
+  t=$1; shift
+  $t -w -N HB_BROWSER 2>/dev/null || true
+  $t -w -F HB_BROWSER
+  if [ "$t" = iptables ]; then $t -w -A HB_BROWSER -d 127.0.0.11 -j RETURN; fi
+  for d in "$@"; do $t -w -A HB_BROWSER -d "$d" -m conntrack --ctstate NEW -j REJECT; done
+  $t -w -C OUTPUT -m owner --uid-owner ${BROWSER_UID} -j HB_BROWSER 2>/dev/null || $t -w -I OUTPUT 1 -m owner --uid-owner ${BROWSER_UID} -j HB_BROWSER
+}
+fence iptables ${BROWSER_FENCED_V4.join(' ')}
+if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" = 1 ]; then echo "IPv6 is off here"; else fence ip6tables ${BROWSER_FENCED_V6.join(' ')}; fi
+iptables -w -C OUTPUT -m owner --uid-owner ${BROWSER_UID} -j HB_BROWSER && echo FENCED`;
+
 /** The day the browser image's Chromium was last refreshed (its Dockerfile's CHROMIUM_REFRESH), or undefined. */
 export function browserRefreshDate(dockerfile: string = browserImage().dockerfile): string | undefined {
   return /^ARG CHROMIUM_REFRESH=(\d{4}-\d{2}-\d{2})\s*$/m.exec(dockerfile)?.[1];
@@ -147,7 +183,8 @@ async function sweepHost(
     } catch (err) {
       out.failed.push(c);
       const message = err instanceof Error ? err.message : String(err);
-      if (/browser image build failed/.test(message)) {
+      // A fence that cannot be set fails the same way for every agent there: it backs off too.
+      if (/browser image build failed|browser fence failed/.test(message)) {
         const fails = (failed?.fails ?? 0) + 1;
         const wait = Math.min(BUILD_BACKOFF_MS * 2 ** (fails - 1), BUILD_BACKOFF_MAX_MS);
         st.buildFailed.set(key, { until: now() + wait, fails });

@@ -110,6 +110,15 @@ describe('the pre-push check', () => {
     const line = commit('doc.md', 'Test the condo board flow; HATCHABOT_AUTH=identity.\n');
     expect(run(['--pre-push', 'origin', 'x'], line).status).toBe(0);
   });
+  it('the name Hatchabot gives a member who joins without one ("Guest") is not private (HB-0682)', () => {
+    // invite.ts names such a member "Guest"; the word is all over the code.
+    expect(readFileSync(join(__dirname, '..', 'src', 'orchestrator', 'invite.ts'), 'utf8')).toMatch(/\|\| 'Guest'/);
+    const d = new Database(db);
+    d.prepare('insert into memberships values (?, ?)').run('123456789013', 'Guest');
+    d.close();
+    const line = commit('doc.md', "const name = displayName.trim() || 'Guest'; // Guest is in\n");
+    expect(run(['--pre-push', 'origin', 'x'], line).status).toBe(0);
+  });
 
   it('only checks what the remote does not have yet', () => {
     commit('old.md', 'Mapleford Helper\n');

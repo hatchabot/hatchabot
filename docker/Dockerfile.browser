@@ -2,6 +2,9 @@
 # browser tool. Hatchabot runs one per agent that has the browser switched on,
 # inside that agent's network namespace, so the agent reaches it at
 # 127.0.0.1:9222 and nothing else can. It holds none of the agent's files.
+# Chromium runs as user 1001, not the agent's 1000: Hatchabot sets a rule in
+# the shared network namespace, with this image's iptables, that holds that
+# user off private addresses (HB-0679; src/orchestrator/browser.ts).
 # Pinned to the multi-arch index digest (#46, 2026-10-09); Dependabot proposes
 # bumps. A bump changes this file, so every machine builds the new image.
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
@@ -11,13 +14,13 @@ FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595
 # that Docker's build cache does not answer with the old one.
 # scripts/release-check.sh refuses a release whose date is over 14 days old
 # (HB-0677). Move it to today when it does.
-ARG CHROMIUM_REFRESH=2026-11-11
+ARG CHROMIUM_REFRESH=2026-11-12
 RUN echo "chromium as of ${CHROMIUM_REFRESH}" \
  && apt-get update \
- && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji ca-certificates \
+ && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji ca-certificates iptables \
  && rm -rf /var/lib/apt/lists/* \
- && useradd -m -u 1000 -s /usr/sbin/nologin browser
-USER 1000:1000
+ && useradd -m -u 1001 -s /usr/sbin/nologin browser
+USER 1001:1001
 ENV HOME=/tmp
 ENTRYPOINT ["chromium", "--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", \
   "--no-first-run", "--no-default-browser-check", "--user-data-dir=/profile", \
