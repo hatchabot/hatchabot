@@ -216,6 +216,10 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
     const rwMount = store.listDataSources(a.id).some((d) => d.kind === 'folder' && d.access === 'rw');
     if (rwMount) capabilities.push('read-write host folder');
     if (a.sharedMemory) capabilities.push('shared memory');
+    // Its own browser (docs/browser.md): it reads and acts on pages anyone
+    // wrote. No saved logins and no private addresses, so not a powerful
+    // capability on its own; listed so the page does not leave it out (HB-0675).
+    if (a.browser === true) capabilities.push('its own browser');
 
     const powerful = capabilities.some((c) => c.startsWith('send email') || c === 'read-write host folder');
     let exposure: AgentExposure['exposure'] = 'low';

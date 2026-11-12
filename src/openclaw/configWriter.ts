@@ -661,6 +661,19 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     cmds.push({ argv: ['config', 'set', 'browser.enabled', 'true'] });
     cmds.push({ argv: ['config', 'set', `browser.profiles.${BROWSER_PROFILE}`, JSON.stringify({ cdpUrl: BROWSER_CDP_URL, attachOnly: true })] });
     cmds.push({ argv: ['config', 'set', 'browser.defaultProfile', BROWSER_PROFILE] });
+    // What a web page can make of it, held to the least (HB-0674), each
+    // checked on 2026.7.1 and 2026.9.8 (2026-11-11):
+    //  - no script evaluation: OpenClaw's default is ON, and it lets the
+    //    model run any JavaScript in a page it was told to by that page;
+    //  - idle tabs closed: every open tab holds memory in a 1 GB browser
+    //    (eleven pages: the whole of it, measured).
+    // NOT browser.ssrfPolicy: unset, OpenClaw refuses private addresses (the
+    // LAN, loopback, a redirect to one). Written, even as
+    // dangerouslyAllowPrivateNetwork=false, 2026.9.8 turns strict and refuses
+    // every address with a hostname ("requires an IP-literal URL"): no site
+    // would open.
+    cmds.push({ argv: ['config', 'set', 'browser.evaluateEnabled', 'false'] });
+    cmds.push({ argv: ['config', 'set', 'browser.tabCleanup.enabled', 'true'] });
   } else {
     cmds.push({ argv: ['config', 'set', 'browser.enabled', 'false'] });
   }

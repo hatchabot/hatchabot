@@ -4,7 +4,8 @@
  * it; docs/browser.md). A web-only test agent gets its browser switched on;
  * OpenClaw's browser tool then opens and reads a real page through it. Its
  * isolation is checked (none of the agent's files, its memory limit,
- * listening on the agent's loopback only, out of a neighbour's reach), it
+ * listening on the agent's loopback only, out of a neighbour's reach), its
+ * settings hold it to the least (no scripts, no private addresses), it
  * follows an agent restart, and switching it off removes it. No AI turns:
  * the browser is driven with `openclaw browser`.
  *
@@ -97,6 +98,28 @@ async function main() {
       ['it lives in the agent\'s network', net === `container:${containerOf(agent)}` || net === `container:${agentId}`, net],
       [`it listens on the agent's loopback only (${listen.join(', ') || 'nothing on 9222'})`, loopbackOnly],
       [`a neighbour on ${agentNet || '?'} cannot reach it at ${agentIp || '?'}:9222`, probe.code === 0 && /NO ANSWER/.test(probe.out) && !/webSocketDebuggerUrl/.test(probe.out), probe.out.slice(-300)],
+    ];
+  });
+  await scenario('B2b held to the least: no script evaluation, no private addresses, idle tabs closed', async () => {
+    // What configWriter writes with the browser on (HB-0674), as OpenClaw holds and enforces it;
+    // private addresses are OpenClaw's own rule with browser.ssrfPolicy unset.
+    const cfg = await inAgent(agent, ['openclaw', 'config', 'get', 'browser'], 120_000);
+    const evalTry = await inAgent(agent, ['openclaw', 'browser', 'evaluate', '--fn', '() => 1 + 1'], 120_000);
+    // Twice at most: a gateway that is reloading its settings answers with a banner, not a refusal.
+    const refused = async (url) => {
+      let r = await inAgent(agent, ['openclaw', 'browser', 'open', url], 120_000);
+      if (!/blocked by policy/i.test(r.out)) { await sleep(15_000); r = await inAgent(agent, ['openclaw', 'browser', 'open', url], 120_000); }
+      return r;
+    };
+    const lan = await refused('http://192.168.0.1/');
+    const own = await refused('http://127.0.0.1:9222/json/version');
+    return [
+      ['script evaluation is off in its settings', /"evaluateEnabled":\s*false/.test(cfg.out), cfg.out.slice(0, 300)],
+      ['a script is refused', /evaluate is disabled|"ok":\s*false/.test(evalTry.out) && !/^\s*2\s*$/m.test(evalTry.out), evalTry.out.slice(-200)],
+      ['idle tabs are closed (its setting)', /"tabCleanup":\s*\{\s*"enabled":\s*true/.test(cfg.out)],
+      ['browser.ssrfPolicy is left unset (written, no site with a name opens)', !/"ssrfPolicy"/.test(cfg.out)],
+      ['a LAN address is refused', /blocked by policy/i.test(lan.out), lan.out.slice(-200)],
+      ['its own control port is refused as a page', /blocked by policy/i.test(own.out), own.out.slice(-200)],
     ];
   });
   await scenario('B3 the agent restarts: its browser follows, and still works', async () => {

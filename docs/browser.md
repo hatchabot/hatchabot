@@ -19,6 +19,14 @@ fraction of the cost. A browsing question is expensive: each page reaches the
 model as a large outline of the page, often several times per answer. In the
 first trial one question took 315,000 tokens (2026-10-08).
 
+A page read is up to 40,000 characters (about 10,000 tokens), cut off there.
+OpenClaw has a smaller "efficient" read (8,000 characters at most), which
+Hatchabot does not make the default: it keeps only what can be clicked or
+typed into, near the top of the page's structure. On five test pages
+(2026-11-11) it dropped all of an article's text, and on a form it kept the
+text boxes and the button but lost the radio buttons and checkboxes. The
+agent can still ask for it, read by read.
+
 ## How it works
 
 - Each agent with the browser on gets **its own Chromium**, in a container
@@ -29,6 +37,20 @@ first trial one question took 315,000 tokens (2026-10-08).
   Agents without the browser run none, and their browser tool is switched off.
 - Its profile lives in memory: **nothing it logs into is kept** across a
   restart of the agent. It starts with no cookies and no saved logins.
+- **What a page can make of it is held to the least** (set at every build of
+  the agent):
+  - the agent cannot run its own scripts in a page (OpenClaw's
+    `browser.evaluateEnabled` is off; it is on by default there). It reads,
+    clicks, types and fills in forms;
+  - it does not open private addresses: your LAN, this machine, its own
+    control port. That is OpenClaw's own rule when `browser.ssrfPolicy` is
+    left unset, as Hatchabot leaves it. Do not set it by hand: with it
+    written, OpenClaw 2026.9.8 refuses every address that is a name
+    ("strict browser SSRF policy requires an IP-literal URL");
+  - tabs it leaves idle are closed (`browser.tabCleanup`).
+- **Memory goes with open tabs, not with the browser.** Measured 2026-11-11
+  (Chromium 154): just started, 160 MB; eleven ordinary pages open, the whole
+  1 GB; those tabs closed, 250 MB. So it is not stopped while idle.
 - It runs headless, with Chromium's own sandbox off (normal inside a
   container); the container is the boundary: no extra privileges, a read-only
   system, nothing of the agent's mounted.
@@ -55,4 +77,5 @@ first trial one question took 315,000 tokens (2026-10-08).
   attached; `openclaw browser open <url>` then `openclaw browser snapshot`
   reads a page without the model.
 - The live test `browser` (docs/live-tests.md) does both, and checks the
-  isolation, on a test agent.
+  isolation and that scripts and private addresses are refused, on a test
+  agent.

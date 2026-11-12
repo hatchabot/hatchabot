@@ -76,7 +76,7 @@ export const LIVE_TESTS = [
   {
     name: 'browser', cmd: ['node', 'scripts/browser-scenarios.mjs'], against: 'install', minutes: '8–12', aiTurns: false,
     needs: 'room for 1 agent; internet from the agents',
-    proves: 'an agent\'s own browser: off by default, switched on it opens and reads a real page, holds none of the agent\'s files, follows an agent restart, and is removed when switched off',
+    proves: 'an agent\'s own browser: off by default, switched on it opens and reads a real page, holds none of the agent\'s files, refuses scripts and private addresses, follows an agent restart, and is removed when switched off',
     area: ['src/orchestrator/browser.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs', LIB,
       { path: ROUTES, near: /browser/i }, { path: 'src/orchestrator/provision.ts', near: /browser/i }, { path: CLI, near: /case '(start|stop)'/ }],
   },

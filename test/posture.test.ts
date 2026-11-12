@@ -44,6 +44,18 @@ describe('computePosture — per-agent Telegram exposure', () => {
     expect(report.agents[0]!.id).toBe('hi');
   });
 
+  it('lists an agent\'s own browser among what it can do, without raising its exposure (HB-0675)', () => {
+    const store = baseStore();
+    agent(store, 'surfer');
+    store.setAgentBrowser('surfer', true);
+    agent(store, 'plain');
+    const report = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'identity' });
+    const surfer = report.agents.find((a) => a.id === 'surfer')!;
+    expect(surfer.capabilities).toContain('its own browser');
+    expect(surfer.exposure).toBe('low');
+    expect(report.agents.find((a) => a.id === 'plain')!.capabilities).not.toContain('its own browser');
+  });
+
   it('a wide-audience agent with NO powerful capability is MEDIUM, not HIGH', () => {
     const store = baseStore();
     agent(store, 'chatty');

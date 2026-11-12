@@ -2416,6 +2416,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.169.0`
 - **Code:** `src/openclaw/workspace.ts` — `peerToolsSection`, `peerOneLine`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`
 
+### An agent's browser opens no site: "strict browser SSRF policy requires an IP-literal URL"
+- **Check:** in the agent, `openclaw config get browser` shows an `ssrfPolicy` block; `openclaw browser open https://…` answers "Navigation blocked: strict browser SSRF policy requires an IP-literal URL because browser DNS rebinding protections are unavailable for hostname-based navigation".
+- **Cause:** `browser.ssrfPolicy` was set by hand (in the console, or with `openclaw config set`). With it written at all, even as `dangerouslyAllowPrivateNetwork: false`, OpenClaw 2026.9.8 refuses every address that is a name. Hatchabot never writes it: left unset, OpenClaw already refuses private addresses (the LAN, this machine, the browser's own control port).
+- **Fix:** in the agent, `openclaw config unset browser.ssrfPolicy`, then restart the agent.
+- **Fixed in:** not a Hatchabot bug; documented with `v2.180.0`
+- **Code:** `src/openclaw/configWriter.ts` — `browser.evaluateEnabled` (the comment beside it)
+
+### An agent says it cannot run a script in a page: "act:evaluate is disabled by config (browser.evaluateEnabled=false)"
+- **Check:** the agent has its browser on and was rebuilt on `v2.180.0` or later; the gateway log or the agent's answer carries that line.
+- **Cause:** on purpose since `v2.180.0`. OpenClaw's default let the model run any JavaScript in a page, including what the page itself told it to run. The agent still reads pages, clicks, types and fills in forms.
+- **Fix:** none needed; ask the agent to do the step by clicking and typing. To allow scripts for one agent anyway: in it, `openclaw config set browser.evaluateEnabled true` and restart it; the next rebuild switches it off again.
+- **Fixed in:** `v2.180.0` (the setting)
+- **Code:** `src/openclaw/configWriter.ts` — `browser.evaluateEnabled`
+
 ### An agent's browser keeps disappearing, or a test install removed it
 - **Check:** another Hatchabot (a second install, or a smoke test with its own `HATCHABOT_PREFIX`) uses the same Docker, and the Setup log shows "its browser removed".
 - **Cause:** each install's sweep listed every browser on the daemon and removed those it didn't know.

@@ -25,6 +25,15 @@ describe('what OpenClaw is told', () => {
     expect(f).toContain(`config set browser.profiles.hatchabot ${JSON.stringify({ cdpUrl: BROWSER_CDP_URL, attachOnly: true })}`);
     expect(f).toContain('config set browser.defaultProfile hatchabot');
   });
+  it('on: no script evaluation, idle tabs closed (HB-0674)', () => {
+    const f = flat(true);
+    expect(f).toContain('config set browser.evaluateEnabled false');
+    expect(f).toContain('config set browser.tabCleanup.enabled true');
+    expect(flat(false).some((l) => /evaluateEnabled|tabCleanup/.test(l))).toBe(false);
+  });
+  it('never writes browser.ssrfPolicy: written, OpenClaw 2026.9.8 refuses every address with a hostname', () => {
+    expect(flat(true).some((l) => l.includes('ssrfPolicy'))).toBe(false);
+  });
   it('off (every other agent): the tool is off — no browser in the image, and a tool that cannot work only costs tokens', () => {
     expect(flat(undefined)).toContain('config set browser.enabled false');
     expect(flat(false)).toContain('config set browser.enabled false');

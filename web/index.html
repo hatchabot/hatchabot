@@ -5818,7 +5818,7 @@ async function loadRuntimeCaps() {
     if (t.git) rows.push(row('Git + SSH', 'repo data sources with generated deploy keys', t.git));
     if (t.node) rows.push(row('Node.js', 'the runtime base', t.node));
     const missing = (c.missing || []).length
-      ? `<div class="sub" style="margin-top:8px">Not included (by design, to keep the image lean): ${c.missing.map(esc).join(', ')} — so no local audio/video processing or browser automation. Agents can still fetch web pages and read PDFs/images via the model.</div>`
+      ? `<div class="sub" style="margin-top:8px">Not included (by design, to keep the image lean): ${c.missing.map(esc).join(', ')} — so no local audio/video processing. Agents can still fetch web pages and read PDFs/images via the model; a browser of its own is an option per agent (its page → Advanced → Browser).</div>`
       : '';
     el.innerHTML = `<div class="cap-wrap"><table class="cap-table"><thead><tr><th>Capability</th><th>What it's for</th><th>Version</th></tr></thead>
       <tbody>${rows.join('')}</tbody></table></div>` + missing;

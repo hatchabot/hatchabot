@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.180.0] — 2026-11-11
+
+### Changed
+- **An agent's own browser no longer runs scripts the model writes.** OpenClaw's default let the model run any JavaScript in a page, including what the page told it to run. With the browser on, that is now off, at the agent's next rebuild. It still reads pages, clicks, types and fills in forms. See docs/browser.md and the troubleshooting entry "act:evaluate is disabled by config".
+- **Its idle tabs are closed.** Open tabs are what fills a browser's memory: measured, a browser just started holds 160 MB, with eleven pages open the whole 1 GB, and with them closed 250 MB.
+
+### Fixed
+- **Alerts left an agent's browser out of what it can do**, and Settings said the runtime had "no browser automation". Alerts now lists "its own browser" on the agent's line; Settings points to the agent's Advanced → Browser.
+
+### Documented
+- docs/browser.md: what a page read costs (up to 40,000 characters), why OpenClaw's smaller "efficient" read is not the default, the browser's memory numbers, and why `browser.ssrfPolicy` must stay unset (written, OpenClaw 2026.9.8 opens no site with a name).
+
 ## [2.179.1] — 2026-11-11
 
 ### Fixed
