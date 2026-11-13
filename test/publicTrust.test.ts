@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
 import { Jar, PUBLIC_HOST, publicApp, type PublicApp } from './helpers/publicApp.js';
@@ -192,14 +192,19 @@ describe('sign-in limits at the public address', () => {
 
   it('a ceiling on requests, per address and overall', async () => {
     const { h } = await ready({ env: { HATCHABOT_PUBLIC_REQS_PER_MIN_PER_ADDRESS: '5', HATCHABOT_PUBLIC_REQS_PER_MIN: '12' } });
-    const codes: number[] = [];
-    for (let i = 0; i < 7; i++) codes.push((await h.pub('/healthz', { from: '198.51.100.60' })).status);
-    expect(codes.filter((c) => c === 429).length).toBeGreaterThanOrEqual(1);
-    expect(codes.slice(0, 4).every((c) => c !== 429)).toBe(true);
-    const more: number[] = [];
-    for (let i = 0; i < 8; i++) more.push((await h.pub('/v1/config', { from: `198.51.100.${70 + i}` })).status);
-    expect(more.at(-1)).toBe(429); // different addresses, the overall ceiling
-    expect((await h.app.inject({ url: '/v1/config' })).statusCode).toBe(200);
+    // The ceilings count by the clock's minute: requests either side of one start again at
+    // nought, and on CI the last answered 200 (HB-0684). The clock is held mid-minute.
+    vi.useFakeTimers({ toFake: ['Date'], now: Math.floor(Date.now() / 60_000) * 60_000 + 30_000 });
+    try {
+      const codes: number[] = [];
+      for (let i = 0; i < 7; i++) codes.push((await h.pub('/healthz', { from: '198.51.100.60' })).status);
+      expect(codes.filter((c) => c === 429).length).toBeGreaterThanOrEqual(1);
+      expect(codes.slice(0, 4).every((c) => c !== 429)).toBe(true);
+      const more: number[] = [];
+      for (let i = 0; i < 8; i++) more.push((await h.pub('/v1/config', { from: `198.51.100.${70 + i}` })).status);
+      expect(more.at(-1)).toBe(429); // different addresses, the overall ceiling
+      expect((await h.app.inject({ url: '/v1/config' })).statusCode).toBe(200);
+    } finally { vi.useRealTimers(); }
   });
 
   it('second-factor guesses are limited per person', async () => {

@@ -157,6 +157,14 @@ The header holds:
   then drag; an ordinary swipe still scrolls. Every drop has a keyboard way
   too, and the strips say where: the agent's Overview → **Group** (including
   ＋ New group…), Advanced → **Archive**, and Advanced → **Delete…**.
+- **An icon's menu.** Right-click one of your agents' icons (or press the
+  keyboard's menu key, or Shift+F10, on it) for **Open**, **Settings**,
+  **Stop** or **Start** (**Wake**, **Retry**, **Restore…** where those
+  apply), **Rebuild**, **Archive…** and **Delete…**, without opening the
+  agent. On a phone, press and hold an icon and let go without moving it;
+  hold and move still drags it. Each entry does what the agent's own button
+  does and asks what it asks: a rebuild of a running agent, Archive and
+  Delete still confirm. The management agent's icon has no menu.
 - **Planned: agents you mean to make.** In the Groups view, a **Planned**
   group sits below your groups (before *Shared with me* and *Archived*). Type
   a name in **Plan an agent…** and press Enter or **Add**: it appears as a

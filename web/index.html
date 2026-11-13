@@ -825,6 +825,16 @@
            max-width:min(320px, calc(100vw - 16px)); pointer-events:none; box-shadow:0 8px 24px rgba(0,0,0,.3); line-height:1.3 }
   .v2tip b { display:block }
   .v2tip ul { margin:4px 0 0; padding-left:16px }
+  /* The menu on an agent's icon (HB-0683): right-click, the menu key, or a touch held still and let go. */
+  .v2menu { position:fixed; z-index:1003; min-width:190px; max-width:calc(100vw - 16px); background:var(--panel); border:1px solid var(--line);
+            border-radius:12px; box-shadow:0 16px 40px rgba(0,0,0,.28); padding:6px; display:grid; gap:2px }
+  .v2menu[hidden] { display:none }
+  .v2menu:focus { outline:none } /* the menu itself holds focus after a pointer opened it; its entries show theirs */
+  .v2menuhead { padding:6px 10px 4px; font-size:12.5px; font-weight:600; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .v2menu > button { text-align:left; background:none; border:0; border-radius:8px; padding:8px 10px; font:inherit; font-size:14px; color:var(--text); cursor:pointer }
+  .v2menu > button:hover, .v2menu > button:focus-visible { background:var(--panel-2) }
+  .v2menu > button.v2menudanger { color:var(--bad) }
+  @media (pointer: coarse) { .v2menu > button { padding:11px 12px; font-size:15px } }
   /* Its parts (cost, runtime), each under a faint rule. */
   .v2tipsec { display:block; margin-top:5px; padding-top:5px; border-top:1px solid color-mix(in srgb, var(--bg) 22%, transparent) }
   /* the agent sheet */
@@ -1152,6 +1162,7 @@
   </div>
 </div>
 <div class="v2tip" id="v2Tip" hidden></div>
+<div class="v2menu" id="v2Menu" role="menu" tabindex="-1" hidden></div>
 
 <dialog id="v2AgentDlg" class="v2sheet" aria-labelledby="v2AgentName">
   <div class="v2sbar" id="v2AgentBar"></div>
@@ -14554,7 +14565,17 @@ function v2DragEnd() {
 window.addEventListener('pointerup', async (e) => {
   const st = v2drag.st; if (!st || e.pointerId !== st.pid) return;
   const wasActive = v2drag.active, t = st.target, a = st.a;
+  // A touch held still and let go: the icon's menu (HB-0683). Held and moved, it was a drag (below).
+  const heldStill = st.touch && st.held && !wasActive;
   v2DragEnd();
+  if (heldStill) {
+    // The tap's own click may still come after a short hold: it must not open the agent too.
+    v2drag.suppress = true; setTimeout(() => { v2drag.suppress = false; }, 600);
+    // The poll may have redrawn the grid during the hold: the icon of that agent now.
+    const el = st.el.isConnected ? st.el : $('v2groups').querySelector(`.v2agent[data-v2id="${CSS.escape(a.id)}"]`);
+    if (el) v2OpenMenu(el); // under the icon, which stays in sight
+    return;
+  }
   if (!wasActive) return; // a plain click: the click handler opens it
   v2drag.suppress = true; setTimeout(() => { v2drag.suppress = false; }, 0);
   if (!t) return renderV2();
@@ -14609,6 +14630,98 @@ $('v2groups').addEventListener('click', (e) => {
   if (v2drag.suppress) { e.preventDefault(); return; }
   v2Open(el.dataset.v2id);
 });
+
+// ---- the menu on an icon (HB-0683) --------------------------------------------------
+// Right-click, the keyboard's menu key or Shift+F10, or on a touch screen a
+// press held still and let go (held and moved, it drags, as before). It offers
+// what the agent's page offers, through the same functions and so with the
+// same questions: a rebuild of a running agent, Archive and Delete still ask.
+// Only on the person's own agents, not the management agent's icon.
+let v2MenuFor = null; // { id, back: the icon focus goes back to, items }
+const v2MenuOk = (el, a) => !!a && !el.dataset.v2fixed && v2Mine(a) && !a.ops;
+/** The menu's entries for this agent, by the rules its page's buttons follow (v2RenderSheetBar, v2Pane's overview). */
+function v2MenuItems(a) {
+  const id = a.id, n = a.name, run = a.state === 'RUNNING', built = !!a.runtimeRef;
+  const items = [['Open', () => v2Open(id)], ['Settings', () => openV2Agent(id)]];
+  if (a.state === 'ARCHIVED') items.push(['Restore…', () => restoreAgent(id, n)]);
+  if (a.state === 'STOPPED' && a.hibernatedAt) items.push(['Wake', () => act(id, 'wake')]);
+  if (a.state === 'STOPPED' && !a.hibernatedAt) items.push(['Start', () => act(id, 'start')]);
+  if (a.state === 'FAILED') items.push(['Retry', () => act(id, 'provision')]);
+  if (run) items.push(['Stop', () => act(id, 'stop')]);
+  if ((run || a.state === 'STOPPED') && built) items.push(['Rebuild', () => rebuild(id)]);
+  if (['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) && !a.archiving) items.push(['Archive…', () => archiveAgent(id, n, a.state)]);
+  items.push(['Delete…', () => del(id, n), 'v2menudanger']);
+  return items;
+}
+/**
+ * Opens the menu of the icon `el`: at the pointer `at` ({x, y}, a right-click), else under the
+ * icon (over it where there is no room below), on the screen either way. Opened by the keyboard
+ * (`byKey`), focus goes to its first entry; otherwise to the menu itself, where the arrow keys
+ * still reach the entries, and no focus ring is drawn on an entry nobody chose.
+ */
+function v2OpenMenu(el, at, byKey) {
+  const a = v2Find(el.dataset.v2id);
+  if (!v2MenuOk(el, a)) return false;
+  $('v2Tip').hidden = true;
+  const m = $('v2Menu'), items = v2MenuItems(a);
+  m.setAttribute('aria-label', `${a.name}: what to do`);
+  m.innerHTML = `<div class="v2menuhead" aria-hidden="true">${esc(a.name)}</div>`
+    + items.map(([label, , cls], i) => `<button type="button" role="menuitem" tabindex="-1" data-i="${i}"${cls ? ` class="${cls}"` : ''}>${esc(label)}</button>`).join('');
+  v2MenuFor = { id: a.id, back: el, items };
+  m.hidden = false;
+  const w = m.offsetWidth, h = m.offsetHeight, r = el.getBoundingClientRect();
+  const x = at ? at.x : r.left + r.width / 2 - w / 2;
+  const y = at ? (at.y + h <= innerHeight - 8 ? at.y : at.y - h) : (r.bottom + 4 + h <= innerHeight - 8 ? r.bottom + 4 : r.top - 4 - h);
+  m.style.left = Math.max(8, Math.min(innerWidth - w - 8, x)) + 'px';
+  m.style.top = Math.max(8, Math.min(innerHeight - h - 8, y)) + 'px';
+  (byKey ? m.querySelector('button') : m)?.focus({ preventScroll: true });
+  return true;
+}
+/** Closes it; `back`: focus returns to its icon (or that agent's icon, redrawn meanwhile). */
+function v2CloseMenu(back) {
+  const m = $('v2Menu');
+  if (m.hidden) return;
+  m.hidden = true;
+  const f = v2MenuFor; v2MenuFor = null;
+  if (!back || !f) return;
+  const el = f.back.isConnected ? f.back : $('v2groups').querySelector(`.v2agent[data-v2id="${CSS.escape(f.id)}"]`);
+  el?.focus({ preventScroll: true });
+}
+$('v2groups').addEventListener('contextmenu', (e) => {
+  const el = e.target.closest('.v2agent'); if (!el) return;
+  // A touch screen's long press: letting go decides (still: the menu; moved: the drag), not this.
+  if (v2drag.st?.touch || e.pointerType === 'touch') { e.preventDefault(); return; }
+  if (!v2MenuOk(el, v2Find(el.dataset.v2id))) return; // the browser's own menu, as before
+  e.preventDefault();
+  if (!$('v2Menu').hidden && v2MenuFor?.back === el) return; // opened by the key already (below)
+  // From the keyboard a contextmenu has no pointer position: at the icon then.
+  const kb = !e.clientX && !e.clientY;
+  v2OpenMenu(el, kb ? undefined : { x: e.clientX, y: e.clientY }, kb);
+});
+$('v2groups').addEventListener('keydown', (e) => {
+  if (e.key !== 'ContextMenu' && !(e.shiftKey && e.key === 'F10')) return;
+  const el = e.target.closest?.('.v2agent'); if (!el) return;
+  if (v2OpenMenu(el, undefined, true)) e.preventDefault();
+});
+$('v2Menu').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-i]'); if (!b || !v2MenuFor) return;
+  const run = v2MenuFor.items[Number(b.dataset.i)]?.[1];
+  // Focus back on the icon first: a dialog the entry opens returns it there when it closes.
+  v2CloseMenu(true);
+  run?.();
+});
+$('v2Menu').addEventListener('keydown', (e) => {
+  // From the menu itself (opened by a pointer, i = -1): ArrowDown to the first entry, ArrowUp to the last.
+  const bs = [...$('v2Menu').querySelectorAll('button')], n = bs.length, i = bs.indexOf(document.activeElement);
+  const to = { ArrowDown: (i + 1) % n, ArrowUp: i < 0 ? n - 1 : (i - 1 + n) % n, Home: 0, End: n - 1 }[e.key];
+  if (to !== undefined) { e.preventDefault(); bs[to]?.focus(); return; }
+  if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); v2CloseMenu(true); }
+});
+$('v2Menu').addEventListener('contextmenu', (e) => e.preventDefault());
+// A press anywhere else closes it (before that press does its own thing); so does the page moving under it.
+document.addEventListener('pointerdown', (e) => { if (!$('v2Menu').hidden && !e.target.closest?.('#v2Menu')) v2CloseMenu(false); }, true);
+window.addEventListener('scroll', () => v2CloseMenu(false), { passive: true });
+window.addEventListener('resize', () => v2CloseMenu(false));
 
 // ---- opening an agent: chat first ---------------------------------------------------
 const v2CanChat = (a) => v2Mine(a) && a.state === 'RUNNING' && a.hasGateway;

@@ -370,6 +370,94 @@ const SCENARIOS = String.raw`(() => {
       const move = await until(() => calls('POST', /\/v1\/agents\/a1\/move$/)[0]);
       eq('the drop asked for the move', move.body, { before: null, group: 'Money' });
     },
+    iconMenu: async () => {
+      // HB-0683 (the owner, 2026-11-13): Rebuild, Stop, Archive, Delete from the icon, without
+      // opening the agent: right-click, the menu key, or on a touch screen a hold let go.
+      const menu = document.getElementById('v2Menu');
+      const labels = () => [...menu.querySelectorAll('button')].map((b) => b.textContent.trim());
+      const rightClick = (el) => { const p = centre(el); const ev = new MouseEvent('contextmenu', { clientX: p.x, clientY: p.y, button: 2, bubbles: true, cancelable: true }); el.dispatchEvent(ev); return ev; };
+      const key = (k, extra = {}) => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...extra }));
+      const onIcon = (id) => document.activeElement?.closest?.('.v2agent')?.dataset.v2id === id;
+      const realOpen = v2Open; let opened = 0;
+      try {
+        const hh = tile('Homework Helper'); ok('Homework Helper tile', !!hh);
+        const ev = rightClick(hh);
+        ok('a right-click opens the menu, not the browser\'s', !menu.hidden && ev.defaultPrevented);
+        eq('a running agent: what its page offers', labels(), ['Open', 'Settings', 'Stop', 'Rebuild', 'Archive…', 'Delete…']);
+        ok('named for the agent', menu.getAttribute('aria-label').includes('Homework Helper') && menu.textContent.includes('Homework Helper'));
+        ok('focus on the menu itself, no entry ringed', document.activeElement === menu);
+        key('ArrowDown'); eq('ArrowDown reaches the first entry', document.activeElement.textContent, 'Open');
+        key('ArrowUp'); eq('ArrowUp goes round to the last', document.activeElement.textContent, 'Delete…');
+        const r = menu.getBoundingClientRect();
+        ok('inside the window: ' + JSON.stringify([r.left, r.top, r.right, r.bottom].map(Math.round)), r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight);
+        window.__confirms = []; window.__confirmAnswer = true;
+        byText('#v2Menu button', 'Rebuild').click();
+        ok('its entry closes it', menu.hidden);
+        await until(() => calls('POST', /\/v1\/agents\/a1\/rebuild$/)[0]);
+        ok('a running agent\'s rebuild still asks: ' + window.__confirms[0], /rebuilds "Homework Helper" now/.test(window.__confirms[0] || ''));
+        ok('focus back on its icon', onIcon('a1'));
+        // A stopped agent: Start in place of Stop.
+        rightClick(tile('Tax Filing'));
+        eq('a stopped agent', labels(), ['Open', 'Settings', 'Start', 'Rebuild', 'Archive…', 'Delete…']);
+        byText('#v2Menu button', 'Start').click();
+        await until(() => calls('POST', /\/v1\/agents\/a10\/start$/)[0]);
+        // Archive opens its dialog; Delete still asks for the name, and a cancel deletes nothing.
+        rightClick(tile('Homework Helper')); byText('#v2Menu button', 'Archive').click();
+        ok('Archive… opens the archive dialog for it', archiveDlg.open && document.getElementById('archiveName').textContent.includes('Homework Helper'));
+        archiveDlg.close();
+        rightClick(tile('Homework Helper')); byText('#v2Menu button', 'Delete').click();
+        await sleep(50);
+        eq('Delete… asks for the name; cancelled, nothing is deleted', calls('DELETE', /\/v1\/agents\/a1$/).length, 0);
+        // The keyboard: the menu key on a focused icon, arrows round the entries, Escape back to the icon.
+        tile('Homework Helper').focus();
+        key('ContextMenu');
+        ok('the menu key opens it', !menu.hidden && document.activeElement === menu.querySelector('button'));
+        key('ArrowDown'); eq('ArrowDown', document.activeElement.textContent, 'Settings');
+        key('End'); eq('End', document.activeElement.textContent, 'Delete…');
+        key('ArrowDown'); eq('round to the first', document.activeElement.textContent, 'Open');
+        key('Escape');
+        ok('Escape closes it, back on the icon', menu.hidden && onIcon('a1'));
+        key('F10', { shiftKey: true });
+        ok('Shift+F10 opens it too', !menu.hidden);
+        key('Escape');
+        // A press anywhere else closes it.
+        rightClick(tile('Homework Helper'));
+        document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 3, pointerType: 'mouse', button: 0 }));
+        ok('a press elsewhere closes it', menu.hidden);
+        // Not on the management agent's icon: the browser's own menu, as before.
+        const fixed = document.querySelector('#v2groups .v2agent[data-v2fixed]');
+        ok('the management agent\'s icon is in the grid', !!fixed);
+        const e2 = rightClick(fixed);
+        ok('a fixed icon has no menu', menu.hidden && !e2.defaultPrevented);
+        // A touch held still and let go: the menu, and that tap's click does not open the agent.
+        v2Open = () => { opened++; };
+        const t1 = tile('Homework Helper'), p = centre(t1);
+        const at = { bubbles: true, cancelable: true, button: 0, pointerId: 9, pointerType: 'touch', clientX: p.x, clientY: p.y };
+        t1.dispatchEvent(new PointerEvent('pointerdown', at));
+        await sleep(420);
+        window.dispatchEvent(new PointerEvent('pointerup', at));
+        t1.click();
+        ok('a touch held and let go opens the menu', !menu.hidden && labels().includes('Rebuild'));
+        eq('and its click opens nothing', opened, 0);
+        document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 4, pointerType: 'touch', button: 0 }));
+        ok('a touch elsewhere closes it', menu.hidden);
+        // Held and moved: the drag, as before, and no menu.
+        const t2 = tile('Homework Helper');
+        t2.dispatchEvent(new PointerEvent('pointerdown', at));
+        await sleep(420);
+        window.dispatchEvent(new PointerEvent('pointermove', { ...at, clientX: p.x + 30, clientY: p.y + 30 }));
+        ok('held and moved: the drag', document.body.classList.contains('v2dragging'));
+        window.dispatchEvent(new PointerEvent('pointercancel', at));
+        ok('no menu after a drag', menu.hidden);
+        // A quick tap still opens the agent.
+        await sleep(700);
+        const t3 = tile('Homework Helper');
+        t3.dispatchEvent(new PointerEvent('pointerdown', at));
+        window.dispatchEvent(new PointerEvent('pointerup', at));
+        t3.click();
+        eq('a quick tap opens it, no menu', [opened, menu.hidden], [1, true]);
+      } finally { v2Open = realOpen; v2CloseMenu(false); if (archiveDlg.open) archiveDlg.close(); }
+    },
     groupArrows: async () => {
       const family = byText('#v2groups .v2ghead', 'Family');
       ok('Family header', !!family);
@@ -10532,6 +10620,36 @@ const SCENARIOS = String.raw`(() => {
         ok('with Cost too: ' + JSON.stringify(edges()), edges().length >= 5 && edges().every(([, r]) => r > 0 && r <= innerWidth));
       }
       ok('the page does not scroll sideways: ' + document.documentElement.scrollWidth + ' > ' + innerWidth, document.documentElement.scrollWidth <= innerWidth);
+    },
+    phoneIconMenu: async () => {
+      // HB-0683 on a phone: a touch held still and let go opens the icon's menu, all of it on
+      // the screen, also for the icon nearest the edge; a touch elsewhere closes it.
+      const menu = document.getElementById('v2Menu');
+      const icons = [...document.querySelectorAll('#v2groups .v2agent:not([data-v2fixed])')];
+      ok('icons to hold: ' + icons.length, icons.length > 2);
+      const right = icons.reduce((m, x) => (x.getBoundingClientRect().right > m.getBoundingClientRect().right ? x : m));
+      try {
+        for (const el of [icons[0], right]) {
+          el.scrollIntoView({ block: 'center' });
+          await sleep(150);
+          const p = centre(el), at = { bubbles: true, cancelable: true, button: 0, pointerId: 11, pointerType: 'touch', clientX: p.x, clientY: p.y };
+          el.dispatchEvent(new PointerEvent('pointerdown', at));
+          await sleep(420);
+          window.dispatchEvent(new PointerEvent('pointerup', at));
+          const name = el.querySelector('.v2name')?.textContent;
+          ok(name + ': held and let go, its menu', !menu.hidden && menu.textContent.includes(name) && menu.querySelectorAll('button').length >= 4);
+          const r = menu.getBoundingClientRect();
+          ok(name + ': the menu on the screen: ' + JSON.stringify([r.left, r.top, r.right, r.bottom].map(Math.round)) + ' in ' + innerWidth + '×' + innerHeight,
+            r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight);
+          const ic = el.querySelector('.v2ic').getBoundingClientRect();
+          ok(name + ': the held icon stays in sight: menu ' + JSON.stringify([r.top, r.bottom].map(Math.round)) + ', icon ' + JSON.stringify([ic.top, ic.bottom].map(Math.round)),
+            r.bottom <= ic.top || r.top >= ic.bottom || r.right <= ic.left || r.left >= ic.right);
+          ok('the page does not scroll sideways', document.documentElement.scrollWidth <= innerWidth);
+          document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 12, pointerType: 'touch', button: 0 }));
+          ok('a touch elsewhere closes it', menu.hidden);
+          await sleep(700);
+        }
+      } finally { v2CloseMenu(false); window.scrollTo(0, 0); }
     },
     phoneChipsBelowTheStatusBar: async () => {
       // An iPhone home-screen app: a 59px status bar inside the page (safe-area inset).

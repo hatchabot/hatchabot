@@ -545,6 +545,7 @@ API through one fetch helper.
 - `web/index.html` — `v2SetView`, `v2SetSort`, `v2LoadRecent`, `agentAttention`, `v2LoadMachine`: View by, sorting, Activity, Alerts and the machine line (its backup part from `GET /v1/backups?latest=1`: the newest set and who it leaves out, never every set).
 - `web/index.html` — `v2PlannedHTML`, `loadTodos`, `createFromTodo`, `retireMadeTodos`: the Planned group (ghost tiles; the plans are the agent-todos routes).
 - `web/index.html` — `v2PlaceInGroup`, `v2MoveInGroup`, `v2DropTarget`, `sortGroup`: My order — drag within a group, Move earlier / later, a group's kept A→Z (the agent move and group sort routes).
+- `web/index.html` — `v2MenuItems`, `v2OpenMenu`, `v2CloseMenu`, `v2MenuOk`: an icon's menu (right-click, the menu key or Shift+F10, a touch held still and let go: the `heldStill` branch of the home grid's pointerup, beside the drag), its entries by the rules of the agent page's own buttons.
 - `web/index.html` — `v2TabKeys`, `v2AcctItems`: arrow keys for the View by and sheet tabs and the account menu.
 - `web/index.html` — `setupSteps`, `renderSetup`, `openSetupGuide`: the first-run guide.
 - `web/index.html` — `renderCrons`, `openInspect`, `openGallery`, `openInbox`: scheduled tasks, archived-agent inspector, templates, shared agents.

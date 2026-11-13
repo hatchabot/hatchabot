@@ -239,3 +239,8 @@ tests that run on their own.
 | 2026-11-12 | clean-install-debian-12 | pass | v2.181.0 | 8 |  |
 | 2026-11-12 | privacy | pass | v2.181.0 | 1 | OpenClaw 2026.9.8; rerun: Guest (Hatchabot's own default member name) is ignored, HB-0682 |
 | 2026-11-12 | clean-install-ubuntu-2204 | pass | v2.181.0 | 8 | rerun: the first run's VM stopped by itself at load 14 |
+| 2026-11-13 | privacy | pass | v2.182.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-13 | runner-scenarios | pass | v2.182.0 | 10 | OpenClaw 2026.9.8 |
+| 2026-11-13 | browser | pass | v2.182.0 | 4 | OpenClaw 2026.9.8 |
+| 2026-11-13 | google-plain-request | pass | v2.182.0 | 1 | OpenClaw 2026.9.8 |
+| 2026-11-13 | candidate-gate | pass | v2.182.0 | 2 | OpenClaw 2026.9.8 |

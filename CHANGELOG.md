@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.183.0] — 2026-11-13
+
+### Added
+- **A menu on an agent's icon.** Right-click one of your agents on the home screen (or press the menu key, or Shift+F10, on it) for Open, Settings, Stop or Start, Rebuild, Archive… and Delete…, without opening the agent first. On a phone, press and hold an icon and let go without moving it; holding and moving still drags it, as before. Each entry asks what the agent page's own button asks: rebuilding a running agent, archiving and deleting still confirm.
+
 ## [2.182.0] — 2026-11-12
 
 ### Security
