@@ -329,7 +329,10 @@ agent's network namespace (docs/browser.md).
 - `src/providers/localDockerProvider.ts` — `ensureBrowser`, `stopBrowser`, `listBrowsers`, `browserVersion`, `containerName`: the containers; the fence is set before each browser starts (none without it); a new image's build removes the ones it replaces.
 - `src/openclaw/configWriter.ts` — `browser.enabled`: OpenClaw's attach-only profile, or the tool off.
 - `src/api/routes.ts` — `'/v1/agents/:id/browser'`, `browsersNow`: the switch (PATCH `browser`), its state, the sweep.
-- `web/index.html` — `v2SetBrowser`, `v2LoadBrowser`: the Advanced tab's Browser row.
+- `src/orchestrator/browserPanel.ts` — `BrowserPanels`, `panelCommands`, `PANEL_CDP_METHODS`, `PANEL_RELAY_SOURCE`, `channelFromChild`, `panelTransportOk`, `panelAddress`, `panelSize`: "Sign in to a site" (HB-0680): the relay run in the agent's container, the fixed list of commands the page's input becomes, what comes back (frames acknowledged one at a time, the address, loading), one panel per agent, closed after ten minutes idle.
+- `src/providers/localDockerProvider.ts` — `openBrowserPanel`: the relay over the provider's own Docker connection (`docker exec -i`, as the agent's user).
+- `src/api/routes.ts` — `'/v1/agents/:id/browser/panel'`, `'/v1/agents/:id/browser/panel/:panel/stream'`, `'/v1/agents/:id/browser/panel/:panel/input'`, `openPanel`: open (the owner, over an encrypted connection), the stream (server-sent events), input, close.
+- `web/index.html` — `v2SetBrowser`, `v2LoadBrowser`: the Advanced tab's Browser row. `bpOpen`, `bpStream`, `bpEvent`, `bpSend`, `bpFlush`, `bpPoint`, `bpClose`: the sign-in panel (`bpDlg`): the picture, clicks and taps mapped to the page's pixels, typing, one input post at a time.
 - `docker/Dockerfile.browser`: its image (Chromium as user 1001, and iptables for the fence). `CHROMIUM_REFRESH` is the day its Chromium was last refreshed; `scripts/release-check.sh` refuses a release where it is over 14 days old.
 - `scripts/browser-cost.mjs` — `TASKS`, `MODES`, `used`, `table`: what three browsing tasks cost in tokens, default page reads against "efficient" ones (a measurement with AI turns, not a live test).
 

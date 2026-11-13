@@ -26,6 +26,7 @@ import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, 
 import { batchConfigCommands, buildConfigCommands, describeConfigCommands, seedInvocation, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 import { publishedRuntimeImage, type PublishedImage } from '../orchestrator/releaseManifest.js';
 import { BROWSER_FENCE_SCRIPT, BROWSER_UID } from '../orchestrator/browser.js';
+import { channelFromChild, PANEL_RELAY_SOURCE, type BrowserPanelChannel } from '../orchestrator/browserPanel.js';
 
 const execFileP = promisify(execFile);
 
@@ -2433,6 +2434,17 @@ export class LocalDockerProvider implements RuntimeProvider {
       if (ref && ref !== image && IMAGE_REF_RE.test(ref) && ref.startsWith(`${repo}:`)) await this.#docker(['rmi', ref]);
     }
   }
+  /**
+   * The sign-in panel's relay (browserPanel.ts): `docker exec -i` in the agent's
+   * container, over this provider's own Docker connection (a runner's too), so
+   * the browser's DevTools port is reached where it is, inside the agent's
+   * network, and never published. It runs as the agent's user: the fence holds
+   * the browser's user (1001) off loopback, where the port is.
+   */
+  openBrowserPanel(agentContainer: string): BrowserPanelChannel {
+    return channelFromChild(spawn(this.docker, this.#argv(['exec', '-i', agentContainer, 'node', '--input-type=module', '-e', PANEL_RELAY_SOURCE])));
+  }
+
   async browserVersion(agentContainer: string): Promise<string | undefined> {
     const r = await this.#docker(['exec', this.#browserName(agentContainer), 'chromium', '--version']);
     return r.code === 0 ? /(\d+\.\d+\.\d+\.\d+)/.exec(r.stdout)?.[1] : undefined;

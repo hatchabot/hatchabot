@@ -351,6 +351,24 @@ export class MockProvider implements RuntimeProvider {
   }
   async stopBrowser(agentContainer: string) { this.browsers.delete(agentContainer); }
   async listBrowsers() { return [...this.browsers].map(([agentContainer, running]) => ({ name: `${agentContainer}-browser`, agentContainer, running })); }
+  /** Each sign-in panel's relay, as tests drive it: what was sent to it, and a way to answer or end it. */
+  panelRelays: Array<{ agentContainer: string; sent: Array<{ id: number; method: string; params?: Record<string, unknown> }>; emit: (m: Record<string, unknown>) => void; end: (detail?: string) => void; closed: boolean }> = [];
+  openBrowserPanel(agentContainer: string): import('../orchestrator/browserPanel.js').BrowserPanelChannel {
+    let onMessage: (m: Record<string, unknown>) => void = () => {};
+    let onClose: (detail: string) => void = () => {};
+    const r = {
+      agentContainer, sent: [] as Array<{ id: number; method: string; params?: Record<string, unknown> }>, closed: false,
+      emit: (m: Record<string, unknown>) => { if (!r.closed) onMessage(m); },
+      end: (detail = '') => { if (r.closed) return; r.closed = true; onClose(detail); },
+    };
+    this.panelRelays.push(r);
+    return {
+      send: (msg) => { if (!r.closed) r.sent.push(msg); },
+      onMessage: (fn) => { onMessage = fn; },
+      onClose: (fn) => { onClose = fn; },
+      close: () => r.end(''),
+    };
+  }
   /** A runner's key-file copies: the keys file's contents at each copy. */
   pushedKeys: string[] = [];
   async pushEmbedKeys(files: import('../embedder/embedder.js').EmbedKeyFiles) {

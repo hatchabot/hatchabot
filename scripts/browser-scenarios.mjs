@@ -8,7 +8,9 @@
  * settings hold it to the least (no scripts, no private addresses), a
  * page that sends itself to a private address later does not reach it (the
  * fence, HB-0679; the page's script is sent over the DevTools port), it
- * follows an agent restart, and switching it off removes it. No AI turns:
+ * follows an agent restart, and switching it off removes it. The sign-in
+ * panel (HB-0680) signs it in to a public demo login page through the app's
+ * own routes, and the agent's own tool then sees the signed-in page. No AI turns:
  * the browser is driven with `openclaw browser`.
  *
  *   node scripts/browser-scenarios.mjs [--keep]
@@ -17,7 +19,7 @@
  * (example.org does not resolve on every network; a real page is used.)
  */
 import { spawnSync } from 'node:child_process';
-import { api, cleanupAgents, createAgent, hbt, inAgent, log, requireRoom, scenario, settle, sleep, summary } from './live-lib.mjs';
+import { api, BASE, cleanupAgents, createAgent, hbt, inAgent, log, requireRoom, scenario, settle, sleep, summary } from './live-lib.mjs';
 
 const PREFIX = 'zz browser test';
 const keep = process.argv.includes('--keep');
@@ -56,6 +58,49 @@ async function setBrowser(agent, on) {
   if (r.status >= 300) throw new Error(`switch: ${r.status} ${JSON.stringify(r.json)}`);
   await sleep(8000);
   return settle(agent.id, 'RUNNING', 15);
+}
+
+/**
+ * The person's eyes on the panel's tab: where a field is, what the page says.
+ * Read off the DevTools port in the agent's network, outside the panel (the
+ * panel has no command that reads a page), as a person reads the screen.
+ */
+async function eyes(agent, match, expr) {
+  const js = `const t = (await (await fetch('http://127.0.0.1:9222/json')).json()).find((x) => x.type === 'page' && x.url.includes(${JSON.stringify(match)}));
+if (!t) { console.log('NO TAB'); process.exit(0); }
+const ws = new WebSocket(t.webSocketDebuggerUrl);
+ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: ${JSON.stringify(expr)}, returnByValue: true } }));
+ws.onmessage = (m) => { const r = JSON.parse(m.data); if (r.id !== 1) return; console.log(JSON.stringify(r.result?.result?.value ?? null)); process.exit(0); };`;
+  const r = await inAgent(agent, ['node', '--input-type=module', '-e', js], 60_000);
+  try { return JSON.parse(r.out.trim().split('\n').at(-1)); } catch { return r.out.trim(); }
+}
+const pageTabs = async (agent) => (await inAgent(agent, ['node', '-e', "fetch('http://127.0.0.1:9222/json').then((r) => r.json()).then((j) => console.log(j.filter((x) => x.type === 'page').length))"], 60_000)).out.trim();
+/** The panel's stream, as the app's page reads it: its events, as they come. */
+function panelStream(agent, panel) {
+  const seen = { frames: 0, urls: [], notes: [], closed: [] };
+  const ctl = new AbortController();
+  const done = (async () => {
+    const res = await fetch(`${BASE}/v1/agents/${agent.id}/browser/panel/${panel}/stream`, { headers: { authorization: `Bearer ${process.env.HATCHABOT_TOKEN || ''}` }, signal: ctl.signal });
+    seen.status = res.status;
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done: end, value } = await reader.read();
+      if (end) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+        if (ev.t === 'frame') seen.frames++;
+        else if (ev.t === 'url') seen.urls.push(ev.url);
+        else if (ev.t === 'note') seen.notes.push(ev.text);
+        else if (ev.t === 'closed') seen.closed.push(ev.why);
+      }
+    }
+  })().catch((e) => { seen.error = String(e?.message || e); });
+  return { seen, done, stop: () => ctl.abort() };
 }
 
 async function main() {
@@ -166,6 +211,48 @@ async function main() {
       ['the agent itself reaches both (so the listener was there to reach)', /agent-itself 200[\s\S]*agent-itself 200/.test(agentItself.out) && (hits.match(/agent-itself/g) ?? []).length === 2, `${agentItself.out} ${hits}`.slice(-300)],
       ['the page\'s late navigations were sent', injected.every((o) => /^set$/m.test(o)), injected.join(' | ').slice(-300)],
       ['neither reached it: loopback, nor the agent\'s private address', /agent-itself/.test(hits) && !/late-navigation/.test(hits), hits.slice(-300)],
+    ];
+  });
+  await scenario('B2d sign in to a site yourself: the panel signs it in on a demo login page, and the agent carries on signed in (HB-0680)', async () => {
+    // A public demo site with published test credentials (the-internet.herokuapp.com):
+    // nobody's account. Clicks, text and Enter through the app's own routes, as the app's page sends them.
+    const SITE = 'https://the-internet.herokuapp.com';
+    const before = await pageTabs(agent);
+    const open = await api(`/v1/agents/${agent.id}/browser/panel`, { method: 'POST', body: { w: 1000, h: 700, url: `${SITE}/login` } });
+    const panel = open.json.panel;
+    const stream = panel ? panelStream(agent, panel) : undefined;
+    const input = (ops) => api(`/v1/agents/${agent.id}/browser/panel/${panel}/input`, { method: 'POST', body: { ops } });
+    const until = async (f, secs = 30) => { for (let i = 0; i < secs * 2; i++) { if (f()) return true; await sleep(500); } return false; };
+    const loaded = stream ? await until(() => stream.seen.frames > 0 && stream.seen.urls.some((u) => u.endsWith('/login'))) : false;
+    const click = async (sel) => {
+      const p = await eyes(agent, 'the-internet', `(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
+      return input([{ k: 'mouse', type: 'move', ...p }, { k: 'mouse', type: 'down', ...p }, { k: 'mouse', type: 'up', ...p }]);
+    };
+    if (loaded) {
+      await click('#username'); await input([{ k: 'text', text: 'tomsmith' }]);
+      await click('#password'); await input([{ k: 'text', text: 'SuperSecretPassword!' }, { k: 'key', key: 'Enter' }]);
+    }
+    const signedIn = loaded && await until(() => stream.seen.urls.at(-1)?.endsWith('/secure'));
+    const says = signedIn ? String(await eyes(agent, 'the-internet', 'document.querySelector("#flash")?.innerText || ""')) : '';
+    const refused = panel ? await input([{ k: 'go', url: 'javascript:alert(1)' }]) : { status: 0 };
+    // The agent's own tool, in a tab of its own, on the members-only page.
+    let agentSees = '';
+    if (signedIn) {
+      await inAgent(agent, ['openclaw', 'browser', 'open', `${SITE}/secure`], 120_000);
+      await sleep(3000);
+      agentSees = (await inAgent(agent, ['openclaw', 'browser', 'snapshot'], 120_000)).out;
+    }
+    const closed = panel ? await api(`/v1/agents/${agent.id}/browser/panel/${panel}`, { method: 'DELETE' }) : { status: 0 };
+    if (stream) { await Promise.race([stream.done, sleep(10_000)]); stream.stop(); }
+    await sleep(2000);
+    const after = await pageTabs(agent);
+    return [
+      ['opened through the app (owner, on this machine)', open.status === 201 && !!panel, JSON.stringify(open.json).slice(0, 200)],
+      ['its stream shows the page: frames and the address', loaded, JSON.stringify(stream?.seen ?? {}).slice(0, 300)],
+      ['signed in with clicks, text and Enter alone', signedIn && /secure area/i.test(says), `${stream?.seen.urls.at(-1)} ${says}`.slice(0, 200)],
+      ['an address that is not http(s) is refused', refused.status === 400, String(refused.status)],
+      ['the agent\'s own browser tool then sees the members-only page', /Secure Area/.test(agentSees) && !/You must login/.test(agentSees), agentSees.slice(-300)],
+      ['closed: its stream says so, and its tab is gone', closed.status === 204 && stream?.seen.closed.at(-1) === 'Closed.' && Number(after) <= Number(before) + 1, `closed ${JSON.stringify(stream?.seen.closed)}; page tabs ${before} → ${after} (the agent's own tab may stay)`],
     ];
   });
   await scenario('B3 the agent restarts: its browser follows, and still works', async () => {

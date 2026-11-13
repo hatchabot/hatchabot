@@ -1,8 +1,10 @@
 # Saved logins and "Sign in yourself" for an agent's browser (design)
 
-Status: a design for the owner to approve (HB-0680, 2026-11-12), checked
-by a trial in throwaway containers on 2026-11-13 (below, "The trial").
-Nothing of it is built. The agent's own browser is described in
+Status: approved by the owner on 2026-11-13 with the three recommended
+choices (below, "Decisions for the owner"), after a trial in throwaway
+containers that day (below, "The trial"). Built in two releases: the panel
+first (built for v2.184.0: docs/browser.md, "Sign in to a site"), then Keep
+its logins. The agent's own browser is described in
 docs/browser.md.
 
 Today an agent's browser keeps nothing: its profile is in memory, so a
@@ -182,6 +184,8 @@ docs/browser.md gets a section with the same advice, and the
 troubleshooting entries for a sign-in the panel cannot complete.
 
 ## Decisions for the owner
+
+Decided 2026-11-13: (a), (a) and (a), as recommended.
 
 1. **Order.** (a) The panel first, in one release, where a sign-in lasts
    until a restart; Keep its logins in the next. (b) Both at once.

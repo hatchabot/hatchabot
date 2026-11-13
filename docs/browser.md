@@ -45,6 +45,63 @@ tasks, each with both kinds of read, the tokens of each turn and whether the
 task was done. It spends real AI turns (six by default) on the default AI
 source; `--only` and `--modes` run part of it.
 
+## Sign in to a site
+
+Some sites the agent must use want a sign-in. **Sign in to a site** shows
+you the agent's browser, live, so you sign it in yourself: agent page →
+**Advanced** → **Browser** → **Sign in to a site…** (the agent running,
+its browser on). Type an address, then click and type in the page as in
+any browser:
+
+- **On a computer:** click a box in the page and type straight into it.
+  Enter, Backspace, Tab and the arrows work; so does pasting.
+- **On a phone:** tap a box in the page, then type in the box under the
+  picture and press **Send**; **Enter ↵** presses Enter in the page. A
+  finger dragged on the picture scrolls the page. What you type there is
+  hidden as you type (**Show** shows it).
+
+Also for what the agent gets stuck on: a two-step code, a cookie banner, a
+CAPTCHA. Then tell the agent to carry on: it opens the site in its own tab,
+signed in.
+
+**How long it lasts:** until the agent restarts (a restart, a sleep, a
+rebuild, a stop). The browser's profile lives in memory: nothing it is
+signed in to is kept on disk, in backups or in downloads.
+
+**What it means:** while it is signed in, the agent can act as you on that
+site, and so can a page that tricks it or anyone who can message it. It can
+also copy the sign-in out of its browser, and see what you type in the
+panel. Sign it in only where you would let it act for you: never your
+email, bank or password manager, nor the Google account behind its
+connections. Where a site allows it, give the agent an account of its own.
+
+**What will not work:** passkeys and security keys (a headless browser has
+no authenticator), and sites that refuse automated browsers: the browser
+tells every site it is `HeadlessChrome`, and some large sign-in providers
+turn it away. Two-step codes work: you type them.
+
+**How it is held:**
+
+- The agent's owner only: not other members, web chat guests or the
+  manager. At the public address it asks for your second factor again.
+- Only over an encrypted connection: this Hatchabot's https address, a
+  device on your tailnet, or the machine itself. Over plain http on your
+  network it stays shut, because what you type in it is a password.
+- The panel reaches the browser through the Docker connection Hatchabot
+  already has to the agent's machine (a runner's too): a small relay in the
+  agent's container, on a tab of its own. Nothing is published or opened.
+- The app's page sends only clicks, scrolls, text, a few keys and
+  addresses (http and https). Hatchabot turns them into the browser's
+  commands from a fixed list, and the relay refuses any other: nothing on
+  it reads cookies or storage or runs a script. Pictures, the address and
+  whether it is loading come back; the rest of what the tab says does not.
+- What you type is not stored or logged. The agent's timeline says when the
+  panel was opened and closed, nothing more.
+- The fence holds: a private address does not open in the panel either.
+- One panel per agent: opening it again (another tab, your phone) closes
+  the first. It closes after ten minutes with nothing clicked or typed;
+  the browser keeps the page.
+
 ## How it works
 
 - Each agent with the browser on gets **its own Chromium**, in a container
@@ -119,5 +176,6 @@ source; `--only` and `--modes` run part of it.
   attached; `openclaw browser open <url>` then `openclaw browser snapshot`
   reads a page without the model.
 - The live test `browser` (docs/live-tests.md) does both, and checks the
-  isolation, that scripts and private addresses are refused, and that a
-  page sending itself to one later does not reach it, on a test agent.
+  isolation, that scripts and private addresses are refused, that a page
+  sending itself to one later does not reach it, and that the sign-in panel
+  signs it in to a demo login page, on a test agent.

@@ -2451,6 +2451,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.153.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `listBrowsers`
 
+### "Sign in to a site" says it opens only over an encrypted connection
+- **Check:** the app is open at an `http://` address of the machine on your network (its LAN address and port 8080), not its `https://` address, `localhost` on the machine itself, or its tailnet address.
+- **Cause:** on purpose: what you type in the panel is a password, and over plain http it would cross your network unencrypted. A device talking to the machine's tailnet address directly is encrypted by the tailnet and allowed; so is a proxy that says the request came over https (`X-Forwarded-Proto: https`).
+- **Fix:** open Hatchabot at its https address (the setup guide's "Turn on HTTPS" step gives it one on your tailnet), or on the machine itself, and open the panel there.
+- **Fixed in:** `v2.184.0` (the panel, and this rule)
+- **Code:** `src/orchestrator/browserPanel.ts` — `panelTransportOk`; `src/api/routes.ts` — `'/v1/agents/:id/browser/panel'`
+
+### "Sign in to a site" says its browser is not running yet, or the panel closes saying the browser closed
+- **Check:** `hatchabot browser "<agent>"` says whether its browser runs; the agent's timeline shows `browser.panel_closed` with why.
+- **Cause:** the browser starts within a minute of the agent, and goes with it: a restart, a sleep, a rebuild or a stop ends the panel and every sign-in in it (the profile lives in memory).
+- **Fix:** wait a minute after the agent starts, then open the panel again and sign in again.
+- **Fixed in:** `v2.184.0` (the panel)
+- **Code:** `src/orchestrator/browserPanel.ts` — `BrowserPanels`, `channelFromChild`; `src/providers/localDockerProvider.ts` — `openBrowserPanel`
+
+### A site turns away the agent's browser in the sign-in panel, or asks for a passkey
+- **Check:** the page in the panel says the browser is not supported or not secure, or offers only a passkey or security key.
+- **Cause:** the agent's browser is a headless Chromium and tells every site so (`HeadlessChrome`); some sign-in providers refuse it. It has no authenticator, so passkeys and security keys cannot work.
+- **Fix:** choose another way to sign in that the site offers (a password and a code), or give the agent an account of its own on that site that it can use with a password. Hatchabot does not disguise the browser.
+- **Fixed in:** not a Hatchabot bug; documented with `v2.184.0`
+- **Code:** `src/orchestrator/browser.ts` — `browserImage` (the image, `docker/Dockerfile.browser`)
+
 ### "its browser did not start" every minute for every agent
 - **Check:** the Setup log repeats "browser image build failed".
 - **Cause:** every sweep tried the build again for every agent, and slow builds overlapped.

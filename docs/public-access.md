@@ -340,6 +340,7 @@ reads inside the agent (docs/access-overview-design.md).
 | signed-in | Apps in agents: which app an agent runs |
 | step-up | Apps in agents: install, update, roll back or remove (reads this machine's folders and git login) |
 | step-up | Moving an agent to another machine |
+| step-up | Opening the sign-in panel on an agent's browser (what is typed there is a password) |
 | step-up | Choosing how an interrupted move or import ends (put it back, try again, it arrived) |
 | step-up | Creating the management agent |
 | step-up | Bot pools (they hold bot tokens) |

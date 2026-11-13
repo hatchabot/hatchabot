@@ -145,6 +145,8 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(['POST', 'DELETE'], /^\/v1\/(apps\/inspect|agents\/:id\/app(\/update|\/rollback|\/pending)?)$/, 'step-up', 'Apps in agents: install, update, roll back or remove (reads this machine\'s folders and git login)'),
   r('*', /^\/v1\/(workspaces\/(inspect|scan-paths)|openclaw\/(agents|quiesce)|agents\/:id\/adopt-workspace)$/, 'step-up', 'Folders of this machine given to an agent, and bringing in workspaces'),
   r(['POST'], /^\/v1\/agents\/:id\/(move-host|rehost)$/, 'step-up', 'Moving an agent to another machine'),
+  // The panel's other routes (its stream, input, close) need the id this one hands back: signed-in, below.
+  r(['POST'], /^\/v1\/agents\/:id\/browser\/panel$/, 'step-up', 'Opening the sign-in panel on an agent\'s browser (what is typed there is a password)'),
   r(['POST'], /^\/v1\/operations\/:id\/recover$/, 'step-up', 'Choosing how an interrupted move or import ends (put it back, try again, it arrived)'),
   r(['POST'], /^\/v1\/ops-agent$/, 'step-up', 'Creating the management agent'),
   r(['POST', 'DELETE'], /^\/v1\/pool(\/.*)?$/, 'step-up', 'Bot pools (they hold bot tokens)'),

@@ -458,6 +458,123 @@ const SCENARIOS = String.raw`(() => {
         eq('a quick tap opens it, no menu', [opened, menu.hidden], [1, true]);
       } finally { v2Open = realOpen; v2CloseMenu(false); if (archiveDlg.open) archiveDlg.close(); }
     },
+    browserSignIn: async () => {
+      // HB-0680: "Sign in to a site": the agent's browser, live, in a panel. The stream is one this
+      // scenario writes into (pictures drawn on a canvas); every post the panel makes is recorded.
+      const a1 = v2Find('a1'), tax = v2Find('a10');
+      const was = { a1: a1.browser, tax: tax.browser };
+      const realFetch = window.fetch, enc = new TextEncoder();
+      const posts = [], deletes = [];
+      let ctl, opened = 0;
+      window.__override['/v1/agents/a1/browser'] = { on: true, running: true, chromium: '156.0.0.0' };
+      window.fetch = async (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url), method = (init.method || 'GET').toUpperCase();
+        if (/\/browser\/panel\/[^/]+\/stream$/.test(url)) return new Response(new ReadableStream({ start(c) { ctl = c; } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+        if (method === 'POST' && /\/browser\/panel$/.test(url)) { opened++; posts.push({ open: JSON.parse(init.body) }); return new Response(JSON.stringify({ panel: 'pn' + opened, idleMinutes: 10 }), { status: 201, headers: { 'content-type': 'application/json' } }); }
+        if (method === 'POST' && /\/input$/.test(url)) { posts.push(...JSON.parse(init.body).ops); return new Response(null, { status: 204 }); }
+        if (method === 'DELETE' && /\/browser\/panel\//.test(url)) { deletes.push(url); return new Response(null, { status: 204 }); }
+        return realFetch(input, init);
+      };
+      const send = (ev) => ctl.enqueue(enc.encode('data: ' + JSON.stringify(ev) + '\n\n'));
+      const frame = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.fillStyle = '#222'; g.font = '26px sans-serif'; g.fillText('Sign in', 40, 70); g.strokeStyle = '#999'; g.strokeRect(40, 110, 320, 42); g.strokeRect(40, 170, 320, 42); g.fillStyle = '#2a6'; g.fillRect(40, 232, 110, 42); return c.toDataURL('image/jpeg', 0.7).split(',')[1]; };
+      const ops = (k) => posts.filter((o) => o.k === k);
+      const scr = document.getElementById('bpScreen');
+      const ptr = (type, x, y, extra = {}) => scr.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 21, pointerType: 'mouse', button: 0, buttons: 1, clientX: x, clientY: y, detail: 1, ...extra }));
+      try {
+        a1.browser = true; tax.browser = true;
+        openV2Agent('a10', 'advanced');
+        await until(() => document.getElementById('v2Browser'));
+        ok('a stopped agent: no Sign in to a site', !document.getElementById('v2BrowserSignIn'));
+        openV2Agent('a1', 'advanced');
+        const btn = await until(() => document.getElementById('v2BrowserSignIn'));
+        btn.click();
+        await until(() => ctl && bpDlg.open);
+        const size = posts[0].open;
+        ok('opened at the size of its screen: ' + JSON.stringify(size), size.w >= 600 && size.h >= 300 && size.mobile === false && size.dpr >= 1);
+        ok('its name in the title', document.getElementById('bpTitle').textContent.includes(a1.name));
+        send({ t: 'url', url: 'https://example.org/sign-in' });
+        send({ t: 'frame', data: frame(size.w, size.h), w: size.w, h: size.h });
+        await until(() => (scr.getAttribute('src') || '').startsWith('data:image/jpeg;base64,'));
+        ok('its address is shown', document.getElementById('bpUrl').value === 'https://example.org/sign-in');
+        const urlBox = document.getElementById('bpUrl');
+        urlBox.value = 'exam'; urlBox.dispatchEvent(new Event('input', { bubbles: true }));
+        send({ t: 'url', url: 'https://example.org/elsewhere' });
+        await sleep(100);
+        ok('an address being typed is not replaced', urlBox.value === 'exam');
+        await sleep(100);
+        // A click lands where it was made, in the page's own pixels.
+        const r = scr.getBoundingClientRect();
+        const sc = Math.min(r.width / size.w, r.height / size.h), ox = (r.width - size.w * sc) / 2, oy = (r.height - size.h * sc) / 2;
+        const at = { x: r.left + ox + 200 * sc, y: r.top + oy + 131 * sc };
+        ptr('pointerdown', at.x, at.y); ptr('pointerup', at.x, at.y, { buttons: 0 });
+        await until(() => ops('mouse').some((o) => o.type === 'up'));
+        const down = ops('mouse').find((o) => o.type === 'down');
+        ok('a click where it was made: ' + JSON.stringify(down), Math.abs(down.x - 200) <= 1 && Math.abs(down.y - 131) <= 1 && down.button === 'left');
+        ok('the picture took focus, for typing', document.activeElement === scr);
+        // Typing on the picture: characters as text, a few keys as keys; Esc is not one of them.
+        for (const k of ['m', 'a', 'd', 'e']) scr.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+        scr.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+        scr.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+        scr.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true }));
+        await until(() => ops('key').length >= 2);
+        eq('typed on the page, in order', posts.filter((o) => o.k === 'text' || o.k === 'key').map((o) => o.k === 'text' ? o.text : '[' + o.key + (o.mods ? '+' + o.mods : '') + ']').join(''), 'made[Backspace][Tab+8]');
+        // The box: what is in it is sent, then it is emptied; hidden as it is typed until Show.
+        const box = document.getElementById('bpType');
+        ok('the box hides what is typed', getComputedStyle(box).getPropertyValue('-webkit-text-security') === 'disc');
+        box.value = 'made-up secret';
+        byText('#bpDlg .bp-type button', 'Send').click();
+        byText('#bpDlg .bp-type button', 'Enter').click();
+        await until(() => ops('key').some((o) => o.key === 'Enter'));
+        ok('the box is sent, then emptied', ops('text').some((o) => o.text === 'made-up secret') && box.value === '');
+        document.getElementById('bpShow').click();
+        ok('Show shows it', box.classList.contains('shown') && document.getElementById('bpShow').getAttribute('aria-pressed') === 'true');
+        // An address, a scroll, back.
+        document.getElementById('bpUrl').value = 'example.org/login';
+        byText('#bpDlg .bp-addr button', 'Go').click();
+        scr.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: at.x, clientY: at.y, deltaY: 120 }));
+        document.querySelector('#bpDlg .bp-addr button[aria-label="Back"]').click();
+        await until(() => ops('back').length);
+        ok('Go sends the address as typed', ops('go').at(-1)?.url === 'example.org/login');
+        ok('a scroll: ' + JSON.stringify(ops('wheel').at(-1)), ops('wheel').at(-1)?.dy === 120);
+        // What the server says: a note, then its end.
+        send({ t: 'note', text: 'It did not open (net::ERR_CONNECTION_REFUSED).' });
+        await until(() => document.getElementById('bpState').textContent.includes('did not open'));
+        ok('a note is shown as a warning', document.getElementById('bpState').classList.contains('warn'));
+        send({ t: 'closed', why: 'Closed after ten minutes with nothing clicked or typed.' });
+        await until(() => bpDlg.classList.contains('bp-done'));
+        ok('its end is said, with Open again', document.getElementById('bpState').textContent.includes('ten minutes') && !document.getElementById('bpAgain').hidden);
+        const n = posts.length;
+        ptr('pointerdown', at.x, at.y);
+        await sleep(100);
+        ok('nothing is sent once it has closed', posts.length === n);
+        document.getElementById('bpAgain').click();
+        await until(() => opened === 2 && document.getElementById('bpState').textContent === 'Connecting…');
+        ok('Open again opens a new one', !bpDlg.classList.contains('bp-done') && document.getElementById('bpAgain').hidden);
+        // Esc closes it, and the server is told.
+        document.getElementById('bpUrl').focus();
+        bpDlg.close();
+        // The check's Chrome does not always deliver a dialog's close event: sent as a browser would.
+        bpDlg.dispatchEvent(new Event('close'));
+        await until(() => deletes.length === 1);
+        ok('closing it tells the server: ' + deletes[0], /\/v1\/agents\/a1\/browser\/panel\/pn2$/.test(deletes[0]));
+        // Refused (plain http): the server's words, and nothing more is asked.
+        window.fetch = async (input, init = {}) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (/\/browser\/panel$/.test(url)) return new Response(JSON.stringify({ error: 'The sign-in panel opens only over an encrypted connection: made-up words.' }), { status: 403, headers: { 'content-type': 'application/json' } });
+          return realFetch(input, init);
+        };
+        await bpOpen('a1');
+        ok('refused: the reason is shown', document.getElementById('bpState').textContent.includes('encrypted connection') && bpDlg.classList.contains('bp-done'));
+        bpClose();
+        ok('closed', !bpDlg.open);
+      } finally {
+        window.fetch = realFetch;
+        delete window.__override['/v1/agents/a1/browser'];
+        a1.browser = was.a1; tax.browser = was.tax;
+        if (bpDlg.open) bpClose();
+        v2Close();
+      }
+    },
     groupArrows: async () => {
       const family = byText('#v2groups .v2ghead', 'Family');
       ok('Family header', !!family);
@@ -10650,6 +10767,64 @@ const SCENARIOS = String.raw`(() => {
           await sleep(700);
         }
       } finally { v2CloseMenu(false); window.scrollTo(0, 0); }
+    },
+    phoneBrowserSignIn: async () => {
+      // HB-0680 on a phone: the panel fills the screen with nothing off its edge; a tap is a click
+      // where it lifted, and a finger dragged scrolls the page instead.
+      const a1 = v2Find('a1'), was = a1.browser;
+      const realFetch = window.fetch, enc = new TextEncoder(), posts = [];
+      let ctl, size;
+      window.__override['/v1/agents/a1/browser'] = { on: true, running: true };
+      window.fetch = async (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url), method = (init.method || 'GET').toUpperCase();
+        if (/\/stream$/.test(url)) return new Response(new ReadableStream({ start(c) { ctl = c; } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+        if (method === 'POST' && /\/browser\/panel$/.test(url)) { size = JSON.parse(init.body); return new Response(JSON.stringify({ panel: 'pp1' }), { status: 201, headers: { 'content-type': 'application/json' } }); }
+        if (method === 'POST' && /\/input$/.test(url)) { posts.push(...JSON.parse(init.body).ops); return new Response(null, { status: 204 }); }
+        if (method === 'DELETE') return new Response(null, { status: 204 });
+        return realFetch(input, init);
+      };
+      const scr = document.getElementById('bpScreen');
+      const touch = (type, x, y) => scr.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 31, pointerType: 'touch', button: 0, clientX: x, clientY: y }));
+      try {
+        a1.browser = true;
+        openV2Agent('a1', 'advanced');
+        const btn = await until(() => document.getElementById('v2BrowserSignIn'));
+        btn.scrollIntoView({ block: 'center' });
+        btn.click();
+        await until(() => ctl && size);
+        const c = document.createElement('canvas'); c.width = size.w; c.height = size.h;
+        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, size.w, size.h); g.fillStyle = '#222'; g.font = '22px sans-serif'; g.fillText('Sign in', 20, 50);
+        ctl.enqueue(enc.encode('data: ' + JSON.stringify({ t: 'frame', data: c.toDataURL('image/jpeg', 0.7).split(',')[1], w: size.w, h: size.h }) + '\n\n'));
+        await until(() => (scr.getAttribute('src') || '').startsWith('data:'));
+        await sleep(100);
+        const d = bpDlg.getBoundingClientRect();
+        ok('the panel is on the screen: ' + JSON.stringify([d.left, d.right].map(Math.round)) + ' of ' + innerWidth, d.left >= 0 && d.right <= innerWidth + 0.5);
+        ok('the console\'s kind of window, not a side panel', !bpDlg.classList.contains('v2panel') && !bpDlg.querySelector('.v2pbar'));
+        ok('no sideways scroll', document.documentElement.scrollWidth <= innerWidth);
+        const off = [...bpDlg.querySelectorAll('button, input')].filter((el) => el.getClientRects().length && (el.getBoundingClientRect().right > d.right + 0.5 || el.getBoundingClientRect().left < d.left - 0.5));
+        ok('every button and box inside it: ' + off.map((el) => el.textContent || el.id).join(', '), off.length === 0);
+        ok('the picture has room: ' + JSON.stringify(size), size.w >= 200 && size.h >= 200);
+        const r = scr.getBoundingClientRect(), mid = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        touch('pointerdown', mid.x, mid.y);
+        touch('pointerup', mid.x, mid.y);
+        await until(() => posts.some((o) => o.k === 'mouse' && o.type === 'up'));
+        ok('a tap is a click: ' + posts.map((o) => o.type).join(' '), posts.filter((o) => o.k === 'mouse').map((o) => o.type).join(' ') === 'move down up');
+        const n = posts.length;
+        touch('pointerdown', mid.x, mid.y + 60);
+        touch('pointermove', mid.x, mid.y + 30);
+        touch('pointermove', mid.x, mid.y);
+        touch('pointerup', mid.x, mid.y);
+        await until(() => posts.slice(n).some((o) => o.k === 'wheel'));
+        await sleep(100);
+        const after = posts.slice(n);
+        ok('a drag scrolls, and clicks nothing: ' + JSON.stringify(after), after.every((o) => o.k === 'wheel') && after.reduce((t, o) => t + o.dy, 0) > 0);
+      } finally {
+        window.fetch = realFetch;
+        delete window.__override['/v1/agents/a1/browser'];
+        a1.browser = was;
+        if (bpDlg.open) bpClose();
+        v2Close();
+      }
     },
     phoneChipsBelowTheStatusBar: async () => {
       // An iPhone home-screen app: a 59px status bar inside the page (safe-area inset).

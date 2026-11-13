@@ -2052,6 +2052,14 @@ container beside it that holds none of its files. For sites it has to use,
 not for looking things up: browsing is expensive in tokens.
 [browser.md](browser.md).
 
+**Sign in to a site** (Advanced → Browser → Sign in to a site…) shows you
+its browser live: you click and type in it yourself, on a computer or a
+phone, to sign it in, type a two-step code or get past a CAPTCHA; then the
+agent carries on, signed in until it restarts. The owner only, over an
+encrypted connection only; the page's input becomes the browser's commands
+from a fixed list that reads no cookies and runs no script; nothing typed
+is stored. [browser.md](browser.md#sign-in-to-a-site).
+
 ## The memory search service
 
 Every runtime image since 2026.9.6 carries no embedding engine of its own:

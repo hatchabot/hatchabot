@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.184.0] — 2026-11-13
+
+### Added
+- **Sign in to a site, in the agent's own browser.** Agent page → Advanced → Browser → **Sign in to a site…** shows its browser live: type an address, then click and type in the page yourself, to sign it in, type a two-step code, or get past a cookie banner or a CAPTCHA it is stuck on. Then the agent carries on, signed in. On a phone, tap a box in the page and type in the box under it; a finger dragged scrolls. A sign-in lasts until the agent restarts: nothing of it is kept on disk, in backups or in downloads. While it lasts, the agent can act as you on that site, so sign it in only where you would let it act for you (docs/browser.md, "Sign in to a site").
+- It is held tight: the agent's owner only (at the public address, with the second factor again); only over an encrypted connection (https, the tailnet, or the machine itself), since what you type is a password; it reaches the browser through Hatchabot's own Docker connection, nothing published; the page's clicks and typing become the browser's commands from a fixed list that reads no cookies and runs no script; nothing typed is stored or logged; it closes after ten minutes with no input. An agent on a runner works the same way.
+
+### For developers
+- The `browser` live test signs a test agent in to a public demo login page through the panel's routes and checks that the agent's own tool then sees the signed-in page (scenario B2d).
+- Saved logins (Keep its logins) are the next part of HB-0680 (docs/browser-logins-design.md).
+
 ## [2.183.0] — 2026-11-13
 
 ### Added

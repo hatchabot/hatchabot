@@ -151,6 +151,29 @@
     .cbtn .lbl-short { display:inline }
   }
   .console-dlg iframe { flex:1; width:100%; border:0; background:var(--bg) }
+  /* "Sign in to a site" (HB-0680): the agent's browser, live, on the console's frame. */
+  .bp-bar { flex-wrap:nowrap }
+  #bpTitle { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:15px; font-weight:700 }
+  .bp-addr { display:flex; gap:6px; padding:8px 10px; border-bottom:1px solid var(--line) }
+  .bp-addr input { flex:1; min-width:0; padding:6px 10px; font-size:14px }
+  .bp-addr .cbtn { height:32px }
+  .bp-addr .cbtn[aria-label], .bp-type .cbtn[aria-label] { font-size:17px; padding:0 10px }
+  /* Over the picture, not above it: the page's size is the screen area's, which a message must not change. */
+  #bpState { position:absolute; top:0; left:0; right:0; z-index:1; padding:6px 12px; font-size:13px; color:var(--dim);
+    background:color-mix(in srgb, var(--panel) 94%, transparent); border-bottom:1px solid var(--line) }
+  #bpState.warn { color:var(--warn) }
+  #bpState:empty { display:none }
+  .bp-wrap { flex:1; min-height:0; position:relative; background:var(--bg); display:flex; align-items:center; justify-content:center }
+  #bpScreen { width:100%; height:100%; object-fit:contain; touch-action:none; user-select:none; -webkit-user-select:none; -webkit-user-drag:none; cursor:default; outline:none }
+  #bpScreen:focus-visible { box-shadow:inset 0 0 0 2px var(--accent) }
+  #bpScreen:not([src]) { visibility:hidden }
+  .bp-done #bpScreen { opacity:.45; pointer-events:none }
+  .bp-type { display:flex; flex-wrap:wrap; gap:6px; padding:8px 10px; border-top:1px solid var(--line); align-items:center }
+  .bp-type input { flex:1 1 12em; min-width:0; padding:6px 10px; font-size:15px }
+  .bp-type input:not(.shown) { -webkit-text-security:disc }
+  .bp-type .cbtn { height:32px }
+  .bp-note { padding:0 12px 10px; font-size:12.5px; color:var(--dim) }
+  .bp-done .bp-addr, .bp-done .bp-type { opacity:.5; pointer-events:none }
   /* Console tabs (Chris, 2026-10-07): one per open agent, the gold only on the active one. */
   .cframes { flex:1; position:relative; min-height:0 }
   .cframes iframe { position:absolute; inset:0; height:100% }
@@ -1231,6 +1254,30 @@
     <div id="cswList" role="listbox"></div>
   </div>
   <div id="consoleFrames" class="cframes"><iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe></div>
+</dialog>
+<dialog id="bpDlg" class="console-dlg" aria-labelledby="bpTitle">
+  <div class="console-bar bp-bar">
+    <span id="bpTitle">Sign in to a site</span>
+    <button id="bpAgain" class="cbtn primary" type="button" onclick="bpOpen(bp.agent)" hidden>Open again</button>
+    <button class="cbtn" type="button" onclick="bpClose()" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  </div>
+  <form class="bp-addr" onsubmit="event.preventDefault(); bpGo()">
+    <button class="cbtn" type="button" onclick="bpSend({ k: 'back' })" aria-label="Back" title="Back">←</button>
+    <button class="cbtn" type="button" onclick="bpSend({ k: 'forward' })" aria-label="Forward" title="Forward">→</button>
+    <button class="cbtn" type="button" onclick="bpSend({ k: 'reload' })" aria-label="Reload" title="Reload">↻</button>
+    <input id="bpUrl" type="text" inputmode="url" enterkeyhint="go" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="A site's address, e.g. example.com/login" aria-label="Address">
+    <button class="cbtn" type="submit">Go</button>
+  </form>
+  <div class="bp-wrap" id="bpWrap"><div id="bpState" role="status"></div><img id="bpScreen" tabindex="0" alt="The page open in the agent's browser: click it, then type" draggable="false"></div>
+  <form class="bp-type" onsubmit="event.preventDefault(); bpTypeSend()">
+    <input id="bpType" type="text" enterkeyhint="send" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Type here, then Send" aria-label="Text to type into the page">
+    <button class="cbtn" type="button" id="bpShow" aria-pressed="false" onclick="bpToggleShow()" title="Show what you type">Show</button>
+    <button class="cbtn primary" type="submit">Send</button>
+    <button class="cbtn" type="button" onclick="bpSend({ k: 'key', key: 'Enter' })" title="Press Enter in the page">Enter ↵</button>
+    <button class="cbtn" type="button" onclick="bpSend({ k: 'key', key: 'Backspace' })" aria-label="Backspace" title="Backspace">⌫</button>
+    <button class="cbtn" type="button" onclick="bpSend({ k: 'key', key: 'Tab' })" title="Press Tab in the page">Tab</button>
+  </form>
+  <div class="bp-note">Click a box in the page and type. What you type goes to that page only; Hatchabot keeps none of it. The agent stays signed in until it restarts and can act as you there: sign it in only where you would let it act for you.</div>
 </dialog>
 
 <dialog id="loginDlg" closedby="none">
@@ -15875,7 +15922,8 @@ function v2Pane(a, tab) {
       ${built && a.state !== 'ARCHIVED' && !a.ops ? row('Browser', `<label style="margin:0">Its own browser <select id="v2Browser" data-saves onchange="v2SetBrowser('${id}', this.value === 'on', this)">
           <option value="off"${a.browser ? '' : ' selected'}>Off</option><option value="on"${a.browser ? ' selected' : ''}>On</option></select></label>
         <span class="sub" id="v2BrowserState"></span>
-        <div class="sub" style="flex-basis:100%">A Chromium of its own that it can open pages in, click and fill forms — for sites it must use, not for looking things up (web search is far cheaper: one browsing question can take 300K tokens). It runs beside the agent, with none of its files, up to 1 GB; nothing it logs into is kept across a restart.</div>`) : ''}
+        ${a.browser && run ? B('Sign in to a site…', `bpOpen('${id}')`, 'id="v2BrowserSignIn" title="See its browser and sign it in to a site yourself"') : ''}
+        <div class="sub" style="flex-basis:100%">A Chromium of its own that it can open pages in, click and fill forms — for sites it must use, not for looking things up (web search is far cheaper: one browsing question can take 300K tokens). It runs beside the agent, with none of its files, up to 1 GB. <b>Sign in to a site</b> shows you its browser, to sign it in yourself (or past a cookie banner or a CAPTCHA); a sign-in lasts until the agent restarts.</div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${built ? row('Recovery', `<div id="v2RecoveryRow" data-agent="${esc(a.id)}" style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline"><span class="sub">Loading…</span></div>`) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
@@ -16195,6 +16243,219 @@ async function v2LoadBrowser(id) {
     el.style.color = b.on && b.running ? 'var(--ok)' : '';
   } catch { if (el) el.textContent = ''; }
 }
+/*
+ * "Sign in to a site" (HB-0680; docs/browser-logins-design.md): the agent's own
+ * browser, live. The server streams the page as pictures (server-sent events,
+ * read with fetch) and takes a few kinds of input back (clicks, scrolls, text,
+ * a short list of keys, an address); it turns them into the browser's
+ * commands from a fixed list, so this page never sends one itself. bp.gen
+ * counts openings: what a closed one still says is ignored.
+ */
+let bp = { gen: 0, q: [] };
+const BP_KEYS = new Set(['Enter', 'Backspace', 'Tab', 'Delete', 'ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
+function bpState(text, warn = false) { const el = $('bpState'); el.textContent = text || ''; el.classList.toggle('warn', !!warn); }
+function bpWrapSize() {
+  const r = $('bpWrap').getBoundingClientRect();
+  return { w: Math.max(200, Math.round(r.width)), h: Math.max(200, Math.round(r.height)), mobile: matchMedia('(pointer: coarse)').matches && innerWidth < 760, dpr: Math.min(2, window.devicePixelRatio || 1) };
+}
+async function bpOpen(id) {
+  const a = v2Find(id);
+  const gen = ++bp.gen;
+  bp.abort?.abort();
+  bp = { gen, q: [], agent: id, panel: null, ended: false, fw: 0, fh: 0, urlTyped: false };
+  $('bpTitle').textContent = `Sign in to a site: ${a?.name ?? 'its browser'}`;
+  $('bpScreen').removeAttribute('src');
+  $('bpUrl').value = ''; $('bpType').value = '';
+  $('bpAgain').hidden = true;
+  bpDlg.classList.remove('bp-done');
+  if (!bpDlg.open) bpDlg.showModal();
+  bpState('Opening its browser…');
+  try {
+    const r = await api(`/v1/agents/${id}/browser/panel`, { method: 'POST', body: bpWrapSize() });
+    if (gen !== bp.gen) { void api(`/v1/agents/${id}/browser/panel/${r.panel}`, { method: 'DELETE' }).catch(() => {}); return; }
+    bp.panel = r.panel;
+    bpState('Connecting…');
+    void bpStream(gen);
+    // With a mouse, straight to the address; on a phone no keyboard springs up over the page.
+    if (!matchMedia('(pointer: coarse)').matches) $('bpUrl').focus();
+  } catch (e) { if (gen === bp.gen) bpEnded(e.message); }
+}
+function bpEnded(why) {
+  if (bp.ended) return;
+  bp.ended = true; bp.panel = null; bp.q = [];
+  bp.abort?.abort();
+  bpDlg.classList.add('bp-done');
+  bpState(why, true);
+  $('bpAgain').hidden = !bpDlg.open || !bp.agent;
+}
+function bpClose() {
+  const { agent, panel, ended } = bp;
+  if (agent && panel && !ended) void api(`/v1/agents/${agent}/browser/panel/${panel}`, { method: 'DELETE' }).catch(() => {});
+  bp.gen++; bp.abort?.abort(); bp.panel = null; bp.ended = true;
+  if (bpDlg.open) bpDlg.close();
+}
+async function bpStream(gen) {
+  const ctl = new AbortController();
+  bp.abort = ctl;
+  let res;
+  try { res = await fetch(`/v1/agents/${bp.agent}/browser/panel/${bp.panel}/stream`, { signal: ctl.signal, headers: { accept: 'text/event-stream' } }); }
+  catch { if (gen === bp.gen) bpEnded('The connection to Hatchabot dropped. Open it again to carry on.'); return; }
+  if (!res.ok || !res.body) { const d = await res.json().catch(() => ({})); if (gen === bp.gen) bpEnded(d.error || 'Its browser could not be shown.'); return; }
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    let r;
+    try { r = await reader.read(); } catch { break; }
+    if (r.done || gen !== bp.gen) break;
+    buf += dec.decode(r.value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      for (const line of chunk.split('\n')) if (line.startsWith('data: ')) { try { bpEvent(JSON.parse(line.slice(6)), gen); } catch { /* not one of ours */ } }
+    }
+  }
+  if (gen === bp.gen) bpEnded('The connection to Hatchabot dropped. Open it again to carry on.');
+}
+function bpEvent(ev, gen) {
+  if (gen !== bp.gen || bp.ended) return;
+  if (ev.t === 'frame') {
+    if (!bp.fw) bpState('');
+    bp.fw = ev.w; bp.fh = ev.h;
+    $('bpScreen').src = `data:image/jpeg;base64,${ev.data}`;
+  } else if (ev.t === 'url') { if (!bp.urlTyped) $('bpUrl').value = ev.url === 'about:blank' ? '' : ev.url; } // not over an address being typed
+  else if (ev.t === 'loading') { if (!$('bpState').classList.contains('warn')) bpState(ev.on ? 'Loading…' : ''); }
+  else if (ev.t === 'note') bpState(ev.text, true);
+  else if (ev.t === 'closed') bpEnded(ev.why);
+}
+/** Inputs go one post at a time, in order; what piles up meanwhile goes in the next (moves and scrolls merged, text joined). */
+function bpSend(...ops) {
+  if (!bp.panel || bp.ended) return;
+  for (const op of ops) {
+    const last = bp.q.at(-1);
+    if (op.k === 'mouse' && op.type === 'move' && last?.k === 'mouse' && last.type === 'move') bp.q[bp.q.length - 1] = op;
+    else if (op.k === 'wheel' && last?.k === 'wheel') { last.dx += op.dx; last.dy += op.dy; last.x = op.x; last.y = op.y; }
+    else if (op.k === 'text' && last?.k === 'text' && last.text.length + op.text.length <= 4000) last.text += op.text;
+    else bp.q.push({ ...op });
+  }
+  if (ops.some((o) => o.k !== 'mouse' || o.type !== 'move') && $('bpState').classList.contains('warn')) bpState('');
+  void bpFlush();
+}
+async function bpFlush() {
+  if (bp.busy || !bp.q.length || !bp.panel) return;
+  const { gen, agent, panel } = bp;
+  bp.busy = true;
+  const ops = bp.q.splice(0, 200);
+  try { await api(`/v1/agents/${agent}/browser/panel/${panel}/input`, { method: 'POST', body: { ops } }); }
+  catch (e) { if (gen === bp.gen && !bp.ended) (/has closed/.test(e.message) ? bpEnded(e.message) : bpState(e.message, true)); }
+  finally { if (gen === bp.gen) { bp.busy = false; void bpFlush(); } }
+}
+function bpGo() {
+  const url = $('bpUrl').value.trim();
+  if (!url) return;
+  bp.urlTyped = false;
+  bpSend({ k: 'go', url });
+  $('bpScreen').focus({ preventScroll: true });
+}
+function bpTypeSend() {
+  const box = $('bpType'), text = box.value;
+  if (!text) return;
+  for (let i = 0; i < text.length; i += 4000) bpSend({ k: 'text', text: text.slice(i, i + 4000) });
+  box.value = '';
+}
+function bpToggleShow() {
+  const box = $('bpType'), on = !box.classList.contains('shown');
+  box.classList.toggle('shown', on);
+  $('bpShow').setAttribute('aria-pressed', String(on));
+  $('bpShow').textContent = on ? 'Hide' : 'Show';
+}
+/** Where on the page a point of the picture is, in the page's own pixels; `clamp` keeps one off the picture at its edge. */
+function bpPoint(e, clamp = false) {
+  if (!bp.fw) return null;
+  const r = $('bpScreen').getBoundingClientRect();
+  const sc = Math.min(r.width / bp.fw, r.height / bp.fh);
+  if (!sc) return null;
+  let x = (e.clientX - r.left - (r.width - bp.fw * sc) / 2) / sc, y = (e.clientY - r.top - (r.height - bp.fh * sc) / 2) / sc;
+  if (!clamp && (x < 0 || y < 0 || x > bp.fw || y > bp.fh)) return null;
+  x = Math.min(bp.fw, Math.max(0, x)); y = Math.min(bp.fh, Math.max(0, y));
+  return { x: Math.round(x), y: Math.round(y) };
+}
+function bpScale() { const r = $('bpScreen').getBoundingClientRect(); return bp.fw ? 1 / Math.min(r.width / bp.fw, r.height / bp.fh) : 1; }
+const bpMods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+(() => {
+  const scr = $('bpScreen');
+  // A mouse clicks and drags as itself. A finger taps (a click where it lifted, if it did not move) or scrolls the page.
+  scr.addEventListener('pointerdown', (e) => {
+    if (!bp.panel || bp.ended) return;
+    const p = bpPoint(e);
+    if (!p) return;
+    e.preventDefault();
+    scr.focus({ preventScroll: true });
+    try { scr.setPointerCapture(e.pointerId); } catch { /* a synthetic pointer */ }
+    if (e.pointerType === 'mouse') {
+      const button = ['left', 'middle', 'right'][e.button] ?? 'left';
+      bp.mouse = { button, p };
+      bpSend({ k: 'mouse', type: 'move', ...p }, { k: 'mouse', type: 'down', ...p, button, clicks: Math.min(3, Math.max(1, e.detail || 1)), mods: bpMods(e) });
+    } else {
+      bp.touch = { id: e.pointerId, x0: e.clientX, y0: e.clientY, lx: e.clientX, ly: e.clientY, p, moved: false };
+    }
+  });
+  scr.addEventListener('pointermove', (e) => {
+    const t = bp.touch;
+    if (t && e.pointerId === t.id) {
+      if (!t.moved && Math.hypot(e.clientX - t.x0, e.clientY - t.y0) > 8) t.moved = true;
+      if (t.moved) {
+        const k = bpScale();
+        bpSend({ k: 'wheel', ...t.p, dx: Math.round((t.lx - e.clientX) * k), dy: Math.round((t.ly - e.clientY) * k) });
+        t.lx = e.clientX; t.ly = e.clientY;
+      }
+      return;
+    }
+    if (bp.mouse) { const p = bpPoint(e, true); if (p) { bp.mouse.p = p; bpSend({ k: 'mouse', type: 'move', ...p, button: bp.mouse.button }); } }
+  });
+  const up = (e) => {
+    const t = bp.touch;
+    if (t && e.pointerId === t.id) {
+      bp.touch = null;
+      if (!t.moved && e.type === 'pointerup') bpSend({ k: 'mouse', type: 'move', ...t.p }, { k: 'mouse', type: 'down', ...t.p }, { k: 'mouse', type: 'up', ...t.p });
+      return;
+    }
+    if (bp.mouse) {
+      const p = bpPoint(e, true) ?? bp.mouse.p;
+      bpSend({ k: 'mouse', type: 'up', ...p, button: bp.mouse.button, clicks: Math.min(3, Math.max(1, e.detail || 1)) });
+      bp.mouse = null;
+    }
+  };
+  scr.addEventListener('pointerup', up);
+  scr.addEventListener('pointercancel', up);
+  scr.addEventListener('contextmenu', (e) => e.preventDefault());
+  scr.addEventListener('wheel', (e) => {
+    const p = bpPoint(e);
+    if (!p || !bp.panel) return;
+    e.preventDefault();
+    const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 400 : 1;
+    bpSend({ k: 'wheel', ...p, dx: Math.round(e.deltaX * k), dy: Math.round(e.deltaY * k) });
+  }, { passive: false });
+  // Typing with the picture focused goes to the page: characters as text, a few keys as keys. Esc still closes the panel.
+  scr.addEventListener('keydown', (e) => {
+    if (!bp.panel || bp.ended || e.isComposing) return;
+    if (BP_KEYS.has(e.key)) { e.preventDefault(); bpSend({ k: 'key', key: e.key, mods: bpMods(e) }); return; }
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); bpSend({ k: 'text', text: e.key }); }
+  });
+  bpDlg.addEventListener('paste', (e) => {
+    if (document.activeElement !== scr) return;
+    const text = e.clipboardData?.getData('text');
+    if (text) { e.preventDefault(); bpSend({ k: 'text', text: text.slice(0, 4000) }); }
+  });
+  bpDlg.addEventListener('close', () => { if (bp.panel && !bp.ended) bpClose(); });
+  $('bpUrl').addEventListener('input', () => { bp.urlTyped = true; });
+  // A turned phone or a resized window: the page is told its new size.
+  let resizing;
+  addEventListener('resize', () => {
+    if (!bpDlg.open || !bp.panel) return;
+    clearTimeout(resizing);
+    resizing = setTimeout(() => { if (bp.panel) bpSend({ k: 'size', ...bpWrapSize() }); }, 300);
+  });
+})();
 async function v2SetAgentPolicy(id, body) {
   try { const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body }); r?.filesCapPending ? toast(r.filesCapPending, 8000) : toast('Saved.'); await refresh(false); }
   catch (e) { toast(e.message, 6000); await refresh(false); }
@@ -16825,7 +17086,8 @@ addEventListener('hashchange', reportFromHash);
 
 function v2ConvertPanels() {
   // recoveryDlg: a secret shown once stays until it is saved — no Back arrow.
-  const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg', 'recoveryDlg', 'sfDlg', 'backupDlg']);
+  // bpDlg: the sign-in panel is the console's kind of window, the agent's browser filling it.
+  const skip = new Set(['loginDlg', 'consoleDlg', 'bpDlg', 'v2AgentDlg', 'recoveryDlg', 'sfDlg', 'backupDlg']);
   for (const d of document.querySelectorAll('dialog')) {
     if (skip.has(d.id) || d.classList.contains('v2panel')) continue;
     d.classList.add('v2panel');

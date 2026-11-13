@@ -14,7 +14,7 @@ import { computeUsagePeriod, localDay, snapshotDailyUsage, USAGE_PERIODS, type U
 import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
-import { type Duplex, Transform, pipeline } from 'node:stream';
+import { type Duplex, PassThrough, Transform, pipeline } from 'node:stream';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname as osHostname, totalmem } from 'node:os';
@@ -35,7 +35,7 @@ import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
 import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/tailnet.js';
 import { activeValues } from '../config/envFile.js';
 import { randomBytes } from 'node:crypto';
-import { hashPassword, newRecoveryCode, normalizeRecoveryCode, passwordProblem, usernameProblem } from './accountsAuth.js';
+import { hashPassword, newRecoveryCode, normalizeRecoveryCode, onThisMachine, passwordProblem, usernameProblem } from './accountsAuth.js';
 import { loopbackIsRemote, noteFailure, throttled } from './auth.js';
 import { cookieFromHeader, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
 import { foreignRequest } from './requestOrigin.js';
@@ -106,6 +106,7 @@ import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, 
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { browserImage, browserSweep, containerOf, browserRefreshDate } from '../orchestrator/browser.js';
+import { BrowserPanels, PANEL_IDLE_MS, panelAddress, panelCommands, panelSize, panelTransportOk, type PanelSink } from '../orchestrator/browserPanel.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { CACHE_READ_DEFAULT, CACHE_WRITE_MULTIPLIER, estimateCost, priceList, pricesNothing, PRICES_CHECKED, PRICES_SOURCE } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
@@ -4360,6 +4361,90 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const chromium = b?.running && c ? await p?.browserVersion?.(c).catch(() => undefined) : undefined;
     const refreshed = browserRefreshDate();
     return { on: !!agent.browser, running: !!b?.running, image: browserImage().image, ...(chromium ? { chromium } : {}), ...(refreshed ? { refreshed } : {}) };
+  });
+
+  // ---- "Sign in to a site": the owner sees the agent's browser and clicks and
+  // types in it (src/orchestrator/browserPanel.ts, HB-0680). The agent's owner
+  // only (ownedAgent): never a guest, another member or the manager. Over an
+  // encrypted connection only, since what is typed is a password; nothing of
+  // it is stored or logged. A panel lasts until it is closed, ten minutes pass
+  // with no input, or the browser goes (the agent stops or restarts).
+  const panels = new BrowserPanels({ log: (agentId, e, d) => trace(agentId)(e, d) });
+  app.addHook('onClose', async () => { panels.closeAll('shutdown'); });
+  const PANEL_PLAIN_HTTP = 'The sign-in panel opens only over an encrypted connection: this Hatchabot\'s https address, a device on your tailnet, or this machine itself. What you type in it is a password, so over plain http on your network it stays shut.';
+  const PANEL_GONE = 'That panel has closed. Open it again.';
+  /** The open panel a request names: that person's, on that agent, over a connection fit to type a password on. */
+  const openPanel = (req: FastifyRequest<{ Params: { id: string; panel: string } }>, reply: FastifyReply) => {
+    if (!panelTransportOk(req, requestIsHttps(req), onThisMachine(req))) { void reply.code(403).send({ error: PANEL_PLAIN_HTTP }); return undefined; }
+    const agent = ownedAgent(req, req.params.id);
+    const panel = agent ? panels.get(req.params.panel, agent.id, agent.ownerId) : undefined;
+    if (!panel) void reply.code(404).send({ error: PANEL_GONE });
+    return panel;
+  };
+  app.post<{ Params: { id: string }; Body: { w?: unknown; h?: unknown; mobile?: unknown; dpr?: unknown; url?: unknown } | undefined }>('/v1/agents/:id/browser/panel', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (!panelTransportOk(req, requestIsHttps(req), onThisMachine(req))) return reply.code(403).send({ error: PANEL_PLAIN_HTTP });
+    if (agent.ops || !agent.browser) return reply.code(409).send({ error: 'Its browser is off: turn it on under Advanced → Browser first.' });
+    if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'It is not running: start it, and its browser starts with it.' });
+    const size = panelSize(req.body);
+    if (!size) return reply.code(400).send({ error: 'Say the panel\'s size: w and h, in pixels.' });
+    const typed = req.body?.url;
+    const url = typed === undefined || typed === '' ? undefined : panelAddress(typed);
+    if (typed !== undefined && typed !== '' && !url) return reply.code(400).send({ error: 'That is not a web address (http or https) the panel can open.' });
+    const p = providerFor(agent.hostId);
+    const c = containerOf(agent.runtimeRef, p);
+    if (!p.openBrowserPanel || !c) return reply.code(409).send({ error: 'This machine cannot show an agent\'s browser.' });
+    const b = (await p.listBrowsers?.().catch(() => []))?.find((x) => x.agentContainer === c);
+    if (!b?.running) return reply.code(409).send({ error: 'Its browser is not running yet: it starts within a minute of the agent. Try again shortly.' });
+    const id = panels.open(agent.id, agent.ownerId, p.openBrowserPanel(c), size, url);
+    return reply.code(201).send({ panel: id, idleMinutes: PANEL_IDLE_MS / 60_000 });
+  });
+  // The page's frames and the address, as server-sent events read by fetch.
+  // A frame is acknowledged once written here, so a slow connection gets
+  // fewer frames, not a growing queue. Closing it closes the panel.
+  app.get<{ Params: { id: string; panel: string } }>('/v1/agents/:id/browser/panel/:panel/stream', NO_COMPRESS, async (req, reply) => {
+    const panel = openPanel(req, reply);
+    if (!panel) return reply;
+    const out = new PassThrough();
+    const sink: PanelSink = (ev) => new Promise<void>((resolve) => {
+      if (out.destroyed || out.writableEnded) { resolve(); return; }
+      const done = () => { out.off('drain', done); out.off('close', done); resolve(); };
+      if (out.write(`data: ${JSON.stringify(ev)}\n\n`)) resolve();
+      else { out.once('drain', done); out.once('close', done); }
+      if (ev.t === 'closed') out.end();
+    });
+    // A comment now and then, so a proxy does not end a stream while the page is still.
+    const beat = setInterval(() => { if (!out.writableEnded) out.write(': \n\n'); }, 25_000);
+    beat.unref();
+    reply.raw.on('close', () => {
+      clearInterval(beat);
+      if (!out.writableEnded) out.end();
+      if (panel.detach(sink)) panel.close('person');
+    });
+    panel.attach(sink);
+    return reply
+      .header('content-type', 'text/event-stream; charset=utf-8')
+      .header('cache-control', 'no-store')
+      .header('x-accel-buffering', 'no')
+      .send(out);
+  });
+  // Input: what the person clicked and typed, as a few kinds of input the
+  // panel turns into commands from its fixed list (panelCommands). Not in
+  // the request log (a post per few keys would fill it); its failures are.
+  app.post<{ Params: { id: string; panel: string }; Body: { ops?: unknown } | undefined }>('/v1/agents/:id/browser/panel/:panel/input', { logLevel: 'warn' }, async (req, reply) => {
+    const panel = openPanel(req, reply);
+    if (!panel) return reply;
+    const r = panelCommands(req.body?.ops);
+    if ('error' in r) return reply.code(400).send({ error: r.error });
+    panel.touch();
+    panel.run(r.commands);
+    return reply.code(204).send();
+  });
+  app.delete<{ Params: { id: string; panel: string } }>('/v1/agents/:id/browser/panel/:panel', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (agent) panels.get(req.params.panel, agent.id, agent.ownerId)?.close('person');
+    return reply.code(204).send();
   });
 
   // A started or woken agent may carry sessions pinned to a runtime its config

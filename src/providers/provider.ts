@@ -406,6 +406,8 @@ export interface RuntimeProvider {
   listBrowsers?(): Promise<Array<{ name: string; agentContainer: string; running: boolean }>>;
   /** The Chromium an agent's running browser is ("154.0.8037.92"), or undefined when it cannot be asked. */
   browserVersion?(agentContainer: string): Promise<string | undefined>;
+  /** "Sign in to a site" (src/orchestrator/browserPanel.ts): a relay in the agent's container, on a tab of its own in its browser. */
+  openBrowserPanel?(agentContainer: string): import('../orchestrator/browserPanel.js').BrowserPanelChannel;
   /** A runner's copy of the memory search key files, after they changed here (no-op on this machine). */
   pushEmbedKeys?(files: import('../embedder/embedder.js').EmbedKeyFiles): Promise<void>;
   /** The engine container's live memory and CPU (from `docker stats`), for the health loop's memory guard. */
