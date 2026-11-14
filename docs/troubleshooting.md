@@ -1962,15 +1962,15 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### After turning on accounts, the owner's first sign-in shows no agents until the service restarts
 - **Check:** the service log has "could not hand this installation's data to the first signed-in account" (from v2.178.0), or, on an older release, the agents came back only after a restart.
-- **Cause:** handing the old owner's agents to the first account failed once (a busy or damaged database), and the process never tried again: it had marked the hand-over done before trying.
+- **Cause:** identity browser-cookie requests also skipped the authenticated-account hook, so a failed attempt made at sign-in never retried on normal page requests. Earlier, handing the old owner's agents to the first account failed once (a busy or damaged database), and the process never tried again: it had marked the hand-over done before trying.
 - **Fix:** upgrade: a failed hand-over is tried again on a later request from the same account, after 30 seconds, then 1 minute, 2 minutes and so on, up to an hour between tries. The first failure is logged as an error, the rest as warnings. If it keeps failing, check the disk has room (`df -h`), read the error in the log, then restart the service (`./scripts/restart.sh`). On an older release, restart the service.
   - Only the account that tried first gets it, even after a restart, so a member who signs in meanwhile does not. In accounts mode only the machine's owner (account #1) can be that account, and what a member made before the owner signed in (an AI source, an agent) does not stop it. Nothing is held on an install that handed its data over long ago. It runs while the old owner has anything it moves, not only an agent, source or machine: with its agents deleted, its Google connections, spare pool bots, peers, command-line tokens and settings still go to that account.
-  - Once everything is handed over, nothing more goes to anyone: an agent a leftover `dev-owner` command-line token makes later stays where it is. A "This machine" host made again at start goes to the install's owner: the host owner with accounts; with Google sign-in, the account the data was handed to, or on an install handed over before v2.178.0, the account that made the first source or agent (recorded then, once the old owner has nothing the hand-over moves, so it does not change).
+  - Once everything is handed over, nothing more goes to anyone: an agent a leftover `dev-owner` command-line token makes later stays where it is. A "This machine" host made again at start goes to the install's owner: the host owner with accounts; with Google sign-in, the recorded owner or the verified address configured in `HATCHABOT_OWNER_EMAIL`. Asset age no longer selects an owner.
   - What you make between tries does not block it: a class with the same name as one of yours comes over as "Name (2)", with its agents. A Google connection to the same account keeps yours (the newer consent), and the old one's agents move to it. They still hold the old sign-in, so its health view says to attach them again: Disconnect and attach each one. One the old connection was never delivered to stays "never delivered". A day's usage or security snapshot you already have stays yours.
   - An old agent with the same name as one of yours stays behind, with its budget, members and the rest. An AI source, machine or Google connection that only such agents use stays with them; one that any agent of yours uses is yours. The log says "some of this installation's agents stayed with the old owner". Rename or delete yours, then restart the service.
   - The log says "this installation's data is held for the account that signed in first" when another account (not a member) signs in. That account takes it at its next sign-in. When the log says that account no longer exists, release the hold, then restart the service: `sqlite3 data/hatchabot.sqlite "DELETE FROM first_account"` (or the database `HATCHABOT_DB` names). A member's sign-in logs nothing.
-- **Fixed in:** `v2.178.0`
-- **Code:** `src/api/firstAccount.ts` — `firstAccountAdoption`, `RELEASE_PIN`; `src/store/store.ts` — `pinFirstAccount`, `adoptLocalOwnerData`, `localOwnerHasAnything`, `localOwnerHasData`, `mayTakeOverInstall`, `installOwner`; `src/index.ts`
+- **Fixed in:** `v2.178.0` for the retry latch; browser-cookie retries are fixed in `v2.185.1` (HB-0548, HB-0625).
+- **Code:** `src/api/firstAccount.ts` — `firstAccountAdoption`, `RELEASE_PIN`; `src/store/store.ts` — `pinFirstAccount`, `adoptLocalOwnerData`, `localOwnerHasAnything`, `localOwnerHasData`, `mayTakeOverInstall`, `installOwner`; `src/api/auth.ts` — `registerIdentityAuth`; `src/index.ts`
 
 ### After Google could not be reached, Google sign-in says "Too many failed attempts", even with Google back
 - **Check:** identity mode. Sign-in said "Could not reach Google to verify your login." a few times, then "Too many failed attempts — try again later." (HTTP 429). The machine's network or Google had a fault shortly before.
@@ -4824,11 +4824,11 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/api/routes.ts` — `runTokenSteward`; `src/orchestrator/compaction.ts` — `syncContextCap`; `src/store/store.ts` — `markContextCapApplied`
 
 ### A budget's switch to a cheaper model fails, and the model you chose meanwhile is lost
-- **Check:** the agent's monthly budget is set to "switch to a cheaper model", its Setup log has `model.live_set_failed` for the cheaper model, and a model you chose about then said it applied live, yet the agent's page shows its earlier model (or its source's default).
+- **Check:** a newer model or source choice disappears during a failed stop followed by cheaper-model reapply, or during a failed reapply itself (even an explicit choice of the same cheaper model). Alternatively, the agent's monthly budget is set to "switch to a cheaper model", its Setup log has `model.live_set_failed` for the cheaper model, and a model you chose about then said it applied live, yet the agent's page shows its earlier model (or its source's default).
 - **Cause:** when the runtime refused the cheaper model, the budget put back the model it had read before, over the one chosen while it waited. That choice was then applied as the old model.
-- **Fix:** upgrade: the budget puts back only its own change, so a model chosen meanwhile stands and goes on, even the same cheaper model, as does a source switched meanwhile. A source's new default that held the agent on the cheaper model meanwhile is not a choice: the budget's change goes back then too, and an agent that followed the old default is held on it. A class's model written while the switch applied (the switch's pause is open from the start) is the one put back. Until then, choose the model again.
-- **Fixed in:** `v2.178.0`
-- **Code:** `src/api/routes.ts` — `runBudgetPass`, `applyModelToRuntime`, `driftedFrom`; `src/orchestrator/budgets.ts` — `runBudgets`; `src/store/store.ts` — `modelGeneration`, `setAgentModel`, `openCheaperPause`, `dropCheaperPause`
+- **Fix:** upgrade to `v2.185.1` or later for the reapply fix: recovery tracks the restoration generation and source across the stop, checks them before reapplying, and rolls back only its own later write. For the original downgrade, upgrade: the budget puts back only its own change, so a model chosen meanwhile stands and goes on, even the same cheaper model, as does a source switched meanwhile. A source's new default that held the agent on the cheaper model meanwhile is not a choice: the budget's change goes back then too, and an agent that followed the old default is held on it. A class's model written while the switch applied (the switch's pause is open from the start) is the one put back. Until then, choose the model again.
+- **Fixed in:** `v2.178.0` for the original downgrade; failed-stop/reapply residuals are fixed in `v2.185.1` (HB-0581).
+- **Code:** `src/api/routes.ts` — `runBudgetPass`, `reapplyCheaper`, `applyModelToRuntime`, `driftedFrom`; `src/orchestrator/budgets.ts` — `runBudgets`; `src/store/store.ts` — `modelGeneration`, `setAgentModel`, `openCheaperPause`, `dropCheaperPause`
 
 ### Brave searches this month leaves out the first days, on a plan that resets on the 29th, 30th or 31st
 - **Check:** Settings → AI → Fleet search key → Brave searches this month says the month runs from the 1st to the 3rd (say "3 March to 31 March") when Brave's plan resets on the 31st, and the days before it are missing from the bars.
@@ -5718,7 +5718,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### Usage jumped by an agent's whole history after a quiet period
 - **Check:** the agent's token chart shows a step the size of its lifetime use; the service log has `usage.sample_partial` for it just before (since the fix), or the agent's transcript database has rows that do not decode.
 - **Cause:** a read that skipped rows it could not decode was stored as a counter reading, smaller than the truth; the next whole read counted the skipped rows as fresh use.
-- **Fix:** upgrade. A partial read keeps the agent's profile and health but writes no total; the first whole read after it continues from the last good total.
+- **Fix:** upgrade. A partial read writes no lifetime token total; the first whole read after it continues from the last good total. The later HB-0708 fix also preserves complete accounting profiles and successful-call history.
 - **Fixed in:** `v2.165.0`
 - **Code:** `src/orchestrator/usage.ts` — `partial`; `src/orchestrator/sourceUsage.ts` — `usage.sample_partial`
 
@@ -6552,3 +6552,246 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** upgrade: any `--purge` removes that folder, with or without `--backups`. Otherwise delete it by hand, after checking no move is running, and rotate the tokens that agent held if the disk may have been read.
 - **Fixed in:** `v2.172.0`
 - **Code:** `scripts/uninstall.sh`; `src/orchestrator/backups.ts` — `newMoveCopy`, `sweepMoveCopies`
+
+
+### Manager cards cannot be confirmed or cancelled after switching to accounts
+- **Check:** a pending card was created in shared-password mode and appears after the first account signs in, but Confirm and Cancel say it is missing.
+- **Cause:** first-account adoption moved the database owner while the card's saved JSON still named the old owner.
+- **Fix:** use a build with this fix. Reads use the database owner, so existing pending cards work for the account that adopted them without recreating the cards.
+- **Fixed in:** `v2.185.1` (HB-0685).
+- **Code:** `src/store/store.ts` — `getMgmtProposal`, `listMgmtProposals`, `adoptLocalOwnerData`
+
+### An interrupted deploy stays broken while the latest-release timer cannot reach the repository
+- **Check:** the latest-release timer reports a failed fetch and an interrupted deploy record remains beside the upgrade lock; the previous release and saved dependencies are still local.
+- **Cause:** the timer fetched tags before checking whether the checkout needed local repair. A failed fetch prevented that repair.
+- **Fix:** use a build with this fix: the timer can run the previous release's local rollback even when fetching fails or no stable tag exists. It does not deploy a cached newer release while offline.
+- **Fixed in:** `v2.185.1` (HB-0686).
+- **Code:** `scripts/follow-latest.sh` — `FETCHED`, `CUT_FROM`, `repair_cut`
+
+### Google sign-in stalls while another signing key is being refreshed
+- **Check:** new Google sign-ins wait during a certificate endpoint outage, even though a recently used signing key is cached. Existing cookie sessions continue to work.
+- **Cause:** verification waited for an unrelated shared certificate refresh before consulting a fresh cached key; the request and response body had no application deadline.
+- **Fix:** use a build with this fix. A fresh cached key is used immediately, and the complete certificate refresh has a ten-second deadline. An unavailable certificate service is reported as unavailable rather than a bad password.
+- **Fixed in:** `v2.185.1` (HB-0687).
+- **Code:** `src/api/identity.ts` — `IdentityVerifier`, `CERT_TIMEOUT_MS`, `IdentityUnavailableError`
+
+### Invalid Google sign-in requests return a server error
+- **Check:** a malformed sign-in token, a non-text token or a null JSON header produces HTTP 500 instead of an authentication refusal.
+- **Cause:** the verifier assumed token and JSON field types and looked up signing keys on a plain object, including inherited property names.
+- **Fix:** use a build with this fix. Invalid token shapes are refused before use, and certificate lookup uses a map.
+- **Fixed in:** `v2.185.1` (HB-0688).
+- **Code:** `src/api/identity.ts` — `IdentityVerifier`, `IdentityError`
+
+### An invitation is spent by a Google account that cannot sign in
+- **Check:** an invitation becomes used, but its recipient cannot sign in because their email is unverified or excluded by the installation's allowed-email setting.
+- **Cause:** invitation redemption verified the token without applying the email admission policy used by sign-in.
+- **Fix:** use a build with this fix. Both chat-app and web-chat invitations apply the sign-in admission policy before consuming the invitation. A previously spent invitation must be replaced by its owner.
+- **Fixed in:** `v2.185.1` (HB-0689).
+- **Code:** `src/api/identity.ts` — `admittedPrincipal`, `allowedEmailProblem`; `src/api/routes.ts` — `joiningAccount`
+
+### Event-triggered tasks keep their old permission after the switch changes
+- **Check:** change the Event-triggered tasks switch while the agent is stopped, or when its runtime refuses a configuration command; the saved switch changes but the agent still uses the old permission.
+- **Cause:** only a running runtime was updated, and an unsuccessful write neither queued a rebuild nor told the caller it had failed to apply.
+- **Fix:** use a build with this fix. An unapplied change is saved for the next start or wake, and the page says when it remains pending. For a running agent with a pending change, rebuild it to apply the saved permission.
+- **Fixed in:** `v2.185.1` (HB-0690).
+- **Code:** `src/api/routes.ts` — `applyCronTriggers`, `cronTriggersPending`; `web/index.html` — `saveCronTriggers`
+
+### Correcting an invitation admits the previous person or removes the corrected window
+- **Check:** reopen an unlinked member's invitation with a corrected handle while its earlier watcher is reading or approving a pairing request; the earlier person is linked or the new window disappears.
+- **Cause:** the watcher checked for replacement only before asynchronous work, and identified windows by their deadlines, which could be equal.
+- **Fix:** use a build with this fix. Each window has its own generation, checked after reads and approvals. An obsolete approval is removed unless a current member legitimately owns that identity; the replacement window is preserved.
+- **Fixed in:** `v2.185.1` (HB-0692).
+- **Code:** `src/orchestrator/claim.ts` — `claimFirstContact`, `scrubApproval`; `src/store/store.ts` — `openPairingWindow`, `pairingWindows`
+
+### A backup run overwrites an existing set from another install or without the install's key
+- **Check:** two installs share a backup directory and today's older set has a saved key but no owner marker, or a run without a usable secret key replaces an existing identified set's registry.
+- **Cause:** the overwrite guard read only the explicit owner marker, and did not refuse an unidentified writer before changing an identified backup set.
+- **Fix:** use a build with this fix. The guard also recognizes older sets by their saved key and refuses to change an identified set when the current install cannot be identified. Give separate installs separate backup directories and restore the correct install key before retrying.
+- **Fixed in:** `v2.185.1` (HB-0696).
+- **Code:** `scripts/backup-volumes.sh` — `dest_owner`; `scripts/backup-owner.sh` — `set_owner`
+
+### The site sign-in panel stays visible behind the login screen or remains busy after closing
+- **Check:** let the Hatchabot session expire while the site sign-in panel is open, or press Escape while the panel is still opening. A screenshot or unsent text stays visible, or a late response opens a hidden stream.
+- **Cause:** panel cleanup depended on receiving its server id; session changes and the dialog's native close did not consistently invalidate and clear it.
+- **Fix:** use a build with this fix. Closing or ending the session clears the picture and unsent text, stops the stream, and releases a panel whose opening response arrives late. Each new panel starts with typing hidden. Best-effort panel cleanup stays silent, so a delayed authentication refusal cannot reopen sign-in or a second-factor prompt.
+- **Fixed in:** `v2.185.1` (HB-0697).
+- **Code:** `web/index.html` — `bpClose`, `bpClearView`, `bpOpen`, `pageSessionEnded`
+
+### An agent's Browser row lists the previous agent's sites
+- **Check:** quickly move between agents while the first agent's browser status request is slow; the second agent's Advanced tab shows the first one's sites.
+- **Cause:** a late response used the current page's sites element together with an earlier agent's status.
+- **Fix:** use a build with this fix. A browser status response is discarded when its original status element is no longer on the page.
+- **Fixed in:** `v2.185.1` (HB-0698).
+- **Code:** `web/index.html` — `v2LoadBrowser`
+
+### Account settings show an earlier account's owner controls
+- **Check:** overlapping account reads finish out of order during a sign-in change; Settings briefly shows the old account's identity or owner-only controls. Server authorization still applies.
+- **Cause:** the page guarded only its session identity update, while the rest of a stale account success or error still updated the account settings.
+- **Fix:** use a build with this fix. The entire stale account response is ignored, including failures.
+- **Fixed in:** `v2.185.1` (HB-0699).
+- **Code:** `web/index.html` — `loadMyAccount`
+
+
+### The agent's browser can reach a local service through Docker's resolver address
+- **Check:** in an isolated test, a page reaches a wildcard local listener through the Docker resolver alias on a non-DNS port even though ordinary loopback access is refused.
+- **Cause:** the browser fence exempted every port on the resolver address. The browser shares the agent's network namespace, so that address also reached wildcard services there.
+- **Fix:** use a build with this fix. The exception permits only original TCP/UDP DNS requests, including Docker's translated resolver ports, and the fence also refuses the IPv6 unspecified address. The sweep replaces browsers with an older fence automatically, closing kept profiles gracefully first.
+- **Fixed in:** `v2.185.1` (HB-0679 resolver-alias follow-up).
+- **Code:** `src/orchestrator/browser.ts` — `BROWSER_FENCE_SCRIPT`, `BROWSER_FENCE_VERSION`, `BROWSER_FENCED_V6`; `src/providers/localDockerProvider.ts` — `ensureBrowser`
+
+
+### A site sign-in panel keeps showing pictures after sign-out or an ownership change
+- **Check:** an already-open panel's screenshot stream continues after signing out, revoking sessions, transferring the agent or replacing its browser. A slow panel-open request may also finish after its original access has changed.
+- **Cause:** authorization was checked only when the HTTP request began, and the panel-open handler reused the agent snapshot from before a runner lookup.
+- **Fix:** use a build with this fix. The panel requires a signed-in browser session and checks that session, public access and the current agent/browser before further frames or input. Mutations and periodic checks close obsolete panels, and opening rechecks after waiting for the runner.
+- **Fixed in:** `v2.185.1` (HB-0700).
+- **Code:** `src/api/routes.ts` — `panelSessionValid`, `panelAccessValid`, `revalidatePanels`, `openPanel`
+
+
+### An app update briefly runs both the old and replacement scheduled task
+- **Check:** an Update crosses a scheduled boundary while old and new jobs of the same app task are both enabled; the external action can run twice even when the update succeeds.
+- **Cause:** replacement jobs were added enabled before old jobs were removed. The control-plane operation lock did not stop the agent's scheduler.
+- **Fix:** use a build with this fix. A durable transition record preserves the original jobs and their enabled states. Replacements are staged disabled, originals are disabled and checked, then the intended replacements are enabled. Failures and restarts use the record to restore or complete the change without mistaking staging for the owner's choice to disable a task. An already-running command is not cancelled by a schedule change.
+- **Fixed in:** `v2.185.1` (HB-0691).
+- **Code:** `src/orchestrator/apps.ts` — `syncTasks`, `readTaskTransition`, `restoreTaskTransition`, `taskTransitionPending`; `src/orchestrator/appOperations.ts` — `tasksAre`, `putTasksBack`
+
+
+### Retrying an interrupted app update restores task commands from the wrong release
+- **Check:** scheduled tasks finished switching before Hatchabot stopped, but its App row still shows the previous release. A retry then fails and reports the tasks unchanged, while a restored task runs the older command.
+- **Cause:** rollback reconstructed removed tasks from the app record's previous manifest, which could lag the scheduler's completed switch.
+- **Fix:** use a build with this fix. Before clearing a successful transition, Hatchabot saves the manifest that created each current task, matched by its id and name. Retries and rollback use that information; a successful restoration records any recreated task ids before clearing its recovery record.
+- **Fixed in:** `v2.185.1` (HB-0701).
+- **Code:** `src/orchestrator/apps.ts` — `readTaskOrigins`, `writeTaskOrigins`, `restoreTaskTransition`, `syncTasks`
+
+### Delete races with bringing an archived agent back
+- **Check:** Restore is waiting to verify its parked Discord or Slack bot when another request deletes the agent. The restore then fails, or channel credentials reappear on the deleted record.
+- **Cause:** restoring the parked bots awaited network calls without holding the agent's lifecycle lock.
+- **Fix:** use a build with this fix. Restore holds the lock through bot reclamation and its provisioning state change. Delete reports busy until restoration finishes.
+- **Fixed in:** `v2.185.1` (HB-0702).
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/restore'`, `markBusy`, `clearBusy`
+
+### Adopting a workspace replaces files while the agent is still running
+- **Check:** the runtime remains running after a stop request, or the record says stopped while the container is running, and Adopt begins copying files.
+- **Cause:** adoption trusted a successful stop reply or the stored stopped label without checking the runtime.
+- **Fix:** use a build with this fix. Adoption confirms stopped or absent before importing anything, including for an agent already labelled stopped. An uncertain stop leaves the files untouched; a lost reply after a successful stop is reconciled.
+- **Fixed in:** `v2.185.1` (HB-0703).
+- **Code:** `src/orchestrator/adopt.ts` — `applyWorkspaceInner`; `src/orchestrator/quiesce.ts` — `stopAndConfirm`
+
+### Typing in a scheduled task disappears when an earlier Save finishes
+- **Check:** change a task's text while Add or Save is waiting; the successful response clears the newer text. Reverting a field during the wait may also be omitted from the next Save.
+- **Cause:** completion checked the agent and task id, but did not compare the visible draft with the one submitted.
+- **Fix:** use a build with this fix. Only the submitted draft is cleared. Later typing stays, and the next Save compares it with the successfully submitted values.
+- **Fixed in:** `v2.185.1` (HB-0704).
+- **Code:** `web/index.html` — `cronFormDraft`, `addCronJob`, `cronEditFilled`
+
+### An old schedule response replaces a newer list or changes another agent's trigger checkbox
+- **Check:** reload or reopen Schedule while a prior read waits, or change agents while saving the event-trigger permission. The older response replaces the latest list or reverses the new panel's checkbox after failing.
+- **Cause:** schedule reads and trigger error cleanup did not distinguish successive requests or successive openings of the same agent.
+- **Fix:** use a build with this fix. Request generations discard obsolete reads and limit checkbox rollback to the still-current write and opening.
+- **Fixed in:** `v2.185.1` (HB-0705).
+- **Code:** `web/index.html` — `prepareCrons`, `loadCrons`, `saveCronTriggers`, `cronRead`, `cronTriggerWrite`
+
+### A machine budget remembers an agent's old model after it changes during the pass
+- **Check:** while a machine budget switches one agent, change the model of a later agent. Its budget restoration record then remembers the earlier model; agents archived or deleted during the wait can also be selected for a switch.
+- **Cause:** the pass refreshed all candidate agents before its first asynchronous action, leaving later candidates stale. Restoration also ran during deletion.
+- **Fix:** use a build with this fix. Each action rereads and checks its agent immediately before use. Model restoration waits for deletion to settle and retains the original model if deletion fails.
+- **Fixed in:** `v2.185.1` (HB-0706).
+- **Code:** `src/orchestrator/budgets.ts` — `runBudgets`, `switchable`, `pausable`
+
+### An imported data source targets runtime files or fails with an unsafe mount name
+- **Check:** the imported source's folder name contains traversal, a slash or a colon; a repo uses a reserved runtime directory name; or a folder source names a regular file or covers a protected container path.
+- **Cause:** import did not enforce the same destination rules as adding a source, and folder mount names were not checked before building the runtime.
+- **Fix:** use a build with this fix. Import skips invalid sources before creating their records or deploy-key secrets. Builds and git scripts also validate persisted names. Removing an older repo source with a reserved name cleans up its deploy key while preserving the runtime directory. Remove an invalid source and add it under a plain, non-reserved name.
+- **Fixed in:** `v2.185.1` (HB-0707).
+- **Code:** `src/orchestrator/transfer.ts` — `importAgentInner`; `src/orchestrator/dataSourceLimits.ts` — `folderMountNameProblem`, `RESERVED_GIT_MOUNT_NAMES`; `src/orchestrator/gitSource.ts` — `validGitMountName`; `src/orchestrator/provision.ts` — `buildRuntimeSpec`
+
+### A partial usage read lowers spending and releases a budget pause
+- **Check:** the service log records `usage.sample_partial`, then measured spending or successful-call counts drop; an agent paused at its limit may start again without a budget change.
+- **Cause:** incomplete reads were excluded from the lifetime token counter but still replaced the accounting profile and successful-call history with smaller values.
+- **Fix:** use a build with this fix. Incomplete reads preserve the last complete profile, call counts and cost rate. The next complete read advances them normally. Repair unreadable transcripts to obtain fresh complete measurements.
+- **Fixed in:** `v2.185.1` (HB-0708).
+- **Code:** `src/orchestrator/sourceUsage.ts` — `sampleOnce`, `usage.sample_partial`; `src/orchestrator/usage.ts` — `partial`; `src/orchestrator/budgets.ts` — `recordCostDays`
+
+### A move uses settings changed after its destination checks
+- **Check:** change an agent's image, source or shared folders while Move is checking its destination; the move can proceed using settings those checks never approved.
+- **Cause:** move preflight retained an old agent snapshot across asynchronous image and Docker daemon checks, while settings remained writable during the move.
+- **Fix:** use a build with this fix. Move rechecks current ownership, runtime and configuration after preflight and daemon lookup, before stopping anything. Conflicting image and folder changes are refused while the move owns the agent.
+- **Fixed in:** `v2.185.1` (HB-0709).
+- **Code:** `src/api/routes.ts` — `'/v1/agents/:id/move-host'`; `src/orchestrator/moveHost.ts` — `moveAgentToHost`
+
+### A later import replaces an already-open setup form
+- **Check:** an import or copy setup is open with answers typed when another template finishes loading. Its form replaces the first, whose operation then remains waiting.
+- **Cause:** the shared setup dialog replaced its fields and single completion callback while a previous caller was still waiting.
+- **Fix:** use a build with this fix. An overlapping setup is declined with a message to finish or cancel the open one first; its answers and pending operation stay intact.
+- **Fixed in:** `v2.185.1` (HB-0710).
+- **Code:** `web/index.html` — `collectParamValues`, `paramFormResolve`
+
+### A budget says paused while the runtime still runs
+- **Check:** a stop request returns without stopping the runtime, its status is unknown, or an asleep label lags a running container. The budget nevertheless shows a completed pause. Conversely, a lost successful-stop reply can leave it unrecorded.
+- **Cause:** the budget trusted the stop response or asleep label rather than confirming the runtime's state.
+- **Fix:** use a build with this fix. Under the lifecycle lock, a budget records its pause only after stopped or absent is confirmed. Uncertain stops remain due for retry; a confirmed stop counts even if its original reply was lost.
+- **Fixed in:** `v2.185.1` (HB-0711).
+- **Code:** `src/api/routes.ts` — `runBudgetPass`; `src/orchestrator/quiesce.ts` — `stopAndConfirm`
+
+### A password username receives copies sent to the matching Google email
+- **Check:** a local password account has an email-shaped username and sees an agent copy sent to that address, or the recipient picker lists both accounts under that address.
+- **Cause:** password usernames were treated as verified email addresses and could bind pending shares before the Google account signed in.
+- **Fix:** use a build with this fix. Email recipients and claims use Google identity accounts only. Pending shares mistakenly bound to a password account become available to the verified Google account at its next sign-in. Already accepted copies are not automatically removed.
+- **Fixed in:** `v2.185.1` (HB-0665).
+- **Code:** `src/api/accountsAuth.ts` — `registerAccountRoutes`; `src/store/store.ts` — `ownerForEmail`, `listAccounts`, `claimSharesForEmail`, `listInbox`, `getShareFor`
+
+### Older account hand-overs leave connections or spare bots under dev-owner
+- **Check:** after an older hand-over, the local host or hand-over record identifies the owner, but connections, spare pool bots or other owner-scoped rows remain under dev-owner. Another valid identity account may own a source or agent too.
+- **Cause:** earlier hand-overs omitted ancillary rows; the guard treated another account's data as proof that adoption had completed.
+- **Fix:** upgrade to a build with this fix. A versioned startup repair transfers existing leftovers to the recorded owner without moving another account's data. It runs once; later dev-owner rows are not repeatedly swept. If ownership is unknown, configure the owner address as described below and sign in.
+- **Fixed in:** `v2.185.1` (HB-0624).
+- **Code:** `src/store/store.ts` — `runOnce`, `identityInstallOwner`, `adoptLocalOwnerData`
+
+### A member signing in first takes ownership of an identity installation
+- **Check:** the installation has no recorded hand-over owner and no already-owned local host. Earlier versions selected whoever signed in first or owned the oldest source.
+- **Cause:** identity mode had no explicit owner setting before its first hand-over.
+- **Fix:** use a build with this fix and set `HATCHABOT_OWNER_EMAIL` to the owner's Google address before switching to identity mode. Restart and have that verified account sign in. Without an established owner or this setting, the data stays under dev-owner. Existing recorded ownership is preserved; changing the setting does not transfer it.
+- **Fixed in:** `v2.185.1` (HB-0625).
+- **Code:** `src/api/firstAccount.ts` — `firstAccountAdoption`; `src/store/store.ts` — `identityInstallOwner`, `installOwner`; `src/config/envCatalog.ts` — `HATCHABOT_OWNER_EMAIL`
+
+### An uploaded core file reverts on Apply values or produces an inconsistent snapshot
+- **Check:** upload SOUL.md or AGENTS.md through Files, then apply setup values. The uploaded text disappears, or a snapshot taken during the upload combines old and new files.
+- **Cause:** raw uploads bypassed the core-file queue and the saved template layer. Budget and documentation writers also used a separate queue.
+- **Fix:** use a build with this fix. Uploads, core edits, snapshots and AGENTS.md commits share one queue. A successful upload into the resolved workspace updates its template layer, including through a folder alias. Failed writes leave that layer unchanged; core uploads enforce the text and size limits.
+- **Fixed in:** `v2.185.1` (HB-0631).
+- **Code:** `src/api/routes.ts` — `withCoreFilesTurn`, `withAgentsMdTurn`, `'/v1/agents/:id/fs/file'`; `src/orchestrator/agentFiles.ts` — `putArgv`
+
+### A memory limit changes back during a settings save
+- **Check:** save an agent's cap or swap while a limits sweep, machine-default change or Start is applying limits. The database shows the saved limit but Docker briefly or persistently has the earlier one.
+- **Cause:** these writers could apply a stale limit between a PATCH's runtime update and its database commit.
+- **Fix:** use a build with this fix. All these writers take the same per-agent limits turn and reread settings there. Drift correction also rechecks the current runtime and effective limits before applying anything.
+- **Fixed in:** `v2.185.1` (HB-0653).
+- **Code:** `src/api/routes.ts` — `inLimitsTurn`, `applyCurrentLimits`, `limitsCheck`, `startStopped`
+
+### A move stays held after its destination machine is permanently lost
+- **Check:** a move passed its host switch, recovery is held because the destination no longer answers, and Put it back cannot confirm that the destination copy stopped.
+- **Cause:** this held state offered Retry and Put it back but omitted the explicit manual-cleanup recovery action available for an orphaned copy.
+- **Fix:** use a build with this fix. After removing the destination copy so it cannot run again, choose **I removed the copy**. Recovery restores the retained source volume and original running or stopped state. A reachable destination that still runs is refused; ordinary Put it back still requires confirmation that the other copy is stopped.
+- **Fixed in:** `v2.185.1` (HB-0481).
+- **Code:** `src/orchestrator/moveHost.ts` — `moveHoldChoices`, `recoverMoveHost`, `settleOrphan`
+
+### Release downloads or rename health checks wait indefinitely
+- **Check:** GitHub or a health endpoint accepts a connection but stops sending, and release resolution, bundle upgrade or rename health probing never finishes.
+- **Cause:** these curl calls lacked a total deadline, including metadata fetched through the release-manifest helper.
+- **Fix:** use a build with this fix. Metadata and checksum requests allow 60 seconds per attempt; bundle downloads allow 900 seconds; rename health probes allow 5 seconds. Connect and retry limits are bounded too. Timeout messages identify the failed request, partial health bodies are rejected, and failed downloads leave the installed release untouched.
+- **Fixed in:** `v2.185.1` (HB-0623).
+- **Code:** `scripts/release-target.sh`, `scripts/release-manifest.sh` — `mf_fetch`; `scripts/upgrade.sh`; `scripts/migrate-rename-host.sh`; `install.sh`
+
+### Asking for image help closes a security or recovery dialog
+- **Check:** trigger image help while entering a second factor, setting one up, displaying recovery codes or completing sign-in. The active dialog closes and its unfinished flow is lost.
+- **Cause:** the helper closed every open dialog before navigating to the management agent.
+- **Fix:** use a build with this fix. Image help waits for the security flow to finish and closes only its own AI-source dialog during normal navigation.
+- **Fixed in:** `v2.185.1` (HB-0524).
+- **Code:** `web/index.html` — `askMgmtForImage`, `pageSecondFactorBusy`
+
+### A delivered web-chat message is offered for resend when a runner's clock differs
+- **Check:** a send times out or loses its reply, then reopening the chat says the message may not have arrived even though the runner recorded it. The runner's clock differs from the browser or server, or the message is older than the displayed history.
+- **Cause:** delivery inference compared text counts and timestamps across machines and only the visible history.
+- **Fix:** use a build with this fix. New messages carry a unique receipt marker and use it for gateway idempotency. History checks pending markers before trimming the display; an incomplete read can prove receipt but cannot prove absence. Legacy messages retain the older fallback.
+- **Fixed in:** `v2.185.1` (HB-0643).
+- **Code:** `web/index.html` — `webChatMessageId`, `webChatOfferUnsure`, `openWebChatPanel`; `src/orchestrator/webChat.ts` — `webChatPrefix`, `historyScript`, `webChatHistory`; `src/api/webChat.ts` — `registerWebChatRoutes`

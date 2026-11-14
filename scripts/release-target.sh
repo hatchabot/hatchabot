@@ -42,14 +42,19 @@ if [ -d .git ]; then
   esac
 else
   newest() {
-    local j
-    j="$(curl -fsSL "https://api.github.com/repos/$SLUG/releases/latest" 2>/dev/null)" || cant "Could not ask GitHub for the newest release (no network?)."
+    local j rc=0
+    j="$(curl -fsSL --connect-timeout 10 --max-time 60 "https://api.github.com/repos/$SLUG/releases/latest" 2>/dev/null)" || rc=$?
+    [ "$rc" != 28 ] || cant "Timed out asking GitHub for the newest release (60 seconds) — try again later."
+    [ "$rc" = 0 ] || cant "Could not ask GitHub for the newest release (no network?)."
     printf '%s\n' "$j" | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"(v[^"]+)".*/\1/p' | sed -n 1p
   }
   case "$CHANNEL" in
     latest) newest ;;
     stable|beta)
-      J="$(curl -fsSL "https://raw.githubusercontent.com/$SLUG/main/channels.json" 2>/dev/null)" || cant "Could not fetch channels.json from GitHub (no network?)."
+      FETCH_RC=0
+      J="$(curl -fsSL --connect-timeout 10 --max-time 60 "https://raw.githubusercontent.com/$SLUG/main/channels.json" 2>/dev/null)" || FETCH_RC=$?
+      [ "$FETCH_RC" != 28 ] || cant "Timed out fetching channels.json from GitHub (60 seconds) — try again later."
+      [ "$FETCH_RC" = 0 ] || cant "Could not fetch channels.json from GitHub (no network?)."
       named "$J" ;;
     v[0-9]*) echo "$CHANNEL" ;;
     *) echo "Unknown channel '$CHANNEL' — use stable, beta, latest, or a version like v2.31.3." >&2; exit 1 ;;

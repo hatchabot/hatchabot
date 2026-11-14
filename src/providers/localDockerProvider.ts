@@ -25,7 +25,7 @@ const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB)
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
 import { batchConfigCommands, buildConfigCommands, describeConfigCommands, seedInvocation, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 import { publishedRuntimeImage, type PublishedImage } from '../orchestrator/releaseManifest.js';
-import { BROWSER_CLOSE_SOURCE, BROWSER_FENCE_SCRIPT, BROWSER_LOGINS_RE, BROWSER_LOGINS_ROLE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_UID, browserLoginsVolume } from '../orchestrator/browser.js';
+import { BROWSER_CLOSE_SOURCE, BROWSER_FENCE_SCRIPT, BROWSER_FENCE_VERSION, BROWSER_LOGINS_RE, BROWSER_LOGINS_ROLE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_UID, browserLoginsVolume } from '../orchestrator/browser.js';
 import { channelFromChild, PANEL_RELAY_SOURCE, type BrowserPanelChannel } from '../orchestrator/browserPanel.js';
 
 const execFileP = promisify(execFile);
@@ -2524,14 +2524,14 @@ export class LocalDockerProvider implements RuntimeProvider {
     // replaced every minute. One from before the label: the limit it holds.
     // And only on the profile asked for: a kept one (its id), or one in memory.
     if (spec.logins && !BROWSER_LOGINS_RE.test(spec.logins)) throw new ProviderError(`bad browser logins id ${spec.logins}`, "Could not start the agent's browser.");
-    const cur = await this.#docker(['inspect', name, '--format', '{{.State.Running}}|{{ index .Config.Labels "hatchabot.browser-with" }}|{{.Config.Image}}|{{ index .Config.Labels "hatchabot.browser-memory" }}|{{.HostConfig.Memory}}|{{ index .Config.Labels "hatchabot.browser-logins" }}']);
-    const [bRunning, bWith, bImage, bAsked = '', bMemory = '', bLogins = ''] = cur.stdout.trim().split('|');
+    const cur = await this.#docker(['inspect', name, '--format', '{{.State.Running}}|{{ index .Config.Labels "hatchabot.browser-with" }}|{{.Config.Image}}|{{ index .Config.Labels "hatchabot.browser-memory" }}|{{.HostConfig.Memory}}|{{ index .Config.Labels "hatchabot.browser-logins" }}|{{ index .Config.Labels "hatchabot.browser-fence" }}']);
+    const [bRunning, bWith, bImage, bAsked = '', bMemory = '', bLogins = '', bFence = ''] = cur.stdout.trim().split('|');
     const had = bAsked && bAsked !== '<no value>' ? dockerMemoryBytes(bAsked) : (/^\d+$/.test(bMemory) ? Number(bMemory) : undefined);
     const wantMemory = dockerMemoryBytes(spec.memory);
     const memoryOk = wantMemory === undefined || had === wantMemory;
     const haveLogins = BROWSER_LOGINS_RE.test(bLogins) ? bLogins : '';
     const sameLogins = haveLogins === (spec.logins ?? '');
-    if (cur.code === 0 && bRunning === 'true' && bWith === startedAt && bImage === spec.image && memoryOk && sameLogins) return 'running';
+    if (cur.code === 0 && bRunning === 'true' && bWith === startedAt && bImage === spec.image && memoryOk && sameLogins && bFence === BROWSER_FENCE_VERSION) return 'running';
     if (cur.code === 0) {
       // On the same kept profile again (a new image or memory limit): closed first, so it writes it.
       if (bRunning === 'true' && bWith === startedAt && haveLogins && sameLogins) await this.#closeKeptBrowser(agent);
@@ -2558,6 +2558,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       '--label', 'hatchabot.role=browser', '--label', `hatchabot.browser-of=${agent}`, '--label', `hatchabot.browser-with=${startedAt}`,
       '--label', `hatchabot.browser-prefix=${this.prefix}`, '--label', `hatchabot.browser-memory=${spec.memory}`,
       '--label', `hatchabot.browser-logins=${spec.logins ?? 'none'}`,
+      '--label', `hatchabot.browser-fence=${BROWSER_FENCE_VERSION}`,
       '--read-only', '--tmpfs', '/tmp:size=256m', ...profile,
       '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
       '--memory', spec.memory, '--pids-limit', '512', '--shm-size', '256m',

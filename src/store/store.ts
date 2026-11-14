@@ -724,7 +724,7 @@ export class Store {
       -- at once, and whichever bound first shut the door on the other (30th
       -- audit). pairing_window above is kept empty for its ALTER migration.
       CREATE TABLE IF NOT EXISTS pairing_windows (
-        agent_id TEXT NOT NULL, seat TEXT NOT NULL, until TEXT NOT NULL, opened_for TEXT, expect TEXT,
+        agent_id TEXT NOT NULL, seat TEXT NOT NULL, until TEXT NOT NULL, opened_for TEXT, expect TEXT, generation TEXT,
         PRIMARY KEY (agent_id, seat)
       );
       -- Verbatim workspace files a template import wants seeded at first provision
@@ -1066,6 +1066,7 @@ export class Store {
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
     for (const alter of [
+      `ALTER TABLE pairing_windows ADD COLUMN generation TEXT`,
       `ALTER TABLE agents ADD COLUMN shared_memory INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE agent_cost_days ADD COLUMN unpriced_tokens REAL NOT NULL DEFAULT 0`,
       // When a removal was first recorded: one pending for over a day is an Alerts line (access overview).
@@ -1520,6 +1521,16 @@ export class Store {
       -- An app that never went in kept its values, secrets included, in plain JSON (2026-10-10).
       DELETE FROM agent_app_pending WHERE agent_id IN (SELECT id FROM agents WHERE state IN ('DELETED', 'ARCHIVED'));
     `);
+    // Older hand-overs missed ancillary rows or stopped when another valid
+    // account owned data. Repair only the leftovers present at this upgrade,
+    // using an established owner; never infer ownership from sign-in order.
+    this.runOnce('legacy-owner-leftovers-v1', () => {
+      const owner = this.identityInstallOwner();
+      if (!owner || !this.localOwnerHasAnything()) return;
+      this.db.prepare(`INSERT INTO first_account (id, owner_id, at) VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET done_at = NULL`).run(owner, new Date().toISOString());
+      this.adoptLocalOwnerData(owner, 'dev-owner', { pinned: true });
+    });
   }
 
   /** A one-time data cleanup: runs, and is recorded, in one transaction. */
@@ -2781,19 +2792,16 @@ export class Store {
       .run(ownerId, email ?? null, new Date().toISOString());
   }
 
-  /** The owner behind an email, if that email has ever signed in. Case-insensitive. */
+  /** The verified identity behind an email; password usernames never qualify. */
   ownerForEmail(email: string): string | undefined {
-    const r = this.db
-      .prepare(`SELECT owner_id FROM accounts WHERE email = ? COLLATE NOCASE`)
-      .get(email.trim()) as { owner_id: string } | undefined;
-    return r?.owner_id;
+    return this.identityOwnerForEmail(email);
   }
 
   /** Known accounts other than `exceptOwner` — the recipient picker for a share. */
   listAccounts(exceptOwner?: string): Array<{ ownerId: string; email?: string }> {
     return (
       this.db
-        .prepare(`SELECT owner_id, email FROM accounts WHERE email IS NOT NULL ORDER BY email`)
+        .prepare(`SELECT owner_id, email FROM accounts WHERE email IS NOT NULL AND owner_id LIKE 'user-%' ORDER BY email`)
         .all() as Array<{ owner_id: string; email: string | null }>
     )
       .filter((r) => r.owner_id !== exceptOwner)
@@ -2869,6 +2877,7 @@ export class Store {
   listInbox(ownerId: string, email?: string): Array<{
     id: string; fromEmail?: string; agentName: string; message?: string; createdAt: string;
   }> {
+    if (!ownerId.startsWith('user-')) return [];
     const rows = this.db
       .prepare(
         `SELECT id, from_email, agent_name, message, created_at FROM agent_shares
@@ -2888,6 +2897,7 @@ export class Store {
     ownerId: string,
     email?: string,
   ): { blob: Buffer; agentName: string; sourceAgentId?: string } | undefined {
+    if (!ownerId.startsWith('user-')) return undefined;
     const r = this.db
       .prepare(
         `SELECT blob, agent_name, to_owner, to_email, status, source_agent_id FROM agent_shares WHERE id = ?`,
@@ -2917,10 +2927,12 @@ export class Store {
 
   /** On sign-in, bind any email-addressed pending shares to this owner. */
   claimSharesForEmail(ownerId: string, email: string): number {
+    if (!ownerId.startsWith('user-')) return 0;
     return this.db
       .prepare(
         `UPDATE agent_shares SET to_owner = ?
-         WHERE to_owner IS NULL AND status = 'pending' AND to_email = ? COLLATE NOCASE`,
+         WHERE (to_owner IS NULL OR to_owner NOT LIKE 'user-%')
+           AND status = 'pending' AND to_email = ? COLLATE NOCASE`,
       )
       .run(ownerId, email.trim()).changes;
   }
@@ -3100,7 +3112,8 @@ export class Store {
   /**
    * May this account take over the old owner's data? In accounts mode only
    * the host owner (account #1): a member who signs in first is not it. An
-   * identity-mode account has no local_accounts row: any may.
+   * identity-mode account has no local_accounts row; firstAccountAdoption
+   * additionally checks it against the designated identity owner.
    */
   mayTakeOverInstall(ownerId: string): boolean {
     const r = this.db.prepare(`SELECT host_owner FROM local_accounts WHERE id = ?`).get(ownerId) as { host_owner: number } | undefined;
@@ -3116,30 +3129,31 @@ export class Store {
    * account's rows show that: the asker's own (made while a save of its pin
    * failed, even across a restart, or a "This machine" host remade at boot
    * for it, installOwner) do not, or its hand-over was lost for good; nor a
-   * member's (#adoptedAlready).
+   * member's (#adoptedAlready). A designated identity owner can finish a
+   * legacy hand-over even when another legitimate identity owns data.
    */
-  pinFirstAccount(ownerId: string, localOwner = 'dev-owner'): { ownerId: string; done: boolean } | undefined {
+  pinFirstAccount(ownerId: string, localOwner = 'dev-owner', opts: { designated?: boolean } = {}): { ownerId: string; done: boolean } | undefined {
     return this.db.transaction(() => {
       const row = this.db.prepare(`SELECT owner_id, done_at FROM first_account WHERE id = 1`).get() as { owner_id: string; done_at: string | null } | undefined;
       if (row) return { ownerId: row.owner_id, done: !!row.done_at };
-      if (this.#adoptedAlready(localOwner, ownerId)) return undefined;
+      if (!opts.designated && this.#adoptedAlready(localOwner, ownerId)) return undefined;
       this.db.prepare(`INSERT INTO first_account (id, owner_id, at) VALUES (1, ?, ?)`).run(ownerId, new Date().toISOString());
       return { ownerId, done: false };
     })();
   }
 
-  /**
-   * Whom a re-made "This machine" host belongs to (index.ts makes it when it
-   * is missing): with accounts, the install's owner — account #1 (the host
-   * owner setting), or the one the old owner's data was handed to — else
-   * dev-owner, whose rows nobody signed in can see. Identity mode has no
-   * owner setting: an install handed over before pins existed goes to the
-   * account owning the first source or agent made (the person who set it up,
-   * whose password-mode data it took; the one owning the most could be a
-   * family member). When dev-owner has nothing left, the pick is recorded as
-   * the done pin, so it does not change later.
-   */
-  installOwner(mode: string, localOwner = 'dev-owner'): string {
+  /** A recorded owner takes precedence; a new identity install names its
+   * owner by verified email. A member's earlier assets prove no ownership. */
+  identityInstallOwner(ownerEmail?: string): string | undefined {
+    const pin = this.db.prepare(`SELECT owner_id FROM first_account WHERE id = 1`).get() as { owner_id: string } | undefined;
+    if (pin) return pin.owner_id;
+    const hostOwner = this.localHostOwnerId();
+    if (hostOwner && hostOwner !== 'dev-owner') return hostOwner;
+    return ownerEmail?.trim() ? this.identityOwnerForEmail(ownerEmail) : undefined;
+  }
+
+  /** Whom a re-created local host belongs to, without guessing from assets. */
+  installOwner(mode: string, localOwner = 'dev-owner', ownerEmail?: string): string {
     if (mode === 'accounts') {
       const r = this.db.prepare(`SELECT id FROM local_accounts WHERE host_owner = 1 ORDER BY created_at LIMIT 1`).get() as { id: string } | undefined;
       if (r) return r.id;
@@ -3148,21 +3162,16 @@ export class Store {
     return this.db.transaction(() => {
       const pin = this.db.prepare(`SELECT owner_id, done_at FROM first_account WHERE id = 1`).get() as { owner_id: string; done_at: string | null } | undefined;
       if (pin) return pin.done_at ? pin.owner_id : localOwner;
-      const first = this.db.prepare(
-        `SELECT owner_id FROM (
-           SELECT owner_id, created_at FROM agents
-           UNION ALL SELECT owner_id, created_at FROM ai_profiles)
-         WHERE owner_id != ? ORDER BY created_at, owner_id LIMIT 1`,
-      ).get(localOwner) as { owner_id: string } | undefined;
-      if (!first) return localOwner;
+      const owner = this.identityInstallOwner(ownerEmail);
+      if (!owner) return localOwner;
       // Recorded as done only when the old owner has nothing left: a done pin
       // ends the hand-over, and what dev-owner still has (a connection, a
       // spare pool bot) is that account's to take at its next sign-in.
       if (!this.localOwnerHasAnything(localOwner)) {
         const at = new Date().toISOString();
-        this.db.prepare(`INSERT INTO first_account (id, owner_id, at, done_at) VALUES (1, ?, ?, ?)`).run(first.owner_id, at, at);
+        this.db.prepare(`INSERT INTO first_account (id, owner_id, at, done_at) VALUES (1, ?, ?, ?)`).run(owner, at, at);
       }
-      return first.owner_id;
+      return owner;
     })();
   }
 
@@ -5456,10 +5465,12 @@ export class Store {
     ).run(rec.id, rec.ownerId, JSON.stringify(rec), rec.status, rec.createdAtMs, rec.expiresAtMs);
   }
   getMgmtProposal<T>(id: string): (T & { status: string; outcome?: string }) | undefined {
-    const r = this.db.prepare(`SELECT record, status, outcome FROM mgmt_proposals WHERE id = ?`).get(id) as { record: string; status: string; outcome: string | null } | undefined;
+    const r = this.db.prepare(`SELECT owner_id, record, status, outcome FROM mgmt_proposals WHERE id = ?`).get(id) as { owner_id: string; record: string; status: string; outcome: string | null } | undefined;
     if (!r) return undefined;
     const rec = safeJson<T | undefined>(r.record, undefined);
-    return rec ? { ...rec, status: r.status, outcome: r.outcome ?? undefined } : undefined;
+    // Ownership can move during first-account adoption. The SQL owner is
+    // authoritative, including for records written before that migration.
+    return rec ? { ...rec, ownerId: r.owner_id, status: r.status, outcome: r.outcome ?? undefined } : undefined;
   }
   /** pending → status, once. False when someone else already resolved it. */
   resolveMgmtProposal(id: string, status: string, nowMs: number): boolean {
@@ -5489,7 +5500,7 @@ export class Store {
     const rows = [...pending, ...resolved].sort((a, b) => b.created_at_ms - a.created_at_ms);
     return rows.flatMap((r) => {
       const rec = safeJson<T | undefined>(r.record, undefined);
-      return rec ? [{ ...rec, status: r.status, outcome: r.outcome ?? undefined, resolvedAtMs: r.resolved_at_ms ?? undefined }] : [];
+      return rec ? [{ ...rec, ownerId, status: r.status, outcome: r.outcome ?? undefined, resolvedAtMs: r.resolved_at_ms ?? undefined }] : [];
     });
   }
   /** Expire overdue ones; forget anything resolved more than a week ago. */
@@ -6226,26 +6237,28 @@ export class Store {
     agentId: string,
     until: string,
     openedFor?: string,
-    opts?: { expect?: string; kind?: string },
-  ): void {
+    opts?: { expect?: string; kind?: string; generation?: string },
+  ): string {
+    const generation = opts?.generation ?? randomUUID();
     this.db
       .prepare(
-        `INSERT INTO pairing_windows (agent_id, seat, until, opened_for, expect)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO pairing_windows (agent_id, seat, until, opened_for, expect, generation)
+         VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, seat) DO UPDATE SET until = excluded.until,
-             opened_for = excluded.opened_for, expect = excluded.expect`,
+             opened_for = excluded.opened_for, expect = excluded.expect, generation = excluded.generation`,
       )
-      .run(agentId, Store.pairingSeat(opts?.kind, openedFor), until, openedFor ?? null, normalizeHandle(opts?.expect) ?? null);
+      .run(agentId, Store.pairingSeat(opts?.kind, openedFor), until, openedFor ?? null, normalizeHandle(opts?.expect) ?? null, generation);
+    return generation;
   }
 
   /** Every window still open on this agent. */
-  pairingWindows(agentId: string, now = new Date()): Array<{ seat: string; until: string; openedFor?: string; expect?: string }> {
+  pairingWindows(agentId: string, now = new Date()): Array<{ seat: string; until: string; openedFor?: string; expect?: string; generation?: string }> {
     const rows = this.db
-      .prepare(`SELECT seat, until, opened_for, expect FROM pairing_windows WHERE agent_id = ? ORDER BY until DESC`)
-      .all(agentId) as Array<{ seat: string; until: string; opened_for: string | null; expect: string | null }>;
+      .prepare(`SELECT seat, until, opened_for, expect, generation FROM pairing_windows WHERE agent_id = ? ORDER BY until DESC`)
+      .all(agentId) as Array<{ seat: string; until: string; opened_for: string | null; expect: string | null; generation: string | null }>;
     return rows
       .filter((r) => Date.parse(r.until) > now.getTime())
-      .map((r) => ({ seat: r.seat, until: r.until, openedFor: r.opened_for ?? undefined, expect: r.expect ?? undefined }));
+      .map((r) => ({ seat: r.seat, until: r.until, openedFor: r.opened_for ?? undefined, expect: r.expect ?? undefined, generation: r.generation ?? undefined }));
   }
 
   /** The longest-open window's terms, or undefined when the door is shut. */

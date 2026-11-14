@@ -229,6 +229,37 @@ describe('uploads and opening in the browser', () => {
       expect(readdirSync(join(home, 'inbox')).sort()).toEqual([long, 'race.md'].sort());   // no staging file left behind
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+  it('core uploads report their resolved destination and enforce the editable text limits there (HB-0631)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-core-upload-'));
+    const ws = '.openclaw/agents/kitchen/agent';
+    try {
+      mkdirSync(join(home, ws), { recursive: true });
+      mkdirSync(join(home, 'ordinary'));
+      symlinkSync(join(home, ws), join(home, 'alias'));
+      writeFileSync(join(home, ws, 'SOUL.md'), 'Original');
+      const run = (dir: string, opts = { tooLarge: false, invalidText: false }, overwrite = true) =>
+        spawnSync('sh', ['-c', putArgv(dir, 'SOUL.md', overwrite, 'kitchen', opts)[2]!.split('/home/node').join(home)], { input: 'Uploaded', encoding: 'utf8' });
+      expect(run('alias', { tooLarge: true, invalidText: false }).status).toBe(7);
+      expect(run('alias', { tooLarge: false, invalidText: true }).status).toBe(8);
+      expect(run('alias', undefined, false).status).toBe(5);
+      expect(readFileSync(join(home, ws, 'SOUL.md'), 'utf8')).toBe('Original');
+      const copied = run('alias');
+      expect(copied.status).toBe(0);
+      expect(copied.stdout).toBe('hatchabot:core\n');
+      expect(readFileSync(join(home, ws, 'SOUL.md'), 'utf8')).toBe('Uploaded');
+      const ordinary = run('ordinary', { tooLarge: true, invalidText: true });
+      expect(ordinary.status).toBe(0);
+      expect(ordinary.stdout).toBe('');
+      const bin = join(home, 'bin'); mkdirSync(bin);
+      writeFileSync(join(bin, 'mv'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      const failed = spawnSync('sh', ['-c', putArgv('alias', 'SOUL.md', true, 'kitchen')[2]!.split('/home/node').join(home)],
+        { input: 'Failed upload', encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin` } });
+      expect(failed.status).toBe(1);
+      expect(failed.stdout).toBe('');
+      expect(readFileSync(join(home, ws, 'SOUL.md'), 'utf8')).toBe('Uploaded');
+      expect(readdirSync(join(home, ws))).toEqual(['SOUL.md']);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
   it('knows what a browser shows: text as text, pages and images as themselves, unknown binaries download', () => {
     expect(inlineType('notes.md')).toBe('text/plain');
     expect(inlineType('Makefile')).toBe('text/plain');

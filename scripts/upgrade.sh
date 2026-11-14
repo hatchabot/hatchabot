@@ -985,10 +985,11 @@ if [ "$BUNDLED" = 1 ]; then
   # What failed: this machine's disk (curl 23), no such file (a 404; 37 on a
   # file:// test bed), or the network. A version named by hand that is not there
   # is refused; a release a channel names may just not be published yet.
-  DL_RC=0; DL_CODE="$(curl -sSL --retry 3 -o "$STAGE/$NAME" -w '%{http_code}' "$BASE/$TARGET/$NAME")" || DL_RC=$?
+  DL_RC=0; DL_CODE="$(curl -sSL --retry 3 --connect-timeout 10 --max-time 900 --retry-max-time 900 -o "$STAGE/$NAME" -w '%{http_code}' "$BASE/$TARGET/$NAME")" || DL_RC=$?
   case "$DL_RC:$DL_CODE" in
     0:200|0:000) ;;
     23:*) disk_full ;;
+    28:*) echo "Timed out downloading the $TARGET bundle (up to 15 minutes per attempt): nothing was changed — try again later."; exit 3 ;;
     0:404|37:*)
       case "$CHANNEL" in
         v[0-9]*) if [ "${HATCHABOT_UPGRADE_BY_TIMER:-}" != 1 ]; then echo "There is no release $TARGET for $PLATFORM: nothing was changed. Check the version, or follow a channel with: hatchabot upgrade stable"; exit 2; fi ;;
@@ -1007,7 +1008,7 @@ if [ "$BUNDLED" = 1 ]; then
     0) ;;
     10)
       # Its own message: under pipefail a failed fetch here ended the script with curl's code and no word.
-      WANT="$(curl -fsSL --retry 3 "$BASE/$TARGET/$NAME.sha256" 2>/dev/null | cut -d' ' -f1)" || { echo "Could not fetch the $TARGET bundle's checksum — try again later."; exit 3; }
+      WANT="$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 --retry-max-time 120 "$BASE/$TARGET/$NAME.sha256" 2>/dev/null | cut -d' ' -f1)" || { echo "Could not fetch the $TARGET bundle's checksum (download failed or timed out after 60 seconds per attempt) — try again later."; exit 3; }
       [ -n "$WANT" ] && [ "$WANT" = "$(sha "$STAGE/$NAME")" ] || { echo "The $TARGET bundle's checksum does not match — not installing it."; exit 3; } ;;
     3) echo "Could not fetch the $TARGET release's manifest to check its bundle — try again later."; exit 3 ;;
     *) echo "Not installing the $TARGET bundle: the release's manifest does not vouch for it (above). Staying on $CUR."; exit 3 ;;

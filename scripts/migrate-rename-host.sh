@@ -101,9 +101,15 @@ say "7. Health"
 PORT="$(envval "$NEW/.env" PORT)"; PORT="${PORT:-8080}"
 URL="${HATCHABOT_HEALTH_URL:-http://127.0.0.1:$PORT/}"
 WANT="$(node -e 'console.log(require(process.argv[1]).version)' "$NEW/package.json")"
+HEALTH_TIMED_OUT=0
 for i in $(seq 1 30); do
-  GOT="$(curl -sk "$URL" 2>/dev/null | grep -oE 'HATCHABOT_VERSION="[^"]+"' | sed -n 1p | cut -d'"' -f2 || true)"
+  PROBE_RC=0
+  BODY="$(curl -sk --connect-timeout 3 --max-time 5 "$URL" 2>/dev/null)" || PROBE_RC=$?
+  if [ "$PROBE_RC" = 28 ]; then HEALTH_TIMED_OUT=1; fi
+  GOT=""
+  if [ "$PROBE_RC" = 0 ]; then GOT="$(printf '%s' "$BODY" | grep -oE 'HATCHABOT_VERSION="[^"]+"' | sed -n 1p | cut -d'"' -f2 || true)"; fi
   [ "$GOT" = "$WANT" ] && { echo "   serving Hatchabot $GOT at $URL"; echo; echo "Done. Old checkout kept at $OLD; remove it once you're happy: rm -rf $OLD $UNITS/agentclaw*"; exit 0; }
   sleep 2
 done
+[ "$HEALTH_TIMED_OUT" != 1 ] || echo "   health checks at $URL timed out (5 seconds per request)"
 echo "   not serving $WANT yet — journalctl --user -u hatchabot -n 50"; exit 1

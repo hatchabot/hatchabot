@@ -7,6 +7,8 @@ import { registerRoutes } from '../src/api/routes.js';
 import { logKey, parseModelCalls, sampleAgentUsage, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/sourceUsage.js';
 import { aiSourceHealth } from '../src/orchestrator/health.js';
 import { totalOf } from './helpers/usageFake.js';
+import { runBudgets } from '../src/orchestrator/budgets.js';
+import { HOUR_FIELDS } from '../src/orchestrator/usage.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 // Lines exactly as OpenClaw writes them (docker logs --timestamps prefix).
@@ -111,7 +113,8 @@ class MemSecrets implements SecretStore {
 const OWNER = 'user-o';
 
 async function world() {
-  const store = new Store(new Database(':memory:'));
+  const db = new Database(':memory:');
+  const store = new Store(db);
   const provider = new MockProvider();
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'max', ownerId: OWNER, name: 'Claude Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/max', shared: true, createdAt: 'now' } as any);
@@ -122,11 +125,72 @@ async function world() {
     store.setAgentRuntimeRef(id, runtimeRef);
     store.setAgentState(id, 'RUNNING');
   }
-  return { store, provider };
+  return { store, provider, db };
 }
 
 describe('sampleSourceUsage + summarizeSourceUsage', () => {
   const NOW = Date.parse('2026-09-15T18:00:00Z');
+  const budgetReading = (input: number, bad = 0) => ({
+    ...totalOf(input, NOW - 3_600_000), bad,
+    window: { since: NOW - 30 * 86_400_000, hourly: true, models: {
+      'claude-opus-4-8': { input, output: 0, cacheRead: 0, cacheWrite: 0, h: { '2026-09-15T17': HOUR_FIELDS.map((f) => f === 'input' ? input : 0) } },
+    } },
+    callSlots: { '2026-09-15T17:05:00.000Z': input / 1_000_000 },
+  });
+
+  it('an undecodable transcript cannot lower recorded spend and release a budget pause (HB-0708)', async () => {
+    const { store, provider, db } = await world();
+    const a = store.getAgent('a')!;
+    const deps = { store, providerFor: () => provider };
+    provider.usage.set('*', budgetReading(5_000_000)); // $25
+    await sampleAgentUsage(deps, a, NOW);
+    store.setBudget(a.id, OWNER, 20, 'pause', new Date(NOW).toISOString());
+    const resumed: string[] = [];
+    const budgets = {
+      store, tz: 'UTC', isBusy: () => false, tell: async () => true,
+      pause: async () => { store.setAgentState(a.id, 'STOPPED'); return true; },
+      resume: async () => { resumed.push(a.id); store.setAgentState(a.id, 'RUNNING'); return true; },
+    };
+    await runBudgets(budgets, NOW);
+    expect(store.getAgent(a.id)?.state).toBe('STOPPED');
+    // A rebuild checkpoint or explicit sample sees only one remaining readable
+    // transcript. The missing archive is a read failure, not refunded usage.
+    provider.usage.set('*', budgetReading(1_000_000, 1));
+    await sampleAgentUsage(deps, a, NOW + 600_000);
+    await runBudgets(budgets, NOW + 600_000);
+    expect(resumed).toEqual([]);
+    expect(store.costBetween('2026-09-01', '2026-09-30', [a.id]).get(a.id)).toBe(25);
+    expect(store.modelProfiles([a.id]).get(a.id)?.at).toBe(new Date(NOW).toISOString());
+    // The next complete read advances the amount normally; it is not frozen.
+    provider.usage.set('*', budgetReading(6_000_000));
+    await sampleAgentUsage(deps, a, NOW + 1_200_000);
+    await runBudgets(budgets, NOW + 1_200_000);
+    expect(store.costBetween('2026-09-01', '2026-09-30', [a.id]).get(a.id)).toBe(30);
+    expect(store.getAgent(a.id)?.state).toBe('STOPPED');
+    db.close();
+  });
+
+  it('an incomplete read does not erase successful call history or claim to be a complete first profile (HB-0708)', async () => {
+    const { store, provider, db } = await world();
+    const deps = { store, providerFor: () => provider };
+    const a = store.getAgent('a')!;
+    provider.usage.set('*', budgetReading(1_000_000, 1));
+    await sampleAgentUsage(deps, a, NOW);
+    expect(store.modelProfiles([a.id]).has(a.id)).toBe(false);
+    expect(store.callsThrough(a.id)).toBeUndefined();
+    provider.usage.set('*', budgetReading(5_000_000));
+    await sampleAgentUsage(deps, a, NOW + 600_000);
+    const count = () => store.modelCallSlotsFor('max', '2026-09-15T17').filter((r) => r.agentId === a.id).reduce((n, r) => n + r.ok, 0);
+    expect(count()).toBe(5);
+    provider.usage.set('*', budgetReading(1_000_000, 1));
+    await sampleAgentUsage(deps, a, NOW + 1_200_000);
+    expect(count()).toBe(5);
+    provider.usage.set('*', budgetReading(6_000_000));
+    await sampleAgentUsage(deps, a, NOW + 1_800_000);
+    expect(count()).toBe(6);
+    db.close();
+  });
+
   it('counts requests and 429s per window, flags a source limited until a call succeeds again, never double-counts', async () => {
     const { store, provider } = await world();
     // Refusals come from the log; successes from the transcripts, which have

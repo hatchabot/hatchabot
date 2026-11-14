@@ -575,6 +575,112 @@ const SCENARIOS = String.raw`(() => {
         v2Close();
       }
     },
+    browserPanelClosedWhileOpening: async () => {
+      const realFetch = window.fetch, deletes = [];
+      let reply, streams = 0;
+      window.fetch = async (input, init = {}) => {
+        const url = String(input), method = (init.method || 'GET').toUpperCase();
+        if (method === 'POST' && /\/browser\/panel$/.test(url)) return new Promise((done) => { reply = done; });
+        if (/\/browser\/panel\/[^/]+\/stream$/.test(url)) { streams++; return new Response(null, { status: 503 }); }
+        if (method === 'DELETE' && /\/browser\/panel\//.test(url)) { deletes.push(url); return new Response(null, { status: 204 }); }
+        return realFetch(input, init);
+      };
+      try {
+        const opening = bpOpen('a1');
+        await until(() => reply);
+        bpDlg.close(); // Escape can close the dialog before the server has made its panel.
+        bpDlg.dispatchEvent(new Event('close'));
+        reply(new Response(JSON.stringify({ panel: 'late-panel' }), { status: 201 }));
+        await opening; await sleep(0);
+        eq('a closed panel never starts a hidden stream', streams, 0);
+        eq('the late panel is released', deletes, ['/v1/agents/a1/browser/panel/late-panel']);
+        ok('nothing reopens', !bpDlg.open && !bp.panel);
+      } finally { bpClose(); window.fetch = realFetch; }
+    },
+    browserPanelCleanupStaysSilent: async () => {
+      const realFetch = window.fetch, realShowLogin = showLogin, realAskFactor = askSecondFactor;
+      let cleanup, logins = 0, factors = 0, hold = true;
+      showLogin = () => { logins++; };
+      askSecondFactor = async () => { factors++; throw new Error('cleanup must not ask'); };
+      window.fetch = async (input, init = {}) => {
+        const url = String(input), method = (init.method || 'GET').toUpperCase();
+        if (method === 'POST' && /\/browser\/panel$/.test(url)) return new Response(JSON.stringify({ panel: 'cleanup-panel' }), { status: 201 });
+        if (/\/browser\/panel\/[^/]+\/stream$/.test(url)) return new Response(new ReadableStream({ start(c) { init.signal.addEventListener('abort', () => c.close(), { once: true }); } }));
+        if (method === 'DELETE' && /\/browser\/panel\//.test(url)) {
+          if (!hold) return new Response(null, { status: 204 });
+          return new Promise((reply) => { cleanup = reply; });
+        }
+        return realFetch(input, init);
+      };
+      try {
+        for (const body of [{ error: 'auth required' }, { error: 'second factor required', secondFactor: 'step-up' }]) {
+          cleanup = null;
+          await bpOpen('a1'); bpClose(); await until(() => cleanup);
+          // The person has already signed in again and opened another panel before
+          // the old cleanup's refusal arrives. It cannot restart either sign-in step.
+          await bpOpen('a1');
+          cleanup(new Response(JSON.stringify(body), { status: 401 }));
+          await sleep(0); await sleep(0);
+          eq('cleanup never asks to sign in or give a factor', [logins, factors], [0, 0]);
+          ok('the new panel stays open', bpDlg.open && !bp.ended);
+          hold = false; bpClose(); hold = true;
+        }
+      } finally { hold = false; bpClose(); window.fetch = realFetch; showLogin = realShowLogin; askSecondFactor = realAskFactor; }
+    },
+    browserPanelEndsWithSession: async () => {
+      const realFetch = window.fetch;
+      const was = { away: pagePersonAway, cleared: pageCleared, out: pageSignedOut, enrol: window.__sfEnrolShown };
+      let signal, streams = 0;
+      window.fetch = async (input, init = {}) => {
+        const url = String(input), method = (init.method || 'GET').toUpperCase();
+        if (method === 'POST' && /\/browser\/panel$/.test(url)) return new Response(JSON.stringify({ panel: 'session-panel' }), { status: 201 });
+        if (/\/browser\/panel\/[^/]+\/stream$/.test(url)) {
+          streams++; signal = init.signal;
+          return new Response(new ReadableStream({ start(c) { signal.addEventListener('abort', () => c.close(), { once: true }); } }));
+        }
+        if (method === 'DELETE' && /\/browser\/panel\//.test(url)) return new Response(null, { status: 204 });
+        return realFetch(input, init);
+      };
+      try {
+        await bpOpen('a1'); await until(() => streams === 1);
+        const oldGen = bp.gen;
+        bpEvent({ t: 'frame', data: 'made-up-frame', w: 800, h: 600 }, oldGen);
+        $('bpUrl').value = 'https://example.org/private'; $('bpType').value = 'made-up secret';
+        if (!$('bpType').classList.contains('shown')) bpToggleShow();
+        pageSessionEnded();
+        ok('the browser leaves the page as soon as its session ends', !bpDlg.open);
+        ok('its stream is stopped', signal.aborted);
+        eq('no picture, address or typed secret remains', [$('bpScreen').getAttribute('src'), $('bpUrl').value, $('bpType').value], [null, '', '']);
+        bpEvent({ t: 'frame', data: 'late-frame', w: 800, h: 600 }, oldGen);
+        eq('a late frame cannot restore it', $('bpScreen').getAttribute('src'), null);
+        await bpOpen('a1');
+        ok('a new panel hides typing again', !$('bpType').classList.contains('shown') && $('bpShow').getAttribute('aria-pressed') === 'false');
+      } finally {
+        bpClose(); window.fetch = realFetch;
+        pagePersonAway = was.away; pageCleared = was.cleared; pageSignedOut = was.out; window.__sfEnrolShown = was.enrol;
+      }
+    },
+    browserMetadataFollowsAgent: async () => {
+      const realFetch = window.fetch;
+      let answer, hold = false;
+      window.fetch = async (input, init = {}) => {
+        const url = String(input);
+        if (/\/v1\/agents\/a[12]\/browser$/.test(url)) {
+          if (hold && /\/a1\//.test(url)) return new Promise((done) => { answer = done; });
+          return new Response(JSON.stringify({ on: true, running: true, keepsLogins: true, sites: [] }));
+        }
+        return realFetch(input, init);
+      };
+      try {
+        openV2Agent('a1', 'advanced'); await sleep(0);
+        hold = true;
+        const old = v2LoadBrowser('a1'); await until(() => answer);
+        openV2Agent('a2', 'advanced'); await sleep(0);
+        answer(new Response(JSON.stringify({ on: true, running: true, keepsLogins: true, sites: [{ site: 'first-agent.example.org', at: '2026-11-13' }] })));
+        await old;
+        ok('the second agent never shows the first agent\'s sites', $('v2BrowserSites').hidden && !$('v2BrowserSites').textContent.includes('first-agent'));
+      } finally { window.fetch = realFetch; v2Close(); }
+    },
     browserKeepLogins: async () => {
       // HB-0680 part 2: Keep its logins, on only after a warning that names who can steer the
       // agent; then Forget logins, the sites its panel signed in to, and how big the profile is.
@@ -795,6 +901,53 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    scheduleTriggersPending: async () => {
+      const pending = 'Saved, but the running agent has not applied it. Rebuild it to apply the change.';
+      try {
+        openV2Agent('a1', 'schedule');
+        await until(() => $('cronTriggers').isConnected && cronAgentId === 'a1');
+        for (const on of [true, false]) {
+          window.__answer = { 'PATCH /v1/agents/a1': [{ body: { cronTriggers: on, cronTriggersPending: pending } }] };
+          await saveCronTriggers(on);
+          eq('a pending ' + on + ' change says it is not applied', $('toast').textContent, pending);
+          eq('the requested trigger setting was sent', calls('PATCH', /^\/v1\/agents\/a1$/).at(-1).body, { cronTriggers: on });
+        }
+        window.__answer = { 'PATCH /v1/agents/a1': [{ body: { cronTriggers: false } }] };
+        await saveCronTriggers(false);
+        eq('a confirmed change says it is disabled', $('toast').textContent, 'Event-triggered tasks disabled.');
+      } finally { window.__answer = {}; v2Close(); }
+    },
+    scheduleTriggerFailureStaysOnItsView: async () => {
+      const fetchWas = window.fetch;
+      let release;
+      const original = agents.map((a) => [a.id, a.cronTriggers]);
+      try {
+        for (const same of [false, true]) {
+          agents.find((a) => a.id === 'a1').cronTriggers = true;
+          openV2Agent('a1', 'schedule');
+          await sleep(50);
+          window.fetch = async (input, init = {}) => {
+            if (String(input) === '/v1/agents/a1' && init.method === 'PATCH') return new Promise((r) => { release = () => r(new Response(JSON.stringify({ error: 'Fixture apply refused' }), { status: 409 })); });
+            return fetchWas(input, init);
+          };
+          $('cronTriggers').checked = false;
+          const saving = saveCronTriggers(false);
+          await until(() => !!release);
+          v2Close();
+          const next = same ? 'a1' : 'a2';
+          agents.find((a) => a.id === next).cronTriggers = false;
+          openV2Agent(next, 'schedule');
+          await sleep(50);
+          eq('reopened permission starts off', $('cronTriggers').checked, false);
+          release(); await saving;
+          eq('the earlier refusal does not change this view', $('cronTriggers').checked, false);
+          window.fetch = fetchWas; release = undefined; v2Close();
+        }
+      } finally {
+        release?.(); window.fetch = fetchWas; v2Close();
+        for (const [id, value] of original) agents.find((a) => a.id === id).cronTriggers = value;
+      }
+    },
     scheduleEdit: async () => {
       // A task that posts to a member's chat, not the owner's: the edit must not move it.
       window.__crons = [{ id: 'c1', name: 'Morning brief', scheduleExpr: '0 8 * * *', scheduleTz: 'America/Toronto', message: 'Good morning', enabled: false, announce: true, sessionTarget: 'isolated', payloadKind: 'message' }];
@@ -873,6 +1026,68 @@ const SCENARIOS = String.raw`(() => {
         window.fetch = fetchWas;
         cancelCronEdit(); v2Close(); window.__crons = [];
       }
+    },
+    scheduleSaveKeepsNewTyping: async () => {
+      const fetchWas = window.fetch;
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const job = { id: 'c1', name: 'Morning brief', scheduleExpr: '0 8 * * *', message: 'Good morning', enabled: true, payloadKind: 'agentTurn' };
+      try {
+        window.__crons = [job];
+        openV2Agent('a1', 'schedule');
+        await until(() => cronCache.some((c) => c.id === 'c1'));
+        editCronJob('c1');
+        window.fetch = async (input, init = {}) => {
+          if (init.method === 'PATCH' && String(input).endsWith('/crons/c1')) await gate;
+          return fetchWas(input, init);
+        };
+        $('cronName').value = 'Morning brief revised';
+        const saving = addCronJob();
+        await until(() => $('cronAddBtn').disabled);
+        $('cronName').value = job.name; // a reversion after Save must differ from the newly saved value
+        $('cronMsg').value = 'Also include tomorrow';
+        window.__crons = [{ ...job, name: 'Morning brief revised' }];
+        release(); await saving;
+        eq('typing after Save remains', [cronEditingId, $('cronName').value, $('cronMsg').value], ['c1', job.name, 'Also include tomorrow']);
+        const mark = window.__calls.length;
+        await addCronJob();
+        eq('the next save includes the reversion to the old name', window.__calls.slice(mark).find((c) => c.method === 'PATCH').body, { name: job.name, message: 'Also include tomorrow' });
+      } finally { release(); window.fetch = fetchWas; cancelCronEdit(); clearCronForm(); v2Close(); window.__crons = []; }
+    },
+    scheduleReadLatestWins: async () => {
+      const fetchWas = window.fetch;
+      let release;
+      try {
+        window.__crons = [];
+        openV2Agent('a1', 'schedule');
+        await sleep(100);
+        window.fetch = async (input, init = {}) => {
+          if ((!init.method || init.method === 'GET') && String(input).endsWith('/a1/crons')) {
+            return new Promise((r) => { release = () => r(new Response(JSON.stringify({ crons: [{ id: 'old', name: 'Older result' }] }), { status: 200 })); });
+          }
+          return fetchWas(input, init);
+        };
+        const stale = loadCrons();
+        await until(() => !!release);
+        window.fetch = fetchWas;
+        window.__crons = [{ id: 'new', name: 'Newer result', enabled: true }];
+        await loadCrons();
+        release(); await stale;
+        eq('the newest successful read owns the cache', cronCache.map((c) => c.id), ['new']);
+        ok('the old list never replaces it', $('cronList').textContent.includes('Newer result') && !$('cronList').textContent.includes('Older result'));
+        release = undefined;
+        window.fetch = async (input, init = {}) => {
+          if ((!init.method || init.method === 'GET') && String(input).endsWith('/a1/crons')) {
+            return new Promise((r) => { release = () => r(new Response(JSON.stringify({ error: 'Older request failed' }), { status: 502 })); });
+          }
+          return fetchWas(input, init);
+        };
+        const failed = loadCrons();
+        await until(() => !!release);
+        prepareCrons('a1', 'Reopened agent');
+        release(); await failed;
+        eq('an earlier failure cannot fill a later opening of the same agent', [$('cronList').textContent, $('cronErr').textContent], ['Loading…', '']);
+      } finally { release?.(); window.fetch = fetchWas; v2Close(); window.__crons = []; }
     },
     intervalLabels: async () => {
       // Intervals to the second: 15 s read "every 0m", 90 s "every 2m" (#95).
@@ -1090,6 +1305,28 @@ const SCENARIOS = String.raw`(() => {
       window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/peers'];
     },
     // v2.157.0: other servers and image building sit in Settings → Advanced, folded; runners stay on Hosts.
+    imageHelpKeepsGuardedDialogs: async () => {
+      const gatewayWas = openGateway, savedAgents = agents;
+      let opened = 0;
+      try {
+        agents = [...agents, { id: 'fixture-manager', slug: 'fixture-manager', name: 'Hatchabot', ops: true, role: 'owner', state: 'RUNNING' }];
+        openGateway = () => { opened++; };
+        for (const dlg of [sfDlg, backupDlg, recoveryDlg]) {
+          dlg.showModal();
+          askMgmtForImage();
+          ok('image help keeps ' + dlg.id + ' open', dlg.open);
+          eq('no navigation while a guarded dialog is open', opened, 0);
+          dlg.close();
+        }
+        aiDlg.showModal();
+        $('sfTotpBox').hidden = true;
+        askMgmtForImage();
+        eq('ordinary image help still opens the manager', opened, 1);
+      } finally {
+        openGateway = gatewayWas; agents = savedAgents;
+        for (const dlg of [sfDlg, backupDlg, recoveryDlg, aiDlg]) if (dlg.open) dlg.close();
+      }
+    },
     settingsAdvanced: async () => {
       const el = (id) => document.getElementById(id);
       // A closed <details> hides its content with content-visibility, which offsetParent does not see.
@@ -2789,7 +3026,9 @@ const SCENARIOS = String.raw`(() => {
         key(false);
         ok('their message shows at once, with the thinking line', log.textContent.includes('What should we read?'));
         const sent = await until(() => calls('POST', /\/v1\/agents\/w1\/chat$/)[0]);
-        eq('Enter sent it', sent.body, { text: 'What should we read?' });
+        eq('Enter sent the unchanged text', sent.body.text, 'What should we read?');
+        ok('Enter included a valid UUID for delivery confirmation', /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(sent.body.messageId));
+        eq('the request has only the text and delivery id', Object.keys(sent.body).sort(), ['messageId', 'text']);
         await until(() => log.textContent.includes('Try Middlemarch.'));
         ok('the thinking line is gone', !log.querySelector('.wchat-msg.wait'));
         box.value = 'And after that?';
@@ -3899,6 +4138,26 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = {};
         if (paramFormDlg.open) paramFormDlg.close();
       }
+    },
+    importKeepsOpenSetup: async () => {
+      // Another import's asynchronous peek must not replace an existing copy's setup or strand its promise.
+      const parameters = [{ key: 'topic', label: 'Topic', type: 'text', required: true }];
+      const bytes = await new Response(new Blob([JSON.stringify({ format: 'hatchabot-template', version: 1, name: 'Later import', files: {}, parameters })]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
+      const file = new File([bytes], 'later.hatchabot');
+      let first;
+      try {
+        first = collectParamValues(parameters, 'Current copy');
+        $('pfv-0').value = 'Keep this answer';
+        const before = calls('POST', /^\/v1\/agents\/import$/).length;
+        let finished = false;
+        const second = importAgentFile(file).then(() => { finished = true; });
+        await until(() => finished || $('paramFormName').textContent === 'Later import');
+        eq('the active setup and its answer remain', [$('paramFormName').textContent, $('pfv-0').value], ['Current copy', 'Keep this answer']);
+        await second;
+        eq('the refused concurrent import uploaded nothing', calls('POST', /^\/v1\/agents\/import$/).length, before);
+        submitParamForm();
+        eq('the original caller receives its own answer', await first, { topic: 'Keep this answer' });
+      } finally { if (paramFormDlg.open) cancelParamForm(); }
     },
     importAnswersInBody: async () => {
       // HB-0093 (v2.170.0): the setup answers rode the request's address; about five full-length
@@ -8478,6 +8737,53 @@ const SCENARIOS = String.raw`(() => {
         ok('busy: skipped; failed: named, with why: ' + said, said.includes('1 skipped (busy or already changing)') && said.includes('1 failed — ' + running[1].name + ': The machine did not answer.'));
       } finally { window.__answer = {}; window.__confirmAnswer = true; delete window.__override['/v1/agents']; await refresh(false); }
     },
+    webChatDeliveryIgnoresRunnerClock: async () => {
+      const a = agents.find((x) => !x.ops && x.state === 'RUNNING'), chat = '/v1/agents/' + a.id + '/chat';
+      const clockWas = serverAheadMs, fetchWas = window.fetch;
+      let release;
+      try {
+        serverAheadMs = 0;
+        window.fetch = async (input, init = {}) => {
+          if (String(input) === chat && (!init.method || init.method === 'GET')) return new Promise((r) => { release = () => r(new Response(JSON.stringify({ messages: [] }), { status: 200 })); });
+          return fetchWas(input, init);
+        };
+        const opening = openWebChatPanel(a.id);
+        await until(() => !!release);
+        window.__answer = { ['POST ' + chat]: [{ status: 504, body: { error: 'No answer in time.' } }] };
+        $('wchatText').value = 'ok'; await webChatSend();
+        const messageId = calls('POST', new RegExp(chat + '$')).at(-1).body.messageId;
+        release(); await opening; window.fetch = fetchWas;
+        window.__override[chat] = { messages: [{ role: 'user', text: 'ok', at: new Date(Date.now() - 3600000).toISOString(), messageId }], delivery: { checked: [messageId], received: [messageId] } };
+        webChatDlg.close(); await openWebChatPanel(a.id);
+        eq('a delivered message on a slow runner is not offered for duplicate send', [$('wchatText').value, $('wchatErr').textContent], ['', '']);
+        ok('the send has a random correlation id', /^[a-f0-9-]{36}$/.test(messageId));
+        window.__answer = { ['POST ' + chat]: [{ status: 504, body: { error: 'No answer in time.' } }] };
+        $('wchatText').value = 'ok'; await webChatSend();
+        const missingId = calls('POST', new RegExp(chat + '$')).at(-1).body.messageId;
+        ok('repeated words get another id', missingId !== messageId);
+        window.__override[chat] = { messages: [{ role: 'user', text: 'ok', at: new Date(Date.now() + 3600000).toISOString(), messageId }], delivery: { checked: [missingId], received: [] } };
+        webChatDlg.close(); await openWebChatPanel(a.id);
+        eq('an earlier identical message on a fast runner does not hide a missing send', $('wchatText').value, 'ok');
+        eq('the receipt lookup names the pending send', calls('GET', new RegExp(chat + '$')).at(-1).headers['x-hatchabot-message-ids'], missingId);
+        for (const partial of [false, true]) {
+          window.__answer = { ['POST ' + chat]: [{ status: 504, body: { error: 'No answer in time.' } }] };
+          $('wchatText').value = 'another'; await webChatSend();
+          const id = calls('POST', new RegExp(chat + '$')).at(-1).body.messageId;
+          window.__override[chat] = { messages: [], delivery: { checked: partial ? [] : [id], received: partial ? [] : [id] } };
+          webChatDlg.close(); await openWebChatPanel(a.id);
+          eq(partial ? 'an incomplete history never offers a duplicate' : 'a receipt beyond the displayed history confirms arrival', $('wchatText').value, '');
+          if (partial) {
+            ok('the uncertain send remains for another read', webChatUnsure.get(a.id).some((s) => s.messageId === id));
+            window.__override[chat] = { messages: [], delivery: { checked: [], received: [id] } };
+            webChatDlg.close(); await openWebChatPanel(a.id);
+            ok('a positive receipt still settles a partial read', !(webChatUnsure.get(a.id) || []).some((s) => s.messageId === id));
+          }
+        }
+      } finally {
+        release?.(); window.fetch = fetchWas; serverAheadMs = clockWas; window.__answer = {}; delete window.__override[chat];
+        webChatUnsure.clear(); $('wchatText').value = ''; if (webChatDlg.open) webChatDlg.close();
+      }
+    },
     webChatCountsAfterTheRead: async () => {
       // HB-0495: the log comes back as its last 100 messages. A message of the same words cut from its start no longer hides that the new one arrived.
       const list = await (await fetch('/v1/agents')).json();
@@ -9122,6 +9428,32 @@ const SCENARIOS = String.raw`(() => {
         box.value = '';
         if (webChatDlg.open) webChatDlg.close();
       }
+    },
+    accountReadLatestWins: async () => {
+      // Polls overlap with sign-in and foreground reads. A late old reply cannot repaint
+      // owner-only controls or replace the account whose newer read already finished.
+      const realFetch = window.fetch, account = myAccount;
+      let reply, delayed = false;
+      window.fetch = async (input, init = {}) => {
+        if (String(input) === '/v1/account') {
+          if (delayed) return new Promise((done) => { reply = done; });
+          return new Response(JSON.stringify({ ...account, hostOwner: false }));
+        }
+        return realFetch(input, init);
+      };
+      try {
+        for (const status of [200, 500]) {
+          delayed = true; reply = null;
+          const old = loadMyAccount(); await until(() => reply);
+          delayed = false;
+          await loadMyAccount();
+          eq('the current account is read', myAccount.hostOwner, false);
+          reply(new Response(JSON.stringify(status === 200 ? { ...account, hostOwner: true } : { error: 'made-up failure' }), { status }));
+          await old;
+          eq('an old ' + status + ' reply cannot replace the newer account', myAccount.hostOwner, false);
+          ok('owner-only forms stay hidden', $('mediaKeyDrawer').hidden);
+        }
+      } finally { window.fetch = realFetch; myAccount = account; paintMachineOwnerOnly(); }
     },
     firstFactorKeepsItsCodes: async () => {
       // Review of HB-0446: at the public address, someone with no second factor cannot read who they are until they add one. That first read comes a poll later, and must not close their codes.
@@ -10910,7 +11242,9 @@ const SCENARIOS = String.raw`(() => {
         root.style.setProperty('--safe-top', '59px');
         scrollTo(0, 0);
         await until(() => document.querySelector('.v2views button'));
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // Virtual-time Chrome may never deliver native animation frames. Use the harness's
+        // two frames, then measure the real layout with the same safe-area assertions below.
+        window.__frame(); window.__frame();
         const header = document.getElementById('v2Header');
         const head = header.getBoundingClientRect();
         const next = [...header.parentElement.children].slice([...header.parentElement.children].indexOf(header) + 1)

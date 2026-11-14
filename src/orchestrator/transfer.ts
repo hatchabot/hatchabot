@@ -16,6 +16,7 @@ import {
   waitForSkillsSettled,
   type ProvisionDeps,
   sharePathProblem,
+  hostPathTargetProblem,
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
@@ -25,11 +26,11 @@ import { buildRecipeOn, derivedByTag, recipeFor, recipeProblem, type ImageRecipe
 import { DERIVED_TAG_PREFIX } from './derivedImage.js';
 import { defaultMemoryCap, formatMemoryCap, memberMemoryMax, parseMemoryCap } from './memoryCap.js';
 import { formatSwapAllowance, parseSwapAllowance } from './swap.js';
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { MAX_FILE_BYTES } from './snapshots.js';
 import { MAX_TEMPLATE_PARAMS, PARAM_KEY_RE, TemplateParamSchema } from './template.js';
-import { MAX_DATA_SOURCES, MAX_MOUNT_NAME } from './dataSourceLimits.js';
-import { GIT_MOUNT_NAME_RE, normalizeGitUrl } from './gitSource.js';
+import { folderMountNameProblem, MAX_DATA_SOURCES, MAX_MOUNT_NAME } from './dataSourceLimits.js';
+import { validGitMountName, normalizeGitUrl } from './gitSource.js';
 import { STATE_CACHE_EXCLUDES } from '../providers/volumeCopy.js';
 import { manifestSchema as appManifestSchema } from './apps.js';
 import { TelegramUnavailableError } from '../channels/telegramManual.js';
@@ -955,14 +956,18 @@ async function importAgentInner(
       if (store.listDataSources(agent.id).some((x) => x.mountName === d.mountName)) continue;
       if (d.kind === 'folder') {
         const p = d.hostPath ?? '';
-        if (!hostLocal || !p || !existsSync(p) || sharePathProblem(p)) { skippedFolders.push(p || d.mountName); continue; }
+        if (!hostLocal || !p || folderMountNameProblem(d.mountName) || sharePathProblem(p)
+          || (d.mountAtHostPath && hostPathTargetProblem(p))) { skippedFolders.push(p || d.mountName); continue; }
+        let isFolder = false;
+        try { isFolder = !!statSync(p, { throwIfNoEntry: false })?.isDirectory(); } catch { /* unreadable: not imported */ }
+        if (!isFolder) { skippedFolders.push(p); continue; }
         store.insertDataSource({ id: randomUUID(), agentId: agent.id, kind: 'folder', access: d.access, mountName: d.mountName, hostPath: p, mountAtHostPath: !!d.mountAtHostPath, createdAt: now });
         continue;
       }
       if (!d.repoUrl) continue;
       // The clone's name and address reach the sync script's shell lines: an
       // unsigned bundle is held to what the add route makes (HB-0237).
-      if (!GIT_MOUNT_NAME_RE.test(d.mountName) || !normalizeGitUrl(d.repoUrl)) { skippedRepos.push(d.mountName.slice(0, 64)); continue; }
+      if (!validGitMountName(d.mountName) || !normalizeGitUrl(d.repoUrl)) { skippedRepos.push(d.mountName.slice(0, 64)); continue; }
       const id = randomUUID();
       let dsSecretRef: string | undefined;
       if (d.deployKey) {

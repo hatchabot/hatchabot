@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 
 const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
 const js = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join('\n');
@@ -71,8 +72,9 @@ function page(names: string[], extra: Record<string, unknown> = {}, consts: stri
   const toasts: string[] = [];
   const noop = () => {};
   const c = vm.createContext({
-    $, console, Intl, encodeURIComponent, Math, Date, Promise, String, JSON, Map, Set, Number, Array, Object,
+    $, console, Intl, encodeURIComponent, Math, Date, Promise, String, JSON, Map, Set, Number, Array, Object, crypto: webcrypto, Uint8Array,
     agents: AGENTS.map((a) => ({ ...a })), profiles: [], agentClasses: [], appConfig: {},
+    cronRead: 0, cronTriggerWrite: 0,
     api: async (url: string, init?: Init) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, toast: (t: string) => { toasts.push(t); }, refresh: async () => {},
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), fmtBytes: String,
@@ -322,7 +324,7 @@ describe("an app update's answer for an agent no longer shown (HB-0587)", () => 
 describe('a task made elsewhere that runs more often than every 15 seconds (HB-0588)', () => {
   const job = { id: 'job1', name: 'Reminder', message: 'Water the beds', everyMs: 1500 };
   // Edit filled the box with the task's interval in minutes, to two places: 0.03 (cronFormOf).
-  const cron = (extra: Record<string, unknown> = {}) => page(['addCronJob', 'cronFormOf', 'clearCronForm'], {
+  const cron = (extra: Record<string, unknown> = {}) => page(['addCronJob', 'cronFormOf', 'cronFormDraft', 'clearCronForm'], {
     cronAgentId: 'a1', cronCache: [job], cronNotes: new Set(), cronEditingId: 'job1', cronEditFilled: null, cancelCronEdit() {}, cronModeChanged() {}, loadCrons: async () => {}, ...extra,
   });
   it('its name and message can be changed; its cadence is not sent', async () => {
@@ -471,7 +473,7 @@ describe('Files: a picture, a player or a reader at the public address gets the 
 
 describe('the Schedule form: a task typed for A is not carried to B (HB-0591)', () => {
   it("B's form starts empty, and Add there creates nothing; A again keeps what was typed", async () => {
-    const { c, $, calls } = page(['prepareCrons', 'addCronJob', 'clearCronForm'], {
+    const { c, $, calls } = page(['prepareCrons', 'addCronJob', 'cronFormDraft', 'clearCronForm'], {
       cronAgentId: 'a1', cronCache: [], cronNotes: new Set(), cronEditingId: null, cronEditFilled: null,
       cancelCronEdit() {}, cronModeChanged() {}, loadCrons: async () => {},
     });
@@ -488,14 +490,14 @@ describe('the Schedule form: a task typed for A is not carried to B (HB-0591)', 
   });
   it('a task added: the form is empty after, its interval and time zone too, and the kind back to a schedule (clearCronForm)', async () => {
     const boxes = (p: ReturnType<typeof page>) => ['cronName', 'cronMsg', 'cronExpr', 'cronEvery', 'cronTz', 'cronMode'].map((id) => p.$(id).value);
-    const every = page(['addCronJob', 'cronFormOf', 'clearCronForm'], {
+    const every = page(['addCronJob', 'cronFormOf', 'cronFormDraft', 'clearCronForm'], {
       cronAgentId: 'a1', cronCache: [], cronNotes: new Set(), cronEditingId: null, cronEditFilled: null, cancelCronEdit() {}, cronModeChanged() {}, loadCrons: async () => {},
     });
     every.$('cronName').value = 'Water reminder'; every.$('cronMsg').value = 'Water the beds'; every.$('cronMode').value = 'every'; every.$('cronEvery').value = '30';
     await every.c.addCronJob();
     expect(every.calls.map((x) => x.url)).toEqual(['/v1/agents/a1/crons']);
     expect(boxes(every)).toEqual(['', '', '', '', '', 'cron']);
-    const zoned = page(['addCronJob', 'cronFormOf', 'clearCronForm'], {
+    const zoned = page(['addCronJob', 'cronFormOf', 'cronFormDraft', 'clearCronForm'], {
       cronAgentId: 'a1', cronCache: [], cronNotes: new Set(), cronEditingId: null, cronEditFilled: null, cancelCronEdit() {}, cronModeChanged() {}, loadCrons: async () => {},
     });
     zoned.$('cronName').value = 'Morning brief'; zoned.$('cronMsg').value = 'Good morning'; zoned.$('cronMode').value = 'cron'; zoned.$('cronExpr').value = '0 8 * * *'; zoned.$('cronTz').value = 'Pacific/Chatham';
@@ -1316,7 +1318,7 @@ describe('web chat: only what was said after the log was read is counted (HB-049
   it('the send and the next open compare words the same way: a trailing space in the log as read (webChatSameWords)', async () => {
     // The log as read holds "ok " (a trailing space) at 9:05. The send counts it as already there, as the next open does.
     const log = [{ textContent: 'ok ', dataset: { at: at(5) } }];
-    const { c, $ } = page(['webChatSend'], {
+    const { c, $ } = page(['webChatSend', 'webChatMessageId'], {
       webChatAgentId: 'a1', webChatDrafts: new Map(), webChatUnsure: new Map(), webChatSending: new Set(), pagePersonAway: false,
       webChatOpens: 1, webChatReadOpen: 1, webChatUnread: false, v2Find: () => ({ name: 'Homework Helper' }),
       webChatWait: () => null, webChatGiveBack() {}, webChatAnswered() {},
@@ -1337,7 +1339,7 @@ describe('web chat: only what was said after the log was read is counted (HB-049
     const early = { text: 'ok', after: undefined, logged: 0, untimed: 0, before: 0, open: 1, unsure: false, waiting: false, sentAt: at(10) };
     const unsure = new Map([['a1', [early]]]);
     const log = [{ textContent: 'ok', dataset: { at: at(10) } }], answeredBubbles = [{ textContent: 'ok', dataset: {} }];
-    const { c, $ } = page(['webChatSend'], {
+    const { c, $ } = page(['webChatSend', 'webChatMessageId'], {
       webChatAgentId: 'a1', webChatDrafts: new Map(), webChatUnsure: unsure, webChatSending: new Set(), pagePersonAway: false,
       webChatOpens: 1, webChatReadOpen: 1, webChatUnread: false, v2Find: () => ({ name: 'Homework Helper' }),
       webChatWait: () => null, webChatGiveBack() {}, webChatAnswered() {},

@@ -34,7 +34,7 @@ function world(ownModel: string | undefined) {
     downgrade: async (a) => { const from = a.model ?? null; store.setAgentModel(a.id, 'claude-haiku-4-5'); return { from, to: 'claude-haiku-4-5' }; },
     restoreModel: async (a, pin) => { restored.push(pin); store.setAgentModel(a.id, pin); return true; },
   };
-  return { store, deps, restored };
+  return { store, deps, restored, add };
 }
 
 describe('cheaper and pause in one pass', () => {
@@ -55,5 +55,62 @@ describe('cheaper and pause in one pass', () => {
     expect(next.resumed).toContain('meal-planner');
     expect(store.getAgent('meal-planner')?.state).toBe('RUNNING');
     expect(store.getAgent('meal-planner')?.model).toBe(ownModel);
+  });
+});
+
+describe('agents changed while a machine budget acts (HB-0706)', () => {
+  it('defers restoring a model during deletion and retains it for a failed delete', async () => {
+    const { store, deps, restored } = world('claude-opus-4-8');
+    store.setBudget('meal-planner', 'owner-household', 20, 'cheaper', iso(NOW));
+    await runBudgets(deps, NOW, { record: false });
+    store.setAgentState('meal-planner', 'DELETING');
+    store.setBudget('meal-planner', 'owner-household', null, 'cheaper', iso(NOW));
+    await runBudgets(deps, NOW + 60_000, { record: false });
+    expect(restored).toEqual([]);
+    expect(store.getBudgetPause('meal-planner', '2026-10')?.resumedAt).toBeUndefined();
+    store.setAgentState('meal-planner', 'FAILED');
+    await runBudgets(deps, NOW + 120_000, { record: false });
+    expect(restored).toEqual(['claude-opus-4-8']);
+    expect(store.getAgent('meal-planner')?.model).toBe('claude-opus-4-8');
+  });
+
+  it.each(['model', 'ARCHIVED', 'DELETING', 'DELETED'] as const)('rechecks the next agent after an earlier switch waits: %s', async (change) => {
+    const { store, deps, add } = world('claude-opus-4-8');
+    add('garden-notes');
+    store.setBudget(MACHINE, 'owner-household', 20, 'cheaper', iso(NOW));
+    let began!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { began = resolve; });
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const switched: string[] = [];
+    deps.downgrade = async (a, hold) => {
+      if (switched.length === 0) { began(); await waiting; }
+      switched.push(a.id);
+      const from = a.model ?? null;
+      store.setAgentModel(a.id, 'claude-haiku-4-5');
+      hold(from, 'claude-haiku-4-5');
+      return { from, to: 'claude-haiku-4-5' };
+    };
+    // The machine's list order is deliberately obtained from the same source
+    // as the pass; whichever agent waits first, the other can change meanwhile.
+    const ids = store.listAllActiveAgents().filter((a) => !a.ops).map((a) => a.id);
+    const next = ids[1]!;
+    const pass = runBudgets(deps, NOW, { record: false });
+    await started;
+    if (change === 'model') store.setAgentModel(next, 'claude-sonnet-5');
+    else {
+      if (change === 'DELETED') store.setAgentState(next, 'DELETING');
+      store.setAgentState(next, change);
+    }
+    release();
+    await pass;
+    if (change === 'model') {
+      expect(store.getBudgetPause(next, '2026-10')?.fromModel).toBe('claude-sonnet-5');
+      await runBudgets(deps, NEXT_MONTH, { record: false });
+      expect(store.getAgent(next)?.model).toBe('claude-sonnet-5');
+    } else {
+      expect(switched).not.toContain(next);
+      expect(store.getBudgetPause(next, '2026-10')).toBeUndefined();
+      expect(store.getAgent(next)?.model).toBe('claude-opus-4-8');
+    }
   });
 });

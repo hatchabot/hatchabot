@@ -592,7 +592,7 @@ export async function agentUsage(
   // A read that skipped rows it could not decode is smaller than the truth: stored
   // as a counter reading, the next whole read counted the skipped rows as fresh use
   // (the 2026-09-28 class; audit, 2026-10-23). Strict callers get the partial read
-  // marked, so the sampler keeps the profile but writes no total from it.
+  // marked, so the sampler preserves its last complete accounting snapshot.
   let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; callSlots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number; bad?: number;
     window?: { since?: number; models?: Record<string, WindowModelStats>; promptErrors?: number; hourly?: boolean }; purposes?: Record<string, string>; crons?: number | null;
     health?: TokenHealthRaw; searches?: { v?: number; since?: number; from?: number; hours?: Record<string, Record<string, number>> } };

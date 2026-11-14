@@ -8,7 +8,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
-import { scrubRemovedDataSources, syncGitDataSources } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec, scrubRemovedDataSources, syncGitDataSources } from '../src/orchestrator/provision.js';
 import { isBusy } from '../src/orchestrator/busy.js';
 
 /**
@@ -44,6 +44,27 @@ const addSource = (f: any, body: unknown) =>
   f.inject({ method: 'POST', url: '/v1/agents/a1/data-sources', headers: as, payload: body });
 
 describe('POST /v1/agents/:id/data-sources', () => {
+  it('refuses a folder path ending in a dot segment instead of mounting /data or its parent (HB-0707)', async () => {
+    const { store, f } = await world();
+    const dir = tmp();
+    for (const suffix of ['/.', '/..']) {
+      const res = await addSource(f, { kind: 'folder', access: 'ro', path: `${dir}${suffix}` });
+      expect(res.statusCode, res.body).toBe(400);
+    }
+    expect(store.listDataSources('a1')).toEqual([]);
+  });
+
+  it('a malformed folder name saved by an older import is refused before the runtime is built (HB-0707)', async () => {
+    const { store, secrets } = await world();
+    await secrets.put('ai/p1', 'made-up-ai-key');
+    store.setAgentWebOnly('a1', true);
+    store.insertDataSource({ id: 'unsafe', agentId: 'a1', kind: 'folder', access: 'rw', mountName: '../etc', hostPath: tmp(), createdAt: 'now' });
+    const provider = new MockProvider();
+    await expect(buildRuntimeSpec({ store, secrets, provider, channel: { kind: 'telegram' } } as never, 'a1')).rejects.toThrow(/one plain folder name/);
+    expect(provider.lastSpec).toBeUndefined();
+    expect(store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
   it('adds a read-only folder and reflects it in dataSources + summary', async () => {
     const { store, f } = await world();
     const dir = tmp();

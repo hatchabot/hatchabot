@@ -2,6 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MAX_MOUNT_NAME, RESERVED_GIT_MOUNT_NAMES } from './dataSourceLimits.js';
 
 /**
  * Git data sources (docs/data-sources.md, Slice B). A repo is CLONED onto the
@@ -60,8 +61,12 @@ export function normalizeGitUrl(input: string): NormalizedGit | null {
  */
 export const GIT_MOUNT_NAME_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 
+export function validGitMountName(name: string): boolean {
+  return name.length <= MAX_MOUNT_NAME && GIT_MOUNT_NAME_RE.test(name) && !RESERVED_GIT_MOUNT_NAMES.has(name);
+}
+
 function assertMountName(name: string): void {
-  if (!GIT_MOUNT_NAME_RE.test(name)) throw new Error('This repo source has a folder name that is not allowed. Remove it and add it again.');
+  if (!validGitMountName(name)) throw new Error('This repo source has a folder name that is not allowed. Remove it and add it again.');
 }
 
 /** A git source stored as an https URL is a public, credential-less, read-only clone. */
@@ -240,11 +245,16 @@ export function buildGitSyncScript(
  * `mountName` is checked by the caller: [A-Za-z0-9_-] first, then also dots.
  */
 export function buildGitRemovalScript(mountName: string, repoUrl: string | null, opts: { keepClone?: boolean } = {}): string {
+  if (!GIT_MOUNT_NAME_RE.test(mountName) || mountName.length > MAX_MOUNT_NAME) assertMountName(mountName);
   const base = '/home/node/.openclaw';
   const key = `${base}/.ssh/${mountName}_deploy`;
   const clone = `${base}/${mountName}`;
   const unsetKey = `case "$(git -C ${clone} config --get core.sshCommand 2>/dev/null)" in *${key}*) git -C ${clone} config --unset-all core.sshCommand ;; esac`;
   const lines = [`rm -f ${key} ${key}.pub ${key}-cert.pub`];
+  const keyGone = `[ ! -e ${key} ] && [ ! -e ${key}.pub ] && [ ! -e ${key}-cert.pub ]`;
+  // An older import could save a reserved name. Revoke its deploy key, but
+  // never treat OpenClaw's own directory as a clone eligible for deletion.
+  if (RESERVED_GIT_MOUNT_NAMES.has(mountName)) return [...lines, keyGone].join('\n');
   if (repoUrl && !opts.keepClone) {
     const same = sameRepoUrls(repoUrl).map(shq).join('|');
     lines.push(`if [ -d ${clone}/.git ]; then case "$(git -C ${clone} config --get remote.origin.url 2>/dev/null)" in ${same}) rm -rf ${clone} ;; *) ${unsetKey} ;; esac; fi`);
@@ -253,7 +263,7 @@ export function buildGitRemovalScript(mountName: string, repoUrl: string | null,
     lines.push(`if [ -d ${clone}/.git ]; then ${unsetKey}; fi`);
   }
   lines.push(`if [ -d ${clone}/.git ]; then case "$(git -C ${clone} config --get core.sshCommand 2>/dev/null)" in *${key}*) exit 1 ;; esac; fi`);
-  lines.push(`[ ! -e ${key} ] && [ ! -e ${key}.pub ] && [ ! -e ${key}-cert.pub ]`);
+  lines.push(keyGone);
   return lines.join('\n');
 }
 

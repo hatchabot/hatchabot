@@ -37,7 +37,7 @@ import { activeValues } from '../config/envFile.js';
 import { randomBytes } from 'node:crypto';
 import { hashPassword, newRecoveryCode, normalizeRecoveryCode, onThisMachine, passwordProblem, usernameProblem } from './accountsAuth.js';
 import { loopbackIsRemote, noteFailure, throttled } from './auth.js';
-import { cookieFromHeader, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
+import { cookieFromHeader, readSessionCookie, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
 import { foreignRequest } from './requestOrigin.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
@@ -168,7 +168,7 @@ import {
   TEMPLATE_FORMAT,
   LEGACY_TEMPLATE_FORMAT,
 } from '../orchestrator/template.js';
-import { MAX_DATA_SOURCES, MAX_MOUNT_NAME } from '../orchestrator/dataSourceLimits.js';
+import { folderMountNameProblem, MAX_DATA_SOURCES, MAX_MOUNT_NAME, RESERVED_GIT_MOUNT_NAMES } from '../orchestrator/dataSourceLimits.js';
 import { agentHealth, aiSourceHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
@@ -259,7 +259,7 @@ import { ConsoleAccess, type RoomPromise } from '../orchestrator/consoleAccess.j
 import { credentialValuesFromEnv, redactSecrets } from '../domain/redact.js';
 import { boundInput, buildReport, endpointIdentity, issueUrl, knownProblems, localContext, matchKnownProblems, readSource, redactForPublic, searchSource, type PublicRedactContext, type ReportFacts, type ReportInput } from '../orchestrator/problemReport.js';
 import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
-import type { IdentityVerifier } from './identity.js';
+import { admittedPrincipal, IdentityError, type IdentityVerifier } from './identity.js';
 import {
   autoSnapshot,
   captureSnapshot,
@@ -1493,10 +1493,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return true;
   };
 
-  /** Keep a change for this stopped or sleeping agent's next start, which is a rebuild (startStopped, wakeAgent). */
-  const oweRebuild = (agentId: string, log = trace(agentId)): void => {
-    store.setRebuildOnStart(agentId, new Date().toISOString());
+  /** Keep a change for the next start or wake, which is a rebuild. A later
+   * obligation gets a distinct stamp even in the same millisecond, so a
+   * completed live apply can clear only the obligation it created. */
+  const oweRebuild = (agentId: string, log = trace(agentId)): string => {
+    const before = Date.parse(store.getAgent(agentId)?.rebuildOnStart ?? '') || 0;
+    const at = new Date(Math.max(Date.now(), before + 1)).toISOString();
+    store.setRebuildOnStart(agentId, at);
     log('rebuild.owed', {});
+    return at;
   };
   /**
    * A change only a new container picks up (a source, a browser, a bot, where
@@ -2415,10 +2420,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * as a member, still at work when the agent left the class, no longer
    * lands after the one its leaving asked for and puts the class's limits
    * back on; and no other change of its limits lands between PATCH's docker
-   * call and its record. (The limits sweep, the fleet's own settings and
-   * Start still put limits on outside the turn: a sweep that reads PATCH's
-   * docker change before its record puts the old one back, and the next
-   * sweep puts the stored one on again. Backlog HB-0653.)
+   * call and its record. The limits sweep, fleet defaults and Start take
+   * that same turn and read the desired limits once it comes (HB-0653).
    * Its callers:
    * - every class path (limitsTold: an edit's members, a class deleted, a
    *   join, a leave, a detach), with `forClass`: an agent with a cap and a
@@ -3574,19 +3577,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const runBudgetPass = (opts: { record?: boolean } = {}): Promise<unknown> => {
     const go = async () => {
       if (budgetPassing) await budgetPassing.catch(() => {});
+      // A cheaper-model retry follows a restoration and a possibly slow
+      // stop. Remember which restoration is ours across both waits, so an
+      // owner edit during the stop is not overwritten before retry begins.
+      const restored = new Map<string, { generation: number; source: string }>();
       return runBudgets({
         store, tell: tellUsageSpike, isBusy,
         pause: async (a) => {
           const now = store.getAgent(a.id);
           if (!now?.runtimeRef || isBusy(a.id)) return false;
-          if (now.state === 'STOPPED' && now.hibernatedAt) { store.setHibernated(a.id, null); return true; }
-          if (now.state !== 'RUNNING') return false;
+          if (now.state !== 'RUNNING' && !(now.state === 'STOPPED' && now.hibernatedAt)) return false;
           // The record changes under the lock too, judged again once it is
           // held: a Start or an Archive must not land between the two (#10).
           return whileBusy(a.id, async () => {
             const held = store.getAgent(a.id);
-            if (!held?.runtimeRef || held.state !== 'RUNNING') return false;
-            await providerFor(held.hostId).stop(held.runtimeRef);
+            if (!held?.runtimeRef || (held.state !== 'RUNNING' && !(held.state === 'STOPPED' && held.hibernatedAt))) return false;
+            // A successful stop reply or an asleep label is not proof the
+            // runtime stopped. Record a pause only after confirmation; a
+            // lost reply after a successful stop is reconciled too (HB-0711).
+            await stopAndConfirm(providerFor(held.hostId), held.runtimeRef);
             store.setHibernated(a.id, null);
             store.setAgentState(a.id, 'STOPPED');
             return true;
@@ -3666,6 +3675,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           const back = pin && !modelOverrideProblem(profile, pin) ? pin : null;
           const before = snapshotModels(store, [a.id]);
           store.setAgentModel(a.id, back, { hatchabot: true });
+          restored.set(a.id, { generation: store.modelGeneration(a.id), source: a.aiProfileId });
           // Unlike the switch down, a runtime that refuses this keeps the record:
           // its own model is what it should run, the page shows it as waiting
           // (pendingModel), and the next rebuild puts it on. Kept cheap, a pause
@@ -3678,11 +3688,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // (budgets.ts putCheaperBackOrClose): the budget's switch, kept only if
         // the runtime took it, as with the switch down.
         reapplyCheaper: async (a, model) => {
-          const own = store.getAgent(a.id)?.model ?? null;
+          const current = store.getAgent(a.id);
+          const was = restored.get(a.id);
+          if (!current || !was || current.aiProfileId !== was.source || store.modelGeneration(a.id) !== was.generation) return false;
+          const own = current.model ?? null, source = current.aiProfileId;
           const before = snapshotModels(store, [a.id]);
-          store.setAgentModel(a.id, model);
+          store.setAgentModel(a.id, model, { hatchabot: true });
+          const ours = store.modelGeneration(a.id);
           const applied = await applyModelToRuntime(a.id).catch(() => 'failed' as const);
-          if (applied !== 'live' && applied !== 'staged') { store.setAgentModel(a.id, own); return false; }
+          if (applied !== 'live' && applied !== 'staged') {
+            // Like the first budget downgrade: only undo our own write.
+            // A newer choice (even of this same model), or another source,
+            // belongs to the owner and its queued apply must keep it.
+            if (store.modelGeneration(a.id) === ours && store.getAgent(a.id)?.aiProfileId === source) {
+              store.setAgentModel(a.id, own, { hatchabot: true });
+            }
+            return false;
+          }
           recordChanges(store, before, { by: 'hatchabot', via: 'budget', source: 'budget', why: 'Its monthly budget was reached: the cheapest model its source offers, until the 1st.' });
           return true;
         },
@@ -4382,22 +4404,74 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // encrypted connection only, since what is typed is a password; nothing of
   // it is stored or logged. A panel lasts until it is closed, ten minutes pass
   // with no input, or the browser goes (the agent stops or restarts).
+  type PanelAccess = {
+    id: string; agent: Agent; cookie: string | undefined; https: boolean; public: boolean; lastActive: number;
+  };
+  const panelAccess = new Map<string, PanelAccess>();
+  const pendingPanelOpens = new Set<{ session: string | undefined; revoked: boolean }>();
+  const panelSessionValid = (access: Omit<PanelAccess, 'id' | 'agent'>, ownerId: string): boolean => {
+    try {
+      // This is the app's password-entry panel, so a signed-in browser is
+      // required. A bearer alone cannot keep a stream open after revocation.
+      // Auth-free route fixtures have no resolver; password mode without a
+      // password has one that resolves the local owner without a cookie.
+      if (app.principalFromCookieHeader && app.principalFromCookieHeader(access.cookie, access.https)?.ownerId !== ownerId) return false;
+      return !access.public || (!!app.publicAccess && !app.publicAccess.refuseOpenSocket(access.cookie, ownerId, access.lastActive));
+    } catch { return false; }
+  };
+  const panelRequestAccess = (req: FastifyRequest) => ({ cookie: req.headers.cookie, https: requestIsHttps(req), public: isPublic(req), lastActive: Date.now() });
+  const panelAccessValid = (access: PanelAccess): boolean => {
+    try {
+      const a = store.getAgent(access.agent.id);
+      return !!a && a.ownerId === access.agent.ownerId && a.state === 'RUNNING' && !!a.browser && !a.ops
+        && a.runtimeRef === access.agent.runtimeRef && a.hostId === access.agent.hostId && a.browserLogins === access.agent.browserLogins
+        && panelSessionValid(access, a.ownerId);
+    } catch { return false; }
+  };
   const panels = new BrowserPanels({
-    log: (agentId, e, d) => trace(agentId)(e, d),
+    log: (agentId, e, d) => {
+      if (e === 'browser.panel_closed') panelAccess.delete(agentId);
+      trace(agentId)(e, d);
+    },
     // An agent that keeps its logins lists the sites its panel opened (the host only).
     onUrl: (agentId, url) => {
+      const access = panelAccess.get(agentId);
+      if (!access || !panelAccessValid(access)) return;
       const a = store.getAgent(agentId);
       const site = siteOf(url);
       if (a?.browserLogins && site) store.noteAgentBrowserSite(agentId, a.browserLogins, site);
     },
   });
-  app.addHook('onClose', async () => { panels.closeAll('shutdown'); });
+  const revalidatePanels = (): void => {
+    for (const access of panelAccess.values()) {
+      if (!panelAccessValid(access)) panels.get(access.id, access.agent.id, access.agent.ownerId)?.close('access');
+    }
+  };
+  app.addHook('onResponse', async (req, reply) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS' || reply.statusCode >= 400) return;
+    // Private logout forgets only the cookie in that browser, not its signed
+    // value on the server. End active and pending panels for that browser.
+    if (req.routeOptions.url === '/v1/logout' && req.headers.cookie) {
+      const ended = readSessionCookie(req.headers.cookie, requestIsHttps(req))?.value;
+      for (const pending of pendingPanelOpens) if (ended && pending.session === ended) pending.revoked = true;
+      for (const access of panelAccess.values()) if (ended && readSessionCookie(access.cookie, access.https)?.value === ended) {
+        panels.get(access.id, access.agent.id, access.agent.ownerId)?.close('person');
+      }
+    }
+    revalidatePanels();
+  });
+  const panelSweep = setInterval(revalidatePanels, 30_000);
+  panelSweep.unref();
+  app.addHook('onClose', async () => { clearInterval(panelSweep); panels.closeAll('shutdown'); });
   const PANEL_PLAIN_HTTP = 'The sign-in panel opens only over an encrypted connection: this Hatchabot\'s https address, a device on your tailnet, or this machine itself. What you type in it is a password, so over plain http on your network it stays shut.';
+  const PANEL_SESSION = 'Sign in to Hatchabot in this browser to open the sign-in panel.';
   const PANEL_GONE = 'That panel has closed. Open it again.';
   /** The open panel a request names: that person's, on that agent, over a connection fit to type a password on. */
   const openPanel = (req: FastifyRequest<{ Params: { id: string; panel: string } }>, reply: FastifyReply) => {
     if (!panelTransportOk(req, requestIsHttps(req), onThisMachine(req))) { void reply.code(403).send({ error: PANEL_PLAIN_HTTP }); return undefined; }
     const agent = ownedAgent(req, req.params.id);
+    if (agent && !panelSessionValid(panelRequestAccess(req), agent.ownerId)) { void reply.code(401).send({ error: PANEL_SESSION }); return undefined; }
+    revalidatePanels();
     const panel = agent ? panels.get(req.params.panel, agent.id, agent.ownerId) : undefined;
     if (!panel) void reply.code(404).send({ error: PANEL_GONE });
     return panel;
@@ -4406,6 +4480,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     if (!panelTransportOk(req, requestIsHttps(req), onThisMachine(req))) return reply.code(403).send({ error: PANEL_PLAIN_HTTP });
+    const access = panelRequestAccess(req);
+    if (!panelSessionValid(access, agent.ownerId)) return reply.code(401).send({ error: PANEL_SESSION });
     if (agent.ops || !agent.browser) return reply.code(409).send({ error: 'Its browser is off: turn it on under Advanced → Browser first.' });
     if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'It is not running: start it, and its browser starts with it.' });
     const size = panelSize(req.body);
@@ -4416,10 +4492,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const p = providerFor(agent.hostId);
     const c = containerOf(agent.runtimeRef, p);
     if (!p.openBrowserPanel || !c) return reply.code(409).send({ error: 'This machine cannot show an agent\'s browser.' });
-    const b = (await p.listBrowsers?.().catch(() => []))?.find((x) => x.agentContainer === c);
-    if (!b?.running) return reply.code(409).send({ error: 'Its browser is not running yet: it starts within a minute of the agent. Try again shortly.' });
-    const id = panels.open(agent.id, agent.ownerId, p.openBrowserPanel(c), size, url);
-    return reply.code(201).send({ panel: id, idleMinutes: PANEL_IDLE_MS / 60_000 });
+    const pending = { session: readSessionCookie(access.cookie, access.https)?.value, revoked: false };
+    pendingPanelOpens.add(pending);
+    try {
+      const b = (await p.listBrowsers?.().catch(() => []))?.find((x) => x.agentContainer === c);
+      // Listing a runner can take time. Ownership, the session and the exact
+      // browser must still be the ones checked before that wait. Private
+      // logout also cancels this request even though its cookie is stateless.
+      const fresh = ownedAgent(req, agent.id);
+      if (!fresh) return reply.code(404).send({ error: 'Not found' });
+      if (pending.revoked || !panelSessionValid(access, agent.ownerId)) return reply.code(401).send({ error: PANEL_SESSION });
+      if (!panelAccessValid({ id: '', agent, ...access })) return reply.code(409).send({ error: 'Its browser changed while the panel was opening. Open it again.' });
+      if (!b?.running) return reply.code(409).send({ error: 'Its browser is not running yet: it starts within a minute of the agent. Try again shortly.' });
+      const id = panels.open(agent.id, agent.ownerId, p.openBrowserPanel(c), size, url);
+      panelAccess.set(agent.id, { id, agent, ...access });
+      return reply.code(201).send({ panel: id, idleMinutes: PANEL_IDLE_MS / 60_000 });
+    } finally { pendingPanelOpens.delete(pending); }
   });
   // The page's frames and the address, as server-sent events read by fetch.
   // A frame is acknowledged once written here, so a slow connection gets
@@ -4427,16 +4515,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string; panel: string } }>('/v1/agents/:id/browser/panel/:panel/stream', NO_COMPRESS, async (req, reply) => {
     const panel = openPanel(req, reply);
     if (!panel) return reply;
+    const access = panelAccess.get(panel.agentId)!;
+    // A second stream can replace the first; its own browser session is the
+    // one that must remain signed in from this point onward.
+    Object.assign(access, panelRequestAccess(req));
     const out = new PassThrough();
     const sink: PanelSink = (ev) => new Promise<void>((resolve) => {
       if (out.destroyed || out.writableEnded) { resolve(); return; }
+      if (ev.t !== 'closed' && !panelAccessValid(access)) { panel.close('access'); resolve(); return; }
       const done = () => { out.off('drain', done); out.off('close', done); resolve(); };
       if (out.write(`data: ${JSON.stringify(ev)}\n\n`)) resolve();
       else { out.once('drain', done); out.once('close', done); }
       if (ev.t === 'closed') out.end();
     });
     // A comment now and then, so a proxy does not end a stream while the page is still.
-    const beat = setInterval(() => { if (!out.writableEnded) out.write(': \n\n'); }, 25_000);
+    const beat = setInterval(() => {
+      if (!panelAccessValid(access)) { panel.close('access'); return; }
+      if (!out.writableEnded && !out.writableNeedDrain) out.write(': \n\n');
+    }, 25_000);
     beat.unref();
     reply.raw.on('close', () => {
       clearInterval(beat);
@@ -4458,6 +4554,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!panel) return reply;
     const r = panelCommands(req.body?.ops);
     if ('error' in r) return reply.code(400).send({ error: r.error });
+    const access = panelAccess.get(panel.agentId);
+    if (access) access.lastActive = Date.now();
     panel.touch();
     panel.run(r.commands);
     return reply.code(204).send();
@@ -4914,6 +5012,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // The host's compressed swap, only where some agent here has an allowance.
       let compressed = false;
       const withSwap = list.filter((a) => !!agentMemoryLimits(store, a).swap);
+      let swapChecked = withSwap.length > 0;
       if (withSwap.length) {
         const sw = await prov.compressedSwap?.({ fresh: !opts.agentIds }).catch(() => undefined);
         compressed = !!sw?.compressed;
@@ -4927,34 +5026,56 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       let live: Map<string, LiveMemoryLimits>;
       try { live = await prov.memoryLimitsLive(list.map((a) => a.runtimeRef!)); } catch { continue; } // unreachable: next sweep
       for (const a of list) {
-        const l = live.get(a.runtimeRef!);
-        if (!l) continue;
-        sum.checked++;
-        if (l.running && !l.cgroup) sum.notCovered++;
-        const now = store.getAgent(a.id);
-        if (!now?.runtimeRef || isBusy(a.id)) continue;
-        const lim = agentMemoryLimits(store, now);
-        const d = limitsDrift(wantedLimits(lim, compressed), l);
-        if (!d.reassert) { driftSeen.delete(a.id); continue; }
-        // The kernel's own limit moved while docker's record did not: a systemd reload.
-        const cgroupOnly = d.reasons.every((r) => r.startsWith('cgroup'));
-        if (cgroupOnly) sum.cgroupDrifted++;
-        let after: ReturnType<typeof limitsDrift> | undefined;
-        try {
-          await prov.updateMemory(now.runtimeRef, lim.memory, lim.swap);
-          const re = (await prov.memoryLimitsLive([now.runtimeRef]).catch(() => undefined))?.get(now.runtimeRef);
-          after = re ? limitsDrift(wantedLimits(lim, compressed), re) : undefined;
-        } catch { /* counted as failed below */ }
-        const ok = !!after && !after.reassert;
-        sum.reasserted++;
-        if (!ok) sum.failed++;
-        const sig = `${d.reasons.join(',')}|${JSON.stringify(d.have)}|${ok}`;
-        if (driftSeen.get(a.id) !== sig) {
-          driftSeen.set(a.id, sig);
-          trace(a.id)(ok ? 'runtime.swap_reasserted' : 'runtime.swap_reassert_failed', {
-            reasons: d.reasons, before: d.have, after: after?.have, want: wantedLimits(lim, compressed), ...(cgroupOnly ? { cause: 'cgroup changed under docker (a systemd reload)' } : {}),
-          });
-        }
+        await inLimitsTurn(a.id, async () => {
+          let l = live.get(a.runtimeRef!);
+          if (!l) return;
+          // The batched reading is only a hint. A PATCH may have applied its
+          // limits but not stored them yet, or a lifecycle change moved the
+          // agent while that reading was in flight. Judge it in its turn.
+          let now = store.getAgent(a.id);
+          const sameRuntime = (n: Agent | undefined): n is Agent & { runtimeRef: string } =>
+            !!n?.runtimeRef && n.runtimeRef === a.runtimeRef && n.hostId === hostId
+            && (n.state === 'RUNNING' || n.state === 'STOPPED') && !n.migratedTo && !isBusy(n.id);
+          if (!sameRuntime(now)) return;
+          // An allowance may have been saved while this sweep queued behind
+          // PATCH; the original batch then had no reason to inspect swap.
+          if (!swapChecked && agentMemoryLimits(store, now).swap) {
+            compressed = !!(await prov.compressedSwap?.({ fresh: !opts.agentIds }).catch(() => undefined))?.compressed;
+            swapChecked = true;
+            now = store.getAgent(a.id);
+            if (!sameRuntime(now)) return;
+          }
+          sum.checked++;
+          if (l.running && !l.cgroup) sum.notCovered++;
+          let lim = agentMemoryLimits(store, now);
+          let d = limitsDrift(wantedLimits(lim, compressed), l);
+          if (!d.reassert) { driftSeen.delete(a.id); return; }
+          l = (await prov.memoryLimitsLive!([now.runtimeRef]).catch(() => undefined))?.get(now.runtimeRef);
+          now = store.getAgent(a.id);
+          if (!l || !sameRuntime(now)) return;
+          lim = agentMemoryLimits(store, now);
+          d = limitsDrift(wantedLimits(lim, compressed), l);
+          if (!d.reassert) { driftSeen.delete(a.id); return; }
+          // The kernel's own limit moved while docker's record did not: a systemd reload.
+          const cgroupOnly = d.reasons.every((r) => r.startsWith('cgroup'));
+          if (cgroupOnly) sum.cgroupDrifted++;
+          let after: ReturnType<typeof limitsDrift> | undefined;
+          try {
+            await prov.updateMemory!(now.runtimeRef, lim.memory, lim.swap);
+            const re = (await prov.memoryLimitsLive!([now.runtimeRef]).catch(() => undefined))?.get(now.runtimeRef);
+            after = re ? limitsDrift(wantedLimits(lim, compressed), re) : undefined;
+          } catch { /* counted as failed below */ }
+          const ok = !!after && !after.reassert;
+          sum.reasserted++;
+          if (!ok) sum.failed++;
+          const sig = `${d.reasons.join(',')}|${JSON.stringify(d.have)}|${ok}`;
+          if (driftSeen.get(a.id) !== sig) {
+            driftSeen.set(a.id, sig);
+            trace(a.id)(ok ? 'runtime.swap_reasserted' : 'runtime.swap_reassert_failed', {
+              reasons: d.reasons, before: d.have, after: after?.have, want: wantedLimits(lim, compressed), ...(cgroupOnly ? { cause: 'cgroup changed under docker (a systemd reload)' } : {}),
+            });
+          }
+        });
       }
     }
     if (!opts.agentIds) {
@@ -7432,6 +7553,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { applied: n, gone };
   };
 
+  /** Concurrent toggles apply the latest saved permission in order. A failed
+   * write leaves a durable rebuild obligation, so Start/wake cannot reuse
+   * the old permission after the caller was told the change was saved. */
+  const triggerApplies = new Map<string, Promise<unknown>>();
+  const applyCronTriggers = (agentId: string, ownObligation?: string): Promise<string | undefined> => inQueue(triggerApplies, agentId, async () => {
+    const a = store.getAgent(agentId);
+    if (!a || agentGone(agentId)) return undefined;
+    let live = false;
+    if (a.state === 'RUNNING' && a.runtimeRef && !isBusy(agentId)) {
+      const res = await providerFor(a.hostId).exec(a.runtimeRef, ['config', 'set', 'cron.triggers.enabled', a.cronTriggers ? 'true' : 'false'], { timeoutMs: 20_000 }).catch(() => undefined);
+      const now = store.getAgent(agentId);
+      live = res?.code === 0 && now?.state === 'RUNNING' && now.runtimeRef === a.runtimeRef && now.hostId === a.hostId && !!now.cronTriggers === !!a.cronTriggers;
+    }
+    trace(agentId)('cron.triggers', { enabled: !!a.cronTriggers, live });
+    if (live) {
+      // A browser, image or channel change may also need a rebuild. Clear
+      // only our own mark, and only if nobody replaced it while we waited.
+      if (ownObligation && store.getAgent(agentId)?.rebuildOnStart === ownObligation) store.setRebuildOnStart(agentId, null);
+      return undefined;
+    }
+    const now = store.getAgent(agentId);
+    if (!now || agentGone(agentId)) return undefined;
+    if (now.runtimeRef && !now.rebuildOnStart) oweRebuild(agentId);
+    return now.state === 'STOPPED' || !now.runtimeRef
+      ? `Saved. Event-triggered tasks will be ${now.cronTriggers ? 'enabled' : 'disabled'} when the agent next starts.`
+      : 'Saved, but its running permission could not be changed. Event-triggered tasks may still use the old permission. Rebuild the agent to apply it; its next start or wake will also apply it.';
+  });
+
   // ---- Defaults for this machine (machineDefaults.ts): written to .env, applied at once ----
   app.get('/v1/machine-defaults', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
@@ -7463,29 +7612,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const fleet = store.listAllActiveAgents().filter((a) => a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED') && !!store.getHost(a.hostId));
     const unreachable = new Set<string>();
     const volumeGone: string[] = [];
-    if (spec.key === 'agentMemory') {
+    if (spec.key === 'agentMemory' || spec.key === 'agentSwap') {
       for (const a of fleet) {
-        const cls = a.classId ? store.getAgentClass(a.classId) : undefined;
-        if (parseMemoryCap(a.memoryCap) || parseMemoryCap(cls?.memoryCap)) continue; // its own or its class's cap stands
-        if (unreachable.has(a.hostId)) continue;
-        const prov = providerFor(a.hostId);
-        const lim = agentMemoryLimits(store, a);
-        try { await prov.updateMemory?.(a.runtimeRef!, lim.memory, lim.swap); applied++; } catch {
-          // The next rebuild applies it.
-          if (a.hostId !== local) { unreachable.add(a.hostId); continue; }
-        }
-        // And tell the agent its new budget (AGENTS.md), as a per-agent change does.
-        if (a.state === 'RUNNING') void syncDocsHeld(a, prov);
-      }
-    } else if (spec.key === 'agentSwap') {
-      for (const a of fleet) {
-        const cls = a.classId ? store.getAgentClass(a.classId) : undefined;
-        if (parseSwapAllowance(a.swapAllowance) !== undefined || parseSwapAllowance(cls?.swapAllowance) !== undefined) continue; // its own or its class's stands
-        if (unreachable.has(a.hostId)) continue;
-        const lim = agentMemoryLimits(store, a);
-        try { await providerFor(a.hostId).updateMemory?.(a.runtimeRef!, lim.memory, lim.swap); applied++; } catch {
-          if (a.hostId !== local) unreachable.add(a.hostId);
-        }
+        const told = await inLimitsTurn(a.id, async () => {
+          const now = store.getAgent(a.id);
+          if (!now?.runtimeRef || (now.state !== 'RUNNING' && now.state !== 'STOPPED') || now.migratedTo || !store.getHost(now.hostId) || unreachable.has(now.hostId)) return;
+          const cls = now.classId ? store.getAgentClass(now.classId) : undefined;
+          // A cap or allowance saved while this default waited stands.
+          if (spec.key === 'agentMemory'
+            ? parseMemoryCap(now.memoryCap) || parseMemoryCap(cls?.memoryCap)
+            : parseSwapAllowance(now.swapAllowance) !== undefined || parseSwapAllowance(cls?.swapAllowance) !== undefined) return;
+          const prov = providerFor(now.hostId), lim = agentMemoryLimits(store, now);
+          if (!prov.updateMemory) return;
+          try { await prov.updateMemory(now.runtimeRef, lim.memory, lim.swap); applied++; }
+          catch { if (now.hostId !== local) unreachable.add(now.hostId); return; }
+          return spec.key === 'agentMemory' && now.state === 'RUNNING' ? now : undefined;
+        });
+        if (told) void syncDocsHeld(told);
       }
     } else if (spec.key === 'engineMemory') {
       if (embedder.enabled && !embedder.external) { await embedder.restart().catch(() => undefined); applied = 1; }
@@ -7996,6 +8139,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // with it was saved under a 400 (#57).
       // A browser or a pin needs a new container: not while an operation decides what runs next.
       if (((parsed.data.browser !== undefined && parsed.data.browser !== !!agent.browser)
+        || parsed.data.cronTriggers !== undefined
         || (parsed.data.image !== undefined && parsed.data.image !== (agent.image ?? null)))
         && operationRefuses(agent, reply)) return reply;
       if (agent.ops && parsed.data.browser && !agent.browser) return reply.code(400).send({ error: 'The manager has no browser: its tools are Hatchabot\'s only.' });
@@ -8028,6 +8172,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       let sameImage: boolean | undefined;
       /** The browser switch was stored but no rebuild started to apply it: what the caller is told. */
       let browserPending: string | undefined;
+      let triggerRebuildClaim: string | undefined;
       if (parsed.data.image !== undefined) {
         // Which image runs on this box is the MACHINE owner's call, like host
         // paths: any local image is runnable by name, including ones that have
@@ -8197,7 +8342,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // first: refused there (the agent or the source deleted meanwhile, or
         // a rebuild or a move begun during the waits above), nothing is stored
         // and nothing that follows is done (HB-0570).
-        let refused: 'no-agent' | 'no-source' | 'busy' | 'runner' | undefined;
+        let refused: 'no-agent' | 'no-source' | 'busy' | 'triggers-busy' | 'runner' | 'moving' | 'folder-runner' | undefined;
         try {
           if (parsed.data.swapAllowance !== undefined) {
             // As it is after the cap's docker call, not as read at the start.
@@ -8210,6 +8355,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           store.transact(() => {
             // Deleted meanwhile: none of the change is written, a source switch or not.
             if (agentGone(agent.id)) { refused = 'no-agent'; return; }
+            // A host move depends on its checked image and mounts. A PATCH
+            // may have waited for a cap/image check while that move began or
+            // finished, so judge these settings again at the write (HB-0709).
+            if ((parsed.data.image !== undefined || sharedPathList !== undefined) && store.activeOperationFor(agent.id)?.kind === 'move-host') { refused = 'moving'; return; }
+            const current = store.getAgent(agent.id)!;
+            if (sharedPathList?.some((p) => !(current.sharedPaths ?? []).includes(p)) && store.getHost(current.hostId)?.kind !== 'local') { refused = 'folder-runner'; return; }
+            // A rebuild may have rendered its permission while this request
+            // waited for a cap/image check. It would clear an obligation made
+            // here without applying this flag. Refuse before any store write.
+            if (parsed.data.cronTriggers !== undefined && (isBusy(agent.id) || operationRefusal(store, agent.id))) { refused = 'triggers-busy'; return; }
             if (switchingProfile) {
               if (isBusy(agent.id)) { refused = 'busy'; return; }
               // Where it is now: moved to a runner during the waits above, this machine's login cannot reach it.
@@ -8244,7 +8399,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
               store.setAgentBrowser(agent.id, parsed.data.browser);
               traceLater('browser.switched', { on: parsed.data.browser });
             }
-            if (parsed.data.cronTriggers !== undefined) store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);
+            if (parsed.data.cronTriggers !== undefined) {
+              store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);
+              // Stored with the flag for running agents too: a service crash
+              // before the live apply leaves the obligation on disk. Existing
+              // obligations belong to other changes and cannot be cleared by
+              // a successful trigger write.
+              const now = store.getAgent(agent.id);
+              if (now?.runtimeRef && !now.rebuildOnStart) triggerRebuildClaim = oweRebuild(agent.id, traceLater);
+            }
             if (persona !== undefined) {
               store.setAgentPersona(agent.id, persona.trim());
               // Same layer-sync rule as direct file edits: without it, the next
@@ -8281,7 +8444,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (refused === 'no-agent') { reply.code(404).send({ error: AGENT_GONE }); return true; }
         if (refused === 'no-source') { reply.code(409).send({ error: new SourceGoneError().userMessage }); return true; }
         if (refused === 'busy') { reply.code(409).send({ error: SOURCE_SWITCH_BUSY }); return true; }
+        if (refused === 'triggers-busy') { reply.code(409).send({ error: 'The agent is busy. Change its event-trigger permission once its current operation finishes.' }); return true; }
         if (refused === 'runner') { reply.code(400).send({ error: MACHINE_LOGIN_NO_RUNNER }); return true; }
+        if (refused === 'moving') { reply.code(409).send({ error: 'Its move to another machine is not over. Change its image or folders once that finishes.' }); return true; }
+        if (refused === 'folder-runner') { reply.code(400).send({ error: 'It runs on another machine now, which cannot see this machine\'s folders. Move it here first, or give it a git repo instead.' }); return true; }
         return false;
       }));
       if (answered) return reply;
@@ -8311,16 +8477,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           trace(agent.id)('browser.rebuild_pending', {});
         }
       }
-      if (parsed.data.cronTriggers !== undefined) {
-        // OpenClaw applies this key without a gateway restart — set it live so
-        // the agent can wire a trigger script right away; rebuilds re-assert it.
-        let live = false;
-        if (agent.state === 'RUNNING' && agent.runtimeRef) {
-          const res = await providerFor(agent.hostId).exec(agent.runtimeRef, ['config', 'set', 'cron.triggers.enabled', parsed.data.cronTriggers ? 'true' : 'false']).catch(() => undefined);
-          live = res?.code === 0;
-        }
-        trace(agent.id)('cron.triggers', { enabled: parsed.data.cronTriggers, live });
-      }
+      const cronTriggersPending = parsed.data.cronTriggers !== undefined ? await applyCronTriggers(agent.id, triggerRebuildClaim) : undefined;
       const filesCapGone = parsed.data.filesMaxMb !== undefined && (await applyFilesCap(store.getAgent(agent.id)!)).gone;
       if (name !== undefined && name !== agent.name) {
         // And inside OpenClaw, whose console otherwise keeps the old name (or
@@ -8386,6 +8543,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ...keptSaid(agent.name, kept),
         ...(filesCapGone ? { filesCapPending: `The limit is saved, but it could not be written to the agent. ${VOLUME_GONE}` } : {}),
         ...(browserPending ? { browserPending } : {}),
+        ...(cronTriggersPending ? { cronTriggersPending } : {}),
       };
     },
   );
@@ -8528,15 +8686,38 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const body = req.body;
     if (!Buffer.isBuffer(body)) return reply.code(400).send({ error: 'Send the file as the request body (application/octet-stream).' });
     if (body.length > FILE_MAX_BYTES) return reply.code(413).send({ error: `Too big (${Math.round(body.length / 1048576)} MB; the limit is ${FILE_MAX_BYTES / 1048576} MB — HATCHABOT_FILE_MAX_MB).` });
-    const provider = providerFor(t.agent.hostId);
-    if (!provider.writeToVolume) return reply.code(501).send({ error: 'Uploads are not available to this machine.' });
     // The busy guard: an export or restore must not interleave with a write.
     if (busyNow(t.agent, reply)) return reply;
     let res: ExecResult;
-    try { res = await whileBusy(t.agent.id, () => provider.writeToVolume!(t.agent.runtimeRef!, putArgv(t.rel, name, req.query.overwrite === '1', t.agent.slug), body)); }
-    catch { return reply.code(502).send({ error: "Couldn't write into the agent." }); }
+    try {
+      // All uploads take the turn: an ordinary-looking folder can be a link
+      // into the workspace. The one-shot reports its resolved destination.
+      res = await withCoreFilesTurn(t.agent.id, () => whileBusy(t.agent.id, async () => {
+        const fresh = ownedAgent(req, t.agent.id);
+        if (!fresh?.runtimeRef || fresh.state === 'DELETED') throw new TurnRefused(404, 'Not found');
+        if (fresh.state === 'DELETING' || operationRefusal(store, fresh.id) || archiving.has(fresh.id)) throw new TurnRefused(409, 'Another change is under way — wait for it to finish.');
+        if (fresh.hostId !== t.agent.hostId || fresh.runtimeRef !== t.agent.runtimeRef) throw new TurnRefused(409, 'The agent moved meanwhile; reload its files and try again.');
+        const provider = providerFor(fresh.hostId);
+        if (!provider.writeToVolume) throw new TurnRefused(501, 'Uploads are not available to this machine.');
+        const content = body.toString('utf8');
+        if (EDITABLE_FILES.has(name) && fresh.state === 'RUNNING') await autoSnapshot(snapshotDeps(fresh), fresh.id, 'pre-edit');
+        const result = await provider.writeToVolume(fresh.runtimeRef, putArgv(t.rel, name, req.query.overwrite === '1', fresh.slug, {
+          tooLarge: body.length > MAX_FILE_BYTES, invalidText: !Buffer.from(content, 'utf8').equals(body),
+        }), body);
+        if (result.code === 0 && result.stdout.trim() === 'hatchabot:core' && store.getAgent(fresh.id)?.paramFiles && (name === 'SOUL.md' || name === 'AGENTS.md')) {
+          store.setAgentParamFile(fresh.id, name === 'SOUL.md' ? 'soul' : 'agents', content);
+        }
+        return result;
+      }));
+    } catch (err) {
+      if (err instanceof TurnRefused) return reply.code(err.status).send({ error: err.message });
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      return reply.code(502).send({ error: "Couldn't write into the agent." });
+    }
     if (res.code === 5) return reply.code(409).send({ error: `${name} is already there — replace it?` });
     if (res.code === 6) return reply.code(400).send({ error: "That folder leads into OpenClaw's own state — uploads go in the workspace or outside .openclaw." });
+    if (res.code === 7) return reply.code(413).send({ error: `Too large — core files cap at ${MAX_FILE_BYTES / 1024}KB.` });
+    if (res.code === 8) return reply.code(400).send({ error: 'Core files must contain UTF-8 text.' });
     if (res.code !== 0) return fsFailure(reply, res);
     return { ok: true, path: t.rel, name, size: body.length };
   });
@@ -8569,9 +8750,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           const fresh = freshRunning(agent.id, () => 'Start the agent to edit its files.');
           // Version the files BEFORE overwriting — a bad save must be recoverable.
           await autoSnapshot(snapshotDeps(fresh), agent.id, 'pre-edit');
-          // AGENTS.md in its turn, which the budget's write takes (withAgentsMdTurn).
-          const write = () => writeFileInAgent(providerFor(fresh.hostId), fresh.runtimeRef, workspacePath(fresh.slug, req.params.name), b64);
-          const r = await (req.params.name === 'AGENTS.md' ? withAgentsMdTurn(agent.id, write) : write());
+          const r = await writeFileInAgent(providerFor(fresh.hostId), fresh.runtimeRef, workspacePath(fresh.slug, req.params.name), b64);
           // Keep the template layer in step with a direct edit: the layer is
           // what "Apply values" re-renders from, and a frozen import-time copy
           // silently REVERTED any approved rewrite on the next value change
@@ -8837,7 +9016,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * is taken even with no time left.
    */
   const CORE_FILES_WAIT_MS = 2 * 60_000;
-  const coreFileTurns = new Map<string, Promise<void>>();
+  // The AGENTS.md budget/docs writers take this same queue. Holding it for
+  // the whole transaction also protects snapshots and partial-write rollback.
+  const coreFileTurns = agentsMdTurns;
   const withCoreFilesTurn = <T>(agentId: string, fn: () => Promise<T>, waitMs = CORE_FILES_WAIT_MS): Promise<T> => {
     const before = coreFileTurns.get(agentId) ?? Promise.resolve();
     const turn = new Promise<void>((resolve, reject) => {
@@ -10090,6 +10271,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
 
     if (kind === 'folder') {
+      if (store.activeOperationFor(agent.id)?.kind === 'move-host') {
+        return reply.code(409).send({ error: 'Its move to another machine is not over. Add folders once that finishes.' });
+      }
       const p = (parsed.data.path ?? '').trim();
       if (!p) return reply.code(400).send({ error: 'A folder path is required.' });
       if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
@@ -10126,6 +10310,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(400).send({ error: `The folder's name is over ${MAX_MOUNT_NAME} characters, longer than a copy of the agent can carry. Rename it, or share a folder with a shorter name.` });
       }
       if (atHostPath && mountName.length > MAX_MOUNT_NAME) mountName = mountName.slice(0, MAX_MOUNT_NAME - 8);
+      const nameProblem = folderMountNameProblem(mountName);
+      if (nameProblem) return reply.code(400).send({ error: nameProblem });
       if (atHostPath) for (let n = 2, base = mountName.slice(0, MAX_MOUNT_NAME - 8); clashes(mountName); n++) mountName = `${base}-${n}`;
       if (clashes(mountName)) {
         return reply.code(409).send({ error: `Another source already lives at /data/${mountName}. Rename or remove it first.` });
@@ -10144,8 +10330,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     // git repos clone beside OpenClaw's own dirs under ~/.openclaw; a repo whose
     // name matches one of them (or a dotfile) would collide with runtime state.
-    const RESERVED = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace', 'connections', 'credentials', 'state', 'npm', 'devices', 'identity', 'cron', 'media', 'extensions', 'plugins', 'bin', 'data']);
-    if (RESERVED.has(git.repoName) || git.repoName.startsWith('.')) {
+    if (RESERVED_GIT_MOUNT_NAMES.has(git.repoName) || git.repoName.startsWith('.')) {
       return reply.code(400).send({ error: `"${git.repoName}" is a reserved name — it would collide with the agent's own files. Use a differently named repo.` });
     }
     if (git.repoName.length > MAX_MOUNT_NAME) {
@@ -10217,6 +10402,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       const src = store.getDataSource(agent.id, req.params.dsId);
       if (!src) return reply.code(404).send({ error: 'No such data source.' });
+      if (src.kind === 'folder' && store.activeOperationFor(agent.id)?.kind === 'move-host') {
+        return reply.code(409).send({ error: 'Its move to another machine is not over. Change folder access once that finishes.' });
+      }
       const parsed = z.object({ access: z.enum(['ro', 'rw']) }).safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       // Same gate as creating a writable folder: granting write to a host folder
@@ -10283,6 +10471,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // What that takes is recorded BEFORE the row goes, so a failed scrub is
       // retried at the next start, wake or rebuild instead of only traced,
       // with the key still usable and nothing left that named it.
+      if (src.kind === 'folder' && store.activeOperationFor(agent.id)?.kind === 'move-host') {
+        return reply.code(409).send({ error: 'Its move to another machine is not over. Remove folders once that finishes.' });
+      }
       const git = src.kind === 'git';
       const deployKey = git && !!src.secretRef;
       if (git) store.addDataSourceRemoval({ id: src.id, agentId: agent.id, mountName: src.mountName, secretRef: src.secretRef, repoUrl: src.repoUrl });
@@ -14704,6 +14895,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return reply.code(409).send({ error: `This agent runs OpenClaw ${running.openclawVersion}; ${host.name} would run ${there.openclawVersion}, which cannot read its data. Copy this machine's image there first (Settings → Hosts → Check, then Install image).` });
         }
       }
+      // Preflight waits for machines and sometimes an image build. The
+      // settings it checked must still describe the move that will run.
+      // Checked once here and once under the move's lock after daemon probes.
+      const preflightRefusal = (): string | undefined => {
+        const fresh = ownedAgent(req, agent.id);
+        if (!fresh || agentGone(agent.id)) return 'It was deleted or its ownership changed while the move was checked.';
+        if (fresh.hostId !== agent.hostId || fresh.runtimeRef !== agent.runtimeRef || fresh.aiProfileId !== agent.aiProfileId
+          || fresh.image !== agent.image || fresh.ops || fresh.migratedTo) {
+          return 'Its machine, AI source or image changed while the move was checked. Look again, then move it.';
+        }
+        if (host.kind !== 'local' && ((fresh.sharedPaths?.length ?? 0) > 0 || store.listDataSources(agent.id).some((d) => d.kind === 'folder'))) {
+          return 'It now reads a folder of this machine, which the other machine cannot see. Remove the folder before moving it.';
+        }
+        return undefined;
+      };
+      const changed = preflightRefusal();
+      if (changed) return reply.code(409).send({ error: changed });
       // Every check has passed; a busy agent is the one refusal left, judged again
       // after the waits above, with none from here to the move's lock: an Archive
       // pressed meanwhile has begun its checkpoint turn, and moveHost.ts does not
@@ -14725,7 +14933,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         { store, secrets, channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision,
           source: providerFor(agent.hostId), sourceHostId: agent.hostId, target: providerFor(host.id),
           requestedBy: ownerIdOf(req), onOperation: (id) => { operation = id; onOperation?.(id); }, dropPin,
-          rebuildWaiting: () => inflight.has(agent.id) },
+          rebuildWaiting: () => inflight.has(agent.id), preflightRefusal },
         agent.id,
         host.id,
       );
@@ -16055,7 +16263,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const joiningAccount = async (req: FastifyRequest, idToken?: string, opts: { acceptingWebChat?: boolean } = {}): Promise<{ accountId?: string; factorRefusal?: { error: string; secondFactor: string } }> => {
     if (idToken && deps.verifier) {
       const token = await deps.verifier.verify(idToken); // throws on a bad token
-      return { accountId: `user-${token.sub}` };
+      return { accountId: admittedPrincipal(token).ownerId };
     }
     const decorated = (app as unknown as { principalFromCookieHeader?: (h: string | undefined, https: boolean) => { ownerId: string } | undefined }).principalFromCookieHeader;
     let fromCookie = decorated?.(req.headers.cookie, requestIsHttps(req))?.ownerId;
@@ -16086,7 +16294,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     let joining: Awaited<ReturnType<typeof joiningAccount>>;
     try { joining = await joiningAccount(req, body.idToken, { acceptingWebChat: true }); }
-    catch { return reply.code(401).send({ error: "That sign-in didn't verify — try again." }); }
+    catch (err) { return reply.code(err instanceof IdentityError ? err.statusCode : 401).send({ error: err instanceof IdentityError ? err.userMessage : "That sign-in didn't verify — try again." }); }
     const accountId = joining.accountId;
     if (!accountId) return reply.code(401).send(joining.factorRefusal ?? { error: 'Sign in to this Hatchabot first.', signIn: true });
     const inv = checkInvite(store, body.code!);
@@ -16373,9 +16581,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (body.idToken && deps.verifier) {
         try {
           const token = await deps.verifier.verify(body.idToken);
-          accountId = `user-${token.sub}`;
-        } catch {
-          return reply.code(401).send({ error: "That sign-in didn't verify — try again." });
+          accountId = admittedPrincipal(token).ownerId;
+        } catch (err) {
+          return reply.code(err instanceof IdentityError ? err.statusCode : 401).send({ error: err instanceof IdentityError ? err.userMessage : "That sign-in didn't verify — try again." });
         }
       }
       // The app they chose must still be one this agent is on: one removed
@@ -17208,9 +17416,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // A change saved for its next start during the checks above.
         if (now?.rebuildOnStart) return { ok: false, error: 'A change was just saved for it. Press Start again.' };
         // Its cap and swap allowance as they are now, as a wake does (swap.ts).
-        const lim = agentMemoryLimits(store, now!);
         const provider = providerFor(now!.hostId);
-        await provider.updateMemory?.(now!.runtimeRef!, lim.memory, lim.swap).catch(() => {});
+        await inLimitsTurn(agent.id, () => applyCurrentLimits(agent.id));
         await provider.start(now!.runtimeRef!);
         store.setHibernated(agent.id, null);
         return { ok: true, agent: store.setAgentState(agent.id, 'RUNNING') };
@@ -17442,6 +17649,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(409).send({ error: 'That agent is not archived.' });
     }
     if (!holdOnce(req, `restore:${agent.id}`)) return reply.code(409).send({ error: 'It is already being brought back.' });
+    // Reclaiming a parked bot waits for its platform. Keep Delete and other
+    // lifecycle changes out until the channels and state are committed; a
+    // deleted agent must never regain credentials after its scrub (HB-0702).
+    // busyNow was checked above with no await before this claim.
+    markBusy(agent.id);
+    try {
     // The bots it left in the pool come back to it, if still there. Their
     // identity is checked with the platform again (a Slack deep link needs the
     // app id; a Discord one the bot user) so the row is whole.
@@ -17470,9 +17683,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     }
     store.setAgentState(agent.id, 'PROVISIONING');
+    } finally { clearBusy(agent.id); }
     // Nobody was asked about Telegram here: with no pool bot free it comes
     // back web-only and the owner is told (Alerts), rather than sitting in
     // PROVISIONING until someone pastes a token (2026-10-07).
+    // No await between releasing the restore's lock and provision taking it.
     kickProvision(agent.id, { webOnlyIfNoBot: true });
     return reply.code(202).send(publicAgent(store.getAgent(agent.id)!));
   });

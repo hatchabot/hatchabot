@@ -785,6 +785,66 @@ describe('a core-file save and a persona change at once (HB-0567)', () => {
   });
 });
 
+describe('core-file uploads share the file transaction (HB-0631)', () => {
+  const upload = (w: Awaited<ReturnType<typeof world>>, name: string, content: string, path = '.openclaw/agents/garden-notes/agent') =>
+    w.f.inject({ method: 'PUT', url: `/v1/agents/a1/fs/file?path=${encodeURIComponent(path)}&name=${name}&overwrite=1`, headers: { ...H, 'content-type': 'application/octet-stream' }, payload: Buffer.from(content) });
+
+  it('an upload waits for an in-flight snapshot, which keeps the old pair of files', async () => {
+    const w = await world(), g = gate();
+    const files = { 'SOUL.md': 'Old soul', 'AGENTS.md': 'Old rules' };
+    w.provider.execShell = fileShell(files, { name: 'SOUL.md', g }) as never;
+    const write = vi.fn(async (_ref, _argv, body: Buffer) => {
+      files['AGENTS.md'] = body.toString(); return { code: 0, stdout: 'hatchabot:core\n', stderr: '' };
+    });
+    w.provider.writeToVolume = write;
+    const snapping = Promise.resolve(w.inject('POST', '/v1/agents/a1/snapshots', { label: 'Before upload' }));
+    await g.reached;
+    const looked = vi.spyOn(w.store, 'getAgent');
+    const writing = Promise.resolve(upload(w, 'AGENTS.md', 'New rules'));
+    await vi.waitFor(() => expect(looked).toHaveBeenCalledWith('a1'));
+    const writesWhileReading = write.mock.calls.length;
+    g.release();
+    const snapshot = await snapping;
+    expect((await writing).statusCode).toBe(200);
+    expect(writesWhileReading).toBe(0);
+    expect(w.store.getSnapshot('a1', snapshot.json().id)?.files['AGENTS.md']).toBe('Old rules');
+    expect(files['AGENTS.md']).toBe('New rules');
+  });
+
+  it('Apply values keeps the uploaded layer, including an upload through a workspace alias', async () => {
+    const w = await world();
+    const files = { 'SOUL.md': 'Old calm', 'AGENTS.md': 'Rules' };
+    w.store.setAgentParameters('a1', [{ key: 'style', label: 'Style', type: 'text', required: true, target: 'soul' }] as never);
+    w.store.setAgentParamState('a1', { style: 'calm' }, { soul: 'Old {{style}}', agents: 'Rules' });
+    w.provider.execShell = fileShell(files) as never;
+    w.provider.writeToVolume = async (_ref, _argv, body) => {
+      files['SOUL.md'] = body.toString(); return { code: 0, stdout: 'hatchabot:core\n', stderr: '' };
+    };
+    expect((await upload(w, 'SOUL.md', 'Uploaded {{style}}', 'inbox')).statusCode).toBe(200);
+    expect((await w.inject('PUT', '/v1/agents/a1/params', { values: { style: 'brisk' } })).statusCode).toBe(200);
+    expect(files['SOUL.md']).toBe('Uploaded brisk');
+    expect(w.store.getAgent('a1')?.paramFiles?.soul).toBe('Uploaded {{style}}');
+  });
+
+  it.each([0, 5, 7, 8])('an ordinary or refused upload (code %s) leaves the saved layer alone', async (code) => {
+    const w = await world();
+    w.store.setAgentParamState('a1', {}, { soul: 'Original', agents: 'Rules' });
+    w.provider.writeToVolume = async () => ({ code, stdout: '', stderr: '' });
+    const r = await upload(w, 'SOUL.md', 'Upload', 'inbox');
+    expect(r.statusCode).toBe(({ 0: 200, 5: 409, 7: 413, 8: 400 })[code]);
+    expect(w.store.getAgent('a1')?.paramFiles?.soul).toBe('Original');
+  });
+
+  it('a stopped agent can still receive an upload and its layer is updated', async () => {
+    const w = await world();
+    w.store.setAgentState('a1', 'STOPPED');
+    w.store.setAgentParamState('a1', {}, { soul: 'Original' });
+    w.provider.writeToVolume = async () => ({ code: 0, stdout: 'hatchabot:core\n', stderr: '' });
+    expect((await upload(w, 'SOUL.md', 'Uploaded')).statusCode).toBe(200);
+    expect(w.store.getAgent('a1')?.paramFiles?.soul).toBe('Uploaded');
+  });
+});
+
 describe('a manual snapshot during a setup-values change (HB-0566)', () => {
   it('a change of setup values waits for the snapshot under way: the snapshot is one moment', async () => {
     const g = gate();
@@ -1246,17 +1306,21 @@ describe('a change to the core files that hangs (HB-0566)', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const looked = vi.spyOn(w.store, 'getAgent');
     const applying = Promise.resolve(w.inject('PUT', '/v1/agents/a1/params', { values: { style: 'new' } }));
+    const uploaded = vi.spyOn(w.provider, 'writeToVolume');
+    const uploading = Promise.resolve(w.f.inject({ method: 'PUT', url: '/v1/agents/a1/fs/file?path=.openclaw/agents/garden-notes/agent&name=SOUL.md&overwrite=1', headers: { ...H, 'content-type': 'application/octet-stream' }, payload: Buffer.from('Must never land') }));
     await vi.waitFor(() => expect(looked).toHaveBeenCalledWith('a1'));
     await vi.advanceTimersByTimeAsync(2 * 60_000);
     const r = await applying;
     expect(r.statusCode).toBe(409);
     expect(r.json().error).toBe(LATE);
+    expect((await uploading).statusCode).toBe(409);
     vi.useRealTimers();
     g.release();
     expect((await snapping).statusCode).toBe(201);
     // It never ran, then or once the snapshot ended.
     await new Promise((done) => setTimeout(done, 20));
     expect(files['SOUL.md']).toBe('Soul old');
+    expect(uploaded).not.toHaveBeenCalled();
     expect(w.store.getAgent('a1')?.paramValues).toEqual({ style: 'old' });
     // And the files are free again.
     expect((await w.inject('PUT', '/v1/agents/a1/params', { values: { style: 'new' } })).statusCode).toBe(200);

@@ -224,7 +224,7 @@ async function main() {
       h.push(q.url); s.setHeader('content-type', 'text/html'); s.end('<h1>a private device</h1>');
     }).listen(${port}, '0.0.0.0');`);
     await sleep(2000);
-    const targets = { loopback: `http://127.0.0.1:${port}`, 'own address': `http://${ip}:${port}` };
+    const targets = { loopback: `http://127.0.0.1:${port}`, 'own address': `http://${ip}:${port}`, 'resolver alias': `http://127.0.0.11:${port}` };
     const fetchAll = (paths) => inAgent(agent, ['node', '--input-type=module', '-e',
       `for (const u of ${JSON.stringify(paths)}) console.log(u, await fetch(u).then((r) => r.status, (e) => 'failed ' + (e.cause?.code || e.name)));`], 60_000);
     const agentItself = await fetchAll(Object.values(targets).map((t) => `${t}/agent-itself`));
@@ -247,9 +247,9 @@ async function main() {
     const hits = (await inAgent(agent, ['node', '-e', `fetch('${targets.loopback}/hits').then((r) => r.text()).then(console.log)`], 60_000)).out;
     return [
       [`Chromium runs as its own user (${uid || '?'}), not the agent's`, uid === '1001'],
-      ['the agent itself reaches both (so the listener was there to reach)', /agent-itself 200[\s\S]*agent-itself 200/.test(agentItself.out) && (hits.match(/agent-itself/g) ?? []).length === 2, `${agentItself.out} ${hits}`.slice(-300)],
+      ['the agent itself reaches all three (so the listener was there to reach)', (agentItself.out.match(/agent-itself 200/g) ?? []).length === 3 && (hits.match(/agent-itself/g) ?? []).length === 3, `${agentItself.out} ${hits}`.slice(-300)],
       ['the page\'s late navigations were sent', injected.every((o) => /^set$/m.test(o)), injected.join(' | ').slice(-300)],
-      ['neither reached it: loopback, nor the agent\'s private address', /agent-itself/.test(hits) && !/late-navigation/.test(hits), hits.slice(-300)],
+      ['none reached it: loopback, the agent\'s private address, nor Docker\'s resolver alias on a non-DNS port', /agent-itself/.test(hits) && !/late-navigation/.test(hits), hits.slice(-300)],
     ];
   });
   await scenario('B2d sign in to a site yourself: the panel signs it in on a demo login page, and the agent carries on signed in (HB-0680)', async () => {

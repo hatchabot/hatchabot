@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { buildConfigCommands } from '../src/openclaw/configWriter.js';
-import { BROWSER_CDP_URL, BROWSER_FENCE_SCRIPT, BROWSER_FENCED_V4, BROWSER_FENCED_V6, BROWSER_UID, browserImage, browserSweep, containerOf, browserRefreshDate } from '../src/orchestrator/browser.js';
+import { BROWSER_CDP_URL, BROWSER_FENCE_SCRIPT, BROWSER_FENCE_VERSION, BROWSER_FENCED_V4, BROWSER_FENCED_V6, BROWSER_UID, browserImage, browserSweep, containerOf, browserRefreshDate } from '../src/orchestrator/browser.js';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 /**
@@ -217,7 +218,7 @@ describe('switching it on or off', () => {
 });
 
 describe('the container (docker argv)', () => {
-  function stub(agentStarted: string, browserLabel?: string, browserMemory = 1024 ** 3, askedLabel = '', fence = 'echo FENCED') {
+  function stub(agentStarted: string, browserLabel?: string, browserMemory = 1024 ** 3, askedLabel = '', fence = 'echo FENCED', fenceVersion = BROWSER_FENCE_VERSION) {
     const dir = mkdtempSync(join(tmpdir(), 'hb-browser-'));
     const log = join(dir, 'argv.log');
     const bin = join(dir, 'docker');
@@ -226,7 +227,7 @@ cat > /dev/null &
 printf '%s\\n' "$*" >> ${JSON.stringify(log)}
 case "$*" in
   "inspect hatchabot-a1 --format "*) echo "true|${agentStarted}" ;;
-  "inspect hatchabot-a1-browser --format "*) ${browserLabel ? `echo "true|${browserLabel}|${browserImage().image}|${askedLabel}|${browserMemory}"` : 'exit 1'} ;;
+  "inspect hatchabot-a1-browser --format "*) ${browserLabel ? `echo "true|${browserLabel}|${browserImage().image}|${askedLabel}|${browserMemory}|none|${fenceVersion}"` : 'exit 1'} ;;
   "image inspect "*) exit 1 ;;
   "build "*) exit 0 ;;
   "run --rm "*) ${fence} ;;
@@ -278,14 +279,49 @@ exit 0
   it('the fence: the browser\'s user only, new connections to every private range, Docker\'s DNS left open', () => {
     expect(BROWSER_FENCE_SCRIPT).toContain(`-m owner --uid-owner ${BROWSER_UID} -j HB_BROWSER`);
     for (const d of [...BROWSER_FENCED_V4, ...BROWSER_FENCED_V6]) expect(BROWSER_FENCE_SCRIPT).toContain(` ${d}`);
-    for (const d of ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16', 'fc00::/7', '::1/128']) expect([...BROWSER_FENCED_V4, ...BROWSER_FENCED_V6]).toContain(d);
-    expect(BROWSER_FENCE_SCRIPT).toContain('-d 127.0.0.11 -j RETURN');
+    for (const d of ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16', 'fc00::/7', '::/128', '::1/128']) expect([...BROWSER_FENCED_V4, ...BROWSER_FENCED_V6]).toContain(d);
     expect(BROWSER_FENCE_SCRIPT).toContain('-m conntrack --ctstate NEW -j REJECT');
     expect(BROWSER_FENCE_SCRIPT).toMatch(/-F HB_BROWSER/); // a second run leaves one copy
     expect(BROWSER_FENCE_SCRIPT.trim().split('\n').at(-1)).toMatch(/&& echo FENCED$/);
     // Chromium runs as that user in its image, which carries iptables.
     expect(browserImage().dockerfile).toMatch(new RegExp(`^USER ${BROWSER_UID}:${BROWSER_UID}$`, 'm'));
     expect(browserImage().dockerfile).toMatch(/apt-get install[^\n]* iptables/);
+  });
+  it('allows only original TCP/UDP DNS requests through the resolver alias, and refuses an unsupported rule (HB-0679)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-fence-rules-'));
+    try {
+      // A confined PATH: no real iptables, Docker or system command can run.
+      for (const tool of ['iptables', 'ip6tables']) writeFileSync(join(dir, tool), `#!/bin/sh
+printf '%s\\n' "$*" >> "$HOME/${tool}.log"
+case "$*" in *--ctorigdstport*) [ "\${FAIL_DNS:-0}" = 0 ] || exit 2 ;; esac
+`, { mode: 0o755 });
+      writeFileSync(join(dir, 'cat'), '#!/bin/sh\necho 0\n', { mode: 0o755 });
+      const run = (fail = '0') => spawnSync('/bin/sh', ['-c', BROWSER_FENCE_SCRIPT], { encoding: 'utf8', env: { HOME: dir, PATH: dir, FAIL_DNS: fail } });
+      const r = run();
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toContain('FENCED');
+      const commands = readFileSync(join(dir, 'iptables.log'), 'utf8').trim().split('\n');
+      const returns = commands.filter((line) => line.includes('-j RETURN'));
+      expect(returns).toHaveLength(2);
+      for (const protocol of ['udp', 'tcp']) {
+        const rule = returns.find((line) => line.includes(`-p ${protocol} `))!;
+        expect(rule).toContain('-d 127.0.0.11 ');
+        expect(rule).toContain('--ctorigdst 127.0.0.11 --ctorigdstport 53 --ctdir ORIGINAL');
+        // --dport 53 sees Docker's translated high port and breaks DNS.
+        expect(rule).not.toContain('--dport');
+        expect(commands.indexOf(rule)).toBeLessThan(commands.findIndex((line) => line.includes('-d 127.0.0.0/8 ')));
+      }
+      expect(readFileSync(join(dir, 'ip6tables.log'), 'utf8')).toContain('-d ::/128 -m conntrack --ctstate NEW -j REJECT');
+      const failed = run('1');
+      expect(failed.status).toBe(2);
+      expect(failed.stdout).not.toContain('FENCED');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it.each(['', 'older-fence'])('replaces a browser with an outdated fence (%s) even when image, network and memory match', async (version) => {
+    const w = stub('2026-10-08T10:00:00Z', '2026-10-08T10:00:00Z', 1024 ** 3, '', 'echo FENCED', version);
+    expect(await w.p.ensureBrowser(spec)).toBe('started');
+    expect(w.argv()).toContain('rm -f hatchabot-a1-browser');
+    expect(w.argv().find((line) => line.startsWith('run -d '))).toContain(`--label hatchabot.browser-fence=${BROWSER_FENCE_VERSION}`);
   });
   it('a new image\'s build removes the images it replaces, and says which Chromium runs (HB-0677)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hb-browser-img-'));

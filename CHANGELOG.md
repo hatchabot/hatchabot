@@ -2,6 +2,31 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.185.1] — 2026-11-14
+
+### Upgrading
+- If an identity installation has no recorded owner yet, set `HATCHABOT_OWNER_EMAIL` to the intended owner's Google address before that account signs in. Existing recorded owners need no new setting; without a recorded owner or this setting, legacy data stays under dev-owner until ownership is established.
+
+### Security
+- **The browser's private-address fence no longer exempts every port on Docker's DNS address.** Only DNS traffic is exempted; IPv6's unspecified address is blocked too. Existing browser sidecars with the old fence are replaced automatically.
+- **Browser sign-in panels recheck who may use them.** A panel closes when its session, owner or runtime changes; delayed browser and account reads cannot restore stale state after logout or an account change.
+- **Identity sign-in checks certificate deadlines, malformed tokens and admission rules consistently.** Email-addressed shares require a verified Google identity; a password account with an email-shaped username cannot claim them. Pending shares previously attached to such an account can be reclaimed by the verified identity.
+- **The first Google owner is explicit.** On an identity install without an existing owner, set `HATCHABOT_OWNER_EMAIL` to the owner's verified Google email. Existing pinned owners and owners already recorded for the local host keep ownership. A one-time migration also restores leftover legacy records to an established owner, and signing in with an existing browser session retries unfinished adoption.
+
+### Fixed
+- **Scheduled-task changes survive interruptions without enabling duplicate tasks.** Trigger permission changes remain pending until their runtime update succeeds; task transitions retain their recovery record and provenance. Delayed task reads and saves no longer overwrite newer edits or toggles.
+- **Budgets preserve newer choices and confirm that an agent has stopped.** A failed stop or cheaper-model retry no longer erases a model chosen meanwhile, and budgets recheck each agent before acting. Partial usage reads retain accounting already collected.
+- **Agent lifecycle operations check current state before committing.** Adoption requires the old runtime to stop; claims retain their own approval window; restoring an archived agent holds its lifecycle lock while reclaiming bots; moves recheck configuration and machine access. A held move can recover its intact source after the removed-copy confirmation. Concurrent limit changes and starts use the same limits queue.
+- **Core-file uploads share the normal write queue and update saved templates only after a successful write.** Uploads validate UTF-8 and the core-file size limit, and expired queued writes cannot execute later. Imported data sources, repositories and folder mounts also reject invalid names while retaining cleanup for legacy entries.
+- **Web chat retries use message receipts and gateway idempotency to avoid duplicate sends.** Incomplete transcript reads cannot incorrectly prove that a message was never sent.
+- **Overlapping dialogs preserve work already in progress.** Import and setup dialogs keep their existing state, and asking the manager for an image respects the second-factor dialog.
+- **Install and upgrade downloads have bounded waits and retries.** Following a release can repair an already-installed version, rename health checks time out, and backups honor a saved foreign backup key.
+
+### For developers
+- App integration and backup-decryption regression tests allow more time for their real local subprocesses on a busy CI runner; their behavioral assertions are unchanged.
+- The phone status-bar layout test uses the browser harness's explicit frame delivery, so Chrome's virtual-time mode cannot stall it before its layout checks run.
+- Volume-writer retry tests advance a controlled clock, so slow subprocess startup cannot accidentally expire the grace period being tested.
+
 ## [2.185.0] — 2026-11-13
 
 ### Added

@@ -649,6 +649,94 @@ export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from
 
 /** `enabled` as `cron list` gives it: false for a task the owner turned off. */
 type Job = { id: string; name: string; enabled?: boolean };
+type TaskOrigin = { id: string; name: string; manifest: AppManifest };
+type RecordedJob = Job & { manifest?: AppManifest };
+
+/** Saved before any scheduler mutation: disabled staging jobs are not owner intent. */
+interface TaskTransition { version: 1; old: RecordedJob[]; previous?: AppManifest; next: AppManifest }
+const taskTransitionFile = (app: string) => `${appPaths(app).root}/.tasks-transition.json`;
+const taskOriginsFile = (app: string) => `${appPaths(app).root}/.tasks-settled.json`;
+
+async function readTaskTransition(d: InstallDeps, app: string): Promise<TaskTransition | undefined> {
+  const file = sq(taskTransitionFile(app));
+  const r = await sh(d, `if [ -e ${file} ]; then printf 'present\\n'; cat ${file}; fi`);
+  if (r.code !== 0) throw new AppError(`Could not read ${app}'s scheduled-task transition: ${errText(r)}. No scheduled tasks were changed.`);
+  if (!r.stdout) return undefined;
+  try {
+    if (!r.stdout.startsWith('present\n')) throw new Error('missing marker');
+    const raw = JSON.parse(r.stdout.slice('present\n'.length));
+    const next = manifestSchema.parse(raw.next);
+    const previous = raw.previous === undefined ? undefined : manifestSchema.parse(raw.previous);
+    const names = appTaskNames(next, previous);
+    if (raw.version !== 1 || next.app !== app || (previous && previous.app !== app) || !Array.isArray(raw.old)
+      || raw.old.some((j: RecordedJob) => !j || typeof j.id !== 'string' || !j.id || typeof j.name !== 'string' || (!names.has(j.name) && j.manifest === undefined) || typeof j.enabled !== 'boolean')
+      || new Set(raw.old.map((j: Job) => j.id)).size !== raw.old.length) throw new Error('invalid transition');
+    const old: RecordedJob[] = raw.old.map((j: RecordedJob) => {
+      const manifest = j.manifest === undefined ? undefined : manifestSchema.parse(j.manifest);
+      if (manifest && (manifest.app !== app || !appTaskNames(manifest).has(j.name))) throw new Error('invalid task origin');
+      return { id: j.id, name: j.name, enabled: j.enabled, manifest };
+    });
+    return { version: 1, old, previous, next };
+  } catch { throw new AppError(`${app}'s scheduled-task transition is unreadable. Its tasks were left alone; restore that file before trying again.`); }
+}
+
+/** An interrupted task switch is never proof that the app operation finished. */
+export async function taskTransitionPending(d: InstallDeps, app: string): Promise<boolean> {
+  return !!(await readTaskTransition(d, app));
+}
+
+/** Task ids bind the actual scheduler generation even while the app DB is older. */
+async function readTaskOrigins(d: InstallDeps, app: string): Promise<TaskOrigin[]> {
+  const file = sq(taskOriginsFile(app));
+  const r = await sh(d, `if [ -e ${file} ]; then printf 'present\\n'; cat ${file}; fi`);
+  if (r.code !== 0) throw new AppError(`Could not read ${app}'s scheduled-task provenance: ${errText(r)}. Its tasks were left alone.`);
+  if (!r.stdout) return [];
+  try {
+    if (!r.stdout.startsWith('present\n')) throw new Error('missing marker');
+    const raw = JSON.parse(r.stdout.slice('present\n'.length));
+    if (raw.version !== 1 || !Array.isArray(raw.jobs)) throw new Error('invalid task origins');
+    const jobs: TaskOrigin[] = raw.jobs.map((j: TaskOrigin) => {
+      const manifest = manifestSchema.parse(j.manifest);
+      if (typeof j.id !== 'string' || !j.id || typeof j.name !== 'string' || manifest.app !== app || !appTaskNames(manifest).has(j.name)) throw new Error('invalid task origin');
+      return { id: j.id, name: j.name, manifest };
+    });
+    if (new Set(jobs.map((j) => j.id)).size !== jobs.length) throw new Error('duplicate task ids');
+    return jobs;
+  } catch { throw new AppError(`${app}'s scheduled-task provenance is unreadable. Its tasks were left alone; restore that file before trying again.`); }
+}
+
+async function writeTaskRecord(d: InstallDeps, app: string, file: string, rec: unknown): Promise<void> {
+  if (!d.provider.writeToVolume) throw new AppError('This machine cannot record scheduled-task transitions (no writeToVolume). No scheduled tasks were changed.');
+  const r = await d.provider.writeToVolume(d.runtimeRef,
+    ['sh', '-c', `umask 077 && mkdir -p ${sq(appPaths(app).root)} && cat > ${sq(`${file}.tmp`)} && mv -f ${sq(`${file}.tmp`)} ${sq(file)}`],
+    Buffer.from(JSON.stringify(rec) + '\n'));
+  if (r.code !== 0) throw new AppError(`Could not record ${app}'s scheduled-task recovery information: ${errText(r)}.`);
+}
+
+const writeTaskTransition = (d: InstallDeps, rec: TaskTransition) => writeTaskRecord(d, rec.next.app, taskTransitionFile(rec.next.app), rec);
+const writeTaskOrigins = (d: InstallDeps, app: string, jobs: TaskOrigin[]) => writeTaskRecord(d, app, taskOriginsFile(app), { version: 1, jobs });
+
+async function clearTaskRecord(d: InstallDeps, app: string, file: string, remains: () => Promise<boolean>): Promise<void> {
+  let why: string;
+  try {
+    const r = await sh(d, `rm -f ${sq(file)}`);
+    if (r.code === 0) return;
+    why = errText(r);
+  } catch (e) { if (e instanceof SimulatedCrash) throw e; why = (e as Error).message; }
+  // The removal may have succeeded before its reply was lost. Absence is
+  // success; an unreadable answer remains uncertain, never assumed absent.
+  if (!(await remains())) return;
+  throw new AppError(`Could not clear ${app}'s scheduled-task transition: ${why}.`);
+}
+
+const clearTaskTransition = (d: InstallDeps, app: string) => clearTaskRecord(d, app, taskTransitionFile(app), async () => !!(await readTaskTransition(d, app)));
+const clearTaskOrigins = (d: InstallDeps, app: string) => clearTaskRecord(d, app, taskOriginsFile(app), async () => (await readTaskOrigins(d, app)).length > 0);
+
+const taskCommand = (d: InstallDeps, argv: string[]): Promise<ExecResult> => d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 })
+  .catch((err: unknown): ExecResult => {
+    if (err instanceof SimulatedCrash) throw err;
+    return { code: 1, stdout: '', stderr: String((err as Error)?.message ?? err) };
+  });
 
 /** The job names an app's manifests make: "<app>-<task>", exactly. */
 export function appTaskNames(...ms: Array<AppManifest | undefined>): Set<string> {
@@ -692,106 +780,198 @@ function addArgv(d: InstallDeps, m: AppManifest, t: AppManifest['tasks'][number]
     '--timeout-seconds', String(t.timeoutSeconds ?? 300), '--no-deliver', '--json'];
 }
 
+/** Restore the journal's original set, never enabling it beside a replacement. */
+async function restoreTaskTransition(d: InstallDeps, rec: TaskTransition): Promise<string[]> {
+  const { old, previous: prev, next: m } = rec;
+  const ours = appTaskNames(m, prev);
+  for (const j of old) ours.add(j.name);
+  const oldIds = new Set(old.map((j) => j.id));
+  const run = (argv: string[]) => taskCommand(d, argv);
+  const unread = (e: unknown) => {
+    if (e instanceof SimulatedCrash) throw e;
+    return [`the list could not be read (${(e as Error)?.message ?? e})`];
+  };
+  let now: Job[];
+  try { now = await appJobs(d, ours); } catch (e) { return unread(e); }
+  // A replacement can already be active when its enable reply was lost.
+  // Before any original is restored, prove every replacement is stopped.
+  for (const j of now.filter((x) => !oldIds.has(x.id) && x.enabled !== false)) await run(['cron', 'disable', j.id]);
+  try { now = await appJobs(d, ours); } catch (e) { return unread(e); }
+  const active = now.filter((j) => !oldIds.has(j.id) && j.enabled !== false);
+  if (active.length) return [`replacement tasks could not be turned off: ${active.map((j) => j.name).join(', ')}`];
+  const seen = new Set(now.map((j) => j.id));
+  for (const j of now.filter((x) => !oldIds.has(x.id))) await run(['cron', 'rm', j.id]);
+  const knownIds = new Set(seen);
+  const origins: TaskOrigin[] = [];
+  const uncertain: string[] = [];
+  for (const j of old) {
+    const manifest = j.manifest ?? prev;
+    if (seen.has(j.id)) {
+      const current = now.find((x) => x.id === j.id)!;
+      if ((current.enabled !== false) !== (j.enabled !== false)) await run(['cron', j.enabled === false ? 'disable' : 'enable', j.id]);
+      if (manifest && appTaskNames(manifest).has(j.name)) origins.push({ id: j.id, name: j.name, manifest });
+    } else {
+      const t = manifest?.tasks.find((x) => `${m.app}-${x.name}` === j.name);
+      if (t) {
+        await run([...addArgv(d, manifest!, t), ...(j.enabled === false ? ['--disabled'] : [])]);
+        // Bind a recreated id to this original definition, including an add
+        // whose response was lost. Never guess by task name alone: duplicate
+        // names may have different definitions in an interrupted generation.
+        let listed: Job[];
+        try { listed = await appJobs(d, ours); } catch (e) { return unread(e); }
+        const added = listed.filter((x) => !knownIds.has(x.id));
+        for (const x of listed) knownIds.add(x.id);
+        if (added.length === 1 && added[0]!.name === j.name) origins.push({ id: added[0]!.id, name: j.name, manifest: manifest! });
+        else if (added.length) uncertain.push(`the restored task definition could not be confirmed: ${j.name}`);
+      }
+    }
+  }
+  let after: Job[];
+  try { after = await appJobs(d, ours); } catch (e) { return unread(e); }
+  const stray = after.filter((j) => seen.has(j.id) && !oldIds.has(j.id)).map((j) => j.name);
+  const off = (j: Job) => j.enabled === false;
+  const count = (jobs: Job[]) => jobs.reduce((n, j) => n.set(j.name, (n.get(j.name) ?? 0) + 1), new Map<string, number>());
+  const kept = after.filter((j) => oldIds.has(j.id) || !seen.has(j.id));
+  const want = count(old), have = count(kept);
+  const missing = [...want].filter(([name, n]) => (have.get(name) ?? 0) < n).map(([name]) => name);
+  const twice = [...have].filter(([name, n]) => n > (want.get(name) ?? 0)).map(([name]) => name);
+  const offWant = count(old.filter(off)), offHave = count(kept.filter(off));
+  const named = new Set([...missing, ...twice]);
+  const switchedOn = [...offWant].filter(([name, n]) => !named.has(name) && (offHave.get(name) ?? 0) < n).map(([name]) => name);
+  const switchedOff = [...offHave].filter(([name, n]) => !named.has(name) && n > (offWant.get(name) ?? 0)).map(([name]) => name);
+  const problems = [
+    ...uncertain,
+    ...(stray.length ? [`still there: ${stray.join(', ')}`] : []),
+    ...(missing.length ? [`not re-added: ${missing.join(', ')}`] : []),
+    ...(twice.length ? [`more than once: ${twice.join(', ')}`] : []),
+    ...(switchedOn.length ? [`switched on, though you had turned it off: ${switchedOn.join(', ')}`] : []),
+    ...(switchedOff.length ? [`turned off, though it was on: ${switchedOff.join(', ')}`] : []),
+  ];
+  if (!problems.length) {
+    try { await writeTaskOrigins(d, m.app, origins); }
+    catch (e) {
+      if (e instanceof SimulatedCrash) throw e;
+      problems.push(`restored task definitions could not be recorded (${(e as Error).message})`);
+    }
+  }
+  return problems;
+}
+
+async function rollbackTasks(d: InstallDeps, rec: TaskTransition): Promise<string[]> {
+  const problems = await restoreTaskTransition(d, rec);
+  if (!problems.length) {
+    try { await clearTaskTransition(d, rec.next.app); }
+    catch (e) { if (e instanceof SimulatedCrash) throw e; problems.push((e as Error).message); }
+  }
+  return problems;
+}
+
+/** An old transaction is resolved before another sync infers owner intent. */
+async function recoverTaskTransition(d: InstallDeps, app: string): Promise<void> {
+  const rec = await readTaskTransition(d, app);
+  if (!rec) return;
+  const problems = await rollbackTasks(d, rec);
+  if (problems.length) throw Object.assign(new AppError(`Its interrupted scheduled-task change could not be put back: ${problems.join('; ')}. Try again once the agent answers.`), { tasksUnconfirmed: true });
+}
+
 /**
- * OpenClaw command tasks named "<app>-<task>": the manifest's set, exactly.
- * The new jobs go in first and the old ones come off after, so a failure part
- * way puts the old set back: new jobs taken off again, old ones gone re-added
- * from `previous` (the manifest they were made from). The error says what
- * could not be put back.
- *
- * The put-back goes by what the agent has, not by what each call answered
- * (2026-10-09, #17): a `cron add` or `cron rm` can take effect and still
- * answer an error (its reply lost, a timeout). So it lists the jobs, takes off
- * any that were not there before, re-adds the old ones that are gone, and lists
- * again; only that second list may say the tasks are as they were.
- *
- * `off`: tasks the owner had turned off whose jobs are gone (taken off for
- * another app that then failed): they go back on turned off (HB-0253).
+ * Stage replacements disabled while the original jobs remain intact. Only
+ * after staging succeeds are originals disabled and checked, replacements
+ * enabled, and originals removed. The volume journal preserves original
+ * enabled states across crashes: a disabled staging job is never read as an
+ * owner's choice. A failed call is reconciled from fresh lists, including
+ * calls whose changes landed before their replies were lost.
  */
 export async function syncTasks(d: InstallDeps, m: AppManifest, previous?: AppManifest, off: readonly string[] = []): Promise<string[]> {
-  // A call that rejects (the daemon gone mid-way) is a failed call: thrown, it
-  // left the replacement jobs already made beside the old ones (review R05, 2026-10-23).
-  const run = (argv: string[]): Promise<ExecResult> => d.provider.exec(d.runtimeRef, argv, { timeoutMs: 60_000 })
-    .catch((err: unknown): ExecResult => ({ code: 1, stdout: '', stderr: String((err as Error)?.message ?? err) }));
+  await recoverTaskTransition(d, m.app);
+  const run = (argv: string[]) => taskCommand(d, argv);
   const prev = previous?.app === m.app ? previous : undefined;
+  const origins = await readTaskOrigins(d, m.app);
   const ours = appTaskNames(m, prev);
-  const old = await appJobs(d, ours);
+  const originOf = (j: Job) => origins.find((x) => x.id === j.id && x.name === j.name);
+  const listed = await appJobs(d, new Set([...ours, ...origins.map((j) => j.name)]));
+  const old = listed.filter((j) => ours.has(j.name) || originOf(j)).map((j) => ({ id: j.id, name: j.name, enabled: j.enabled !== false,
+    manifest: originOf(j)?.manifest ?? (prev && appTaskNames(prev).has(j.name) ? prev : undefined) }));
+  for (const j of old) ours.add(j.name);
   const oldIds = new Set(old.map((j) => j.id));
-  /** Put the old set back; what is still wrong after a fresh list ([] = confirmed as it was). */
-  const putBack = async (): Promise<string[]> => {
-    const unread = (e: unknown) => [`the list could not be read (${(e as Error)?.message ?? e})`];
-    let now: Job[];
-    try { now = await appJobs(d, ours); } catch (e) { return unread(e); }
-    const seen = new Set(now.map((j) => j.id));
-    for (const j of now.filter((x) => !oldIds.has(x.id))) await run(['cron', 'rm', j.id]);
-    // One the owner had turned off goes back off: re-added switched on, it
-    // ran work they had stopped, and the count below still said "as they
-    // were" (audit #016).
-    for (const j of old.filter((x) => !seen.has(x.id))) {
-      const t = prev?.tasks.find((x) => `${m.app}-${x.name}` === j.name);
-      if (t) await run([...addArgv(d, prev!, t), ...(j.enabled === false ? ['--disabled'] : [])]);
-    }
-    let after: Job[];
-    try { after = await appJobs(d, ours); } catch (e) { return unread(e); }
-    // Listed before the put-back and not in the old set: a new job that would not come off.
-    // Not listed before: added by the put-back, whatever its add answered.
-    const stray = after.filter((j) => seen.has(j.id) && !oldIds.has(j.id)).map((j) => j.name);
-    const off = (j: Job) => j.enabled === false;
-    const count = (jobs: Job[]) => jobs.reduce((n, j) => n.set(j.name, (n.get(j.name) ?? 0) + 1), new Map<string, number>());
-    const kept = after.filter((j) => oldIds.has(j.id) || !seen.has(j.id));
-    const want = count(old);
-    const have = count(kept);
-    const missing = [...want].filter(([name, n]) => (have.get(name) ?? 0) < n).map(([name]) => name);
-    const twice = [...have].filter(([name, n]) => n > (want.get(name) ?? 0)).map(([name]) => name);
-    // As many of each turned off as before (those counted above aside).
-    const offWant = count(old.filter(off));
-    const offHave = count(kept.filter(off));
-    const named = new Set([...missing, ...twice]);
-    const switchedOn = [...offWant].filter(([name, n]) => !named.has(name) && (offHave.get(name) ?? 0) < n).map(([name]) => name);
-    const switchedOff = [...offHave].filter(([name, n]) => !named.has(name) && n > (offWant.get(name) ?? 0)).map(([name]) => name);
-    return [
-      ...(stray.length ? [`still there: ${stray.join(', ')}`] : []),
-      ...(missing.length ? [`not re-added: ${missing.join(', ')}`] : []),
-      ...(twice.length ? [`more than once: ${twice.join(', ')}`] : []),
-      ...(switchedOn.length ? [`switched on, though you had turned it off: ${switchedOn.join(', ')}`] : []),
-      ...(switchedOff.length ? [`turned off, though it was on: ${switchedOff.join(', ')}`] : []),
-    ];
-  };
+  const rec: TaskTransition = { version: 1, old, previous: prev, next: m };
+  await writeTaskTransition(d, rec);
   const fail = async (what: string) => {
-    const problems = await putBack();
+    // A failed journal removal may actually have removed it. Before a
+    // rollback changes any scheduler state, its original intent is durable
+    // again; otherwise leave the jobs alone and report the uncertainty.
+    let problems: string[];
+    try { await writeTaskTransition(d, rec); problems = await rollbackTasks(d, rec); }
+    catch (e) {
+      if (e instanceof SimulatedCrash) throw e;
+      problems = [`rollback could not be recorded or completed (${(e as Error).message})`];
+    }
     return Object.assign(new AppError(`${what} ${problems.length
       ? `Its scheduled tasks could not be confirmed: ${problems.join('; ')}. Check them with \`openclaw cron list --all\` in the agent's console (jobs named ${m.app}-…), then Update or Roll back again.`
       : 'Its tasks are as they were.'}`), { tasksUnconfirmed: problems.length > 0 });
   };
-
-  const made: string[] = [];
-  // A task the owner turned off stays off in the new version: re-added
-  // switched on, an Update ran work they had stopped (HB-0229). Off when
-  // every old job of that name was; with none, when `off` names it.
+  const made = m.tasks.map((t) => `${m.app}-${t.name}`);
   const offBefore = (name: string) => old.some((j) => j.name === name)
-    ? old.filter((j) => j.name === name).every((j) => j.enabled === false)
+    ? old.filter((j) => j.name === name).every((j) => !j.enabled)
     : off.includes(name);
-  for (const t of m.tasks) {
-    const r = await run([...addArgv(d, m, t), ...(offBefore(`${m.app}-${t.name}`) ? ['--disabled'] : [])]);
-    if (r.code !== 0) throw await fail(`Could not schedule ${m.app}-${t.name}: ${errText(r)}.`);
-    made.push(`${m.app}-${t.name}`);
+  try {
+    for (const t of m.tasks) {
+      const r = await run([...addArgv(d, m, t), '--disabled']);
+      if (r.code !== 0) throw new AppError(`Could not schedule ${m.app}-${t.name}: ${errText(r)}.`);
+    }
+    const staged = (await appJobs(d, ours)).filter((j) => !oldIds.has(j.id));
+    if (staged.length !== made.length || staged.some((j) => j.enabled !== false)
+      || made.some((name) => staged.filter((j) => j.name === name).length !== 1)) {
+      throw new AppError('The replacement scheduled tasks were not confirmed staged and turned off.');
+    }
+    for (const j of old.filter((j) => j.enabled)) {
+      const r = await run(['cron', 'disable', j.id]);
+      if (r.code !== 0) throw new AppError(`Could not turn off the old task ${j.name}: ${errText(r)}.`);
+    }
+    const quiet = await appJobs(d, ours);
+    if (quiet.some((j) => j.enabled !== false) || old.some((j) => !quiet.some((x) => x.id === j.id))) {
+      throw new AppError('The old scheduled tasks could not be confirmed turned off.');
+    }
+    for (const j of staged.filter((j) => !offBefore(j.name))) {
+      const r = await run(['cron', 'enable', j.id]);
+      if (r.code !== 0) throw new AppError(`Could not enable ${j.name}: ${errText(r)}.`);
+    }
+    for (const j of old) {
+      const r = await run(['cron', 'rm', j.id]);
+      if (r.code !== 0) throw new AppError(`Could not take off the old task ${j.name}: ${errText(r)}.`);
+    }
+    const final = await appJobs(d, ours);
+    if (final.length !== made.length || made.some((name) => final.filter((j) => j.name === name).length !== 1)
+      || final.some((j) => (j.enabled === false) !== offBefore(j.name))) {
+      throw new AppError('The replacement scheduled tasks could not be confirmed in their intended state.');
+    }
+    await writeTaskOrigins(d, m.app, final.map((j) => ({ id: j.id, name: j.name, manifest: m })));
+    await clearTaskTransition(d, m.app);
+    return made;
+  } catch (e) {
+    if (e instanceof SimulatedCrash) throw e;
+    throw await fail((e as Error)?.message ?? String(e));
   }
-  for (const j of old) {
-    const r = await run(['cron', 'rm', j.id]);
-    if (r.code !== 0) throw await fail(`Could not take off the old task ${j.name}: ${errText(r)}.`);
-  }
-  return made;
 }
 
 /** Take its tasks off (those its manifests `ms` make); the code and data stay on the volume. */
 export async function removeTasks(d: InstallDeps, app: string, ...ms: Array<AppManifest | undefined>): Promise<number> {
-  const names = appTaskNames(...ms);
-  const jobs = await appJobs(d, names);
+  // Stop app removes both generations, including renamed staged jobs. It
+  // must never restore/enable the old generation just to remove it next.
+  const transition = await readTaskTransition(d, app);
+  const origins = await readTaskOrigins(d, app);
+  const names = appTaskNames(...ms, transition?.previous, transition?.next);
+  for (const j of transition?.old ?? []) names.add(j.name);
+  const jobs = (await appJobs(d, new Set([...names, ...origins.map((j) => j.name)])))
+    .filter((j) => names.has(j.name) || origins.some((x) => x.id === j.id && x.name === j.name));
+  for (const j of jobs) names.add(j.name);
   for (const j of jobs) {
     // A lost response may mean it was removed. The fresh list decides.
-    await d.provider.exec(d.runtimeRef, ['cron', 'rm', j.id], { timeoutMs: 60_000 }).catch(() => undefined);
+    await taskCommand(d, ['cron', 'rm', j.id]);
   }
   const left = await appJobs(d, names);
   if (left.length) throw new AppError(`Could not remove ${app}'s scheduled tasks: ${left.map((j) => j.name).join(', ')} remain. Try again; the app record has been kept.`);
+  await clearTaskOrigins(d, app);
+  if (transition) await clearTaskTransition(d, app);
   return jobs.length;
 }

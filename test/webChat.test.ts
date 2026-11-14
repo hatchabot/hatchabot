@@ -40,7 +40,7 @@ async function world(opts: { authMode?: 'password' | 'accounts' | 'identity' } =
   store.insertMembership({ id: 'm2', agentId: 'a1', userId: PAT, role: 'user', displayName: 'Pat', status: 'active' });
   const f = Fastify();
   // "good-<sub>" verifies as that Google account; anything else does not.
-  const verifier = { verify: async (t: string) => { if (!t.startsWith('good-')) throw new Error('bad'); return { sub: t.slice(5), email: `${t.slice(5)}@example.com` }; } };
+  const verifier = { verify: async (t: string) => { if (!t.startsWith('good-')) throw new Error('bad'); return { sub: t.slice(5), email: `${t.slice(5)}@example.com`, emailVerified: true }; } };
   await registerRoutes(f, {
     store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]),
     channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
@@ -57,6 +57,34 @@ const reply = (stdout: string, code = 0) => ({ code, stdout, stderr: '' });
 afterEach(() => { delete process.env.HATCHABOT_WEB_CHAT_PER_HOUR; });
 
 describe('who may chat on the web', () => {
+  it('carries a validated message id into the transcript without changing guest rights (HB-0643)', async () => {
+    const w = await world();
+    const messageId = '11223344-5566-4777-8888-99aabbccddee';
+    const result = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/chat', headers: as(SAM), payload: { text: 'ok', messageId } });
+    expect(result.statusCode).toBe(200);
+    expect(turns(w.provider)[0]).toMatchObject({ messageId, message: `[Sam via the web app; message ${messageId}]\nok`, rights: 'member', scopes: ['operator.read', 'operator.write'] });
+    for (const bad of ['not-an-id', [messageId], 123]) {
+      expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/chat', headers: as(SAM), payload: { text: 'ok', messageId: bad } })).statusCode).toBe(400);
+    }
+    expect(turns(w.provider)).toHaveLength(1);
+    await w.f.close();
+  });
+
+  it('returns delivery evidence only for requested ids and strips the metadata from the bubble (HB-0643)', async () => {
+    const w = await world();
+    const messageId = '11223344-5566-4777-8888-99aabbccddee', other = '22334455-6677-4888-9999-aabbccddeeff';
+    w.provider.webChatSessions.set(webChatStoreKey('kitchen', SAM), reply(JSON.stringify({
+      messages: [{ role: 'user', text: `[Sam via the web app; message ${messageId}]\nok`, at: '2026-09-29T01:00:00Z' }],
+      delivery: { checked: [messageId, other], received: [messageId, other] },
+    })));
+    const result = await w.f.inject({ method: 'GET', url: '/v1/agents/a1/chat', headers: { ...as(SAM), 'x-hatchabot-message-ids': messageId } });
+    expect(result.json()).toEqual({ messages: [{ role: 'user', text: 'ok', at: '2026-09-29T01:00:00Z', messageId }], delivery: { checked: [messageId], received: [messageId] } });
+    for (const ids of ['not-an-id', Array(101).fill(messageId).join(',')]) {
+      expect((await w.f.inject({ method: 'GET', url: '/v1/agents/a1/chat', headers: { ...as(SAM), 'x-hatchabot-message-ids': ids } })).statusCode).toBe(400);
+    }
+    await w.f.close();
+  });
+
   it('the owner and a web-chat member may; a plain member, a stranger and a removed member may not', async () => {
     const w = await world();
     w.provider.webChatReply = reply('Pasta tonight.\n');
@@ -319,6 +347,46 @@ describe('the conversation', () => {
 });
 
 describe('the in-container reader on 2026.7: what was missing or merged', () => {
+  it('an unclassified or disappearing reset cannot prove a message absent (HB-0643)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-reset-receipts-'));
+    const messageId = '11223344-5566-4777-8888-99aabbccddee';
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM), reset = 'old-session.jsonl.reset.2026-09-29';
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'new-session' } }));
+      writeFileSync(join(sd, 'new-session.jsonl'), '');
+      writeFileSync(join(sd, reset), JSON.stringify({ type: 'message', id: 'sent', timestamp: '2026-09-29T01:00:00Z', message: { role: 'user', content: `[Sam via the web app; message ${messageId}]\nok` } }));
+      const read = (before = '') => JSON.parse(execFileSync(process.execPath, ['-e', before + HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '100', PENDING: messageId }, encoding: 'utf8' }));
+      expect(read().delivery).toEqual({ checked: [], received: [] }); // no provenance
+      writeFileSync(join(sd, 'old-session.trajectory.jsonl'), '{"unfinished":');
+      expect(read().delivery).toEqual({ checked: [], received: [] });
+      writeFileSync(join(sd, 'old-session.trajectory.jsonl'), JSON.stringify({ type: 'session.started', sessionKey: 'agent:kitchen:main' }));
+      expect(read().delivery).toEqual({ checked: [messageId], received: [] }); // known other session
+      writeFileSync(join(sd, 'old-session.trajectory.jsonl'), JSON.stringify({ type: 'session.started', sessionKey: key }));
+      expect(read().delivery).toEqual({ checked: [messageId], received: [messageId] });
+      const disappear = `const actualRead = require('fs').readFileSync; require('fs').readFileSync = function(file, ...args) { if (String(file).endsWith('${reset}')) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return actualRead.call(this, file, ...args); };\n`;
+      expect(read(disappear).delivery).toEqual({ checked: [], received: [] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('finds delivery ids before the display cap, and an incomplete transcript cannot prove absence (HB-0643)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-receipts-'));
+    const messageId = '11223344-5566-4777-8888-99aabbccddee', missing = '22334455-6677-4888-9999-aabbccddeeff';
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'sess-1' } }));
+      const rows = [
+        JSON.stringify({ type: 'message', id: 'sent', timestamp: '2026-09-29T01:00:00Z', message: { role: 'user', content: `[Sam via the web app; message ${messageId}]\nok` } }),
+        JSON.stringify({ type: 'message', id: 'reply', timestamp: '2026-09-29T01:00:01Z', message: { role: 'assistant', content: 'Noted.' } }),
+      ];
+      const read = () => JSON.parse(execFileSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '1', PENDING: `${messageId},${missing}` }, encoding: 'utf8' }));
+      writeFileSync(join(sd, 'sess-1.jsonl'), rows.join('\n'));
+      expect(read()).toMatchObject({ messages: [{ text: 'Noted.' }], delivery: { checked: [messageId, missing], received: [messageId] } });
+      writeFileSync(join(sd, 'sess-1.jsonl'), rows.join('\n') + '\n{"unfinished":');
+      expect(read().delivery).toEqual({ checked: [], received: [messageId] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   const run = (root: string, key: string) => spawnSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '100' }, encoding: 'utf8' });
   const ev = (id: string, role: string, content: unknown, ts: string) => JSON.stringify({ type: 'message', id, timestamp: ts, message: { role, content } });
   const setup = () => {
@@ -379,6 +447,7 @@ describe('the in-container reader on 2026.7: what was missing or merged', () => 
 describe('the in-container reader on 2026.9', () => {
   it('reads every window of the key from the agent database, archives too, and nothing of other sessions', () => {
     const root = mkdtempSync(join(tmpdir(), 'hb-webchat-db-'));
+    const messageId = '11223344-5566-4777-8888-99aabbccddee', otherId = '22334455-6677-4888-9999-aabbccddeeff';
     try {
       mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
       const db = new Database(join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite'));
@@ -394,11 +463,12 @@ describe('the in-container reader on 2026.9', () => {
       const put = db.prepare('INSERT INTO transcript_events (session_id, seq, event_json) VALUES (?, ?, ?)');
       put.run('w-new', 1, ev('n1', 'user', '[Sam via the web app]\nsecond', '2026-09-29T11:00:00.000Z'));
       put.run('w-new', 2, ev('n2', 'assistant', 'answer two', '2026-09-29T11:00:01.000Z'));
-      put.run('w-other', 1, ev('o1', 'user', 'not Sam', '2026-09-29T10:30:00.000Z'));
+      put.run('w-other', 1, ev('o1', 'user', `[The owner via the web app; message ${otherId}]\nnot Sam`, '2026-09-29T10:30:00.000Z'));
       db.prepare('INSERT INTO session_transcript_archives VALUES (?, ?, ?, ?)').run('w-old', key, 'identity',
-        Buffer.from([ev('a1', 'user', '[Sam via the web app]\nfirst', '2026-09-29T10:00:00.000Z'), ev('a2', 'assistant', 'answer one', '2026-09-29T10:00:01.000Z')].join('\n')));
+        Buffer.from([ev('a1', 'user', `[Sam via the web app; message ${messageId}]\nfirst`, '2026-09-29T10:00:00.000Z'), ev('a2', 'assistant', 'answer one', '2026-09-29T10:00:01.000Z')].join('\n')));
       db.close();
-      const out = execFileSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '3' }, encoding: 'utf8' });
+      const out = execFileSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '3', PENDING: `${messageId},${otherId}` }, encoding: 'utf8' });
+      expect(JSON.parse(out).delivery).toEqual({ checked: [messageId, otherId], received: [messageId] });
       // Newest last, capped to the last 3.
       expect(JSON.parse(out).messages.map((m: { text: string }) => m.text)).toEqual(['answer one', '[Sam via the web app]\nsecond', 'answer two']);
     } finally { rmSync(root, { recursive: true, force: true }); }

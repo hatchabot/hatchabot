@@ -8,7 +8,7 @@ export const ADOPTION_RETRY_MAX_MS = 60 * 60_000;
 export const RELEASE_PIN = 'sqlite3 data/hatchabot.sqlite "DELETE FROM first_account" (or the database HATCHABOT_DB names), then restart Hatchabot';
 
 /**
- * The first real account adopts what password mode owned (Phase 3 of
+ * The selected account adopts what password mode owned (Phase 3 of
  * docs/identity.md), run from the auth hook on an authenticated request.
  * Once it has gone through it is not tried again in this process: it fires on
  * every request. One that failed (a busy or broken database) is tried again
@@ -16,7 +16,8 @@ export const RELEASE_PIN = 'sqlite3 data/hatchabot.sqlite "DELETE FROM first_acc
  * failure left the fleet under dev-owner, and the owner facing an empty one,
  * until the next restart (HB-0548).
  *
- * The account that tried first is the one it is for: it is recorded before
+ * Identity mode supplies its designated owner; accounts mode admits only
+ * the local host owner. The selected account is recorded before
  * the hand-over runs (in the store, so a restart keeps it too), and a retry
  * runs only on that account's requests. Without that, a member who signed in
  * during the wait after a failure took the owner's agents. Only an account
@@ -29,7 +30,7 @@ export const RELEASE_PIN = 'sqlite3 data/hatchabot.sqlite "DELETE FROM first_acc
 export function firstAccountAdoption(
   store: {
     adoptLocalOwnerData(ownerId: string, localOwner?: string, opts?: { pinned?: boolean }): number;
-    pinFirstAccount(ownerId: string): { ownerId: string; done: boolean } | undefined;
+    pinFirstAccount(ownerId: string, localOwner?: string, opts?: { designated?: boolean }): { ownerId: string; done: boolean } | undefined;
     localOwnerHasData(): boolean;
     localOwnerHasAnything(): boolean;
     mayTakeOverInstall(ownerId: string): boolean;
@@ -37,6 +38,7 @@ export function firstAccountAdoption(
   },
   log: { warn(detail: object, msg: string): void; error(detail: object, msg: string): void },
   now: () => number = Date.now,
+  options: { identityOwner?: () => string | undefined } = {},
 ): (principal: Pick<Principal, 'ownerId' | 'email'>) => void {
   let done = false;
   // Only ever what the store holds: set from its answer, never ahead of it.
@@ -50,6 +52,7 @@ export function firstAccountAdoption(
   let failures = 0;
   let retryAt = 0;
   let toldSkip = false;
+  let toldMissingOwner = false;
   const skip = (ownerId: string): void => {
     if (toldSkip) return;
     toldSkip = true;
@@ -73,6 +76,20 @@ export function firstAccountAdoption(
     if (refused.has(principal.ownerId)) return;
     if (now() < retryAt) return;
     try {
+      // In identity mode the operator explicitly names the owner, or an
+      // existing hand-over/local host already records it. A member arriving
+      // earlier cannot pin the installation or prevent the owner's retry.
+      if (options.identityOwner) {
+        const owner = options.identityOwner();
+        if (!owner) {
+          if (!toldMissingOwner) {
+            log.warn({}, 'installation ownership is not established; set HATCHABOT_OWNER_EMAIL to the owner\'s Google address and have that account sign in');
+            toldMissingOwner = true;
+          }
+          return;
+        }
+        if (owner !== principal.ownerId) return;
+      }
       // A member is never who it is for, held or not: nothing to say to them.
       if (!allowed.has(principal.ownerId)) {
         if (!store.mayTakeOverInstall(principal.ownerId)) { refused.add(principal.ownerId); return; }
@@ -89,7 +106,7 @@ export function firstAccountAdoption(
           // memory ahead of the store, a pin the store could not read was
           // this account's, and the stored account was turned away until a
           // restart (fifth review).
-          const pin = store.pinFirstAccount(principal.ownerId);
+          const pin = store.pinFirstAccount(principal.ownerId, LOCAL_OWNER, { designated: !!options.identityOwner });
           // It went to an account already: what the old owner gets later is nobody's.
           if (!pin || pin.done) { done = true; return; }
           pinned = pin.ownerId;
@@ -98,7 +115,9 @@ export function firstAccountAdoption(
         const rows = store.adoptLocalOwnerData(principal.ownerId, LOCAL_OWNER, { pinned: true });
         adopted = true;
         if (rows > 0) {
-          log.warn({ ownerId: principal.ownerId, email: principal.email, rows }, 'adopted this installation\'s data into the first signed-in account');
+          log.warn({ ownerId: principal.ownerId, email: principal.email, rows }, options.identityOwner
+            ? 'adopted this installation\'s data into its designated account'
+            : 'adopted this installation\'s data into the first signed-in account');
         }
       }
       // In the try: a busy database here is asked again on the next request,
@@ -115,7 +134,8 @@ export function firstAccountAdoption(
       const wait = Math.min(ADOPTION_RETRY_MS * 2 ** (failures - 1), ADOPTION_RETRY_MAX_MS);
       retryAt = now() + wait;
       const detail = { ownerId: pinned, err: String(err), failures, retryInSeconds: wait / 1000 };
-      const msg = 'could not hand this installation\'s data to the first signed-in account. '
+      const msg = (options.identityOwner ? 'could not hand this installation\'s data to its designated account. '
+        : 'could not hand this installation\'s data to the first signed-in account. ')
         + 'It is tried again on that account\'s next request after the wait. '
         + 'If it keeps failing, check that the disk has room (df -h), read the error here, then restart Hatchabot';
       if (failures === 1) log.error(detail, msg);

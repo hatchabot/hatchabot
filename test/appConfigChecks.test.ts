@@ -56,7 +56,7 @@ function repo(manifest: unknown = MANIFEST): string {
 /** A fake agent: shell steps run in a temp folder per agent (the apps folder rewritten to it); tasks are a list in memory. */
 const APPS = '/home/node/.openclaw/apps';
 class FakeAgent extends MockProvider {
-  jobs: Array<{ id: string; name: string }> = [];
+  jobs: Array<{ id: string; name: string; enabled: boolean }> = [];
   #roots = new Map<string, string>();
   #next = 1;
   root(ref: string): string {
@@ -71,13 +71,17 @@ class FakeAgent extends MockProvider {
     return { code: r.status ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? '') };
   }
   override async exec(_ref: string, argv: string[]): Promise<ExecResult> {
-    if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs.map(({ id, name }) => ({ id, name, enabled: true })) }), stderr: '' };
+    if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs: this.jobs }), stderr: '' };
     if (argv[0] === 'cron' && argv[1] === 'add') {
       const id = `j${this.#next++}`;
-      this.jobs.push({ id, name: argv[argv.indexOf('--name') + 1]! });
+      this.jobs.push({ id, name: argv[argv.indexOf('--name') + 1]!, enabled: !argv.includes('--disabled') });
       return { code: 0, stdout: JSON.stringify({ id }), stderr: '' };
     }
     if (argv[0] === 'cron' && argv[1] === 'rm') this.jobs = this.jobs.filter((j) => j.id !== argv[2]);
+    if (argv[0] === 'cron' && (argv[1] === 'enable' || argv[1] === 'disable')) {
+      const job = this.jobs.find((j) => j.id === argv[2]);
+      if (job) job.enabled = argv[1] === 'enable';
+    }
     return { code: 0, stdout: '{}', stderr: '' };
   }
   override async execShell(ref: string, script: string): Promise<ExecResult> { return this.#run(ref, script); }

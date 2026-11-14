@@ -11,6 +11,10 @@ import {
   panelAddress, panelCommands, panelSize, panelTransportOk, type BrowserPanelChannel, type PanelEvent,
 } from '../src/orchestrator/browserPanel.js';
 import { makeWorld, seedRunningAgent, as, type World } from './support/world.js';
+import { registerAuth } from '../src/api/auth.js';
+import { mintSession } from '../src/api/accountsAuth.js';
+import { publicApp } from './helpers/publicApp.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
 
 // Made-up frames: "/9j/" is how every JPEG's base64 begins.
 const FRAME = '/9j/4AAQSkZJRgABAQAAAQABAAD';
@@ -419,5 +423,151 @@ describe('the routes', () => {
     const bad = await open(w, { url: 'javascript:alert(1)' });
     expect(bad.statusCode).toBe(400);
     expect(w.provider.panelRelays).toHaveLength(0);
+  });
+
+  it.each(['owner', 'stopped', 'browser off', 'runtime', 'profile'])('does not open a stale browser after a slow machine listing changes %s (HB-0700)', async (changed) => {
+    const { w } = await ready();
+    const list = w.provider.listBrowsers.bind(w.provider);
+    w.provider.listBrowsers = async () => {
+      const result = await list();
+      const db = (w.store as unknown as { db: Database.Database }).db;
+      if (changed === 'owner') db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-other', 'a1');
+      if (changed === 'stopped') w.store.setAgentState('a1', 'STOPPED');
+      if (changed === 'browser off') w.store.setAgentBrowser('a1', false);
+      if (changed === 'runtime') w.store.setAgentRuntimeRef('a1', 'mock://replacement');
+      if (changed === 'profile') w.store.setAgentBrowserLogins('a1', '0a1b2c3d4e5f');
+      return result;
+    };
+    try {
+      const r = await open(w);
+      expect(r.statusCode, r.body).toBe(changed === 'owner' ? 404 : 409);
+      expect(w.provider.panelRelays).toHaveLength(0);
+    } finally { await w.f.close(); }
+  });
+
+  it('ends an existing stream before sending a frame after ownership changes (HB-0700)', async () => {
+    const { w, relay } = await ready();
+    try {
+      const { panel } = (await open(w)).json();
+      const stream = Promise.resolve(w.f.inject({ method: 'GET', url: `/v1/agents/a1/browser/panel/${panel}/stream`, headers: as() }));
+      await tick();
+      (w.store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-other', 'a1');
+      relay().emit({ method: 'Page.screencastFrame', params: { data: FRAME, sessionId: 5, metadata: { deviceWidth: 1000, deviceHeight: 700 } } });
+      const res = await stream;
+      expect(res.payload).not.toContain(FRAME);
+      expect(res.payload).toContain('"t":"closed"');
+      expect(relay().closed).toBe(true);
+    } finally { await w.f.close(); }
+  });
+
+  it('refuses input to a panel whose browser was switched off (HB-0700)', async () => {
+    const { w, relay } = await ready();
+    try {
+      const { panel } = (await open(w)).json();
+      w.store.setAgentBrowser('a1', false);
+      const res = await w.f.inject({ method: 'POST', url: `/v1/agents/a1/browser/panel/${panel}/input`, headers: as(), payload: { ops: [{ k: 'text', text: 'fixture' }] } });
+      expect(res.statusCode).toBe(404);
+      expect(relay().closed).toBe(true);
+      expect(relay().sent.some((m) => m.method === 'Input.insertText')).toBe(false);
+    } finally { await w.f.close(); }
+  });
+
+  const signedIn = async () => {
+    const r = await ready();
+    const secret = Buffer.alloc(32, 5);
+    r.w.store.insertLocalAccount({ id: r.w.owner, username: 'owner', pwHash: 'fixture-hash', pwSalt: 'fixture-salt', hostOwner: true, disabled: false, createdAt: 'now' });
+    await registerAuth(r.w.f, { mode: 'accounts', store: r.w.store, secret, cliTokenOwner: (t) => r.w.store.ownerForCliToken(t) });
+    const cookie = `hatchabot_session=${mintSession(secret, r.w.owner, 'fixture-hash', Date.now() + 3_600_000)}`;
+    return { ...r, cookie };
+  };
+
+  it('checks the browser session again after a slow listing (HB-0700)', async () => {
+    const { w, cookie } = await signedIn();
+    const list = w.provider.listBrowsers.bind(w.provider);
+    w.provider.listBrowsers = async () => { const result = await list(); w.store.bumpSessionEpoch(w.owner); return result; };
+    try {
+      const res = await open(w, {}, { headers: { cookie } });
+      expect(res.statusCode, res.body).toBe(401);
+      expect(w.provider.panelRelays).toHaveLength(0);
+    } finally { await w.f.close(); }
+  });
+
+  it.each(['same', 'another'])('cancels a pending panel only when the %s browser signs out (HB-0700)', async (browser) => {
+    const { w, cookie } = await signedIn();
+    const endingCookie = browser === 'same' ? cookie : `hatchabot_session=${mintSession(Buffer.alloc(32, 5), w.owner, 'fixture-hash', Date.now() + 7_200_000)}`;
+    const list = w.provider.listBrowsers.bind(w.provider);
+    w.provider.listBrowsers = async () => {
+      const result = await list();
+      const ended = await w.f.inject({ method: 'POST', url: '/v1/logout', headers: { cookie: endingCookie } });
+      expect(ended.statusCode, ended.body).toBe(200);
+      return result;
+    };
+    try {
+      const res = await open(w, {}, { headers: { cookie } });
+      expect(res.statusCode, res.body).toBe(browser === 'same' ? 401 : 201);
+      expect(w.provider.panelRelays).toHaveLength(browser === 'same' ? 0 : 1);
+    } finally { await w.f.close(); }
+  });
+
+  it.each(['logout', 'everywhere', 'epoch', 'quiet epoch'])('closes an already open stream after %s (HB-0700)', async (how) => {
+    // Only intervals are fake: Fastify's IO and the panel's idle timer stay real.
+    if (how === 'quiet epoch') vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const { w, cookie, relay } = await signedIn();
+    try {
+      const opened = await open(w, {}, { headers: { cookie } });
+      expect(opened.statusCode, opened.body).toBe(201);
+      const { panel } = opened.json();
+      const stream = Promise.resolve(w.f.inject({ method: 'GET', url: `/v1/agents/a1/browser/panel/${panel}/stream`, headers: { cookie } }));
+      await tick();
+      if (how === 'logout' || how === 'everywhere') {
+        const res = await w.f.inject({ method: 'POST', url: how === 'logout' ? '/v1/logout' : '/v1/logout/everywhere', headers: { cookie } });
+        expect(res.statusCode, res.body).toBe(200);
+      } else {
+        w.store.bumpSessionEpoch(w.owner);
+        if (how === 'quiet epoch') await vi.advanceTimersByTimeAsync(30_000);
+        else relay().emit({ method: 'Page.screencastFrame', params: { data: FRAME, sessionId: 6, metadata: { deviceWidth: 1000, deviceHeight: 700 } } });
+      }
+      const res = await stream;
+      expect(res.payload).not.toContain(FRAME);
+      expect(res.payload).toContain('"t":"closed"');
+      expect(relay().closed).toBe(true);
+    } finally { await w.f.close(); vi.useRealTimers(); }
+  });
+
+  it('asks a bearer-only caller to sign in in a browser (HB-0700)', async () => {
+    const { w } = await signedIn();
+    try {
+      const token = w.store.createCliToken(w.owner, 'fixture');
+      const res = await open(w, {}, { headers: { authorization: `Bearer ${token.token}` } });
+      expect(res.statusCode, res.body).toBe(401);
+      expect(res.json().error).toMatch(/Sign in to Hatchabot in this browser/);
+      expect(w.provider.panelRelays).toHaveLength(0);
+    } finally { await w.f.close(); }
+  });
+
+  it('ends a public stream before another frame when its second-factor pass is revoked (HB-0700)', async () => {
+    const provider = new MockProvider();
+    const h = await publicApp({ fullRoutes: true, routeDeps: { providers: new Map([['mock', provider]]) } });
+    try {
+      const owner = await h.addAccount('owner', { owner: true });
+      await h.app.publicAccess!.evaluate();
+      const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'garden', workspace: { files: {}, configPatch: { agentId: 'garden', authMode: 'api-key' } }, env: {} });
+      await provider.start(runtimeRef);
+      h.store.insertAgent({ id: 'a1', ownerId: owner.id, name: 'Garden', slug: 'garden', state: 'RUNNING', hostId: h.store.localHostId()!, aiProfileId: 'p1', runtimeRef, persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+      h.store.setAgentBrowser('a1', true);
+      provider.browsers.set('a1', true);
+      const jar = await h.signIn('owner', owner.password, { totpSecret: owner.totpSecret });
+      const opened = await h.pub('/v1/agents/a1/browser/panel', { jar, body: { w: 1000, h: 700 } });
+      expect(opened.status, JSON.stringify(opened.json)).toBe(201);
+      const stream = h.pub(`/v1/agents/a1/browser/panel/${opened.json.panel}/stream`, { jar });
+      await new Promise((r) => setTimeout(r, 30));
+      h.app.publicAccess!.secondFactorsChanged(owner.id);
+      provider.panelRelays.at(-1)!.emit({ method: 'Page.screencastFrame', params: { data: FRAME, sessionId: 7, metadata: { deviceWidth: 1000, deviceHeight: 700 } } });
+      const res = await stream;
+      expect(res.status).toBe(200);
+      expect(res.json).not.toContain(FRAME);
+      expect(res.json).toContain('"t":"closed"');
+      expect(provider.panelRelays.at(-1)!.closed).toBe(true);
+    } finally { h.app.server.closeAllConnections(); await h.close(); }
   });
 });

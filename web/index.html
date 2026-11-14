@@ -6028,9 +6028,10 @@ function toggleDerivedLines(name, key) {
 
 /** Hand the job to the management agent: it writes the Dockerfile, you Confirm. */
 function askMgmtForImage() {
+  if (pageSecondFactorBusy()) { toast('Finish signing in or saving your codes before asking for an image.', 8000); return; }
   const ops = (agents ?? []).find(a => a.ops && v2Mine(a) && a.state === 'RUNNING');
   if (!ops) { toast('Set up your Hatchabot agent first — it writes the Dockerfile for you.', 8000); return; }
-  for (const d of document.querySelectorAll('dialog[open]')) d.close();
+  if (aiDlg.open) aiDlg.close(); // leave any other pending form to its own completion path
   openGateway(ops.id, ops.slug);
   toast('Ask it for the image — e.g. “build a derived image called media-tools with ffmpeg”.', 9000);
 }
@@ -10912,7 +10913,7 @@ async function loadLogs() {
   } catch (e) { if (gen === logsGen) $('logsText').textContent = e.message; }
 }
 
-let cronAgentId = null;
+let cronAgentId = null, cronRead = 0, cronTriggerWrite = 0;
 function cronScheduleLabel(c) {
   if (c.scheduleKind === 'cron') return c.scheduleExpr + (c.scheduleTz ? ' · ' + c.scheduleTz : '');
   if (c.scheduleKind === 'every' && c.everyMs) {
@@ -10926,6 +10927,8 @@ function cronScheduleLabel(c) {
   return c.scheduleKind || 'schedule';
 }
 function prepareCrons(id, name) {
+  cronRead++; // a response from an earlier opening must not fill this one
+  cronTriggerWrite++;
   // Another agent's: a task typed for the one before is not carried to it, nor added there
   // (HB-0591, as the edit forms' boxes), and an Edit begun there ends: its Save would change
   // the other agent's task (a leftover edit once deleted an unrelated task, 10th audit).
@@ -10950,17 +10953,18 @@ function cancelCronEdit() {
 }
 async function loadCrons() {
   if (!cronAgentId) return;
+  const read = ++cronRead;
   $('cronErr').textContent = '';
   const forId = cronAgentId; // an Edit + Save on another agent's list would create its task here
   try {
     const { crons, waiting, notes, noteReach } = await api(`/v1/agents/${forId}/crons`);
-    if (cronAgentId !== forId) return;
+    if (cronAgentId !== forId || read !== cronRead) return;
     cronCache = crons;
     cronNotes = new Set(notes || []);
     cronNoteReach = noteReach !== false;
     cronNoteFormState();
     renderCrons(crons, waiting || []);
-  } catch (e) { if (cronAgentId !== forId) return; $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
+  } catch (e) { if (cronAgentId !== forId || read !== cronRead) return; $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
 }
 let cronEditingId = null, cronCache = [];
 /**
@@ -10973,6 +10977,11 @@ let cronEditFilled = null;
 function cronFormOf(c) {
   return { name: c.name || '', message: c.message || '', mode: c.everyMs && !c.scheduleExpr ? 'every' : 'cron',
     every: c.everyMs ? String(Math.round(c.everyMs / 600) / 100) : '', cron: c.scheduleExpr || '', tz: c.scheduleTz || '', notify: cronNotes.has(c.id) };
+}
+/** The visible draft, including text typed while a save waits. */
+function cronFormDraft() {
+  return { name: $('cronName').value, message: $('cronMsg').value, mode: $('cronMode').value,
+    every: $('cronEvery').value, cron: $('cronExpr').value, tz: $('cronTz').value, notify: $('cronNote').checked };
 }
 /**
  * An Edit ended with nothing saved by the sheet closing: it ends, and what it put in the form goes
@@ -11018,11 +11027,12 @@ async function setCronNote(jobId, on, box) {
   finally { if (box) box.disabled = !cronNoteReach && !box.checked; }
 }
 async function saveCronTriggers(on) {
+  const forId = cronAgentId, write = ++cronTriggerWrite;
   try {
-    await api(`/v1/agents/${cronAgentId}`, { method: 'PATCH', body: { cronTriggers: on } });
-    toast(on ? 'Event-triggered tasks allowed — tell the agent it can wire its trigger script now.' : 'Event-triggered tasks disabled.', 7000);
+    const r = await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { cronTriggers: on } });
+    toast(r.cronTriggersPending || (on ? 'Event-triggered tasks allowed — tell the agent it can wire its trigger script now.' : 'Event-triggered tasks disabled.'), r.cronTriggersPending ? 12000 : 7000);
     await refresh(false);
-  } catch (e) { toast(e.message, 9000); $('cronTriggers').checked = !on; }
+  } catch (e) { toast(e.message, 9000); if (cronAgentId === forId && write === cronTriggerWrite) $('cronTriggers').checked = !on; }
 }
 function cronModeChanged() {
   const every = $('cronMode').value === 'every';
@@ -11088,6 +11098,7 @@ async function addCronJob() {
   // while it waits, and its form must not be cleared by this one (#69).
   const forId = cronAgentId, editId = editing ? editing.id : null;
   const notify = $('cronNote').checked && !$('cronNote').disabled;
+  const submitted = cronFormDraft();
   $('cronAddBtn').disabled = true; $('cronErr').textContent = '';
   try {
     if (editing) {
@@ -11119,10 +11130,14 @@ async function addCronJob() {
       toast(notify ? 'Task saved — you will get a note on Telegram each time it runs.' : 'Task saved');
     }
     if (cronAgentId !== forId) return;
-    // The form still holds what was saved (not another task's edit begun since): empty it.
+    // Empty only the submitted draft. New typing stays, and another Save
+    // compares it with this successful save, including a field reverted to
+    // its earlier value while the request waited.
     if (cronEditingId === editId) {
-      cancelCronEdit(); clearCronForm(); // its interval and zone too: left, they went into the next task unseen
-      v2SheetBaseline('cronBody');
+      if (JSON.stringify(cronFormDraft()) === JSON.stringify(submitted)) {
+        cancelCronEdit(); clearCronForm(); // its interval and zone too: left, they went into the next task unseen
+        v2SheetBaseline('cronBody');
+      } else if (editing && cronEditFilled === filled) cronEditFilled = submitted;
     }
     await loadCrons();
   } catch (e) { if (cronAgentId === forId) $('cronErr').textContent = e.message; else toast(e.message, 9000); }
@@ -12044,6 +12059,10 @@ function choiceStart(options, v) {
   return options.find(o => o.trim() === want) ?? options.find(o => o.trim().toLowerCase() === want.toLowerCase()) ?? options[0] ?? '';
 }
 function collectParamValues(parameters, title) {
+  if (paramFormResolve) {
+    toast('Finish or cancel the setup already open, then start this import or copy again.', 9000);
+    return Promise.resolve(null);
+  }
   paramFormFields = parameters;
   $('paramFormName').textContent = title || 'this agent';
   $('paramFormErr').textContent = '';
@@ -12506,6 +12525,7 @@ function paintMachineOwnerOnly() {
 let pagePerson = null, pagePersonAway = false, pagePersonRead = 0, pageCleared = false, pageSignedOut = false;
 function pageSessionEnded() {
   sfDrop(); // a request waiting on a prompt for this session is not sent under the next one
+  bpClose(); // pictures and unsent sign-in text must not remain under the sign-in screen
   pageSignedOut = true;
   pagePersonAway = true; pageCleared = false;
   window.__sfEnrolShown = false; // whoever comes next is taken to add a factor if they need one
@@ -12611,6 +12631,7 @@ function pageSecretsBack(ownerId) {
 /** `next`: who has just been read, whose own one-time secret on the screen stays. */
 function pageClearLast(next = '') {
   v2Close();
+  bpClose();
   if ($('consoleDlg').open) closeConsole();
   consoleTabs = [];
   const theirs = (dlg) => !!next && dlg.open && pageSecretOwner.get(dlg) === next;
@@ -12651,9 +12672,11 @@ async function pageSignedIn(show) {
 async function loadMyAccount() {
   const read = ++pagePersonRead;
   try {
-    myAccount = await api('/v1/account');
-    if (read === pagePersonRead) pagePersonIs(myAccount.ownerId);
-  } catch { myAccount = {}; }
+    const account = await api('/v1/account');
+    if (read !== pagePersonRead) return;
+    myAccount = account;
+    pagePersonIs(myAccount.ownerId);
+  } catch { if (read !== pagePersonRead) return; myAccount = {}; }
   paintMachineOwnerOnly();
   loadRebuildPolicy(); // the cards' wording depends on it
   const el = $('tgLinkStatus');
@@ -15547,7 +15570,9 @@ let webChatBoxFor = null;
  * newest time; `logged`, the same words in it; `untimed`, those with no time), whether it
  * may not have arrived (`unsure`: 502, 504, no answer) and whether it is still waiting for
  * its answer (`waiting`). Reopening draws the log from the
- * server, so this is where such a message is got back from (HB-0446). The log holds the last
+ * server, so this is where such a message is got back from (HB-0446).
+ * New sends carry a UUID whose transcript receipt confirms delivery without comparing
+ * clocks. The counts below remain for old pages and older servers. The log holds only
  * 100 messages, so a count of the whole log could not tell an often-said "ok" apart
  * (HB-0495): only what comes after the read is counted, against the sends that followed it,
  * answered or not. Send does not wait for the log: one sent before it was read, like one after
@@ -15569,6 +15594,13 @@ let webChatUnread = false;
 const webChatCanSend = (id) => !webChatSending.has(id);
 /** The same words, the one test for both counts (webChatSend's of the log as read, webChatOfferUnsure's of the next): trimmed, both sides. */
 const webChatSameWords = (a, b) => String(a ?? '').trim() === String(b ?? '').trim();
+/** A UUID also works on private HTTP, where crypto.randomUUID is unavailable. */
+function webChatMessageId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+  const hex = [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+}
 /** The same words sent after the same read: a group, counted together (webChatOfferUnsure). Sent with no read: a group of their own. */
 const webChatKey = (s) => JSON.stringify([s.text, s.after ?? null, s.logged, s.untimed, !!s.sentAt]);
 /** How far this browser's clock may be ahead of the machine's: a copy timed that much before a send with no read is still taken as its. */
@@ -15642,11 +15674,19 @@ function webChatOfferUnsure(id, r) {
   // fail with a 504, and then it is counted with them (dropped now, it was never offered back).
   const due = sent.filter(s => s.open < webChatOpens), waiting = new Set(due.filter(s => s.waiting).map(key));
   const kept = sent.filter(s => s.open >= webChatOpens || waiting.has(key(s)));
-  if (kept.length) webChatUnsure.set(id, kept); else webChatUnsure.delete(id);
   const groups = new Map();
   for (const s of due.filter(s => !waiting.has(key(s)))) groups.set(key(s), [...(groups.get(key(s)) ?? []), s]);
   const lost = [];
-  for (const g of groups.values()) {
+  for (const group of groups.values()) {
+    // New sends are correlated with their transcript marker, even when the
+    // runner's clock differs or their bubble has fallen outside the last 100.
+    // A partial history can prove arrival, but cannot prove absence.
+    const g = r.delivery ? group.filter(s => !s.messageId) : group;
+    if (r.delivery) for (const s of group.filter(s => s.messageId && s.unsure)) {
+      if ((r.delivery.received || []).includes(s.messageId)) continue;
+      if (!(r.delivery.checked || []).includes(s.messageId)) { kept.push(s); continue; }
+      if (!lost.includes(s.text)) lost.push(s.text);
+    }
     const unsure = g.filter(s => s.unsure).length; if (!unsure) continue;
     // `before`: those answered in its open before the first of these, whose records went (webChatAnswered).
     const { text, after, logged, untimed, before = 0, sentAt } = g[0];
@@ -15665,6 +15705,7 @@ function webChatOfferUnsure(id, r) {
       : same.length - logged;
     if (since - (g.length - unsure + before) < unsure && !lost.includes(text)) lost.push(text);
   }
+  if (kept.length) webChatUnsure.set(id, kept); else webChatUnsure.delete(id);
   if (!lost.length) return;
   for (const text of lost.reverse()) webChatGiveBack(id, text); // each goes ahead of the last: the first sent ends up first
   $('wchatErr').textContent = `${lost.length === 1 ? 'A message you sent is' : 'Messages you sent are'} not in this conversation, so ${lost.length === 1 ? 'it' : 'they'} may not have been delivered. ${lost.length === 1 ? 'It is' : 'They are'} back in the box: send or clear as you wish.`;
@@ -15691,7 +15732,8 @@ async function openWebChatPanel(id, note = '') {
   if (!webChatDlg.open) webChatDlg.showModal();
   $('wchatText').focus();
   try {
-    const r = await api(`/v1/agents/${id}/chat`);
+    const pending = (webChatUnsure.get(id) || []).filter(s => s.messageId && (s.unsure || s.waiting)).slice(0, 100).map(s => s.messageId);
+    const r = await api(`/v1/agents/${id}/chat`, pending.length ? { headers: { 'x-hatchabot-message-ids': pending.join(',') } } : {});
     // Opened again meanwhile: that open's read draws the log.
     if (webChatAgentId !== id || webChatDrafts !== drafts || webChatOpens !== open) return;
     webChatUnread = !!r.note;
@@ -15750,6 +15792,7 @@ async function webChatSend() {
     : { text, after, logged: read.length, untimed: read.filter(el => !Date.parse(el.dataset.at)).length, before, open: webChatOpens, unsure: false, waiting: true,
       // No read before it: the moment it was sent, by this browser's clock (webChatOfferUnsure puts it in the server's).
       ...(unread ? { sentAt: new Date().toISOString() } : {}) };
+  record.messageId = webChatMessageId();
   unsure.set(id, [...(unsure.get(id) ?? []), record]);
   log.insertAdjacentHTML('beforeend', webChatBubble('user', text));
   const bubble = log.lastElementChild;
@@ -15757,7 +15800,7 @@ async function webChatSend() {
   webChatScroll();
   let answered = false;
   try {
-    const r = await api(`/v1/agents/${id}/chat`, { method: 'POST', body: { text } });
+    const r = await api(`/v1/agents/${id}/chat`, { method: 'POST', body: { text, messageId: record.messageId } });
     answered = true; bubble.dataset.answered = '';
     if (onScreen()) { webChatWait(id)?.remove(); $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('assistant', r.reply)); }
     else if (stillHere()) toast(`${name} answered — open its chat to read it.`, 8000); // not dropped without a word
@@ -16242,7 +16285,7 @@ async function v2LoadBrowser(id) {
   const el = $('v2BrowserState');
   try {
     const b = await api(`/v1/agents/${id}/browser`);
-    if (!el) return;
+    if (!el || el !== $('v2BrowserState')) return; // the agent or tab changed while this read waited
     el.textContent = !b.on ? '' : (b.running ? `· running${b.chromium ? ` (Chromium ${b.chromium})` : ''}` : '· starting (within a minute of the agent)') + (b.keepsLogins ? ` · keeps logins${b.profileMB ? ` (${b.profileMB} MB)` : ''}` : '');
     el.style.color = b.on && b.running ? 'var(--ok)' : '';
     // The sites its sign-in panel opened while it keeps its logins, newest first, with the day.
@@ -16295,6 +16338,16 @@ async function v2ForgetLogins(id) {
 let bp = { gen: 0, q: [] };
 const BP_KEYS = new Set(['Enter', 'Backspace', 'Tab', 'Delete', 'ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
 function bpState(text, warn = false) { const el = $('bpState'); el.textContent = text || ''; el.classList.toggle('warn', !!warn); }
+function bpClearView() {
+  $('bpScreen').removeAttribute('src');
+  $('bpUrl').value = ''; $('bpType').value = '';
+  $('bpType').classList.remove('shown');
+  $('bpShow').setAttribute('aria-pressed', 'false'); $('bpShow').textContent = 'Show';
+}
+/** Cleanup cannot ask for a sign-in or a second factor, including after another panel opened. */
+function bpRelease(agent, panel) {
+  void fetch(`/v1/agents/${agent}/browser/panel/${panel}`, { method: 'DELETE', credentials: 'same-origin' }).catch(() => {});
+}
 function bpWrapSize() {
   const r = $('bpWrap').getBoundingClientRect();
   return { w: Math.max(200, Math.round(r.width)), h: Math.max(200, Math.round(r.height)), mobile: matchMedia('(pointer: coarse)').matches && innerWidth < 760, dpr: Math.min(2, window.devicePixelRatio || 1) };
@@ -16307,15 +16360,14 @@ async function bpOpen(id) {
   $('bpTitle').textContent = `Sign in to a site: ${a?.name ?? 'its browser'}`;
   // How long a sign-in lasts: until a restart, or until forgotten when it keeps its logins.
   $('bpNote').textContent = `Click a box in the page and type. What you type goes to that page only; Hatchabot keeps none of it. The agent stays signed in ${a?.keepsLogins ? 'until you forget its logins (it keeps them)' : 'until it restarts'} and can act as you there: sign it in only where you would let it act for you.`;
-  $('bpScreen').removeAttribute('src');
-  $('bpUrl').value = ''; $('bpType').value = '';
+  bpClearView();
   $('bpAgain').hidden = true;
   bpDlg.classList.remove('bp-done');
   if (!bpDlg.open) bpDlg.showModal();
   bpState('Opening its browser…');
   try {
     const r = await api(`/v1/agents/${id}/browser/panel`, { method: 'POST', body: bpWrapSize() });
-    if (gen !== bp.gen) { void api(`/v1/agents/${id}/browser/panel/${r.panel}`, { method: 'DELETE' }).catch(() => {}); return; }
+    if (gen !== bp.gen) { bpRelease(id, r.panel); return; }
     bp.panel = r.panel;
     bpState('Connecting…');
     void bpStream(gen);
@@ -16333,8 +16385,9 @@ function bpEnded(why) {
 }
 function bpClose() {
   const { agent, panel, ended } = bp;
-  if (agent && panel && !ended) void api(`/v1/agents/${agent}/browser/panel/${panel}`, { method: 'DELETE' }).catch(() => {});
-  bp.gen++; bp.abort?.abort(); bp.panel = null; bp.ended = true;
+  if (agent && panel && !ended) bpRelease(agent, panel);
+  bp.gen++; bp.abort?.abort(); bp.panel = null; bp.ended = true; bp.q = [];
+  bpClearView();
   if (bpDlg.open) bpDlg.close();
 }
 async function bpStream(gen) {
@@ -16489,7 +16542,9 @@ const bpMods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 
     const text = e.clipboardData?.getData('text');
     if (text) { e.preventDefault(); bpSend({ k: 'text', text: text.slice(0, 4000) }); }
   });
-  bpDlg.addEventListener('close', () => { if (bp.panel && !bp.ended) bpClose(); });
+  // Escape can arrive before the opening request answers. Invalidate that request too;
+  // a delayed close event from the previous panel must not close a new one.
+  bpDlg.addEventListener('close', () => { if (!bpDlg.open && !bp.ended) bpClose(); });
   $('bpUrl').addEventListener('input', () => { bp.urlTyped = true; });
   // A turned phone or a resized window: the page is told its new size.
   let resizing;

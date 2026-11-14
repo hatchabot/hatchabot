@@ -269,8 +269,10 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     // counter would have read them, so the windows are right at once instead
     // of starting empty (2026-09-28, when the source became the transcripts).
     // Rows the reader could not decode make the total smaller than the truth; stored,
-    // the next whole read counted them as fresh use (audit, 2026-10-23). The profile
-    // and health below still come from what was read.
+    // the next whole read counted them as fresh use (audit, 2026-10-23). Keep
+    // the last complete profile and call counts too: replacing them with a
+    // partial read lowered budget spend and could release a pause (HB-0708).
+    // Health and monotonic search counts can still use what was read below.
     if (u.partial) deps.log?.('usage.sample_partial', { agentId: a.id, undecodable: u.partial });
     if (!u.partial && store.latestTokenTotal(a.id) === undefined && u.recent?.length) {
       let running = u.totalTokens - u.recent.reduce((s, [, t]) => s + t, 0);
@@ -289,7 +291,7 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     if (!u.partial) store.addTokenSample(a.id, source, nowIso, u.totalTokens);
     // The model scorecard's 30 days, from this same read: a review then needs
     // no container at all, and an asleep agent keeps its last profile.
-    if (u.profile) {
+    if (u.profile && !u.partial) {
       const { purposes, ...rest } = u.profile;
       store.setModelProfile(a.id, { ...rest, purpose: purposes[a.slug] }, nowIso);
     }
@@ -303,7 +305,7 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
     // Successful calls per slot, from the transcripts: the whole 8 days the
     // first time (replacing the log's partial counts), then from an hour
     // before the last slot written, so late-arriving calls land.
-    if (u.recentCalls) {
+    if (u.recentCalls && !u.partial) {
       const ok = new Map<string, number>();
       for (const [end, n] of u.recentCalls) {
         const start = new Date(Date.parse(end) - 300_000).toISOString();
@@ -331,7 +333,7 @@ async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ ca
       if (u.lastActive) store.noteUsageOk(a.id, u.lastActive, sourceAt(u.lastActive));
     }
     const priced = u.byModel.filter((m) => m.tokens > 0);
-    if (u.totalTokens > 0 && priced.length) {
+    if (!u.partial && u.totalTokens > 0 && priced.length) {
       const c = estimateCost(priced);
       if (c.low > 0) store.setAgentTokenRate(a.id, c.low / u.totalTokens, c.partial, nowIso);
     }

@@ -91,7 +91,7 @@ if (!store.getHost(LOCAL_HOST_ID)) {
     // Made again after the install went to accounts: the owner's, not
     // dev-owner's, whom nobody signed in can see (and whose data no account
     // takes once the hand-over is done).
-    ownerId: store.installOwner(authModeFromEnv()),
+    ownerId: store.installOwner(authModeFromEnv(), LOCAL_OWNER, process.env.HATCHABOT_OWNER_EMAIL),
     kind: 'local',
     provider: 'local-docker',
     name: `This machine (${hostname()})`,
@@ -212,7 +212,10 @@ if (sweptRefs.length) app.log.warn({ refs: sweptRefs }, 'deleted orphaned bot-to
 // agent's removal, an import's rollback, a source's removal).
 const sweptAgentRefs = store.sweepOrphanAgentSecrets();
 if (sweptAgentRefs.length) app.log.warn({ count: sweptAgentRefs.length }, 'deleted orphaned agent secrets');
-const adoptForFirstAccount = firstAccountAdoption(store, app.log);
+const adoptForFirstAccount = firstAccountAdoption(store, app.log, Date.now,
+  authModeFromEnv() === 'identity'
+    ? { identityOwner: () => store.identityInstallOwner(process.env.HATCHABOT_OWNER_EMAIL) }
+    : {});
 await registerAuth(app, {
   password: process.env.HATCHABOT_PASSWORD,
   store,
@@ -227,7 +230,7 @@ await registerAuth(app, {
     // the writes are no-ops once steady.
     if (principal.ownerId !== LOCAL_OWNER) {
       store.recordAccount(principal.ownerId, principal.email);
-      if (principal.email) store.claimSharesForEmail(principal.ownerId, principal.email);
+      if (principal.via === 'identity' && principal.email) store.claimSharesForEmail(principal.ownerId, principal.email);
     }
     // Phase 3: the first real account adopts what password mode owned.
     adoptForFirstAccount(principal);

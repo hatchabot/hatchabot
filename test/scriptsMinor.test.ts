@@ -74,7 +74,7 @@ exit 0`);
 });
 
 describe('scripts/migrate-rename-host.sh', () => {
-  it('writes the env files 600 from the start (they hold the secret key), not readable until a chmod', () => {
+  it.each([false, true])('writes env files privately and bounds health requests (timeout=%s, HB-0623)', (timeout) => {
     const root = temp('hb-migrate-');
     const home = join(root, 'home'), bin = join(root, 'bin');
     for (const d of [home, bin]) mkdirSync(d, { recursive: true });
@@ -94,14 +94,19 @@ describe('scripts/migrate-rename-host.sh', () => {
     const modes = join(root, 'modes.log');
     for (const t of ['systemctl', 'docker', 'npm']) shim(bin, t, 'exit 0');
     shim(bin, 'uname', 'echo Linux');
-    shim(bin, 'curl', 'echo \'HATCHABOT_VERSION="1.1.0"\'');
+    shim(bin, 'curl', `case " $* " in *" --connect-timeout 3 --max-time 5 "*) ;; *) exit 99 ;; esac\necho 'HATCHABOT_VERSION="1.1.0"'\nexit ${timeout ? 28 : 0}`);
+    shim(bin, 'sleep', 'exit 0');
     symlinkSync(process.execPath, join(bin, 'node'));
     // chmod notes each file's mode as it was BEFORE the chmod.
     shim(bin, 'chmod', `for a in "$@"; do [ -f "$a" ] && echo "$a $(stat -c %a "$a")" >> ${JSON.stringify(modes)}; done\nexec /bin/chmod "$@"`);
     const r = spawnSync('bash', ['-c', 'umask 022; exec bash "$@"', '_', 'scripts/migrate-rename-host.sh', 'v1.1.0', '--yes', '--old', old], {
       encoding: 'utf8', timeout: 60_000, env: { ...env, HATCHABOT_REPO: src },
     });
-    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.status, r.stdout + r.stderr).toBe(timeout ? 1 : 0);
+    if (timeout) {
+      expect(r.stdout).toMatch(/health checks.*timed out \(5 seconds per request\)/);
+      expect(r.stdout).not.toContain('serving Hatchabot 1.1.0');
+    }
     const seen = readFileSync(modes, 'utf8').split('\n').filter((l) => /\/(\.env|env)\s/.test(l));
     expect(seen.length).toBeGreaterThanOrEqual(2);
     for (const l of seen) expect(l, l).toMatch(/ 600$/);

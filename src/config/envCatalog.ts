@@ -53,6 +53,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   // Sign-in
   s('signin', 'HATCHABOT_SESSION_DAYS', '14', 'How long a Google sign-in lasts before it asks again. "Sign out on every device" ends them sooner.'),
   s('signin', 'HATCHABOT_ALLOWED_EMAILS', null, 'Identity mode: only these Google addresses may sign in, comma-separated. Unset: any Google account that reaches this machine.'),
+  s('signin', 'HATCHABOT_OWNER_EMAIL', null, 'Identity mode: the verified Google address that takes ownership of a new or password-mode installation. Set before switching modes. An existing recorded owner stays the owner.'),
   s('signin', 'HATCHABOT_LOCAL_ACCOUNTS', null, 'Identity mode: 1 also allows local username/password accounts (the owner uses Google, others get an invitation link).'),
   s('signin', 'HATCHABOT_GCP_PROJECT', null, 'Identity mode: the Google Cloud project.'),
   s('signin', 'HATCHABOT_IDENTITY_API_KEY', null, 'Identity mode: the Identity Platform API key.'),

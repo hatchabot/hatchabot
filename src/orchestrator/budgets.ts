@@ -258,8 +258,8 @@ export interface BudgetDeps {
   tz?: string;
 }
 
-const pausable = (a: Agent) => !a.ops && !a.migratedTo && !!a.runtimeRef && a.state !== 'ARCHIVED';
-const switchable = (a: Agent) => !a.ops && !a.migratedTo && a.state !== 'ARCHIVED';
+const switchable = (a: Agent) => !a.ops && !a.migratedTo && a.state !== 'ARCHIVED' && a.state !== 'DELETING' && a.state !== 'DELETED';
+const pausable = (a: Agent) => switchable(a) && !!a.runtimeRef;
 
 /**
  * One pass, after a usage pass (or at once after a budget changes): record
@@ -308,6 +308,9 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     const p = store.getBudgetPause(listed.agentId, listed.month);
     if (!p || p.resumedAt) continue;
     const a = store.getAgent(p.agentId);
+    // Teardown owns the runtime and model now. Keep the restoration record
+    // until deletion settles: a failed delete may still need its own model.
+    if (a?.state === 'DELETING') continue;
     if (!a || a.state === 'ARCHIVED' || a.state === 'DELETED') {
       // Archived on a cheaper model a budget chose: its own goes back on the record now, or a
       // restore from the archive would bring the cheaper one back for good.
@@ -390,8 +393,9 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     // to a cheaper model. Judged on the list read before, a pause did not see
     // that model, did not put its own back, and its record replaced the one
     // that remembered it — the agent came back on the cheaper model for good
-    // (audit #010).
-    const current = (a: Agent): Agent => store.getAgent(a.id) ?? a;
+    // (audit #010). Read inside each iteration, after any earlier agent's
+    // awaited action: mapping the whole pool first still used old models and
+    // states for the rest (HB-0706).
     // The budget this pass read, unchanged since: each pause and each switch is
     // checked against it just before it is made. Raised, removed or set to warn
     // while an earlier agent stopped, the rest were still stopped (HB-0574). A
@@ -403,8 +407,10 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     };
     let revised = false;
     if (level === 100 && b.atLimit === 'pause') {
-      for (const a of pool.filter(pausable).map(current)) {
+      for (const listed of pool) {
         if (!unchanged()) { revised = true; break; }
+        const a = store.getAgent(listed.id);
+        if (!a || !pausable(a)) continue;
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' && prior.kind === 'pause') continue; // started by hand after a pause: runs on until the 1st
         // Already paused (running again: a rebuild started it). A cheaper model another
@@ -474,8 +480,10 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
     if (level === 100 && b.atLimit === 'cheaper' && deps.downgrade) {
       const tries = refusalsOf(store);
       const told100 = !!store.budgetMark(b.scope, month, 100, b.usd)?.toldAt;
-      for (const a of pool.filter(switchable).map(current)) {
+      for (const listed of pool) {
         if (!unchanged()) { revised = true; break; }
+        const a = store.getAgent(listed.id);
+        if (!a || !switchable(a)) continue;
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' || (prior && !prior.resumedAt)) continue;
         if (deps.isBusy(a.id)) { deferred++; continue; }

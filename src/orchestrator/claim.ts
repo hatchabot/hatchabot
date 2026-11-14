@@ -204,7 +204,7 @@ export async function claimFirstContact(
   /** The latest a window open to anyone may run (ANYONE_WINDOW_MAX_MS); none for a named one. */
   const anyoneEnds = normalizeHandle(opts.expect) ? undefined : openedAt + Math.max(timeoutMs, ANYONE_WINDOW_MAX_MS);
   const until = new Date(deadline).toISOString();
-  /** The `until` this watcher last stored: another value there means a later watcher took the seat. */
+  /** The deadline this watcher last stored; renewal preserves its generation. */
   let written = until;
   // An OPEN DOOR for as long as we are watching — and a narrow one when the
   // owner said WHO the invite is for: only a knock from that @handle or id is
@@ -218,7 +218,7 @@ export async function claimFirstContact(
   // This window is one seat's: the owner's first contact and an invitee's
   // run side by side, and closing one must not close the other (30th audit).
   const seat = Store.pairingSeat(kindHere, opts.forUserId);
-  deps.store.openPairingWindow(opts.agentId, until, opts.forUserId, { expect: opts.expect, kind: kindHere });
+  const generation = deps.store.openPairingWindow(opts.agentId, until, opts.forUserId, { expect: opts.expect, kind: kindHere });
   /**
    * This seat's stored window, expired or not. The owner's Reopen, or Telegram attached
    * again, starts another watcher for the same seat, which renews the one row: the later
@@ -228,7 +228,12 @@ export async function claimFirstContact(
   const storedWindow = () => deps.store.pairingWindows(opts.agentId, new Date(0)).find((w) => w.seat === seat);
   const superseded = (): boolean => {
     const w = storedWindow();
-    return !!w && w.until !== written && Date.parse(w.until) > Date.now();
+    return !!w && w.generation !== generation;
+  };
+  const windowLost = (): boolean => {
+    if (superseded()) { log('claim.window_superseded', { agentId: opts.agentId, kind: kindHere }); return true; }
+    if (!storedWindow()) { log('claim.window_gone', { agentId: opts.agentId, kind: kindHere }); return true; }
+    return false;
   };
   /**
    * Down time moves the deadline on, and the stored window follows, so the
@@ -247,7 +252,7 @@ export async function claimFirstContact(
     if (exact ? w === deadline : w >= cap(deadline + downLead)) return;
     if (!storedWindow()) return; // closed by someone else: not reopened here
     written = new Date(exact ? deadline : cap(deadline + downLead + renewEvery)).toISOString();
-    deps.store.openPairingWindow(opts.agentId, written, opts.forUserId, { expect: opts.expect, kind: kindHere });
+    deps.store.openPairingWindow(opts.agentId, written, opts.forUserId, { expect: opts.expect, kind: kindHere, generation });
   };
   let downSince: number | undefined; // when it was last seen down, while it still is
   let downFrom: number | undefined; // when this stretch of down time began
@@ -291,6 +296,9 @@ export async function claimFirstContact(
   };
   let readFailed = false; // said once a window, not every round
   for (;;) {
+    // Before any close or renewal too: even an expired replacement is not
+    // this watcher's window, and identical deadlines can be different invites.
+    if (windowLost()) return null;
     const now = Date.now();
     if (downSince !== undefined) { deadline += now - downSince; downSince = now; }
     if (anyoneEnds !== undefined && deadline > anyoneEnds) deadline = anyoneEnds;
@@ -398,6 +406,8 @@ export async function claimFirstContact(
         await sleep(pollIntervalMs);
         continue;
       }
+      // Reopen/Close may have landed while Docker was reading the requests.
+      if (windowLost()) return null;
       // Skip requests whose sender already belongs to another membership on
       // this agent: a concurrent window may have just bound them, and binding
       // that id here would swap two people's identities.
@@ -431,6 +441,14 @@ export async function claimFirstContact(
       }
       if (first) {
         const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code, kind).catch(() => false);
+        if (windowLost()) {
+          // The runtime accepted an obsolete invite while the approval was
+          // in flight. Remove it unless a current member legitimately owns it.
+          if (ok && !deps.store.listAllowedChannelUserIds(opts.agentId, kind).includes(first.id)) {
+            await scrubApproval(deps, opts, kind, first.id, log);
+          }
+          return null;
+        }
         const didBind = ok && (kind === 'telegram'
           ? deps.store.bindMembershipChannelUser(opts.agentId, opts.forUserId, first.id)
           : deps.store.bindMemberIdentity(opts.agentId, opts.forUserId, kind, first.id));

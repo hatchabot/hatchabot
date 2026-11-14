@@ -484,6 +484,37 @@ describe('a successful swap keeps BOTH tokens (use-case audit, 2026-09-27)', () 
 });
 
 describe('a spare of the same app: swap, archive and restore (2026-09-25)', () => {
+  it.each(['discord', 'slack'] as const)('holds the lifecycle lock while restoring its parked %s bot', async (kind) => {
+    const w = await setup();
+    const id = w.add({ state: 'ARCHIVED' });
+    const secretRef = `parked/${kind}`;
+    const accountId = kind === 'discord' ? '1234567890123456789' : 'U0BOT';
+    await w.secrets.put(secretRef, 'ok-good');
+    w.store.upsertDiscordBot({ applicationId: accountId, secretRef, ownerId: OWNER, servers: [], warnings: [], addedAt: 'now', kind, archivedFor: id });
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const get = w.secrets.get.bind(w.secrets);
+    w.secrets.get = async (ref) => {
+      const value = await get(ref);
+      if (ref === secretRef) { entered(); await gate; }
+      return value;
+    };
+    const restoring = Promise.resolve(w.inject('POST', `/v1/agents/${id}/restore`, {}));
+    try {
+      await waiting;
+      const deletion = await w.inject('DELETE', `/v1/agents/${id}`);
+      expect(deletion.statusCode, deletion.body).toBe(409);
+      expect(w.store.getAgent(id)?.state).toBe('ARCHIVED');
+      release();
+      const restored = await restoring;
+      expect(restored.statusCode, restored.body).toBe(202);
+      expect(w.store.getChannelForAgent(id, kind)?.accountId).toBe(accountId);
+      expect(w.secrets.map.get(`channel/${id}/${kind}`)).toBe('ok-good');
+    } finally { release(); await restoring; await w.f.close(); }
+  });
+
   it('swap moves the agent onto a parked app, parks the old one, keeps the people linked; restore takes a kept app back', async () => {
     const { store, secrets, add, inject } = await setup();
     const id = add();

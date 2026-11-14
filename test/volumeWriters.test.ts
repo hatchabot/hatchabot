@@ -174,6 +174,8 @@ describe('an everyday write removes only one-shots known to write (HB-0509, sixt
     const inspects = () => argv().split('\n').filter((l) => l.startsWith('container inspect ')).length;
     const warned: Array<[string, Record<string, unknown>]> = [];
     setVolumeEventSink((e, d) => { warned.push([e, d]); });
+    // Shell startup time must not consume the retry grace; process timers stay real.
+    vi.useFakeTimers({ toFake: ['Date'] });
     try {
       const p = new LocalDockerProvider({ docker: bin, image: 'test-image:latest', reapRetryMs: 10, listRetryMs: 400 });
       for (const fails of ['echo "context deadline exceeded" >&2; exit 1', 'exit 125']) {
@@ -183,7 +185,8 @@ describe('an everyday write removes only one-shots known to write (HB-0509, sixt
         writeFileSync(LOG, '');
         stub({ inspect: `case "$fmt" in *.Mounts*) ${fails} ;; esac` });
         expect((await p.execShellOnVolume(ref, 'echo one > /home/node/a.md')).code, fails).toBe(0);
-        // The retries right after it neither list nor look at the mounts again.
+        // Even just before the grace ends, retries neither list nor inspect again.
+        vi.setSystemTime(Date.now() + 399);
         expect((await p.execShellOnVolume(ref, 'echo two > /home/node/b.md')).code).toBe(0);
         expect((await p.writeToVolume(ref, ['sh', '-c', 'cat > /home/node/c.md'], Buffer.from('three'))).code).toBe(0);
         expect(inspects(), fails).toBe(1);
@@ -192,13 +195,15 @@ describe('an everyday write removes only one-shots known to write (HB-0509, sixt
         expect(left()).toEqual(['hatchabot-io-0b0b0b0b0b0b']);
         expect(warned).toEqual([['volume.writers_unlisted', expect.objectContaining({ volume: vol, error: expect.stringMatching(/how hatchabot-io-0b0b0b0b0b0b mount its files could not be read/) })]]);
       }
-      // A while later Docker answers: the writer left there is found and removed, and the write goes ahead.
+      // At the retry boundary Docker answers: the writer is found and removed.
       stub();
-      await new Promise((r) => setTimeout(r, 450));
+      vi.setSystemTime(Date.now() + 1);
       expect((await p.execShellOnVolume(ref, 'echo four > /home/node/d.md')).code).toBe(0);
+      expect(lists(vol)).toBe(2);
       expect(left()).toEqual([]);
       expect(warned).toHaveLength(1);
     } finally {
+      vi.useRealTimers();
       setVolumeEventSink(() => {});
     }
   });
@@ -256,9 +261,12 @@ describe('an everyday write looks only where a writer may be left (HB-0509 revie
     store.insertAgent({ id: 'a1', ownerId: 'u1', name: 'Kitchen Helper', slug: 'kitchen-helper', state: 'RUNNING', aiProfileId: 'p', hostId: 'h', runtimeRef: ref, persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
     const warned: Array<[string, Record<string, unknown>]> = [];
     setVolumeEventSink(runtimeEventLog(store, (e, d) => warned.push([e, d])));
+    // Advance only the retry clock; the Docker stub and its timeouts stay real.
+    vi.useFakeTimers({ toFake: ['Date'] });
     try {
       const p = new LocalDockerProvider({ docker: bin, image: 'test-image:latest', reapRetryMs: 10, listRetryMs: 400 });
       expect((await p.execShellOnVolume(ref, 'echo one > /home/node/a.md')).code).toBe(0);
+      vi.setSystemTime(Date.now() + 399);
       expect((await p.writeToVolume(ref, ['sh', '-c', 'cat > /home/node/b.md'], Buffer.from('two'))).code).toBe(0);
       await p.importWorkspace(ref, 'kitchen-helper', Buffer.from('not really a tarball'));
       expect(argv().match(/^run /gm)).toHaveLength(3);
@@ -269,8 +277,8 @@ describe('an everyday write looks only where a writer may be left (HB-0509 revie
       expect(eventLabel('volume.writers_unlisted', warned[0]![1])).toMatch(/could not be listed.*written anyway/);
       // A restore's own look still refuses on a failed listing.
       expect(await p.stopVolumeWriters(ref)).toMatch(/could not be listed/);
-      // A while later it still fails: asked again, and not said again.
-      await new Promise((r) => setTimeout(r, 450));
+      // At the retry boundary it still fails: asked again, and not said again.
+      vi.setSystemTime(Date.now() + 1);
       const looked = lists(vol);
       expect((await p.execShellOnVolume(ref, 'echo three > /home/node/c.md')).code).toBe(0);
       expect(lists(vol)).toBe(looked + 1);
@@ -278,7 +286,7 @@ describe('an everyday write looks only where a writer may be left (HB-0509 revie
       // Later, the listing works again, and a copy is left writing there: the check was never off for good.
       seed('hatchabot-io-0b0b0b0b0b0b', 'running', vol, true);
       stub();
-      await new Promise((r) => setTimeout(r, 450));
+      vi.setSystemTime(Date.now() + 400);
       writeFileSync(LOG, '');
       expect((await p.execShellOnVolume(ref, 'echo four > /home/node/d.md')).code).toBe(0);
       const lines = argv().split('\n');
@@ -290,6 +298,7 @@ describe('an everyday write looks only where a writer may be left (HB-0509 revie
       expect(run).toBeGreaterThan(rm);
       expect(warned).toHaveLength(1);
     } finally {
+      vi.useRealTimers();
       setVolumeEventSink(() => {});
     }
   });

@@ -925,6 +925,14 @@ describe('scripts/release-target.sh on a bundle install (no clone: it asks GitHu
     expect(r.stderr).toMatch(/Could not fetch channels\.json/);
   });
 
+  it.each(['stable', 'latest'])('a stalled %s lookup has both deadlines and names the timed-out request (HB-0623)', (channel) => {
+    const r = bundleTree('case " $* " in *" --connect-timeout 10 --max-time 60 "*) exit 28 ;; esac; exit 99')(channel);
+    expect(r.status).toBe(3);
+    expect(r.stderr).toMatch(/Timed out.*60 seconds/);
+    expect(r.stderr).toMatch(channel === 'stable' ? /channels.json/ : /newest release/);
+    expect(r.stdout).toBe('');
+  });
+
   it('a captive portal\'s page is not "stable is not named" — no fall back to the newest release', () => {
     const r = bundleTree(`case "$*" in *channels.json*) echo '<html><body>Sign in to the cafe wifi</body></html>' ;; *) echo '{"tag_name": "v9.9.9"}' ;; esac`)('stable');
     expect(r.status).toBe(3);

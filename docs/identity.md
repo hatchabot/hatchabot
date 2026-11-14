@@ -50,11 +50,25 @@ from day one.
 
 ### Migrating a dev-owner install
 
-One-time, on first login after switching modes: if rows owned by
-`dev-owner` exist and no other real owner does, re-key them to the
-authenticated uid (`UPDATE ... SET owner_id = ?`  across agents, profiles,
-hosts, invites, memberships). Logged loudly. This turns an existing
-installation into account #1 without export/import.
+Before switching to identity mode, set `HATCHABOT_OWNER_EMAIL` to the
+installation owner's Google address. That account must sign in with its
+verified Google identity before it can receive the installation's data.
+A member signing in first, or owning an earlier source, does not become
+the owner. Without an established owner or this setting, the data stays
+under `dev-owner` and the service log explains what to configure.
+
+An existing hand-over record or an already-owned local host keeps its
+owner; changing the setting does not transfer an owned installation.
+The selected account is recorded before the hand-over, so failures and
+restarts cannot give another account the data. Agents, profiles, hosts,
+connections and the other owner-scoped rows move together. In accounts
+mode, the first local account's host-owner flag still selects the owner.
+
+Upgrading runs a one-time repair for legacy `dev-owner` leftovers when
+the recorded owner or local host identifies their owner, even when other
+legitimate accounts own data. Later rows created under `dev-owner` are
+not repeatedly swept. If ownership is unknown, configure the Google
+owner address and sign in; the repair does not guess from asset age.
 
 ### Members become accounts (full invites)
 

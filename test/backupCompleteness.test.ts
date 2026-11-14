@@ -453,6 +453,39 @@ describe('HATCHABOT_BACKUP_KEEP_DAYS has one reading (HB-0432)', () => {
 });
 
 describe('scripts/backup-volumes.sh: two installs sharing a backups folder (HB-0280)', () => {
+  it('a legacy set from earlier today is identified by its saved key before another install can overwrite it', () => {
+    const a = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    const b = scriptWorld(['other-garden-2-vol'], ['docker://other-garden-2']);
+    writeFileSync(join(b.repo, '.env'), 'HATCHABOT_SECRET_KEY=another-made-up-key\n');
+    expect(a.run().status).toBe(0);
+    const set = a.setDir();
+    rmSync(join(set, '.backup-owner'));
+    const before = Object.fromEntries(readdirSync(set).map((f) => [f, readFileSync(join(set, f))]));
+    const r = b.run({ HATCHABOT_BACKUP_DIR: a.backups, HATCHABOT_PREFIX: 'other' });
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toContain("is another Hatchabot install's backup set");
+    expect(readdirSync(set).sort()).toEqual(Object.keys(before).sort());
+    for (const [file, bytes] of Object.entries(before)) expect(readFileSync(join(set, file)), file).toEqual(bytes);
+    // Its own install can still update a legacy set and add the owner mark.
+    expect(a.run().status).toBe(0);
+    expect(existsSync(join(set, '.backup-owner'))).toBe(true);
+  }, 30_000);
+
+  it.each([true, false])('a run without its own key preserves an existing set before writing its database (owner mark: %s)', (marked) => {
+    const a = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    const b = scriptWorld(['other-garden-2-vol'], ['docker://other-garden-2']);
+    rmSync(join(b.repo, '.env'));
+    expect(a.run().status).toBe(0);
+    const set = a.setDir();
+    if (!marked) rmSync(join(set, '.backup-owner'));
+    const before = Object.fromEntries(readdirSync(set).map((f) => [f, readFileSync(join(set, f))]));
+    const r = b.run({ HATCHABOT_BACKUP_DIR: a.backups, HATCHABOT_PREFIX: 'other' });
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toContain('cannot identify this install');
+    expect(readdirSync(set).sort()).toEqual(Object.keys(before).sort());
+    for (const [file, bytes] of Object.entries(before)) expect(readFileSync(join(set, file)), file).toEqual(bytes);
+  }, 30_000);
+
   it('a day\'s set stays the install\'s that made it: the other one stops before writing, and does not prune it', () => {
     const a = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
     const b = scriptWorld(['other-garden-2-vol'], ['docker://other-garden-2']);
@@ -973,14 +1006,14 @@ it('backs up an environment-only key without logging it', () => {
   expect(r.stdout + r.stderr).not.toContain(key);
 });
 
-it('a missing key does not discard the key from an earlier run of the same dated set', () => {
+it('a missing key does not change an earlier complete run of the same dated set', () => {
   const w = scriptWorld([], []);
   expect(w.run().status).toBe(0);
   const keyFile = join(w.setDir(), 'secret-key.env');
   const saved = readFileSync(keyFile, 'utf8');
   rmSync(join(w.repo, '.env'));
   expect(w.run().status).toBe(1);
-  expect(w.record().state).toBe('incomplete');
+  expect(w.record().state).toBe('complete');
   expect(readFileSync(keyFile, 'utf8')).toBe(saved);
 });
 

@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPairSync, createSign } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { IdentityVerifier, IdentityError, principalFor } from '../src/api/identity.js';
+import { IdentityVerifier, IdentityError, IdentityUnavailableError, principalFor } from '../src/api/identity.js';
+import { installErrorHandler } from '../src/api/errorHandler.js';
 import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
 import { publicApp } from './helpers/publicApp.js';
 import { principalOf } from '../src/api/principal.js';
@@ -298,6 +299,101 @@ describe('identity auth mode', () => {
       headers: { cookie: `hatchabot_session=${forged}` },
     });
     expect(res.statusCode).toBe(401);
+  });
+});
+
+describe('identity verification with malformed input and slow certificates (HB-0687, HB-0688)', () => {
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); _resetLoginThrottle(); });
+
+  const signed = (header: unknown, payload: unknown): string => {
+    const material = `${b64(header)}.${b64(payload)}`;
+    return `${material}.${createSign('RSA-SHA256').update(material).sign(KEYS.privateKey).toString('base64url')}`;
+  };
+
+  it('refuses non-string tokens, non-object JSON and inherited certificate names through the real session route', async () => {
+    const f = Fastify();
+    installErrorHandler(f);
+    await registerAuth(f, { secret: Buffer.alloc(32, 3), mode: 'identity', verifier: verifier() });
+    const header = { alg: 'RS256', kid: 'kid-1' };
+    const payload = JSON.parse(Buffer.from(makeToken().split('.')[1]!, 'base64url').toString());
+    try {
+      for (const bad of [42, true, {}, [], signed(null, payload), signed([], payload), signed(header, null), signed(header, []), makeToken({}, { kid: '__proto__' }), makeToken({}, { kid: 'constructor' }), signed({ alg: 'RS256', kid: {} }, payload)]) {
+        _resetLoginThrottle();
+        const r = await f.inject({ method: 'POST', url: '/v1/session', payload: { idToken: bad } });
+        expect(r.statusCode, r.body).toBe(401);
+        expect(r.cookies).toHaveLength(0);
+      }
+    } finally { await f.close(); }
+  });
+
+  it('requires the numeric dates and string identity fields before admitting a signed token', async () => {
+    for (const bad of [{ exp: '1800003600' }, { iat: null }, { iat: '1800000000' }, { email: {} }, { email_verified: 'true' }, { name: [] }]) {
+      await expect(verifier().verify(makeToken(bad))).rejects.toBeInstanceOf(IdentityError);
+    }
+  });
+
+  it('a fresh cached key does not wait behind an unknown key refresh', async () => {
+    let clock = NOW;
+    let calls = 0;
+    let release!: (v: Record<string, string>) => void;
+    const v = new IdentityVerifier({ projectId: PROJECT, now: () => clock, fetchCerts: async () => ++calls === 1 ? certs() : new Promise((r) => { release = r; }) });
+    await v.verify(makeToken());
+    clock += 61_000;
+    const unknown = v.verify(makeToken({}, { kid: 'unknown' })).catch((e: unknown) => e);
+    await new Promise((r) => setImmediate(r));
+    let knownFinished = false;
+    const known = v.verify(makeToken()).then((value) => { knownFinished = true; return value; });
+    try {
+      await new Promise((r) => setImmediate(r));
+      expect(knownFinished).toBe(true);
+      expect(calls).toBe(2);
+    } finally { release(certs()); }
+    expect((await known).sub).toBe('uid-abc');
+    expect(await unknown).toBeInstanceOf(IdentityError);
+  });
+
+  it.each(['headers', 'body'])('bounds a stalled certificate %s read and aborts it', async (where) => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, options: RequestInit) => {
+      signal = options.signal as AbortSignal;
+      if (where === 'headers') return new Promise(() => {});
+      return { ok: true, json: () => new Promise(() => {}) };
+    }));
+    const v = new IdentityVerifier({ projectId: PROJECT, now: () => NOW });
+    const outcome = v.verify(makeToken()).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await outcome).toBeInstanceOf(IdentityUnavailableError);
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('a timed-out injected fetch can retry, and its late answer cannot replace newer keys', async () => {
+    vi.useFakeTimers();
+    let clock = 0;
+    let calls = 0;
+    let release!: (v: Record<string, string>) => void;
+    const v = new IdentityVerifier({ projectId: PROJECT, now: () => clock, fetchCerts: async () => ++calls === 1 ? new Promise((r) => { release = r; }) : certs() });
+    const first = v.verify(makeToken()).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await first).toBeInstanceOf(IdentityUnavailableError);
+    clock = NOW;
+    expect((await v.verify(makeToken())).sub).toBe('uid-abc');
+    release({ 'old-key': certs()['kid-1']! });
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await v.verify(makeToken())).sub).toBe('uid-abc');
+    expect(calls).toBe(2);
+  });
+
+  it('an invalid certificate response is unavailable and preserves a cached signing key', async () => {
+    let clock = NOW;
+    let current: unknown = certs();
+    const v = new IdentityVerifier({ projectId: PROJECT, now: () => clock, fetchCerts: async () => current as Record<string, string> });
+    const lasting = makeToken({ exp: Math.floor(NOW / 1000) + 4 * 3600 });
+    await v.verify(lasting);
+    clock += 3_600_001;
+    current = null;
+    expect((await v.verify(lasting)).sub).toBe('uid-abc');
+    await expect(v.verify(makeToken({}, { kid: 'unknown' }))).rejects.toBeInstanceOf(IdentityUnavailableError);
   });
 });
 

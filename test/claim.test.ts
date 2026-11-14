@@ -703,7 +703,8 @@ describe('claimFirstContact', () => {
   // second watcher for the same seat before the first has run out. The two share one
   // stored window; the older one used to delete it and shut the door at ITS deadline.
   async function guestSeat() {
-    const store = new Store(new Database(':memory:'));
+    const db = new Database(':memory:');
+    const store = new Store(db);
     const provider = new MockProvider();
     const { runtimeRef } = await provider.provision({
       agentId: 'a4', slug: 'a4',
@@ -719,9 +720,59 @@ describe('claimFirstContact', () => {
     store.insertMembership({ id: 'm1', agentId: 'a4', userId: 'u1', role: 'owner', channelUserId: '31337', status: 'active' });
     store.insertMembership({ id: 'm2', agentId: 'a4', userId: 'guest', role: 'user', status: 'active' });
     provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [] }), stderr: '' });
-    return { store, provider, runtimeRef };
+    return { db, store, provider, runtimeRef };
   }
   const guestWindow = (store: Store) => store.pairingWindows('a4', new Date(0)).find((w) => w.seat === Store.pairingSeat('telegram', 'guest'));
+
+  it.each(['read', 'approve'] as const)('a corrected invite during the pairing %s cannot bind its previous person (HB-0692)', async (stage) => {
+    const { db, store, provider, runtimeRef } = await guestSeat();
+    let corrected = false;
+    const correct = () => {
+      const old = guestWindow(store)!;
+      // Same deadline: timestamps alone cannot identify which watcher owns it.
+      store.openPairingWindow('a4', old.until, 'guest', { kind: 'telegram', expect: 'corrected_person' });
+      corrected = true;
+    };
+    provider.execShell = async () => {
+      if (stage === 'read') correct();
+      return { code: 0, stdout: JSON.stringify({ requests: [{ id: '4242', code: 'RACE', meta: { username: 'earlier_person' } }] }), stderr: '' };
+    };
+    const exec = provider.exec.bind(provider);
+    provider.exec = async (ref, argv, opts) => {
+      if (argv[0] === 'pairing' && argv[1] === 'approve') correct();
+      return exec(ref, argv, opts);
+    };
+    provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
+    try {
+      const claimed = await claimFirstContact({ store, provider, sleep: async () => { throw new Error('A superseded watcher must stop'); } }, {
+        agentId: 'a4', runtimeRef, accountId: 'bot', forUserId: 'guest', expect: 'earlier_person', timeoutMs: 60_000,
+      });
+      expect(corrected).toBe(true);
+      expect(claimed).toBeNull();
+      expect(store.getMembership('a4', 'guest')?.channelUserId).toBeUndefined();
+      expect(guestWindow(store)?.expect).toBe('corrected_person');
+      const approvals = provider.execLog.filter((a) => a[0] === 'pairing' && a[1] === 'approve');
+      expect(approvals).toHaveLength(stage === 'read' ? 0 : 1);
+      const scrubs = provider.execLog.filter((a) => a[0] === 'sh-volume' && a[1]!.includes('delete from channel_pairing_allow_entries') && a[1]!.includes('"4242"'));
+      expect(scrubs).toHaveLength(stage === 'approve' ? 1 : 0);
+    } finally { db.close(); }
+  });
+
+  it('a window closed during the pairing read cannot approve its waiting request', async () => {
+    const { db, store, provider, runtimeRef } = await guestSeat();
+    provider.execShell = async () => {
+      store.closePairingWindow('a4', Store.pairingSeat('telegram', 'guest'));
+      return { code: 0, stdout: JSON.stringify({ requests: [{ id: '4242', code: 'RACE' }] }), stderr: '' };
+    };
+    provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
+    try {
+      expect(await claimFirstContact({ store, provider, sleep: async () => { throw new Error('A closed watcher must stop'); } }, {
+        agentId: 'a4', runtimeRef, accountId: 'bot', forUserId: 'guest', timeoutMs: 60_000,
+      })).toBeNull();
+      expect(provider.execLog.some((a) => a[0] === 'pairing' && a[1] === 'approve')).toBe(false);
+      expect(store.getMembership('a4', 'guest')?.channelUserId).toBeUndefined();
+    } finally { db.close(); }
+  });
 
   it('reopened while an older watcher waits: the older one stops, leaving the renewed window and the open door alone', async () => {
     const { store, provider, runtimeRef } = await guestSeat();

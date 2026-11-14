@@ -1464,6 +1464,46 @@ describe('scripts/follow-latest.sh runs only a release the workflow published (#
       return record;
     }
 
+    it('an offline fetch still restores the prior release and dependencies, without running the cached newest release (HB-0686)', () => {
+      const w = world();
+      const record = killedHandDeploy(w, 'v2.159.1', 'v2.160.0');
+      // The killed deploy had restarted the service: the repair must restart
+      // the restored code too. All service commands are the sandbox's shims.
+      writeFileSync(record, 'from v2.159.1\nto v2.160.0\nrestarted\n');
+      w.git(w.prod, 'remote', 'set-url', 'origin', join(w.root, 'gone.git'));
+      const tries = join(w.state, 'follow-latest-tries');
+      const priorTries = `v2.160.0 7 ${Math.floor(Date.now() / 1000)}\n`;
+      writeFileSync(tries, priorTries);
+      const r = w.follow();
+      expect(r.stdout, r.stdout + r.stderr).toMatch(/cut off part-way — putting v2\.159\.1 back first/);
+      expect(w.at()).toBe('v2.159.1');
+      expect(readFileSync(join(w.prod, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+      expect(existsSync(join(w.prod, 'node_modules', 'half-installed'))).toBe(false);
+      expect(existsSync(record)).toBe(false);
+      expect(lines(w.log)).toContain('systemctl --user restart hatchabot');
+      expect(lines(w.ran)).toEqual([]);
+      expect(w.urls()).toEqual([]);
+      expect(readFileSync(tries, 'utf8')).toBe(priorTries);
+      expect(existsSync(join(w.state, 'follow-latest-failed'))).toBe(false);
+      // Once repaired, another offline tick has no reason to run any code.
+      w.follow();
+      expect(lines(w.log).filter((line) => line.startsWith('systemctl'))).toHaveLength(1);
+      expect(lines(w.ran)).toEqual([]);
+    });
+
+    it('an interrupted prerelease deploy is repaired offline even with no stable tags cached (HB-0686)', () => {
+      const w = world('v2.160.0-rc.2', 'v2.160.0-rc.1');
+      const record = killedHandDeploy(w, 'v2.160.0-rc.1', 'v2.160.0-rc.2');
+      w.git(w.prod, 'remote', 'set-url', 'origin', join(w.root, 'gone.git'));
+      const r = w.follow();
+      expect(r.stdout, r.stdout + r.stderr).toContain('putting v2.160.0-rc.1 back');
+      expect(w.at()).toBe('v2.160.0-rc.1');
+      expect(existsSync(record)).toBe(false);
+      expect(readFileSync(join(w.prod, 'node_modules', 'marker'), 'utf8')).toBe('deps');
+      expect(lines(w.ran)).toEqual([]);
+      expect(w.urls()).toEqual([]);
+    });
+
     it('a tag verify_release refuses (30), set aside, then deployed by hand and killed: the tick repairs by the old release\'s script, none of the tag\'s code runs', () => {
       const w = world();
       w.release({ immutable: false }); w.manifest();

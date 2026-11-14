@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Agent } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
-import { runWebChatTurn, webChatHistory, type WebChatRights } from '../orchestrator/webChat.js';
+import { runWebChatTurn, webChatHistory, WEB_CHAT_MESSAGE_ID, type WebChatRights } from '../orchestrator/webChat.js';
 import { ownerIdOf } from './principal.js';
 
 /**
@@ -73,13 +73,15 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
   const nameOf = (agent: Agent, userId: string): string =>
     store.getMembership(agent.id, userId)?.displayName || (agent.ownerId === userId ? 'The owner' : 'Someone');
 
-  app.post<{ Params: { id: string }; Body: { text?: string } }>('/v1/agents/:id/chat', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { text?: string; messageId?: unknown } }>('/v1/agents/:id/chat', async (req, reply) => {
     const me = ownerIdOf(req);
     const found = allowed(req.params.id, me, reply);
     if (!found) return reply;
     const text = String((req.body as { text?: string } | undefined)?.text ?? '').trim();
     if (!text) return reply.code(400).send({ error: 'Say something.' });
     if (text.length > MAX_WEB_CHAT_CHARS) return reply.code(413).send({ error: 'That message is over 8,000 characters.' });
+    const messageId = req.body?.messageId;
+    if (messageId !== undefined && (typeof messageId !== 'string' || !WEB_CHAT_MESSAGE_ID.test(messageId))) return reply.code(400).send({ error: 'That message id is not valid.' });
     const key = webChatKey(found.id, me);
     if (deps.inFlight.has(key)) return reply.code(409).send({ error: 'It is still answering your last message.' });
     const now = Date.now();
@@ -110,7 +112,7 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
       // The agent's owner keeps an owner's rights; everyone else has a member's —
       // what a Telegram member has: no scheduling, no settings.
       const rights: WebChatRights = agent.ownerId === me ? 'owner' : 'member';
-      const res = await runWebChatTurn(deps.providerFor(agent.hostId), agent, { userId: me, displayName: nameOf(agent, me), text, rights }, deps.timeoutMs);
+      const res = await runWebChatTurn(deps.providerFor(agent.hostId), agent, { userId: me, displayName: nameOf(agent, me), text, messageId, rights }, deps.timeoutMs);
       deps.afterTurn?.(agent.id);
       switch (res.kind) {
         case 'reply':
@@ -140,13 +142,18 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
     const me = ownerIdOf(req);
     const agent = allowed(req.params.id, me, reply);
     if (!agent) return reply;
+    const rawIds = req.headers['x-hatchabot-message-ids'];
+    const pending = typeof rawIds === 'string' && rawIds ? rawIds.split(',') : [];
+    if ((rawIds !== undefined && typeof rawIds !== 'string') || pending.length > 100 || pending.some((id) => !WEB_CHAT_MESSAGE_ID.test(id))) {
+      return reply.code(400).send({ error: 'Those message ids are not valid.' });
+    }
     // Nothing built yet, or being rebuilt/moved: nothing to read (and a stopped
     // volume is read off disk; a sleeping one is not woken just to look).
     if (!agent.runtimeRef || !['RUNNING', 'STOPPED'].includes(agent.state) || deps.isBusy(agent.id)) {
       return { messages: [], note: 'Its conversation cannot be read right now.' };
     }
     try {
-      return { messages: await webChatHistory(deps.providerFor(agent.hostId), agent, me) };
+      return await webChatHistory(deps.providerFor(agent.hostId), agent, me, 100, pending);
     } catch (err) {
       app.log.warn({ agent: agent.id, err: String((err as Error).message ?? err) }, 'web chat history read failed');
       return reply.code(502).send({ error: "Couldn't read your conversation just now — try again." });

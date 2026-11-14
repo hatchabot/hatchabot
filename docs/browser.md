@@ -83,8 +83,11 @@ turn it away. Two-step codes work: you type them.
 
 **How it is held:**
 
-- The agent's owner only: not other members, web chat guests or the
-  manager. At the public address it asks for your second factor again.
+- The agent's owner, signed in through this browser: not other members,
+  web chat guests or the manager. A bearer token alone cannot open this
+  panel. At the public address it asks for your second factor again.
+  Sign-out, session revocation, an ownership change or a changed browser
+  ends the panel; its stream is checked throughout, not only when opened.
 - Only over an encrypted connection: this Hatchabot's https address, a
   device on your tailnet, or the machine itself. Over plain http on your
   network it stays shut, because what you type in it is a password.

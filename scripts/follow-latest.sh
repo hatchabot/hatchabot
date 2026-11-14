@@ -85,15 +85,29 @@ trap '[ -z "${FOLLOW_LATEST_COPY:-}" ] || rm -f "$FOLLOW_LATEST_COPY"' EXIT
 
 [ -d "$PROD/.git" ] || { echo "No production checkout at $PROD."; exit 1; }
 mkdir -p "$STATE"
-git -C "$PROD" fetch --tags --force --quiet origin
-NEWEST="$(git -C "$PROD" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p)"
-[ -n "$NEWEST" ] || exit 0
-CUR="$(git -C "$PROD" describe --tags --exact-match 2>/dev/null || true)"
 # A deploy killed part-way (SIGKILL, a power cut) left prod on the new tag
 # with half its dependencies, and its record beside the lock (the one
 # deploy-release.sh keys on prod's path): the deploy repairs that first, so
 # it runs though prod is on the newest tag already (HB-0266).
 CUT="$STATE/upgrade-$(cd "$PROD" && printf %s "$PWD" | cksum | cut -d' ' -f1).from"
+CUT_FROM=""; [ ! -f "$CUT" ] || CUT_FROM="$(sed -n 's/^from //p' "$CUT" | sed -n 1p)"
+# A failed fetch must not prevent the local rollback: its release and saved
+# dependencies are already here (HB-0686). Without a fresh tag list, only
+# that repair may run, never the cached newest release's code.
+FETCHED=1
+if ! git -C "$PROD" fetch --tags --force --quiet origin; then
+  FETCHED=0
+  echo "Could not fetch the latest release; only a deploy cut off part-way can be repaired from the local checkout."
+  [ -f "$CUT" ] || exit 1
+fi
+# sed succeeds with no stable tags too: grep under pipefail ended the tick
+# before a hand deploy between two prereleases could be repaired.
+NEWEST="$(git -C "$PROD" tag -l 'v[0-9]*' --sort=-v:refname | sed -E '/-(rc|beta|alpha)/d' | sed -n 1p)"
+if [ -z "$NEWEST" ]; then
+  [ -n "$CUT_FROM" ] || exit 0
+  NEWEST="$CUT_FROM"; FETCHED=0
+fi
+CUR="$(git -C "$PROD" describe --tags --exact-match 2>/dev/null || true)"
 [ "$CUR" = "$NEWEST" ] && [ ! -f "$CUT" ] && exit 0
 # Only ever forward: a checkout that is ahead (a hand deploy of a newer tag) stays.
 vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
@@ -146,10 +160,10 @@ disk_words() {
 # newest tag cannot be deployed now (verify_release, below; refused, every
 # tick failed with no repair), or the release it came from is at or ahead of
 # the newest tag (a hand deploy between two rcs; going on would take it back).
-CUT_FROM=""; [ ! -f "$CUT" ] || CUT_FROM="$(sed -n 's/^from //p' "$CUT" | sed -n 1p)"
 repair_cut() {
   local deploy rc=0
   echo "A deploy of $PROD was cut off part-way; putting ${CUT_FROM:-the previous release} back."
+  [ -n "$CUT_FROM" ] || { echo "The interrupted deploy record names no previous release, so no release's code was run. Deploy a release by hand: scripts/deploy-release.sh vX.Y.Z"; return 1; }
   [ "$NO_COPY" = 0 ] || disk_stop "a private copy of $0 in ${TMPDIR:-/tmp}"
   deploy="$(mktemp 2>/dev/null)" || disk_stop "a copy of the deploy script in ${TMPDIR:-/tmp}"
   if ! git -C "$PROD" show "$CUT_FROM:scripts/deploy-release.sh" > "$deploy" 2>/dev/null; then
@@ -171,6 +185,13 @@ repair_cut() {
   fi
   return "$rc"
 }
+if [ "$FETCHED" = 0 ]; then
+  ! disk_waiting || exit 0
+  repair_cut || { [ ! -f "$CUT" ] || exit 1; }
+  # The old deploy repairs before fetching. It can therefore report a fetch
+  # failure after the repair succeeded; a removed record confirms it is done.
+  exit 0
+fi
 if [ -n "$CUT_FROM" ] && [ "$(vernewer "$CUT_FROM" "$NEWEST")" = "$CUT_FROM" ]; then
   ! disk_waiting || exit 0
   repair_cut || exit 1

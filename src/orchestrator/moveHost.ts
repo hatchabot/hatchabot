@@ -56,6 +56,8 @@ export interface MoveDeps extends Omit<ProvisionDeps, 'provider'> {
   dropPin?: boolean;
   /** A rebuild of it is waiting its turn in the queue (the routes' `inflight`): no move begins under one. */
   rebuildWaiting?: () => boolean;
+  /** Rejudge the route's configuration checks after daemon probes, before any mutation. */
+  preflightRefusal?: () => string | undefined;
 }
 
 export async function moveAgentToHost(
@@ -127,6 +129,8 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
   // a machine Hatchabot no longer knew. A removal still under way sees the
   // operation begun below, in this same tick, and stops (HB-0275).
   if (!store.getHost(targetHostId)) throw new TransferError(`${targetHost.name} was removed meanwhile — the move was cancelled.`);
+  const changed = deps.preflightRefusal?.();
+  if (changed) throw new TransferError(changed);
   // A rebuild waiting its turn carries a change. At its turn, called off by this move,
   // it keeps the change as a mark on the agent; the target's build clears that mark, and
   // an undo cannot restore what it never saw, so the source ran on without the change.
@@ -530,6 +534,7 @@ const moveHoldChoices = (p: MoveParams) => ({
   actions: [
     { action: 'retry', label: `Try again when ${p.toName} is back` },
     { action: 'put-back', label: `Put it back on ${p.fromName}` },
+    { action: 'copy-removed', label: `I removed the copy on ${p.toName}${p.wasRunning ? ` — start it on ${p.fromName}` : ''}` },
   ],
   recommended: 'retry',
 });
@@ -542,7 +547,7 @@ const moveHoldChoices = (p: MoveParams) => ({
  *  - after the flip: finish — the second seed and the start on the target,
  *    its rebuild hook, skills and re-index, then remove the source's volume;
  *  - the machine it must use does not answer: hold, with
- *    [Try again when it's back] [Put it back here].
+ *    [Try again when it's back] [Put it back here] [I removed the copy there].
  */
 export async function resumeMoveHost(deps: MoveResumeDeps, opId: string): Promise<void> {
   const { store } = deps;

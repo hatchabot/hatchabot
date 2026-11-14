@@ -7,7 +7,7 @@
  * Both scripts run in a sandbox: a temp HOME, install and backups folder, a
  * PATH whose docker is a shim, git hooks off. Every key is made up.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -17,6 +17,11 @@ import { parseEnv } from 'node:util';
 import Database from 'better-sqlite3';
 import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
 import { Store } from '../src/store/store.js';
+
+// Real backup/drill subprocesses, tsx startup and passphrase stretching exceeded
+// 5 s on the shared CI runner (PR #122). Match restoreDrill.test.ts's bounded
+// integration-test allowance; keep the real scripts and crypto assertions.
+vi.setConfig({ testTimeout: 30_000 });
 
 const repo = resolve(import.meta.dirname, '..');
 const dirs: string[] = [];

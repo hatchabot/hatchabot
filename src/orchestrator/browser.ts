@@ -58,10 +58,10 @@ export const BROWSER_UID = 1001;
 /**
  * Where the browser may not open a connection: this machine and the agent's
  * own ports (loopback), the LAN, the tailnet (100.64/10), link-local (cloud
- * metadata), and the reserved rest. Docker's own DNS (127.0.0.11) stays open.
+ * metadata), and the reserved rest. Docker's own DNS (127.0.0.11:53) stays open.
  */
 export const BROWSER_FENCED_V4 = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.168.0.0/16', '198.18.0.0/15', '224.0.0.0/4', '240.0.0.0/4'];
-export const BROWSER_FENCED_V6 = ['::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8'];
+export const BROWSER_FENCED_V6 = ['::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8'];
 /**
  * The fence (HB-0679), run as root with NET_ADMIN only, once per browser start,
  * in a throwaway container in the agent's network namespace, before Chromium
@@ -78,13 +78,24 @@ fence() {
   t=$1; shift
   $t -w -N HB_BROWSER 2>/dev/null || true
   $t -w -F HB_BROWSER
-  if [ "$t" = iptables ]; then $t -w -A HB_BROWSER -d 127.0.0.11 -j RETURN; fi
+  if [ "$t" = iptables ]; then
+    for p in udp tcp; do
+      $t -w -A HB_BROWSER -d 127.0.0.11 -p "$p" -m conntrack --ctorigdst 127.0.0.11 --ctorigdstport 53 --ctdir ORIGINAL -j RETURN
+    done
+  fi
   for d in "$@"; do $t -w -A HB_BROWSER -d "$d" -m conntrack --ctstate NEW -j REJECT; done
   $t -w -C OUTPUT -m owner --uid-owner ${BROWSER_UID} -j HB_BROWSER 2>/dev/null || $t -w -I OUTPUT 1 -m owner --uid-owner ${BROWSER_UID} -j HB_BROWSER
 }
 fence iptables ${BROWSER_FENCED_V4.join(' ')}
 if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" = 1 ]; then echo "IPv6 is off here"; else fence ip6tables ${BROWSER_FENCED_V6.join(' ')}; fi
 iptables -w -C OUTPUT -m owner --uid-owner ${BROWSER_UID} -j HB_BROWSER && echo FENCED`;
+/**
+ * Docker redirects port 53 to an internal resolver port before the filter
+ * chain, so the exception matches the connection's original port. Opening
+ * every port on its address also opened wildcard listeners in this namespace.
+ * A changed fence replaces existing browsers too, even on the same image.
+ */
+export const BROWSER_FENCE_VERSION = createHash('sha256').update(BROWSER_FENCE_SCRIPT).digest('hex').slice(0, 16);
 
 /**
  * Keep its logins (HB-0680, docs/browser-logins-design.md). The profile is a

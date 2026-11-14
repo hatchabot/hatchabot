@@ -238,7 +238,7 @@ describe('move-host: killed at every step, then a restart', () => {
         return;
       }
       expect(op.status).toBe('held');
-      expect(op.recovery!.actions.map((a) => a.action)).toEqual(['retry', 'put-back']);
+      expect(op.recovery!.actions.map((a) => a.action)).toEqual(['retry', 'put-back', 'copy-removed']);
       expect(operationRefusal(m.w.store, m.id)).toMatch(/isn't answering/);
       // Put back while it is away: only if its copy there never started.
       const mayRun = STEPS['move-host']!.findIndex((s) => s.key === op.step) >= STEPS['move-host']!.findIndex((s) => s.key === 'target-configured');
@@ -365,6 +365,35 @@ describe('move-host: undone after a restart, and its source will not start again
 });
 
 describe('move-host: a copy on the target that could not be removed is held, not failed (A087)', () => {
+  it('a target lost after the flip can be recovered after its owner removes the copy (HB-0481)', async () => {
+    const m = await moveWorld();
+    crashAt('target-started');
+    await expect(moveAgentToHost(m.deps, m.id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+    reboot(m.id);
+    m.up.h2 = false;
+    await resumeOperations(m.ctx);
+    const op = m.w.store.listOperations([m.id])[0]!;
+    expect(op.status).toBe('held');
+    expect(op.recovery!.actions.map((a) => a.action)).toContain('copy-removed');
+    expect(m.w.provider.stateStore.get(m.ref)?.toString()).toBe('remembered');
+    await expect(recoverOperation(m.ctx, op.id, 'put-back')).rejects.toThrow(/may already be running/);
+    expect((await m.w.provider.status(m.ref)).phase).toBe('stopped');
+    // A target that answers is checked even when the owner clicks this choice.
+    m.up.h2 = true;
+    await expect(recoverOperation(m.ctx, op.id, 'copy-removed')).rejects.toThrow(/still there/);
+    expect((await m.w.provider.status(m.ref)).phase).toBe('stopped');
+    // The owner removed the target offline; only that explicit acknowledgement
+    // can recover onto the intact source when the machine is gone for good.
+    await m.target.destroy(m.w.store.getAgent(m.id)!.runtimeRef!, { purge: true });
+    m.up.h2 = false;
+    const after = await recoverOperation(m.ctx, op.id, 'copy-removed');
+    expect(after.status).toBe('rolled_back');
+    expect(m.w.store.getAgent(m.id)).toMatchObject({ hostId: 'h1', state: 'RUNNING' });
+    expect(await m.running2()).toEqual([true, false]);
+    expect(m.w.provider.stateStore.get(m.ref)?.toString()).toBe('remembered');
+    expect(operationRefusal(m.w.store, m.id)).toBeUndefined();
+  });
+
   /** The target starts it, never comes up healthy, and will not be removed. */
   const stuckTarget = (m: Awaited<ReturnType<typeof moveWorld>>) => {
     const status = m.target.status.bind(m.target);

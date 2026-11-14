@@ -24,6 +24,23 @@ function olderDb(): Database.Database {
 }
 
 describe('opening a database that predates the current columns', () => {
+  it('adds window generations without losing an existing per-seat invitation (HB-0692)', () => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(`CREATE TABLE pairing_windows (agent_id TEXT NOT NULL, seat TEXT NOT NULL, until TEXT NOT NULL, opened_for TEXT, expect TEXT, PRIMARY KEY (agent_id, seat))`);
+      const until = new Date(Date.now() + 60_000).toISOString();
+      db.prepare(`INSERT INTO pairing_windows VALUES ('a1', 'telegram:guest', ?, 'guest', 'expected_person')`).run(until);
+      const store = new Store(db);
+      expect(store.pairingWindow('a1')).toMatchObject({ until, openedFor: 'guest', expect: 'expected_person' });
+      const first = store.openPairingWindow('a1', until, 'guest', { expect: 'expected_person' });
+      expect(first).toBeTruthy();
+      new Store(db); // another startup preserves the generation
+      expect(store.pairingWindows('a1')[0]?.generation).toBe(first);
+      expect(store.openPairingWindow('a1', until, 'guest', { expect: 'expected_person', generation: first })).toBe(first);
+      expect(store.openPairingWindow('a1', until, 'guest', { expect: 'expected_person' })).not.toBe(first);
+    } finally { db.close(); }
+  });
+
   it('migrates pairing_window and still reads and writes a window', () => {
     const store = new Store(olderDb());
     store.openPairingWindow('a1', new Date(Date.now() + 60_000).toISOString(), 'user-guest', { expect: '@maria_k' });

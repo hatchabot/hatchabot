@@ -277,6 +277,7 @@ const CLOSED_WHY = {
   idle: 'Closed after ten minutes with nothing clicked or typed. Open it again to carry on: the browser keeps the page.',
   replaced: 'Opened again in another window, so this one closed.',
   person: 'Closed.',
+  access: 'Your access to this panel ended. Sign in again, then open it again if you still own this agent.',
   gone: 'The browser closed: the agent stopped, restarted or was rebuilt.',
   restarted: 'Its browser started again, to keep or forget its logins. Open it again to sign in.',
   shutdown: 'Hatchabot is restarting.',

@@ -6,6 +6,34 @@ import { join } from 'node:path';
 import { firstThen, heldPort, onFreePort, TAKEN } from './helpers/ports.js';
 import { buildGitRemovalScript, buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncScript, isPublicGitUrl } from '../src/orchestrator/gitSource.js';
 
+describe('runtime directories cannot become repo clones or removals (HB-0707)', () => {
+  it('refuses reserved names at both clone script builders', () => {
+    const repoUrl = 'https://git.example.org/example-owner/notes.git';
+    const commit = { name: 'Demo', email: 'demo@example.org' };
+    for (const mountName of ['agents', 'cron', 'credentials']) {
+      expect(() => buildPublicGitSyncScript({ mountName, httpsUrl: repoUrl }, commit)).toThrow(/folder name.*not allowed/);
+      expect(() => buildGitSyncScript({ mountName, sshUrl: 'git@git.example.org:example-owner/notes.git', host: 'git.example.org' }, 'Zml4dHVyZQ==', commit)).toThrow(/folder name.*not allowed/);
+    }
+  });
+
+  it('removing an old reserved-name source revokes its key without deleting runtime files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-git-reserved-'));
+    try {
+      mkdirSync(join(dir, '.ssh'));
+      mkdirSync(join(dir, 'agents', '.git'), { recursive: true });
+      writeFileSync(join(dir, 'agents', 'MEMORY.md'), '# keep runtime memory');
+      for (const suffix of ['', '.pub', '-cert.pub']) writeFileSync(join(dir, '.ssh', `agents_deploy${suffix}`), 'made-up-key');
+      const bin = join(dir, 'bin'); mkdirSync(bin);
+      writeFileSync(join(bin, 'rm'), '#!/bin/sh\nfor p in "$@"; do case "$p" in -f|"$FIXTURE_BASE"/.ssh/agents_deploy*) ;; *) exit 88;; esac; done\nexec /bin/rm "$@"\n', { mode: 0o755 });
+      const script = buildGitRemovalScript('agents', 'git@git.example.org:example-owner/agents.git').split('/home/node/.openclaw').join(dir);
+      const r = spawnSync('/bin/sh', ['-c', script], { env: { PATH: bin, HOME: dir, FIXTURE_BASE: dir }, encoding: 'utf8' });
+      expect(r.status, r.stderr).toBe(0);
+      expect(readFileSync(join(dir, 'agents', 'MEMORY.md'), 'utf8')).toBe('# keep runtime memory');
+      expect(readdirSync(join(dir, '.ssh'))).toEqual([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 describe('normalizeGitUrl', () => {
   it('normalizes ssh, ssh://, and https forms to the ssh clone URL', () => {
     for (const input of [

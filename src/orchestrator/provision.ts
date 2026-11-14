@@ -74,6 +74,7 @@ if (!hit) { console.error('Unknown peer "' + peer + '". Available: ' + peers.map
  */
 export const SEARCH_KEY_REF = 'media/brave-api-key';
 import { buildGitRemovalScript, buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from './gitSource.js';
+import { folderMountNameProblem } from './dataSourceLimits.js';
 import type { Agent, Channel, Host } from '../domain/types.js';
 import { ownSearchKeys, readWebSearch, searchProviderFor } from './webSearch.js';
 import { briefCause } from '../domain/redact.js';
@@ -799,8 +800,8 @@ export async function buildRuntimeSpec(
   // place inside the container too, and judged again here like every share
   // (it was left out of the check above, HB-0053).
   for (const d of store.listDataSources(agent.id)) {
-    if (d.kind !== 'folder' || !d.hostPath || !d.mountAtHostPath) continue;
-    const problem = hostPathTargetProblem(d.hostPath);
+    if (d.kind !== 'folder' || !d.hostPath) continue;
+    const problem = folderMountNameProblem(d.mountName) || (d.mountAtHostPath ? hostPathTargetProblem(d.hostPath) : undefined);
     if (problem) throw new ProviderError(`shared folder refused at build: ${problem}`, `A shared folder is no longer safe to mount: ${problem} Remove it from the agent's Data, then rebuild.`);
   }
   const seedFiles = store.getAgentSeed(agentId);

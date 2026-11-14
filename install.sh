@@ -269,7 +269,8 @@ say "2/3 Hatchabot $TAG → $DIR"
 # on a file:// test bed); 2 could not fetch (no network, a server error).
 mf_fetch() {
   local code rc=0
-  code="$(curl -sSL --retry 3 --max-filesize 65536 -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || rc=$?
+  code="$(curl -sSL --retry 3 --connect-timeout 10 --max-time 60 --retry-max-time 120 --max-filesize 65536 -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || rc=$?
+  [ "$rc" != 28 ] || echo "Timed out fetching the release manifest (60 seconds per attempt) — try again later." >&2
   case "$rc:$code" in
     0:200|0:000) [ -s "$2" ] && return 0 ;;
     0:404|37:*) rm -f "$2"; return 1 ;;

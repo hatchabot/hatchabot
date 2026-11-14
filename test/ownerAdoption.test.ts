@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { OWNER_COLUMNS, Store } from '../src/store/store.js';
 import { TelegramPoolProvisioner } from '../src/channels/telegramPool.js';
+import { PendingStore, type PendingConfirm } from '../src/mgmt/pendingStore.js';
 
 /**
  * The deep audit of v2.177.0 (2026-11-07): what the first account takes over
@@ -22,6 +23,32 @@ function fullSchema(): { db: Database.Database; store: Store } {
 }
 
 describe('the first account takes over everything password mode owned (HB-0545)', () => {
+  it('adopted management proposals can be confirmed or cancelled only by their new owner (HB-0685)', () => {
+    const { db, store } = fullSchema();
+    try {
+      const now = 1_000;
+      const pending = new PendingStore({ now: () => now, backing: {
+        get: (id) => store.getMgmtProposal<PendingConfirm>(id),
+        put: (rec) => store.putMgmtProposal(rec),
+        resolve: (id, status) => store.resolveMgmtProposal(id, status, now),
+        sweep: (at) => store.sweepMgmtProposals(at),
+      } });
+      const cards = ['confirm', 'cancel'].map(() => pending.create({
+        ownerId: 'dev-owner', chatId: 0, fromUserId: 0,
+        tool: 'stop_agent', resolved: { agentId: 'agent-test', agentName: 'Example' }, summary: 'Stop Example',
+      }));
+      store.adoptLocalOwnerData('account-test');
+      expect(store.listMgmtProposals<PendingConfirm>('account-test', now).map((r) => r.ownerId)).toEqual(['account-test', 'account-test']);
+      expect(store.listMgmtProposals<PendingConfirm>('dev-owner', now)).toEqual([]);
+      for (const [i, verb] of (['confirm', 'cancel'] as const).entries()) {
+        const id = cards[i]!.id;
+        expect(pending.claim(id, verb, { ownerId: 'dev-owner', chatId: 0, fromUserId: 0 })).toEqual({ ok: false, reason: 'missing' });
+        expect(pending.claim(id, verb, { ownerId: 'account-test', chatId: 0, fromUserId: 0 })).toMatchObject({ ok: true, rec: { ownerId: 'account-test', status: verb === 'confirm' ? 'confirmed' : 'cancelled' } });
+      }
+      expect(store.listMgmtProposals<PendingConfirm>('account-test', now).every((r) => r.ownerId === 'account-test')).toBe(true);
+    } finally { db.close(); }
+  });
+
   it('every column of the schema that holds an owner id is in OWNER_COLUMNS, and every entry is in the schema', () => {
     const { db } = fullSchema();
     const tables = (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map((t) => t.name);
@@ -266,15 +293,16 @@ describe('an agent that stays behind keeps its own rows; a finished hand-over ta
 
   it('a host remade at boot on an identity install while dev-owner still has agents does not end the hand-over', () => {
     const { db, store } = fullSchema();
-    store.insertAIProfile({ id: 'p-main', ownerId: 'acct-main', name: 'Source', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/pm', createdAt: '2026-01-05T00:00:00Z' });
+    store.insertAIProfile({ id: 'p-main', ownerId: 'user-main', name: 'Source', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/pm', createdAt: '2026-01-05T00:00:00Z' });
     makeAgent(store, 'still-old', 'dev-owner');
-    expect(store.installOwner('identity')).toBe('acct-main');
+    store.recordAccount('user-main', 'owner@example.com');
+    expect(store.installOwner('identity', 'dev-owner', 'owner@example.com')).toBe('user-main');
     expect(db.prepare(`SELECT COUNT(*) AS n FROM first_account`).get()).toEqual({ n: 0 });
-    store.insertHost({ id: 'local', ownerId: 'acct-main', kind: 'local', provider: 'mock', name: 'This machine', settings: {}, createdAt: 'now' });
+    store.insertHost({ id: 'local', ownerId: 'user-main', kind: 'local', provider: 'mock', name: 'This machine', settings: {}, createdAt: 'now' });
     // The next sign-in still takes what dev-owner has.
-    expect(store.pinFirstAccount('acct-main')).toEqual({ ownerId: 'acct-main', done: false });
-    store.adoptLocalOwnerData('acct-main', 'dev-owner', { pinned: true });
-    expect(store.getAgent('still-old')!.ownerId).toBe('acct-main');
+    expect(store.pinFirstAccount('user-main')).toEqual({ ownerId: 'user-main', done: false });
+    store.adoptLocalOwnerData('user-main', 'dev-owner', { pinned: true });
+    expect(store.getAgent('still-old')!.ownerId).toBe('user-main');
   });
 
   it('a "This machine" host made again goes to the install\'s owner, not to dev-owner', () => {
@@ -289,19 +317,20 @@ describe('an agent that stays behind keeps its own rows; a finished hand-over ta
     expect(store.installOwner('accounts')).toBe('acct-host');
   });
 
-  it('an identity install handed over before pins existed: a re-made host goes to who set it up, not a member with more agents, and stays theirs', () => {
+  it('an identity install without a pin uses the configured verified owner and keeps the recorded choice', () => {
     const { store } = fullSchema();
     const made = (id: string, ownerId: string, at: string) => store.insertAgent({
       id, ownerId, name: id, slug: id, state: 'RUNNING', aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: at, updatedAt: at });
-    store.insertAIProfile({ id: 'p', ownerId: 'acct-main', name: 'Household source', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p', createdAt: '2026-01-05T00:00:00Z' });
-    made('a1', 'acct-main', '2026-01-06T00:00:00Z');
+    store.insertAIProfile({ id: 'p', ownerId: 'user-main', name: 'Household source', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p', createdAt: '2026-01-05T00:00:00Z' });
+    made('a1', 'user-main', '2026-01-06T00:00:00Z');
     for (const n of [1, 2, 3]) made(`m${n}`, 'acct-member', `2026-03-0${n}T00:00:00Z`);
     expect(store.installOwner('password')).toBe('dev-owner');
-    expect(store.installOwner('identity')).toBe('acct-main');
+    store.recordAccount('user-main', 'owner@example.com');
+    expect(store.installOwner('identity', 'dev-owner', 'owner@example.com')).toBe('user-main');
     // Recorded: what the accounts own later does not change it.
     made('m0', 'acct-member', '2025-12-31T00:00:00Z');
-    expect(store.installOwner('identity')).toBe('acct-main');
-    expect(store.pinFirstAccount('acct-member')).toEqual({ ownerId: 'acct-main', done: true });
+    expect(store.installOwner('identity')).toBe('user-main');
+    expect(store.pinFirstAccount('acct-member')).toEqual({ ownerId: 'user-main', done: true });
   });
 });
 

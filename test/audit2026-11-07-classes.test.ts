@@ -328,6 +328,68 @@ describe('models and budgets (HB-0565, HB-0581)', () => {
     expect(r).toMatchObject({ source: 'runtime', openclawVersion: '2026.9.8', models: [OPUS55] });
   });
 
+  it.each(['different model', 'same model', 'source', 'no edit'] as const)('HB-0581: failed cheaper reapply preserves a concurrent %s', async (choice) => {
+    const { w, id } = await setup();
+    w.store.setCostDays(id, new Map([[new Date().toISOString().slice(0, 10), 25]]));
+    expect((await send(w, 'PUT', `/v1/agents/${id}/budget`, { usd: 20, atLimit: 'cheaper' })).statusCode).toBe(200);
+    expect(w.store.getAgent(id)?.model).toBe(HAIKU);
+    // The harder machine limit restores its own model before trying a stop.
+    // A refused stop tries to put the budget's cheaper model back again.
+    w.provider.stop = async () => { throw new Error('made-up stop refusal'); };
+    const gate = deferred(), reached = deferred();
+    const exec = w.provider.exec.bind(w.provider);
+    const set: string[] = [];
+    let held = false;
+    w.provider.exec = async (ref, args, opts) => {
+      if (args[0] === 'models' && args[1] === 'set') {
+        set.push(args[2]!);
+        if (!held && args[2]?.endsWith(HAIKU)) {
+          held = true; reached.resolve(); await gate.promise;
+          return { code: 1, stdout: '', stderr: 'made-up model refusal' };
+        }
+      }
+      return exec(ref, args, opts);
+    };
+    const budget = Promise.resolve(send(w, 'PUT', '/v1/budgets/machine', { usd: 20, atLimit: 'pause' }));
+    await reached.promise;
+    let owner: ReturnType<typeof send> | undefined;
+    const expected = choice === 'different model' ? OPUS55 : HAIKU;
+    if (choice === 'different model' || choice === 'same model') {
+      const generation = w.store.modelGeneration(id);
+      owner = send(w, 'POST', `/v1/agents/${id}/model`, { model: expected });
+      // Start Fastify's lazy injection while the budget's runtime call waits.
+      owner = Promise.resolve(owner) as never;
+      await vi.waitFor(() => expect(w.store.modelGeneration(id)).toBeGreaterThan(generation));
+    } else if (choice === 'source') {
+      w.store.insertAIProfile({ id: 'other-key', ownerId: w.owner, name: 'Other key', vendor: 'anthropic', kind: 'api_key', model: SONNET, models: [HAIKU], secretRef: 'ai/other-key', createdAt: 'now' });
+      expect((await send(w, 'PATCH', `/v1/agents/${id}`, { aiProfileId: 'other-key' })).statusCode).toBe(200);
+    }
+    gate.resolve();
+    await budget;
+    if (owner) expect((await owner).json()).toMatchObject({ model: expected, live: true });
+    if (choice === 'no edit') expect(w.store.getAgent(id)?.model).toBeUndefined();
+    else expect(w.store.getAgent(id)?.model).toBe(expected);
+    if (owner) expect(w.store.getAgent(id)?.appliedModel).toBe(expected);
+    if (choice === 'source') expect(w.store.getAgent(id)?.aiProfileId).toBe('other-key');
+    expect(set[0]).toMatch(new RegExp(`${SONNET}$`));
+  });
+
+  it('HB-0581: an owner choice during the failed stop also prevents a later cheaper reapply', async () => {
+    const { w, id } = await setup();
+    w.store.setCostDays(id, new Map([[new Date().toISOString().slice(0, 10), 25]]));
+    await send(w, 'PUT', `/v1/agents/${id}/budget`, { usd: 20, atLimit: 'cheaper' });
+    const gate = deferred(), reached = deferred();
+    w.provider.stop = async () => { reached.resolve(); await gate.promise; throw new Error('made-up stop refusal'); };
+    const budget = Promise.resolve(send(w, 'PUT', '/v1/budgets/machine', { usd: 20, atLimit: 'pause' }));
+    await reached.promise;
+    const owner = await send(w, 'POST', `/v1/agents/${id}/model`, { model: OPUS55 });
+    expect(owner.statusCode, owner.body).toBe(200);
+    expect(w.store.getAgent(id)?.model).toBe(OPUS55);
+    gate.resolve(); await budget;
+    expect(w.store.getAgent(id)?.model).toBe(OPUS55);
+    expect(w.store.openCheaperPause(id)).toBeUndefined();
+  });
+
   it('HB-0581: a failed budget switch down leaves a model the owner chose meanwhile, and puts it on', async () => {
     const { w, id } = await setup();
     // On "p1", whose default is claude-opus-4-8; the owner may also choose Sonnet.

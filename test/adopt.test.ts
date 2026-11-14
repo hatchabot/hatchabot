@@ -263,6 +263,39 @@ describe('applyWorkspace', () => {
     expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
   });
 
+  for (const phase of ['running', 'unknown', 'refused'] as const) {
+    it(`does not replace workspace files when stopping is unconfirmed (${phase})`, async () => {
+      const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+      const w = await agentWorld();
+      w.provider.stop = async () => {};
+      if (phase === 'unknown') w.provider.status = async () => ({ phase: 'unknown' });
+      if (phase === 'refused') w.provider.status = async () => { throw new Error('fixture status unavailable'); };
+      await expect(applyWorkspace(w.deps as any, 'a1', ws)).rejects.toThrow(/confirm.*stopped/);
+      expect(w.provider.workspaceStore.has(`${w.runtimeRef}:kitchen`)).toBe(false);
+      expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+    });
+  }
+
+  it('a stored STOPPED label cannot authorize copying over a runtime that is still running', async () => {
+    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const w = await agentWorld('STOPPED');
+    await w.provider.start(w.runtimeRef);
+    w.provider.stop = async () => {};
+    await expect(applyWorkspace(w.deps as any, 'a1', ws)).rejects.toThrow(/confirm.*stopped/);
+    expect(w.provider.workspaceStore.has(`${w.runtimeRef}:kitchen`)).toBe(false);
+    expect((await w.provider.status(w.runtimeRef)).phase).toBe('running');
+  });
+
+  it('a lost stop reply proceeds only once the runtime is confirmed down', async () => {
+    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const w = await agentWorld();
+    const stop = w.provider.stop.bind(w.provider);
+    w.provider.stop = async (ref) => { await stop(ref); throw new Error('fixture stop reply lost'); };
+    await applyWorkspace(w.deps as any, 'a1', ws);
+    expect(w.provider.workspaceStore.has(`${w.runtimeRef}:kitchen`)).toBe(true);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
   it('refuses an agent that is mid-rebuild — the runtime is not a stable target', async () => {
     const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
     const w = await agentWorld('REBUILDING');

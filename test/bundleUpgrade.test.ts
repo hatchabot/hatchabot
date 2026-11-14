@@ -189,6 +189,15 @@ describe('scripts/upgrade.sh on a bundle install', () => {
       expect(r.stdout).not.toContain('No bundle');
       expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
     });
+    it('a bundle download timeout leaves the installed release and registry intact (HB-0623)', () => {
+      const w = world();
+      const r = upgrade(w, 'stable', shimmed(w, 'curl', 'case " $* " in *" --connect-timeout 10 --max-time 900 --retry-max-time 900 "*) exit 28 ;; esac; exit 99'), { HATCHABOT_UPGRADE_BY_TIMER: '1', HATCHABOT_UPGRADE_TARGET: 'v2.0.1' });
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stdout).toMatch(/Timed out downloading.*v2\.0\.1.*nothing was changed/);
+      expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+      expect(read(join(w.install, 'data', 'hatchabot.sqlite'))).toBe('not really a database');
+      expect(readdirSync(join(w.root, 'srv')).some((f) => f.startsWith('.hatchabot-next-'))).toBe(false);
+    });
     it('tar out of space: the same, with what tar said', () => {
       const w = world();
       publish(w.base, 'v2.0.1');

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -52,6 +52,38 @@ const KEYS = ['HATCHABOT_ENV_FILE', 'HATCHABOT_AGENT_MEMORY'];
 afterEach(() => { for (const k of KEYS) delete process.env[k]; });
 
 describe('docs syncs run with the agent held (HB-0230)', () => {
+  it('a snapshot waits until a memory-budget commit finishes (HB-0631)', async () => {
+    const w = await makeWorld(), id = await seedRunningAgent(w);
+    let text = '# Playbook\n\n## Memory budget\n- Your container has **8 GB** of memory in total.\n';
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((r) => { enter = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const shell = w.provider.execShell.bind(w.provider);
+    let snapshotReads = 0;
+    w.provider.execShell = async (ref, script, opts) => {
+      if (BUDGET_READ.test(script)) return { code: 0, stdout: Buffer.from(text).toString('base64'), stderr: '' };
+      if (script.includes('AGENTS.md.tmp-') && script.includes('mv -f')) {
+        enter(); await gate;
+        text = Buffer.from(/echo "([A-Za-z0-9+/=]+)"/.exec(script)![1]!, 'base64').toString();
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (script.startsWith('head ')) { snapshotReads++; return { code: 0, stdout: script.includes('/AGENTS.md') ? text : 'Other file', stderr: '' }; }
+      return shell(ref, script, opts);
+    };
+    expect((await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { memoryCap: '4g' } })).statusCode).toBe(200);
+    await entered;
+    const looked = vi.spyOn(w.store, 'getAgent');
+    const snapping = Promise.resolve(w.f.inject({ method: 'POST', url: `/v1/agents/${id}/snapshots`, headers: as(), payload: { label: 'After budget' } }));
+    await vi.waitFor(() => expect(looked).toHaveBeenCalledWith(id));
+    const readsWhileCommitting = snapshotReads;
+    release();
+    const result = await snapping;
+    expect(result.statusCode, result.body).toBe(201);
+    expect(readsWhileCommitting).toBe(0);
+    expect(w.store.getSnapshot(id, result.json().id)?.files['AGENTS.md']).toContain('**4 GB**');
+    await w.f.close();
+  });
+
   it('a new memory cap: not held, and a save made meanwhile is kept, with the new budget', async () => {
     // Its sync is the budget sync (tellMemoryBudget): held busy, it refused
     // a Rebuild and made a model change wait. It replaces AGENTS.md only if

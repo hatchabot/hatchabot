@@ -113,6 +113,18 @@ async function gateway(opts?: FakeOpts) {
 }
 
 describe('the web chat client (inside the container)', () => {
+  it('uses the supplied message id for retries, scoped to the person\'s session (HB-0643)', async () => {
+    const g = await gateway();
+    const messageId = '11223344-5566-4777-8888-99aabbccddee';
+    for (const sessionKey of ['web:00000000000000aa', 'web:00000000000000aa', 'web:00000000000000bb']) {
+      expect((await runClient(g.port, { messageId, sessionKey })).code).toBe(0);
+    }
+    const keys = g.frames.filter((f) => f.method === 'agent').map((f) => f.params.idempotencyKey);
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[2]).not.toBe(keys[0]);
+    expect(keys[0]).toContain(messageId);
+  });
+
   it("a guest's turn: a backend client on loopback with the gateway's own token, read + write only, into their web session", async () => {
     const g = await gateway();
     const out = await runClient(g.port, {});

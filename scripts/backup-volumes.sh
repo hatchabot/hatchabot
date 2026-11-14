@@ -229,13 +229,21 @@ fi
 # a fingerprint of the key (each install has its own, for good; never the key
 # itself), and a set of another install's is left as it is: this run stops
 # before it writes anything, and retention below passes over such sets. A run
-# with no key has no fingerprint and goes on as before: the key step below
-# fails it, and the day's set says incomplete. key_owner and set_owner
+# with no key has no fingerprint: it leaves an already identified set alone;
+# for a new set the key step below fails it, and that set says incomplete.
+# key_owner and set_owner
 # (scripts/backup-owner.sh, read above) make and read the fingerprint: of the
 # key in the environment, which has .env's (above), as the app reads it.
 owner="$(key_owner)"
 OWNER_FILE=".backup-owner"
-dest_owner="$(cat "$DEST/$OWNER_FILE" 2>/dev/null || true)"
+# The same rule as retention and restore: an older set has no owner file,
+# but its saved key still identifies it. Otherwise a second install could
+# replace today's legacy registry and key while keeping the first's archives.
+dest_owner="$(set_owner "$DEST")"
+if [ -z "$owner" ] && [ -n "$dest_owner" ]; then
+  echo "✗ No usable HATCHABOT_SECRET_KEY — this run cannot identify this install, so it leaves the existing backup set $DEST unchanged. Restore the install's key before trying again." >&2
+  exit 1
+fi
 if [ -n "$owner" ] && [ -n "$dest_owner" ] && [ "$dest_owner" != "$owner" ]; then
   echo "✗ $DEST is another Hatchabot install's backup set (two installs share $BASE) — this run stops and leaves it as it is. Give each install a HATCHABOT_BACKUP_DIR of its own." >&2
   exit 1

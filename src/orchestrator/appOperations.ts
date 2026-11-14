@@ -12,7 +12,7 @@
  */
 import type { AgentApp, Store } from '../store/store.js';
 import {
-  appJobs, appPaths, appTaskNames, clearStaging, currentSha, pointBack, releaseManifest, removeTasks, sq, stagingDir, syncTasks,
+  appJobs, appPaths, appTaskNames, clearStaging, currentSha, pointBack, releaseManifest, removeTasks, sq, stagingDir, syncTasks, taskTransitionPending,
   type AppManifest, type InstallDeps,
 } from './apps.js';
 import { handleFor, stepReached, type OpHandle, type Recovery } from './operations.js';
@@ -79,6 +79,9 @@ const TASKS_BACK: Recovery = { actions: [{ action: 'put-tasks-back', label: 'Put
 export async function putTasksBack(d: InstallDeps, m: AppManifest, off: readonly string[] = []): Promise<string | undefined> {
   let failed: string | undefined;
   try { await syncTasks(d, m, undefined, off); } catch (err) { failed = String((err as Error)?.message ?? err).slice(0, 200); }
+  try {
+    if (await taskTransitionPending(d, m.app)) return `an interrupted scheduled-task change still needs recovery${failed ? ` (${failed})` : ''}`;
+  } catch (err) { return `its scheduled-task transition could not be read (${String((err as Error)?.message ?? err).slice(0, 200)})`; }
   let jobs: Awaited<ReturnType<typeof appJobs>>;
   try { jobs = await appJobs(d, appTaskNames(m)); }
   catch (err) { return `the agent's task list could not be read (${String((err as Error)?.message ?? err).slice(0, 200)})`; }
@@ -98,6 +101,7 @@ export async function putTasksBack(d: InstallDeps, m: AppManifest, off: readonly
  * tasks a sync cut off part way may have left on.
  */
 async function tasksAre(d: InstallDeps, m: AppManifest, ...others: Array<AppManifest | undefined>): Promise<boolean> {
+  if (await taskTransitionPending(d, m.app)) return false;
   const have = (await appJobs(d, appTaskNames(m, ...others))).map((j) => j.name).sort();
   const want = m.tasks.map((t) => `${m.app}-${t.name}`).sort();
   return have.length === want.length && have.every((n, i) => n === want[i]);

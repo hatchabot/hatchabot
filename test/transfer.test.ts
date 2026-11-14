@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -755,6 +755,58 @@ describe('HB-0237: an imported repo source keeps a name the sync script can hold
     const a = await importAgent({ ...dst.deps, log: (e: string) => { events.push(e); } }, gzipSync(Buffer.from(JSON.stringify(manifest))), { ownerId: 'importer' });
     expect(dst.store.listDataSources(a.id).map((d) => d.mountName)).toEqual(['recipes']);
     expect(events).toContain('import.repos_refused');
+  });
+});
+
+describe('imported data-source destinations stay out of runtime paths (HB-0707)', () => {
+  it('skips a file declared as a folder and a host-path mount that would cover container scratch space', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-transfer-folder-kind-'));
+    try {
+      const file = join(dir, 'notes.md');
+      writeFileSync(file, '# fixture');
+      const src = await installation();
+      await seedSourceAgent(src);
+      const { data } = await exportAgent(src.deps, 'a1');
+      const manifest = JSON.parse(gunzipSync(data).toString('utf8'));
+      manifest.agent.dataSources = [
+        { kind: 'folder', access: 'rw', mountName: 'notes', hostPath: file },
+        { kind: 'folder', access: 'ro', mountName: 'scratch', hostPath: tmpdir(), mountAtHostPath: true },
+        { kind: 'folder', access: 'ro', mountName: 'good', hostPath: dir },
+      ];
+      const dst = await installation('importer');
+      const a = await importAgent(dst.deps, gzipSync(Buffer.from(JSON.stringify(manifest))), { ownerId: 'importer' });
+      expect(dst.store.listDataSources(a.id).map((d) => d.mountName)).toEqual(['good']);
+      expect(dst.provider.lastSpec!.hostMounts).toEqual([{ source: dir, target: '/data/good', readonly: true }]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('skips traversing or Docker-separated folder names while retaining a normal folder', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-transfer-mount-'));
+    try {
+      const src = await installation();
+      await seedSourceAgent(src);
+      const { data } = await exportAgent(src.deps, 'a1');
+      const manifest = JSON.parse(gunzipSync(data).toString('utf8'));
+      manifest.agent.dataSources = ['../etc', '../../home/node', 'notes:rw', '.', '..', '/etc', 'notes\0bad', 'Team notes']
+        .map((mountName) => ({ kind: 'folder', access: 'rw', mountName, hostPath: dir }));
+      const dst = await installation('importer');
+      const a = await importAgent(dst.deps, gzipSync(Buffer.from(JSON.stringify(manifest))), { ownerId: 'importer' });
+      expect(dst.store.listDataSources(a.id).map((d) => d.mountName)).toEqual(['Team notes']);
+      expect(dst.provider.lastSpec!.hostMounts).toEqual([{ source: dir, target: '/data/Team notes', readonly: false }]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('skips git clone names reserved for runtime state before making source rows or deploy-key secrets', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const manifest = JSON.parse(gunzipSync(data).toString('utf8'));
+    manifest.agent.dataSources = ['agents', 'cron', 'credentials', 'notes']
+      .map((mountName) => ({ kind: 'git', access: 'ro', mountName, repoUrl: 'git@git.example.org:example-owner/notes.git', deployKey: 'made-up-deploy-key' }));
+    const dst = await installation('importer');
+    const a = await importAgent(dst.deps, gzipSync(Buffer.from(JSON.stringify(manifest))), { ownerId: 'importer' });
+    expect(dst.store.listDataSources(a.id).map((d) => d.mountName)).toEqual(['notes']);
+    expect([...dst.secrets.map.keys()].filter((k) => k.startsWith('data-source/'))).toHaveLength(1);
   });
 });
 

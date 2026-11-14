@@ -8,7 +8,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import {
-  BROWSER_CLOSE_SOURCE, BROWSER_LOGINS_RE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_PROFILE_WARN_BYTES, BROWSER_UID,
+  BROWSER_CLOSE_SOURCE, BROWSER_FENCE_VERSION, BROWSER_LOGINS_RE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_PROFILE_WARN_BYTES, BROWSER_UID,
   browserImage, browserLoginsVolume, browserSweep, newBrowserLogins,
 } from '../src/orchestrator/browser.js';
 import { browserSteerers, siteOf } from '../src/orchestrator/browserLogins.js';
@@ -55,7 +55,7 @@ describe('the container (docker argv)', () => {
    * `browser`: the running browser's labels, or none. `volume`: the label an
    * existing profile volume carries, or none (made new).
    */
-  function stub(o: { browser?: { with: string; logins: string; memory?: number }; volume?: string; prep?: string; closes?: boolean } = {}) {
+  function stub(o: { browser?: { with: string; logins: string; memory?: number; fence?: string }; volume?: string; prep?: string; closes?: boolean } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'hb-logins-'));
     const log = join(dir, 'argv.log');
     const bin = join(dir, 'docker');
@@ -65,7 +65,7 @@ cat > /dev/null &
 printf '%s\\n' "$*" >> ${JSON.stringify(log)}
 case "$*" in
   "inspect hatchabot-a1 --format "*) echo "true|2026-11-13T10:00:00Z" ;;
-  "inspect hatchabot-a1-browser --format "*browser-with*) ${b ? `echo "true|${b.with}|${browserImage().image}||${b.memory ?? 1024 ** 3}|${b.logins}"` : 'exit 1'} ;;
+  "inspect hatchabot-a1-browser --format "*browser-with*) ${b ? `echo "true|${b.with}|${browserImage().image}||${b.memory ?? 1024 ** 3}|${b.logins}|${b.fence ?? BROWSER_FENCE_VERSION}"` : 'exit 1'} ;;
   "inspect hatchabot-a1-browser --format "*) ${b ? `echo "true|${b.logins}"` : 'exit 1'} ;;
   "image inspect "*) echo sha256:x ;;
   "volume inspect "*) ${o.volume !== undefined ? `echo "${o.volume}"` : 'echo "Error: no such volume" >&2; exit 1'} ;;
@@ -137,6 +137,16 @@ exit 0
     expect(at('exec hatchabot-a1 node --input-type=module -e')).toBeGreaterThan(-1);
     expect(at('exec hatchabot-a1 node')).toBeLessThan(at('wait hatchabot-a1-browser'));
     expect(at('wait hatchabot-a1-browser')).toBeLessThan(at('rm -f hatchabot-a1-browser'));
+  });
+
+  it('updating the fence closes a kept browser before replacing it, preserving its profile', async () => {
+    const { p, argv, at } = stub({ browser: { with: '2026-11-13T10:00:00Z', logins: ID, fence: '' }, volume: ID });
+    expect(await p.ensureBrowser({ ...spec, logins: ID })).toBe('started');
+    expect(at('exec hatchabot-a1 node')).toBeGreaterThan(-1);
+    expect(at('exec hatchabot-a1 node')).toBeLessThan(at('rm -f hatchabot-a1-browser'));
+    const run = argv().find((line) => line.startsWith('run -d '))!;
+    expect(run).toContain(`-v ${VOL}:/profile`);
+    expect(run).toContain(`--label hatchabot.browser-fence=${BROWSER_FENCE_VERSION}`);
   });
 
   it('one on a profile forgotten, or switched off, is removed at once: nothing of it is wanted', async () => {

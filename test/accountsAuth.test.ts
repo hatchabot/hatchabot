@@ -44,6 +44,22 @@ describe('password hashing', () => {
 });
 
 describe('HATCHABOT_AUTH=accounts', () => {
+  it('an email-shaped username is not reported as a verified email (HB-0665)', async () => {
+    const db = new Database(':memory:');
+    const store = new Store(db);
+    const pw = await hashPassword('made-up-password');
+    store.insertLocalAccount({ id: 'acct-example', username: 'recipient@example.com', pwHash: pw.hash, pwSalt: pw.salt,
+      hostOwner: true, disabled: false, createdAt: 'now' });
+    const seen: unknown[] = [];
+    const f = Fastify();
+    try {
+      await registerAuth(f, { secret: SECRET, mode: 'accounts', store, onAuthenticated: (principal) => seen.push(principal) });
+      expect((await signIn(f, 'recipient@example.com', 'made-up-password')).statusCode).toBe(200);
+      expect(seen).toContainEqual({ ownerId: 'acct-example', via: 'password' });
+      expect(seen.some((p: any) => p.email)).toBe(false);
+    } finally { await f.close(); db.close(); }
+  });
+
   it('is a recognised mode', () => {
     expect(authModeFromEnv({ HATCHABOT_AUTH: 'accounts' } as NodeJS.ProcessEnv)).toBe('accounts');
     expect(() => authModeFromEnv({ HATCHABOT_AUTH: 'acounts' } as NodeJS.ProcessEnv)).toThrow();

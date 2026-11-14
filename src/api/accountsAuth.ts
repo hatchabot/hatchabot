@@ -470,7 +470,7 @@ export function registerAccountRoutes(
     }
     release();
     setSessionCookie(reply, req, mintSession(secret, account.id, account.pwHash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
-    deps.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
+    deps.onAuthenticated?.({ ownerId: account.id, via: 'password' });
     return { ok: true, id: account.id, username: account.username, hostOwner: account.hostOwner };
   });
 
@@ -564,7 +564,7 @@ export function registerAccountRoutes(
     app.log.warn({ account: account.id }, 'account.recovered_with_code');
     // The new hash signs out every other session; this browser gets a fresh one.
     setSessionCookie(reply, req, mintSession(secret, account.id, pw.hash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
-    deps.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
+    deps.onAuthenticated?.({ ownerId: account.id, via: 'password' });
     return { ok: true, username: account.username, recoveryCode, ownerId: account.id };
   });
 

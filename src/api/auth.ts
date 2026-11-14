@@ -18,26 +18,14 @@ import {
   IdentityError,
   IdentityUnavailableError,
   IdentityVerifier,
-  principalFor,
+  admittedPrincipal,
+  allowedEmailProblem,
 } from './identity.js';
 import { routedPath } from './routedPath.js';
 import { dockerDesktop } from '../ops/opsServer.js';
 
 /** The agent-to-agent consult (its caller's token is checked in the handler): only when the router matched that very route. */
 const isAgentMessageRoute = (req: FastifyRequest): boolean => req.method === 'POST' && req.routeOptions?.url === '/v1/agents/:id/message';
-
-/**
- * Optional allowlist for identity mode: HATCHABOT_ALLOWED_EMAILS="a@example.com, b@example.org".
- * Unset = anyone the identity provider accepts may sign in (the household
- * default). Set = only these addresses become tenants; everyone else is 403.
- */
-function allowedEmailProblem(email: string | undefined): string | undefined {
-  const raw = process.env.HATCHABOT_ALLOWED_EMAILS?.trim();
-  if (!raw) return undefined;
-  const allowed = new Set(raw.split(/[\s,]+/).filter(Boolean).map((e) => e.toLowerCase()));
-  if (email && allowed.has(email.toLowerCase())) return undefined;
-  return 'This installation only admits listed accounts.';
-}
 
 /**
  * Per-client throttle for the credential endpoints: after LIMIT failures in
@@ -558,7 +546,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
   linkRoute(app, opts, (req, reply, who): LinkSignIn => {
     const account = 'owner' in who ? store.listLocalAccounts().find((a) => a.hostOwner) : store.localAccountByUsername(who.user);
     const r = signInLocalByLink(store, opts.secret, req, reply, account);
-    if (r.kind === 'session' && account) opts.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
+    if (r.kind === 'session' && account) opts.onAuthenticated?.({ ownerId: account.id, via: 'password' });
     return r;
   });
 
@@ -693,12 +681,10 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     try {
       const token = await verifier.verify(idToken);
-      // principalFor refuses an unverified email. It ran AFTER the cookie
+      // Admission refuses an unverified email. It ran AFTER the cookie
       // was set, so the 401 carried a working 14-day session and "verify
       // your email" gated nothing (review, 2026-09-29). Judge first, mint last.
-      const principal = principalFor(token);
-      const denied = allowedEmailProblem(token.email);
-      if (denied) return reply.code(403).send({ error: denied });
+      const principal = admittedPrincipal(token);
       // "Only invited people": at the public address a Google account this
       // installation has never met, and nobody invited, is a stranger. It
       // cannot become an account by signing in there (safeguard c).
@@ -714,6 +700,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     } catch (err) {
       // Could not check is not a guess: counted, an outage locked people out after it ended (HB-0424).
       if (err instanceof IdentityUnavailableError) return reply.code(503).header('retry-after', '60').send({ error: err.userMessage });
+      if (err instanceof IdentityError && err.statusCode === 403) return reply.code(403).send({ error: err.userMessage });
       noteFailure(req);
       if (err instanceof IdentityError) return reply.code(401).send({ error: err.userMessage });
       throw err;
@@ -814,14 +801,12 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (typeof authz === 'string' && authz.startsWith('Bearer ') && !CONSOLE_PATH.test(path) && !isPublic(req)) {
       try {
         const token = await verifier.verify(authz.slice(7));
-        const denied = allowedEmailProblem(token.email);
-        if (denied) return reply.code(403).send({ error: denied });
-        req.principal = principalFor(token);
+        req.principal = admittedPrincipal(token);
         opts.onAuthenticated?.(req.principal);
         return;
       } catch (err) {
         const msg = err instanceof IdentityError ? err.userMessage : 'auth required';
-        return reply.code(401).send({ error: msg });
+        return reply.code(err instanceof IdentityError ? err.statusCode : 401).send({ error: msg });
       }
     }
 
@@ -830,6 +815,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (session) {
       req.principal = { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub, email: session.email };
       upgradeSessionCookie(req, reply, sessionTtlMs() / 1000);
+      opts.onAuthenticated?.(req.principal);
       return;
     }
     // …or a local account's session, when those run alongside Google. The two
@@ -842,6 +828,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
         if (owner && !owner.disabled) {
           req.principal = { ownerId: id, via: 'password', subject: id };
           upgradeSessionCookie(req, reply, TTL_MS / 1000);
+          opts.onAuthenticated?.(req.principal);
           return;
         }
       }

@@ -9,6 +9,8 @@ import { VolumeGoneError } from '../providers/provider.js';
 import { openclawConfigPath } from './openclawImport.js';
 import { openclawConfigAgents, openclawUserPath } from '../openclaw/configWriter.js';
 import { RUNTIME_STATE_FILES } from './agentFiles.js';
+import { stopAndConfirm } from './quiesce.js';
+import { rethrowIfCrash } from './operations.js';
 
 /**
  * Adopt an OpenClaw agent that already exists on this machine — one you built
@@ -250,10 +252,14 @@ async function applyWorkspaceInner(
   // Stop first: OpenClaw reads these at turn time, and copying underneath a
   // live agent risks a half-written workspace being read mid-conversation.
   const wasRunning = agent.state === 'RUNNING';
-  if (wasRunning) {
-    await provider.stop(agent.runtimeRef);
-    store.setAgentState(agentId, 'STOPPED');
+  // A STOPPED record can lag the real runtime, and a resolved stop call is
+  // not proof it stopped. No file is replaced until the runtime confirms it.
+  try { await stopAndConfirm(provider, agent.runtimeRef); }
+  catch (err) {
+    rethrowIfCrash(err);
+    throw new AdoptError(`${(err as Error).message} Nothing was copied into the agent.`);
   }
+  if (wasRunning) store.setAgentState(agentId, 'STOPPED');
   try {
     await provider.importWorkspace(agent.runtimeRef, agent.slug, tar);
   } catch (err) {

@@ -169,11 +169,18 @@ export function uploadAllowed(relDir: string, slug: string, name?: string): bool
  * refuses a name that appeared while the bytes streamed; `mv -f` would
  * replace it (review 2026-10-22, A05/A06/A19).
  */
-export function putArgv(relDir: string, name: string, overwrite: boolean, slug: string): string[] {
+export function putArgv(relDir: string, name: string, overwrite: boolean, slug: string, core?: { tooLarge: boolean; invalidText: boolean }): string[] {
   const n = q(name);
   // The .openclaw rule again, on the RESOLVED directory: a symlink an agent
   // made (`~/inbox -> ~/.openclaw`) must not route an upload into its state.
   const ws = `${AGENT_HOME}/.openclaw/agents/${slug}/agent`;
+  // Report the resolved destination, including a workspace reached through
+  // a symlink. Only that destination updates the saved setup-file layer.
+  const isCore = name === 'SOUL.md' || name === 'AGENTS.md' || name === 'MEMORY.md';
+  const coreGuard = isCore && core
+    ? `if [ "$P" = ${q(ws)} ]; then ${core.tooLarge ? 'exit 7;' : ''} ${core.invalidText ? 'exit 8;' : ''} :; fi;`
+    : '';
+  const report = isCore ? `; if [ "$P" = ${q(ws)} ]; then printf 'hatchabot:core\\n'; fi` : '';
   // Under the name of its live state, not even the workspace: the resolved
   // directory decides, so `~/inbox -> the agent's folder` is caught too.
   const stateGuard = isRuntimeStateFile(name)
@@ -181,7 +188,7 @@ export function putArgv(relDir: string, name: string, overwrite: boolean, slug: 
     : `case "$P" in ${ws}|${ws}/*) ;; ${AGENT_HOME}/.openclaw|${AGENT_HOME}/.openclaw/*) exit 6;; esac;`;
   // A directory (or a link to one) under the target name is refused, not
   // written into.
-  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; ${stateGuard} T="$P"/${n}; if [ -d "$T" ]; then exit 4; fi; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; TMP="$P/.hatchabot-upload-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \\n').part"; trap 'rm -f "$TMP"' EXIT; trap 'exit 1' HUP INT TERM; set -C; cat > "$TMP" || exit 1; ${overwrite ? 'mv -fT "$TMP" "$T"' : 'ln -T "$TMP" "$T" 2>/dev/null || exit 5'}`];
+  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; ${stateGuard} ${coreGuard} T="$P"/${n}; if [ -d "$T" ]; then exit 4; fi; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; TMP="$P/.hatchabot-upload-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \\n').part"; trap 'rm -f "$TMP"' EXIT; trap 'exit 1' HUP INT TERM; set -C; cat > "$TMP" || exit 1; ${overwrite ? 'mv -fT "$TMP" "$T" || exit 1' : 'ln -T "$TMP" "$T" 2>/dev/null || exit 5'}${report}`];
 }
 
 /**

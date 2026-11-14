@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -13,7 +13,7 @@ import { clearBusy } from '../src/orchestrator/busy.js';
 import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
 import { resolvePendingValues, stashPendingSecrets } from '../src/orchestrator/appPending.js';
 import {
-  AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, parseManifest, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, type AgentFacts,
+  AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, parseManifest, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, taskTransitionPending, type AgentFacts,
 } from '../src/orchestrator/apps.js';
 
 /**
@@ -37,6 +37,10 @@ const MANIFEST = {
   ] },
 };
 const FACTS: AgentFacts = { slug: 'demo-agent', name: 'Demo', timezone: 'America/Toronto', telegramAccount: 'demobot', ownerTelegram: '100' };
+
+// repo() and FakeAgent run real Git and shell steps, often across several app
+// operations. Give their integration groups room for a loaded CI runner.
+const INTEGRATION_TIMEOUT = 30_000;
 
 const tmp: string[] = [];
 afterAll(() => { for (const d of tmp) rmSync(d, { recursive: true, force: true }); });
@@ -126,6 +130,11 @@ class FakeAgent extends MockProvider {
       this.jobs = this.jobs.filter((j) => j.id !== argv[2]);
       if (this.lostRm(argv[2]!)) return lost;
     }
+    if (argv[0] === 'cron' && (argv[1] === 'enable' || argv[1] === 'disable')) {
+      const job = this.jobs.find((j) => j.id === argv[2]);
+      if (!job) return { code: 1, stdout: '', stderr: 'job missing' };
+      job.disabled = argv[1] === 'disable';
+    }
     return { code: 0, stdout: '{}', stderr: '' };
   }
   override async execShell(ref: string, script: string): Promise<ExecResult> {
@@ -178,7 +187,7 @@ describe('the manifest', () => {
   });
 });
 
-describe('reading a repo on the host', () => {
+describe('reading a repo on the host', { timeout: INTEGRATION_TIMEOUT }, () => {
   it('resolves a ref to its commit, its manifest and its files', async () => {
     const dir = repo();
     const r = await resolveRelease(hostGit, await repoFor(hostGit, { kind: 'dir', path: dir }, '/nonexistent'), 'HEAD');
@@ -195,7 +204,7 @@ describe('reading a repo on the host', () => {
   });
 });
 
-describe('installing into an agent', () => {
+describe('installing into an agent', { timeout: INTEGRATION_TIMEOUT }, () => {
   const rel = async () => resolveRelease(hostGit, repo(), 'HEAD');
 
   it('unpacks, writes the config, tests, switches, and syncs only its own tasks', async () => {
@@ -269,7 +278,7 @@ describe('installing into an agent', () => {
  * A failed update changes nothing live (issues #4 and #5): the release, its
  * config (to the byte) and its tasks stay as they were, whichever step fails.
  */
-describe('a failed update leaves the running app as it was', () => {
+describe('a failed update leaves the running app as it was', { timeout: INTEGRATION_TIMEOUT }, () => {
   const TWO_TASKS = { ...MANIFEST, tasks: [
     { name: 'tick', every: '1m', command: ['python3', '-m', 'demo', 'tick'] },
     { name: 'digest', every: '1h', command: ['python3', '-m', 'demo', 'digest'] },
@@ -437,16 +446,253 @@ describe('a failed update leaves the running app as it was', () => {
     const again = await installed(changed);
     const tick = again.agent.jobs.find((j) => j.name === 'demoapp-tick')!;
     tick.disabled = true;
-    again.agent.lostRm = (id) => id === tick.id;
+    let restoring = false;
+    again.agent.lostRm = (id) => id === tick.id ? (restoring = true) : false;
     const exec = again.agent.exec.bind(again.agent);
-    again.agent.exec = (ref: string, argv: string[]) => exec(ref, argv.filter((a) => a !== '--disabled'));
+    again.agent.exec = (ref: string, argv: string[]) => exec(ref, restoring ? argv.filter((a) => a !== '--disabled') : argv);
     const err = await installRelease(again.d, v2, {}).catch((e: Error) => e);
     expect((err as Error).message).toMatch(/switched on, though you had turned it off: demoapp-tick/);
     expect((err as Error).message).not.toMatch(/as they were/);
   });
 });
 
-describe('the app routes', () => {
+describe('scheduled task transitions never enable both generations (HB-0691)', { timeout: INTEGRATION_TIMEOUT }, () => {
+  const original = parseManifest(JSON.stringify({ ...MANIFEST, tasks: [
+    { name: 'tick', every: '1m', command: ['old-tick'] },
+    { name: 'digest', every: '1h', command: ['old-digest'] },
+  ] }));
+  const next = parseManifest(JSON.stringify({ ...MANIFEST, tasks: [
+    { name: 'tick', every: '5m', command: ['new-tick'] },
+    { name: 'digest', every: '2h', command: ['new-digest'] },
+  ] }));
+  async function fixture() {
+    const agent = new FakeAgent();
+    agent.jobs = [{ id: 'keep', name: 'daily-brief' }];
+    const d = { provider: agent, runtimeRef: 'x', facts: FACTS };
+    await syncTasks(d, original);
+    agent.jobs.find((j) => j.name === 'demoapp-digest')!.disabled = true;
+    const before = structuredClone(agent.jobs);
+    const file = join(agent.root('x'), 'demoapp/.tasks-transition.json');
+    const exec = agent.exec.bind(agent);
+    // Inspect the actual in-memory scheduler after every response, not just
+    // after sync returns: a brief overlap is the original bug.
+    agent.exec = async (ref, argv) => {
+      const result = await exec(ref, argv);
+      const enabled = agent.jobs.filter((j) => j.name.startsWith('demoapp-') && !j.disabled);
+      expect(enabled.filter((j) => j.argv?.includes('1m')).length > 0 && enabled.filter((j) => j.argv?.includes('5m')).length > 0).toBe(false);
+      expect(enabled.filter((j) => j.name === 'demoapp-tick').length).toBeLessThanOrEqual(1);
+      return result;
+    };
+    return { agent, d, before, file };
+  }
+  const states = (agent: FakeAgent) => agent.jobs.filter((j) => j.name.startsWith('demoapp-'))
+    .map((j) => ({ name: j.name, off: !!j.disabled, every: j.argv?.[j.argv.indexOf('--every') + 1] })).sort((a, b) => a.name.localeCompare(b.name));
+  const oldStates = [{ name: 'demoapp-digest', off: true, every: '1h' }, { name: 'demoapp-tick', off: false, every: '1m' }];
+  const newStates = [{ name: 'demoapp-digest', off: true, every: '2h' }, { name: 'demoapp-tick', off: false, every: '5m' }];
+
+  it('checks no overlap throughout a successful update, retaining the owner-disabled task', async () => {
+    const { agent, d, file } = await fixture();
+    await syncTasks(d, next, original);
+    expect(states(agent)).toEqual(newStates);
+    expect(existsSync(file)).toBe(false);
+    expect(agent.jobs.find((j) => j.id === 'keep')).toEqual({ id: 'keep', name: 'daily-brief' });
+  });
+
+  it('permanent add refusal preserves the original job ids and enabled states', async () => {
+    const { agent, d, before, file } = await fixture();
+    agent.failAdd = () => true;
+    await expect(syncTasks(d, next, original)).rejects.toThrow(/Its tasks are as they were/);
+    expect(agent.jobs).toEqual(before);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('a failed retry after a completed switch restores the actual newer definitions despite a stale app record (HB-0701)', async () => {
+    const { agent, d, file } = await fixture();
+    await syncTasks(d, next, original);
+    // The scheduler finished, but the process died before the app DB advanced.
+    // Recovery still supplies the old manifest. A lost removal reply then
+    // requires reconstructing an already-new task, not the DB's old command.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const tick = agent.jobs.find((j) => j.name === 'demoapp-tick')!;
+      agent.lostRm = (id) => id === tick.id;
+      await expect(syncTasks(d, next, original)).rejects.toThrow(/Its tasks are as they were/);
+      expect(states(agent)).toEqual(newStates);
+      expect(agent.jobs.find((j) => j.name === 'demoapp-tick')!.argv).toContain(JSON.stringify(['new-tick']));
+      const provenance = join(agent.root('x'), 'demoapp/.tasks-settled.json');
+      expect(statSync(provenance).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(readFileSync(provenance, 'utf8')).jobs.map((j: { id: string }) => j.id).sort())
+        .toEqual(agent.jobs.filter((j) => j.name.startsWith('demoapp-')).map((j) => j.id).sort());
+      expect(existsSync(file)).toBe(false);
+    }
+  });
+
+  it('settled provenance does not acquire an unrelated job with a reused historical name', async () => {
+    const { agent, d } = await fixture();
+    const renamed = parseManifest(JSON.stringify({ ...next, tasks: [{ name: 'tock', every: '5m', command: ['new-tock'] }] }));
+    await syncTasks(d, renamed, original);
+    agent.jobs = [{ id: 'personal', name: 'demoapp-tock', argv: ['personal-command'] }];
+    await syncTasks(d, original, original);
+    expect(agent.jobs.find((j) => j.id === 'personal')).toEqual({ id: 'personal', name: 'demoapp-tock', argv: ['personal-command'] });
+    await removeTasks(d, 'demoapp', original);
+    expect(agent.jobs).toEqual([{ id: 'personal', name: 'demoapp-tock', argv: ['personal-command'] }]);
+    expect(existsSync(join(agent.root('x'), 'demoapp/.tasks-settled.json'))).toBe(false);
+  });
+
+  it('an unreadable settled provenance file blocks a new transition before mutation', async () => {
+    const { agent, d, before } = await fixture();
+    writeFileSync(join(agent.root('x'), 'demoapp/.tasks-settled.json'), '');
+    await expect(syncTasks(d, next, original)).rejects.toThrow(/provenance is unreadable/);
+    expect(agent.jobs).toEqual(before);
+  });
+
+  it('refused provenance writes keep the journal until restored definitions can be recorded', async () => {
+    const { agent, d, file } = await fixture();
+    const write = agent.writeToVolume.bind(agent);
+    agent.writeToVolume = async (ref, argv, input) => argv.join(' ').includes('.tasks-settled.json')
+      ? { code: 1, stdout: '', stderr: 'fixture provenance write refused' } : write(ref, argv, input);
+    await expect(syncTasks(d, next, original)).rejects.toMatchObject({ tasksUnconfirmed: true });
+    expect(states(agent)).toEqual(oldStates);
+    expect(existsSync(file)).toBe(true);
+    agent.writeToVolume = write;
+    await syncTasks(d, next, original);
+    expect(states(agent)).toEqual(newStates);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('a crash after settled provenance is written still uses the unfinished journal to recover owner intent', async () => {
+    const { agent, d, file } = await fixture();
+    const write = agent.writeToVolume.bind(agent);
+    agent.writeToVolume = async (ref, argv, input) => {
+      const result = await write(ref, argv, input);
+      if (argv.join(' ').includes('.tasks-settled.json')) throw new SimulatedCrash();
+      return result;
+    };
+    await expect(syncTasks(d, next, original)).rejects.toBeInstanceOf(SimulatedCrash);
+    expect(states(agent)).toEqual(newStates);
+    expect(existsSync(file)).toBe(true);
+    agent.writeToVolume = write;
+    await syncTasks(d, next, original);
+    expect(states(agent)).toEqual(newStates);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('a journal write failure changes no scheduler jobs', async () => {
+    const { agent, d, before } = await fixture();
+    const start = agent.calls.length;
+    agent.writeToVolume = async () => ({ code: 1, stdout: '', stderr: 'fixture disk full' });
+    await expect(syncTasks(d, next, original)).rejects.toThrow(/Could not record/);
+    expect(agent.jobs).toEqual(before);
+    expect(agent.calls.slice(start).filter((c) => c.kind === 'exec').map((c) => JSON.parse(c.what)[1])).toEqual(['list']);
+  });
+
+  for (const content of ['', '{broken', JSON.stringify({ version: 1, old: [], next: { ...next, app: 'anotherapp' } })]) {
+    it(`refuses an unreadable existing journal (${JSON.stringify(content).slice(0, 30)}) without changing jobs`, async () => {
+      const { agent, d, before, file } = await fixture();
+      writeFileSync(file, content);
+      await expect(syncTasks(d, next, original)).rejects.toThrow(/transition is unreadable/);
+      expect(agent.jobs).toEqual(before);
+      expect(readFileSync(file, 'utf8')).toBe(content);
+    });
+  }
+
+  it('an enabled replacement that cannot be disabled holds the originals off and retains recovery intent', async () => {
+    const { agent, d, before, file } = await fixture();
+    const oldIds = new Set(before.map((j) => j.id));
+    const exec = agent.exec.bind(agent);
+    agent.exec = async (ref, argv) => {
+      if (argv[1] === 'disable' && !oldIds.has(argv[2]!)) return { code: 1, stdout: '', stderr: 'fixture disable refused' };
+      const result = await exec(ref, argv);
+      return argv[1] === 'enable' ? { code: 1, stdout: '', stderr: 'fixture enable reply lost' } : result;
+    };
+    await expect(syncTasks(d, next, original)).rejects.toMatchObject({ tasksUnconfirmed: true });
+    expect(existsSync(file)).toBe(true);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(agent.jobs.filter((j) => oldIds.has(j.id) && j.name.startsWith('demoapp-')).every((j) => j.disabled)).toBe(true);
+    expect(JSON.parse(readFileSync(file, 'utf8')).old.find((j: { name: string }) => j.name === 'demoapp-tick').enabled).toBe(true);
+    agent.exec = exec;
+    await syncTasks(d, next, original);
+    expect(states(agent)).toEqual(newStates);
+    expect(await taskTransitionPending(d, 'demoapp')).toBe(false);
+  });
+
+  it('recovers after a crash while rollback has re-added an original with a new id', async () => {
+    const { agent, d, before, file } = await fixture();
+    const oldTick = before.find((j) => j.name === 'demoapp-tick')!.id;
+    const oldDigest = before.find((j) => j.name === 'demoapp-digest')!.id;
+    agent.failRm = (id) => id === oldDigest;
+    const exec = agent.exec.bind(agent);
+    agent.exec = async (ref, argv) => {
+      const result = await exec(ref, argv);
+      if (argv[1] === 'add' && argv.includes('1m')) throw new SimulatedCrash();
+      return result;
+    };
+    await expect(syncTasks(d, next, original)).rejects.toBeInstanceOf(SimulatedCrash);
+    expect(states(agent)).toEqual(oldStates);
+    expect(agent.jobs.find((j) => j.name === 'demoapp-tick')!.id).not.toBe(oldTick);
+    expect(existsSync(file)).toBe(true);
+    agent.exec = exec; agent.failRm = () => false;
+    await syncTasks(d, next, original);
+    expect(states(agent)).toEqual(newStates);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('a lost journal deletion reply is reconciled without rolling a successful switch back', async () => {
+    const { agent, d, file } = await fixture();
+    const sh = agent.execShell.bind(agent);
+    let removed = false;
+    agent.execShell = async (ref, script) => {
+      const result = await sh(ref, script);
+      if (script.startsWith('rm -f ') && script.includes('.tasks-transition.json')) {
+        removed = true;
+        return { code: 1, stdout: '', stderr: 'fixture deletion reply lost' };
+      }
+      return result;
+    };
+    await syncTasks(d, next, original);
+    expect(removed).toBe(true);
+    expect(states(agent)).toEqual(newStates);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('an ambiguous journal deletion followed by a failed journal rewrite never starts a rollback', async () => {
+    const { agent, d, file } = await fixture();
+    const sh = agent.execShell.bind(agent), write = agent.writeToVolume.bind(agent);
+    let removed = false;
+    agent.execShell = async (ref, script) => {
+      if (removed && script.includes("printf 'present")) return { code: 1, stdout: '', stderr: 'fixture read unavailable' };
+      const result = await sh(ref, script);
+      if (script.startsWith('rm -f ') && script.includes('.tasks-transition.json')) {
+        removed = true;
+        return { code: 1, stdout: '', stderr: 'fixture deletion reply lost' };
+      }
+      return result;
+    };
+    agent.writeToVolume = async (ref, argv, input) => removed ? { code: 1, stdout: '', stderr: 'fixture write unavailable' } : write(ref, argv, input);
+    await expect(syncTasks(d, next, original)).rejects.toMatchObject({ tasksUnconfirmed: true });
+    expect(states(agent)).toEqual(newStates);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('Stop removes renamed staged tasks from the journal without enabling originals', async () => {
+    const { agent, d, file } = await fixture();
+    const renamed = parseManifest(JSON.stringify({ ...next, tasks: [{ name: 'tock', every: '5m', command: ['new-tock'] }] }));
+    const exec = agent.exec.bind(agent);
+    agent.exec = async (ref, argv) => {
+      const result = await exec(ref, argv);
+      if (argv[1] === 'disable') throw new SimulatedCrash();
+      return result;
+    };
+    await expect(syncTasks(d, renamed, original)).rejects.toBeInstanceOf(SimulatedCrash);
+    agent.exec = exec;
+    const start = agent.calls.length;
+    await removeTasks(d, 'demoapp', original);
+    expect(agent.jobs).toEqual([{ id: 'keep', name: 'daily-brief' }]);
+    expect(agent.calls.slice(start).some((c) => c.what.startsWith('["cron","enable"'))).toBe(false);
+    expect(existsSync(file)).toBe(false);
+  });
+});
+
+describe('the app routes', { timeout: INTEGRATION_TIMEOUT }, () => {
   const OWNER = 'owner-1';
   async function app(appGit?: typeof hostGit, secrets: { put(r: string, v: string): Promise<void>; get(r: string): Promise<string>; delete(r: string): Promise<void> } = { put: async () => {}, get: async () => 'x', delete: async () => {} }) {
     const store = new Store(new Database(':memory:'));
@@ -791,7 +1037,7 @@ describe('the app routes', () => {
     // Confirmed once, it stays allowed: a later update with nothing new about the mailbox is not refused.
     commit(dir);
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a2/app/update', headers: as, payload: {} })).statusCode).toBe(200);
-  }, 30_000);
+  });
 
   it('two installs of one app on one account at the same time: one goes in, the other is refused (2026-10-10)', async () => {
     const { f, store, provider } = await app();
@@ -882,7 +1128,7 @@ describe('the app routes', () => {
 });
 
 // ---- durable operations (appOperations.ts): an install, update or roll back cut off by a restart ----
-describe('an app change cut off by a restart (kill at every step)', () => {
+describe('an app change cut off by a restart (kill at every step)', { timeout: INTEGRATION_TIMEOUT }, () => {
   const OWNER = 'owner-1';
   const hdr = { 'x-hatchabot-owner': OWNER };
   afterEach(() => setStepHookForTests(undefined));
@@ -914,6 +1160,100 @@ describe('an app change cut off by a restart (kill at every step)', () => {
   }
   const opOf = (store: Store) => store.listOperations(['a1'])[0]!;
   const SECOND = { ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] };
+
+  for (const boundary of ['add', 'disable', 'enable', 'rm']) {
+    for (const action of ['go-back', 'use-new']) {
+      it(`scheduler crash after ${boundary}, then ${action}: durable intent preserves enabled states (HB-0691)`, async () => {
+        const w = await world();
+        const firstManifest = { ...MANIFEST, tasks: [MANIFEST.tasks[0]!, { name: 'digest', every: '1h', command: ['digest'] }] };
+        commit(w.dir, firstManifest);
+        expect((await w.install()).statusCode).toBe(200);
+        const first = w.agrees()!;
+        w.provider.jobs.find((j) => j.name === 'demoapp-digest')!.disabled = true;
+        commit(w.dir, { ...firstManifest, tasks: firstManifest.tasks.map((t) => ({ ...t, every: t.name === 'tick' ? '5m' : '2h' })) });
+        const exec = w.provider.exec.bind(w.provider);
+        let crashed = false;
+        w.provider.exec = async (ref, argv) => {
+          const result = await exec(ref, argv);
+          if (!crashed && argv[0] === 'cron' && argv[1] === boundary) { crashed = true; throw new SimulatedCrash(); }
+          return result;
+        };
+        const cut = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} });
+        expect(cut.statusCode).toBeGreaterThanOrEqual(500);
+        expect(crashed).toBe(true);
+        const journal = join(w.provider.root('mock://a1'), 'demoapp/.tasks-transition.json');
+        expect(existsSync(journal)).toBe(true);
+        w.provider.exec = exec;
+        reboot();
+        await w.routes.resumeOperations();
+        const op = opOf(w.store);
+        expect(op.status).toBe('held');
+        const recovered = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action } });
+        expect(recovered.statusCode, recovered.body).toBe(200);
+        expect(w.agrees()!.sha === first.sha).toBe(action === 'go-back');
+        expect(w.provider.every('demoapp-tick')).toEqual([action === 'go-back' ? '1m' : '5m']);
+        expect(w.provider.every('demoapp-digest')).toEqual([action === 'go-back' ? '1h' : '2h']);
+        expect(w.provider.jobs.find((j) => j.name === 'demoapp-tick')!.disabled).toBe(false);
+        expect(w.provider.jobs.find((j) => j.name === 'demoapp-digest')!.disabled).toBe(true);
+        expect(existsSync(journal)).toBe(false);
+      });
+    }
+  }
+
+  it('an unreadable task journal on boot leaves the operation held with its recovery staging', async () => {
+    const w = await world();
+    expect((await w.install()).statusCode).toBe(200);
+    commit(w.dir, SECOND);
+    const exec = w.provider.exec.bind(w.provider);
+    w.provider.exec = async (ref, argv) => {
+      const result = await exec(ref, argv);
+      if (argv[1] === 'add') throw new SimulatedCrash();
+      return result;
+    };
+    await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} });
+    w.provider.exec = exec;
+    const journal = join(w.provider.root('mock://a1'), 'demoapp/.tasks-transition.json');
+    const saved = readFileSync(journal, 'utf8');
+    writeFileSync(journal, '');
+    reboot();
+    await w.routes.resumeOperations();
+    expect(opOf(w.store).status).toBe('held');
+    expect(w.provider.live('mock://a1').staging).toBe(true);
+    expect(readFileSync(journal, 'utf8')).toBe('');
+    writeFileSync(journal, saved);
+    const retried = await w.f.inject({ method: 'POST', url: `/v1/operations/${opOf(w.store).id}/recover`, headers: hdr, payload: { action: 'retry' } });
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(opOf(w.store).status).toBe('held');
+    const recovered = await w.f.inject({ method: 'POST', url: `/v1/operations/${opOf(w.store).id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+    expect(recovered.statusCode, recovered.body).toBe(200);
+    w.agrees();
+  });
+
+  it('a failed recovery after tasks committed but before the app record advanced restores the newer commands (HB-0701)', async () => {
+    const w = await world();
+    expect((await w.install()).statusCode).toBe(200);
+    const first = w.agrees()!;
+    commit(w.dir, { ...SECOND, tasks: [{ ...SECOND.tasks[0]!, command: ['python3', '-m', 'demo', 'new-tick'] }] });
+    crashAt('tasks');
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: hdr, payload: {} })).statusCode).toBeGreaterThanOrEqual(500);
+    expect(w.store.getAgentApp('a1')!.sha).toBe(first.sha);
+    expect(w.provider.every('demoapp-tick')).toEqual(['5m']);
+    reboot();
+    await w.routes.resumeOperations();
+    const op = opOf(w.store);
+    expect(op.status).toBe('held');
+    const nextTick = w.provider.jobs.find((j) => j.name === 'demoapp-tick')!.id;
+    w.provider.lostRm = (id) => id === nextTick;
+    const failed = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'use-new' } });
+    expect(failed.statusCode, failed.body).toBe(409);
+    expect(w.store.getAgentApp('a1')!.sha).toBe(first.sha);
+    expect(w.provider.every('demoapp-tick')).toEqual(['5m']);
+    expect(w.provider.jobs.find((j) => j.name === 'demoapp-tick')!.argv).toContain(JSON.stringify(['python3', '-m', 'demo', 'new-tick']));
+    w.provider.lostRm = () => false;
+    const recovered = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'use-new' } });
+    expect(recovered.statusCode, recovered.body).toBe(200);
+    expect(w.agrees()!.sha).not.toBe(first.sha);
+  });
 
   for (const key of ['unpacked', 'configured', 'tested', 'switching', 'switched', 'tasks', '#succeeded']) {
     const before = ['unpacked', 'configured', 'tested', 'switching'].includes(key);
@@ -1265,7 +1605,7 @@ describe('an app change cut off by a restart (kill at every step)', () => {
 });
 
 // ---- the Apps in agents audit of 2026-10-27: waiting installs, replacement and roll back ----
-describe('apps: what the 2026-10-27 audit found (waiting installs, replacing, rolling back)', () => {
+describe('apps: what the 2026-10-27 audit found (waiting installs, replacing, rolling back)', { timeout: INTEGRATION_TIMEOUT }, () => {
   const OWNER = 'owner-1';
   const hdr = { 'x-hatchabot-owner': OWNER };
   afterEach(() => { setStepHookForTests(undefined); clearBusy('a1'); });
@@ -1490,7 +1830,7 @@ describe('apps: what the 2026-10-27 audit found (waiting installs, replacing, ro
 });
 
 // ---- the workflow audit of 2026-10-10 (issues #73–#121) ----
-describe('apps: what the 2026-10-10 workflow audit found', () => {
+describe('apps: what the 2026-10-10 workflow audit found', { timeout: INTEGRATION_TIMEOUT }, () => {
   const d = (agent: FakeAgent) => ({ provider: agent, runtimeRef: 'x', facts: FACTS });
 
   it('a manifest names each task and each config key once (#75 #104)', () => {
@@ -1627,7 +1967,7 @@ describe('apps: what the 2026-10-10 workflow audit found', () => {
   });
 });
 
-describe('apps: what the 2026-10-23 review found', () => {
+describe('apps: what the 2026-10-23 review found', { timeout: INTEGRATION_TIMEOUT }, () => {
   const d = (agent: FakeAgent) => ({ provider: agent, runtimeRef: 'x', facts: FACTS });
   const withFields = (fields: unknown[]) => parseManifest(JSON.stringify({ ...MANIFEST, config: { fields } }));
 
@@ -1666,7 +2006,7 @@ describe('apps: what the 2026-10-23 review found', () => {
   });
 });
 
-describe('apps: what the 2026-10-22 review found', () => {
+describe('apps: what the 2026-10-22 review found', { timeout: INTEGRATION_TIMEOUT }, () => {
   const d = (agent: FakeAgent) => ({ provider: agent, runtimeRef: 'x', facts: FACTS });
   const withFields = (fields: unknown[]) => parseManifest(JSON.stringify({ ...MANIFEST, config: { fields } }));
 
@@ -1801,9 +2141,12 @@ describe('apps: what the 2026-10-29 audit found', () => {
     ];
     let n = 0;
     const provider = {
+      execShell: async () => ({ code: 0, stdout: '', stderr: '' }),
+      writeToVolume: async () => ({ code: 0, stdout: '', stderr: '' }),
       exec: async (_ref: string, argv: string[]): Promise<ExecResult> => {
         if (argv[1] === 'list') return { code: 0, stdout: JSON.stringify({ jobs }), stderr: '' };
-        if (argv[1] === 'add') { const id = `app-${++n}`; jobs.push({ id, name: argv[argv.indexOf('--name') + 1], enabled: true, payload: { kind: 'command' } }); return { code: 0, stdout: JSON.stringify({ id }), stderr: '' }; }
+        if (argv[1] === 'add') { const id = `app-${++n}`; jobs.push({ id, name: argv[argv.indexOf('--name') + 1], enabled: !argv.includes('--disabled'), payload: { kind: 'command' } }); return { code: 0, stdout: JSON.stringify({ id }), stderr: '' }; }
+        if (argv[1] === 'enable' || argv[1] === 'disable') jobs.find((j) => j.id === argv[2])!.enabled = argv[1] === 'enable';
         if (argv[1] === 'rm') jobs.splice(jobs.findIndex((j) => j.id === argv[2]), 1);
         return { code: 0, stdout: '', stderr: '' };
       },

@@ -48,14 +48,17 @@ export function webChatStoreKey(slug: string, userId: string): string {
 }
 
 /** What the agent is told about who writes: a short first line, stripped again in the history. */
-export function webChatPrefix(displayName: string): string {
+export const WEB_CHAT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export function webChatPrefix(displayName: string, messageId?: string): string {
   // Brackets and line breaks would let a chosen name close the marker early
   // and pass what follows as something else.
   const name = displayName.replace(/[[\]\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 48) || 'Someone';
-  return `[${name} via the web app]`;
+  if (messageId !== undefined && !WEB_CHAT_MESSAGE_ID.test(messageId)) throw new Error('invalid web chat message id');
+  return `[${name} via the web app${messageId ? `; message ${messageId}` : ''}]`;
 }
 
-const PREFIX_RE = /^\s*\[[^\]\n]{1,60} via the web app\]\s*\n?/;
+const PREFIX_RE = /^\s*\[[^\]\n]{1,60} via the web app(?:; message ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))?\]\s*\n?/;
 export function stripWebChatPrefix(text: string): string {
   return text.replace(PREFIX_RE, '');
 }
@@ -92,7 +95,7 @@ export type WebChatTurnResult =
 
 /**
  * The in-container client (CommonJS, node 22+: global WebSocket). REQ is
- * base64 JSON { agentId, sessionKey, message, scopes, rights, timeoutMs }.
+ * base64 JSON { agentId, sessionKey, message, messageId?, scopes, rights, timeoutMs }.
  * Prints the reply on stdout; see TURN_EXIT for the rest. The gateway's
  * credential never leaves the container: it is read from the agent's own
  * openclaw.json, as the agent's own CLI reads it.
@@ -161,7 +164,7 @@ async function run() {
     res = await call("agent", {
       message: String(req.message || ""), agentId: req.agentId, sessionKey: req.sessionKey,
       deliver: false, timeout: Math.max(1, Math.floor((Number(req.timeoutMs) || 280000) / 1000)),
-      idempotencyKey: "hb-web-" + crypto.randomUUID(),
+      idempotencyKey: "hb-web-" + (req.messageId ? req.sessionKey + "-" + req.messageId : crypto.randomUUID()),
     });
   } catch (e) {
     if (member && refusedAsOwnerOnly(e)) done(23, "owner-only: " + JSON.stringify(e));
@@ -193,8 +196,9 @@ ws.onclose = (e) => { if (!finished) done(1, "gateway closed the connection: " +
  * (a fixed character set), so plain quoting is safe; the message itself is
  * inside REQ and never meets the shell.
  */
-export function turnScript(req: { agentId: string; sessionKey: string; message: string; rights: WebChatRights; timeoutMs: number }): string {
+export function turnScript(req: { agentId: string; sessionKey: string; message: string; messageId?: string; rights: WebChatRights; timeoutMs: number }): string {
   if (!SLUG_RE.test(req.agentId) || !/^web:[0-9a-f]{16}$/.test(req.sessionKey)) throw new Error('unexpected agent slug or session key');
+  if (req.messageId !== undefined && !WEB_CHAT_MESSAGE_ID.test(req.messageId)) throw new Error('invalid web chat message id');
   const body = { ...req, scopes: WEB_CHAT_SCOPES[req.rights] };
   const b64 = Buffer.from(TURN_SCRIPT, 'utf8').toString('base64');
   const r64 = Buffer.from(JSON.stringify(body), 'utf8').toString('base64');
@@ -210,11 +214,11 @@ export function turnScript(req: { agentId: string; sessionKey: string; message: 
 export async function runWebChatTurn(
   provider: RuntimeProvider,
   agent: Pick<Agent, 'slug' | 'runtimeRef'>,
-  turn: { userId: string; displayName: string; text: string; rights: WebChatRights },
+  turn: { userId: string; displayName: string; text: string; messageId?: string; rights: WebChatRights },
   timeoutMs: number,
 ): Promise<WebChatTurnResult> {
-  const message = `${webChatPrefix(turn.displayName)}\n${turn.text}`;
-  const script = turnScript({ agentId: agent.slug, sessionKey: webChatSessionKey(turn.userId), message, rights: turn.rights, timeoutMs });
+  const message = `${webChatPrefix(turn.displayName, turn.messageId)}\n${turn.text}`;
+  const script = turnScript({ agentId: agent.slug, sessionKey: webChatSessionKey(turn.userId), message, messageId: turn.messageId, rights: turn.rights, timeoutMs });
   // The client stops itself at timeoutMs; the exec gets a little longer so it can say so.
   const res: ExecResult = await provider.execShell(agent.runtimeRef!, script, { timeoutMs: timeoutMs + 15_000 });
   const detail = (res.stderr || res.stdout || '').slice(-300);
@@ -230,6 +234,7 @@ export interface WebChatMessage {
   role: 'user' | 'assistant';
   text: string;
   at?: string;
+  messageId?: string;
 }
 
 /**
@@ -250,13 +255,17 @@ const fs = require("fs"), path = require("path"), zlib = require("zlib");
 const env = process.env;
 const root = (env.AGENTS_DIR || "/home/node/.openclaw/agents") + "/" + env.SLUG; // AGENTS_DIR: tests only
 const key = env.SKEY, cap = Number(env.CAP) || 100;
+const wanted = new Set((env.PENDING || "").split(",").filter(Boolean)), received = new Set();
+let complete = true;
+const prefix = /^\s*\[[^\]\n]{1,60} via the web app(?:; message ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))?\]/;
 const events = []; const seen = new Set();
 const take = (e) => {
-  if (!e || e.type !== "message" || !e.message) return;
+  if (!e || typeof e !== "object") { complete = false; return; }
+  if (e.type !== "message" || !e.message) return;
   if (e.id) { if (seen.has(e.id)) return; seen.add(e.id); }
   events.push(e);
 };
-const lines = (text) => { for (const l of text.split(String.fromCharCode(10))) { if (!l) continue; try { take(JSON.parse(l)); } catch {} } };
+const lines = (text) => { for (const l of text.split(String.fromCharCode(10))) { if (!l) continue; try { take(JSON.parse(l)); } catch { complete = false; } } };
 let sqlite = null; try { sqlite = require("node:sqlite"); } catch {}
 const dbf = path.join(root, "agent", "openclaw-agent.sqlite");
 let fromDb = false;
@@ -273,14 +282,15 @@ if (sqlite && fs.existsSync(dbf)) {
       const q = db.prepare("SELECT event_json, event_zstd FROM transcript_events WHERE session_id = ? ORDER BY seq");
       for (const id of ids) for (const r of q.all(id)) {
         let j = r.event_json;
-        if (j == null && r.event_zstd) { try { j = zlib.zstdDecompressSync(Buffer.from(r.event_zstd)).toString("utf8"); } catch { continue; } }
-        try { take(JSON.parse(j)); } catch {}
+        if (j == null && r.event_zstd) { try { j = zlib.zstdDecompressSync(Buffer.from(r.event_zstd)).toString("utf8"); } catch { complete = false; continue; } }
+        if (typeof j !== "string") { complete = false; continue; }
+        try { take(JSON.parse(j)); } catch { complete = false; }
       }
       let arch = [];
       try { arch = db.prepare("SELECT encoding, archive_blob FROM session_transcript_archives WHERE session_key = ?").all(key); }
       catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
       for (const a of arch) {
-        try { lines(a.encoding === "zstd" ? zlib.zstdDecompressSync(Buffer.from(a.archive_blob)).toString("utf8") : Buffer.from(a.archive_blob).toString("utf8")); } catch {}
+        try { lines(a.encoding === "zstd" ? zlib.zstdDecompressSync(Buffer.from(a.archive_blob)).toString("utf8") : Buffer.from(a.archive_blob).toString("utf8")); } catch { complete = false; }
       }
     }
   } catch (e) {
@@ -307,21 +317,25 @@ if (!fromDb) {
   const ofKey = (id) => {
     for (const f of files) {
       if (f.indexOf(id + ".trajectory.jsonl") !== 0) continue;
-      let fd; try { fd = fs.openSync(path.join(sd, f), "r"); } catch { continue; }
+      let fd; try { fd = fs.openSync(path.join(sd, f), "r"); } catch { complete = false; continue; }
       try {
         const b = Buffer.alloc(65536); const n = fs.readSync(fd, b, 0, b.length, 0);
         for (const l of b.subarray(0, n).toString("utf8").split(String.fromCharCode(10))) {
-          let t; try { t = JSON.parse(l); } catch { continue; }
+          if (!l) continue;
+          let t; try { t = JSON.parse(l); } catch { complete = false; continue; }
           if (t && t.type === "session.started") return t.sessionKey === key;
         }
       } finally { try { fs.closeSync(fd); } catch {} }
     }
+    // An unclassified reset could hold this person's pending message.
+    // Readable history is still useful, but cannot prove its absence.
+    complete = false;
     return false;
   };
   const resets = files.map((f) => /^([A-Za-z0-9-]+)\.jsonl\.reset\.(.+)$/.exec(f)).filter((m) => m && m[1] !== sid && ofKey(m[1]))
     .sort((a, b) => (a[2] < b[2] ? -1 : 1));
-  for (const m of resets) { const t = read(m[0]); if (t != null) lines(t); }
-  if (sid && /^[A-Za-z0-9-]+$/.test(sid)) { const t = read(sid + ".jsonl"); if (t != null) lines(t); }
+  for (const m of resets) { const t = read(m[0]); if (t != null) lines(t); else complete = false; }
+  if (sid && /^[A-Za-z0-9-]+$/.test(sid)) { const t = read(sid + ".jsonl"); if (t != null) lines(t); else complete = false; }
 }
 // An image-only reply is still a reply: shown as [image], not dropped.
 const textOf = (c) => typeof c === "string" ? c : Array.isArray(c)
@@ -335,7 +349,9 @@ for (const e of events) {
   // What OpenClaw itself put in the conversation (a finished background task
   // arrives as a "user" message with provenance inter_session) is not
   // something this person wrote. What they wrote carries the web-app line.
-  if (role === "user" && m.provenance && !/^\s*\[[^\]\n]{1,60} via the web app\]/.test(t)) continue;
+  if (role === "user" && m.provenance && !prefix.test(t)) continue;
+  const messageId = role === "user" ? prefix.exec(t)?.[1] : undefined;
+  if (messageId && wanted.has(messageId)) received.add(messageId);
   const raw = e.timestamp || m.timestamp || "";
   const at = typeof raw === "string" ? raw : new Date(raw).toISOString();
   const prev = out[out.length - 1];
@@ -345,37 +361,44 @@ for (const e of events) {
   out.push({ role, text: t, at });
 }
 out.sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0));
-process.stdout.write(JSON.stringify({ messages: out.slice(-cap) }));
+process.stdout.write(JSON.stringify({ messages: out.slice(-cap), delivery: { checked: complete ? [...wanted] : [], received: [...received] } }));
 `;
 
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const KEY_RE = /^agent:[a-z0-9][a-z0-9_-]{0,63}:web:[0-9a-f]{16}$/;
 
-export function historyScript(slug: string, storeKey: string, cap = 100): string {
+export function historyScript(slug: string, storeKey: string, cap = 100, pending: readonly string[] = []): string {
   if (!SLUG_RE.test(slug) || !KEY_RE.test(storeKey)) throw new Error('unexpected agent slug or session key');
+  if (pending.length > 100 || pending.some((id) => !WEB_CHAT_MESSAGE_ID.test(id))) throw new Error('invalid web chat delivery ids');
   const b64 = Buffer.from(HISTORY_SCRIPT, 'utf8').toString('base64');
   // Every value is from a fixed character set (checked above), so plain quoting is safe.
-  return `set -e; T=/tmp/hatchabot-webchat-$$.cjs; echo ${b64} | base64 -d > $T; SLUG='${slug}' SKEY='${storeKey}' CAP='${Math.max(1, Math.min(500, Math.floor(cap)))}' node $T; rm -f $T`;
+  return `set -e; T=/tmp/hatchabot-webchat-$$.cjs; echo ${b64} | base64 -d > $T; SLUG='${slug}' SKEY='${storeKey}' CAP='${Math.max(1, Math.min(500, Math.floor(cap)))}' PENDING='${pending.join(',')}' node $T; rm -f $T`;
 }
 
-/** This person's web conversation, newest last, with the "[… via the web app]" line taken off. */
+/** This person's conversation with its web marker removed, plus requested
+ * delivery evidence from the entire readable transcript, before the cap. */
 export async function webChatHistory(
   provider: RuntimeProvider,
   agent: Pick<Agent, 'slug' | 'runtimeRef' | 'state'>,
   userId: string,
   cap = 100,
-): Promise<WebChatMessage[]> {
-  const s = historyScript(agent.slug, webChatStoreKey(agent.slug, userId), cap);
+  pending: readonly string[] = [],
+): Promise<{ messages: WebChatMessage[]; delivery?: { checked: string[]; received: string[] } }> {
+  const s = historyScript(agent.slug, webChatStoreKey(agent.slug, userId), cap, pending);
   const res = agent.state === 'RUNNING'
     ? await provider.execShell(agent.runtimeRef!, s)
     : await provider.execShellOnVolume(agent.runtimeRef!, s, { readOnly: true });
   if (res.code !== 0) throw new Error((res.stderr || res.stdout || 'history read failed').slice(-200));
-  const j = JSON.parse(res.stdout || '{}') as { messages?: Array<{ role?: string; text?: string; at?: string }> };
-  return (j.messages ?? [])
+  const j = JSON.parse(res.stdout || '{}') as { messages?: Array<{ role?: string; text?: string; at?: string }>; delivery?: { checked?: string[]; received?: string[] } };
+  const messages = (j.messages ?? [])
     .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
     .map((m) => ({
       role: m.role as 'user' | 'assistant',
       text: m.role === 'user' ? stripWebChatPrefix(m.text!) : m.text!,
       ...(m.at ? { at: m.at } : {}),
+      ...(m.role === 'user' && PREFIX_RE.exec(m.text!)?.[1] ? { messageId: PREFIX_RE.exec(m.text!)![1] } : {}),
     }));
+  const requested = new Set(pending);
+  const relevant = (ids: unknown) => Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string' && requested.has(id)) : [];
+  return { messages, ...(pending.length ? { delivery: { checked: relevant(j.delivery?.checked), received: relevant(j.delivery?.received) } } : {}) };
 }

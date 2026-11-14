@@ -524,6 +524,41 @@ async function app() {
 }
 
 describe('the budget routes', () => {
+  it.each(['running', 'asleep', 'unknown', 'lost-reply'] as const)('records a pause only once the runtime confirms it stopped: %s (HB-0711)', async (mode) => {
+    const { f, store, provider } = await app();
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    const now = Date.now(), month = monthKey(now, machineTz());
+    const ref = store.getAgent('r1')!.runtimeRef!;
+    store.setModelProfile('r1', profile(now, opus(now - HOUR, 30)), iso(now));
+    recordCostDays(store, machineTz(), now);
+    const originalStop = provider.stop.bind(provider);
+    const stop = vi.spyOn(provider, 'stop').mockImplementation(async (runtime) => {
+      if (mode === 'lost-reply') { await originalStop(runtime); throw new Error('reply lost'); }
+    });
+    const status = mode === 'unknown' ? vi.spyOn(provider, 'status').mockResolvedValue({ phase: 'unknown' }) : undefined;
+    if (mode === 'asleep') {
+      store.setAgentState('r1', 'STOPPED');
+      store.setHibernated('r1', iso(now - HOUR)); // the label lags a running container
+    }
+    const r = await f.inject({ method: 'PUT', url: '/v1/agents/r1/budget', headers: as(OWNER), payload: { usd: 25, atLimit: 'pause' } });
+    expect(r.statusCode).toBe(200);
+    if (mode === 'lost-reply') {
+      expect(store.getAgent('r1')!.state).toBe('STOPPED');
+      expect(store.getBudgetPause('r1', month)?.kind).toBe('pause');
+      expect(r.json().budget.paused).toBeDefined();
+    } else {
+      expect(store.getBudgetPause('r1', month)).toBeUndefined();
+      expect(r.json().budget.paused).toBeUndefined();
+      expect(store.getAgent('r1')!.state).toBe(mode === 'asleep' ? 'STOPPED' : 'RUNNING');
+      if (mode === 'asleep') expect(store.getAgent('r1')!.hibernatedAt).toBeDefined();
+      status?.mockRestore();
+      expect((await provider.status(ref)).phase).toBe('running');
+    }
+    stop.mockRestore();
+    status?.mockRestore();
+    await f.close();
+  });
+
   it('set, read, pause at once when quiet, start by hand, remove', async () => {
     const { f, store } = await app();
     const now = Date.now();
