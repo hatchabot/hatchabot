@@ -105,6 +105,8 @@ if [ "$1" = -H ]; then
 fi
 echo "$*" >> "${root}/local.log"
 case "$1 $2" in
+  # The kept-logins label's listing: every volume, as if each were labelled so. The script
+  # leaves out only those whose name says so too: an agent's own volume is never skipped.
   "volume ls") printf '%s\\n' ${volumes.map((v) => `'${v}'`).join(' ')} ;;
   "image inspect") exit 0 ;;
   "info --format") if [ -f "${root}/rootless" ]; then echo '[name=seccomp name=rootless name=cgroupns]'; else echo '[name=seccomp name=cgroupns]'; fi ;;
@@ -230,6 +232,16 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
     expect(existsSync(join(w.setDir(), 'agentclaw-old-garden.tgz'))).toBe(false);
     expect(existsSync(join(w.setDir(), 'hatchabot-kitchen-1-vol.tgz'))).toBe(true);
     expect(readSetStatus(w.setDir())).toMatchObject({ complete: true, orphans: ['agentclaw-old-garden'], failedVolumes: [] });
+  });
+
+  it("an agent's kept browser logins are never in a set, and not called a volume no agent uses (HB-0680)", () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol', 'hatchabot-kitchen-1-browser-logins-0a1b2c3d4e5f'], ['docker://hatchabot-kitchen-1']);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout + r.stderr).not.toMatch(/browser-logins/);
+    expect(existsSync(join(w.setDir(), 'hatchabot-kitchen-1-browser-logins-0a1b2c3d4e5f.tgz'))).toBe(false);
+    expect(existsSync(join(w.setDir(), 'hatchabot-kitchen-1-vol.tgz'))).toBe(true);
+    expect(readSetStatus(w.setDir())).toMatchObject({ complete: true, orphans: [], failedVolumes: [] });
   });
 
   it('a local archive whose client was killed: its container, with no network, is removed by name, the set incomplete (HB-0348)', () => {

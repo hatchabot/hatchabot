@@ -147,6 +147,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(['POST'], /^\/v1\/agents\/:id\/(move-host|rehost)$/, 'step-up', 'Moving an agent to another machine'),
   // The panel's other routes (its stream, input, close) need the id this one hands back: signed-in, below.
   r(['POST'], /^\/v1\/agents\/:id\/browser\/panel$/, 'step-up', 'Opening the sign-in panel on an agent\'s browser (what is typed there is a password)'),
+  r(['PUT'], /^\/v1\/agents\/:id\/browser\/logins$/, 'step-up', 'Keep its logins on an agent\'s browser, on or off (its sign-ins then outlive a restart)'),
   r(['POST'], /^\/v1\/operations\/:id\/recover$/, 'step-up', 'Choosing how an interrupted move or import ends (put it back, try again, it arrived)'),
   r(['POST'], /^\/v1\/ops-agent$/, 'step-up', 'Creating the management agent'),
   r(['POST', 'DELETE'], /^\/v1\/pool(\/.*)?$/, 'step-up', 'Bot pools (they hold bot tokens)'),

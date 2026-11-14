@@ -67,7 +67,7 @@ describe('inspectWorkspace', () => {
     mkdirSync(join(big, 'data'), { recursive: true });
     for (let i = 0; i < 40; i++) writeFileSync(join(big, 'data', `f${i}.bin`), Buffer.alloc(20 * 1024 * 1024));
     expect(() => inspectWorkspace(big)).toThrow(/too big|share it as a folder/);
-  });
+  }, 30_000);   // 800 MB written: CI's loaded runner took 5.5 s (HB-0695)
 
   it('refuses a flat folder of more than 20,000 files, not only a nested one (#112)', () => {
     const flat = mkdtempSync(join(tmpdir(), 'acl-flat-'));

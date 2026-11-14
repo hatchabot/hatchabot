@@ -74,10 +74,10 @@ export const LIVE_TESTS = [
     area: ['src/api/consoleProxy.ts', 'src/api/consoleSockets.ts', 'src/orchestrator/consoleAccess.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs', LIB],
   },
   {
-    name: 'browser', cmd: ['node', 'scripts/browser-scenarios.mjs'], against: 'install', minutes: '9–13', aiTurns: false,
+    name: 'browser', cmd: ['node', 'scripts/browser-scenarios.mjs'], against: 'install', minutes: '11–16', aiTurns: false,
     needs: 'room for 1 agent; internet from the agents',
-    proves: 'an agent\'s own browser: off by default, switched on it opens and reads a real page, holds none of the agent\'s files, refuses scripts and private addresses, can be signed in to a site through the sign-in panel (the agent then carries on signed in), follows an agent restart, and is removed when switched off',
-    area: ['src/orchestrator/browser.ts', 'src/orchestrator/browserPanel.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs', LIB,
+    proves: 'an agent\'s own browser: off by default, switched on it opens and reads a real page, holds none of the agent\'s files, refuses scripts and private addresses, can be signed in to a site through the sign-in panel (the agent then carries on signed in), keeps that sign-in through a restart with Keep its logins on and loses it after Forget logins, follows an agent restart, and is removed when switched off, its kept logins with it',
+    area: ['src/orchestrator/browser.ts', 'src/orchestrator/browserPanel.ts', 'src/orchestrator/browserLogins.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs', LIB,
       { path: ROUTES, near: /browser/i }, { path: 'src/orchestrator/provision.ts', near: /browser/i }, { path: CLI, near: /case '(start|stop)'/ }],
   },
   {

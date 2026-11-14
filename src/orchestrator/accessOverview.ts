@@ -486,7 +486,13 @@ export function accessOverview(store: Store, agent: Agent, now = Date.now()): Ag
 
   // ---- Its browser and app: what lives there is the agent's own.
   const own: AccessRow[] = [];
-  if (agent.browser) own.push({ kind: 'browser', subject: 'browser', label: 'Its own browser', intended: true, managed: false, verified: { status: 'unknown' }, note: 'what it logs into there is not kept across a restart, and is not checked' });
+  if (agent.browser) {
+    // Keep its logins (HB-0680): the sites its sign-in panel opened, newest first.
+    const sites = (agent.browserSites ?? []).slice(0, 8).map((x) => x.site);
+    own.push(agent.browserLogins
+      ? { kind: 'browser', subject: 'browser', label: 'Its own browser, keeping its logins', intended: true, managed: false, verified: { status: 'unknown' }, note: `keeps what it is signed in to until you forget it (Advanced → Browser)${sites.length ? `; signed in through its panel at ${sites.join(', ')}` : ''}. What it signs in to by itself is not checked` }
+      : { kind: 'browser', subject: 'browser', label: 'Its own browser', intended: true, managed: false, verified: { status: 'unknown' }, note: 'what it logs into there is not kept across a restart, and is not checked' });
+  }
   const app = store.getAgentApp(agent.id);
   if (app) own.push({ kind: 'app', subject: app.app, label: `App ${app.app}`, intended: true, managed: false, verified: { status: 'unknown' }, note: 'keeps its own settings, which may hold an account or a password — not checked' });
 

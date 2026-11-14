@@ -1293,6 +1293,12 @@ export class Store {
       // drops or marks only the one it ran, never a newer one saved meanwhile
       // (HB-0256). NULL: saved before it was recorded.
       `ALTER TABLE agent_app_pending ADD COLUMN gen TEXT`,
+      // Keep its logins (HB-0680, docs/browser.md): the id of the browser
+      // profile it keeps, NULL when it keeps none. Forget gives it a new one,
+      // so a profile forgotten is never mounted again; the sweep removes it.
+      `ALTER TABLE agents ADD COLUMN browser_logins TEXT`,
+      // The sites opened in its sign-in panel while it keeps that profile, JSON.
+      `ALTER TABLE agents ADD COLUMN browser_sites TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -5279,6 +5285,11 @@ export class Store {
       .get(agentId, peerId);
   }
 
+  /** The agents that may consult this one, and whether each may ask it to act. */
+  listAgentCallers(agentId: string): Array<{ agentId: string; actions: boolean }> {
+    return (this.db.prepare(`SELECT agent_id, allow_actions FROM agent_peers WHERE peer_id = ?`).all(agentId) as any[]).map((r) => ({ agentId: r.agent_id, actions: r.allow_actions === 1 }));
+  }
+
   listAgentPeers(agentId: string): string[] {
     return (this.db.prepare(`SELECT peer_id FROM agent_peers WHERE agent_id = ?`).all(agentId) as any[]).map((r) => r.peer_id);
   }
@@ -5535,8 +5546,29 @@ export class Store {
   setAgentEmbedIndex(id: string, indexedAt: string | null, error: string | null): void {
     this.db.prepare(`UPDATE agents SET embed_indexed_at = ?, embed_index_error = ? WHERE id = ?`).run(indexedAt, error, id);
   }
+  /** Switched off, it keeps no logins either: on again, it starts with none. */
   setAgentBrowser(id: string, on: boolean): void {
-    this.db.prepare(`UPDATE agents SET browser = ?, updated_at = ? WHERE id = ?`).run(on ? 1 : 0, new Date().toISOString(), id);
+    this.db.prepare(`UPDATE agents SET browser = ?, browser_logins = CASE WHEN ? THEN browser_logins END, browser_sites = CASE WHEN ? THEN browser_sites END, updated_at = ? WHERE id = ?`)
+      .run(on ? 1 : 0, on ? 1 : 0, on ? 1 : 0, new Date().toISOString(), id);
+  }
+  /** Keep its logins (browser.ts): the profile it keeps, or null for none. A new one starts with no sites. */
+  setAgentBrowserLogins(id: string, logins: string | null): void {
+    this.db.prepare(`UPDATE agents SET browser_logins = ?, browser_sites = NULL, updated_at = ? WHERE id = ?`).run(logins, new Date().toISOString(), id);
+  }
+  /**
+   * A site its sign-in panel opened, newest first, one line a site, at most
+   * 30. Only while it keeps the profile `logins`: a panel still open on one
+   * just forgotten writes nothing.
+   */
+  noteAgentBrowserSite(id: string, logins: string, site: string): void {
+    this.transact(() => {
+      const r = this.db.prepare(`SELECT browser_logins, browser_sites FROM agents WHERE id = ?`).get(id) as { browser_logins: string | null; browser_sites: string | null } | undefined;
+      if (!r || r.browser_logins !== logins) return;
+      const had = (safeJson(r.browser_sites ?? '[]', []) as Array<{ site?: unknown; at?: unknown }>)
+        .filter((x): x is { site: string; at: string } => typeof x?.site === 'string' && typeof x?.at === 'string' && x.site !== site);
+      const sites = [{ site, at: new Date().toISOString() }, ...had].slice(0, 30);
+      this.db.prepare(`UPDATE agents SET browser_sites = ? WHERE id = ?`).run(JSON.stringify(sites), id);
+    });
   }
   setAgentCronTriggers(id: string, on: boolean): void {
     this.db.prepare(`UPDATE agents SET cron_triggers = ?, updated_at = ? WHERE id = ?`).run(on ? 1 : 0, new Date().toISOString(), id);
@@ -6821,6 +6853,8 @@ function rowToAgent(r: any): Agent {
     filesMaxMb: r.files_max_mb ?? undefined,
     cronTriggers: !!r.cron_triggers,
     browser: !!r.browser,
+    browserLogins: r.browser && r.browser_logins ? r.browser_logins : undefined,
+    browserSites: r.browser && r.browser_logins && r.browser_sites ? safeJson(r.browser_sites, undefined) : undefined,
     memoryCap: r.memory_cap ?? undefined,
     memoryCapBaseline: r.memory_cap_baseline ?? undefined,
     memoryCapBaselineStartedAt: r.memory_cap_baseline_started ?? undefined,

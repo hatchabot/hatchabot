@@ -282,8 +282,10 @@ service_networks() {
 }
 volumes() {
   [ -n "$VOL_NAMES" ] || return 0
-  local v
+  local v n
   for v in $VOL_NAMES; do docker volume ls -q --filter "name=^$v$" 2>/dev/null || return 1; done
+  # The logins their browsers kept (Keep its logins), by the agent container they belong to.
+  for n in $NAMES; do docker volume ls -q --filter "label=hatchabot.role=browser-logins" --filter "label=hatchabot.browser-of=$n" 2>/dev/null || return 1; done
 }
 # Which of this install's agents still run (a container name a line); one
 # Docker could not be asked about counts as running.

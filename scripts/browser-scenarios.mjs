@@ -103,6 +103,45 @@ function panelStream(agent, panel) {
   return { seen, done, stop: () => ctl.abort() };
 }
 
+/**
+ * A sign-in through the panel, as the app's page sends it, on a public demo
+ * site with published test credentials (the-internet.herokuapp.com):
+ * nobody's account. Clicks, text and Enter only.
+ */
+const DEMO = 'https://the-internet.herokuapp.com';
+async function panelSignIn(agent) {
+  const open = await api(`/v1/agents/${agent.id}/browser/panel`, { method: 'POST', body: { w: 1000, h: 700, url: `${DEMO}/login` } });
+  const panel = open.json.panel;
+  const stream = panel ? panelStream(agent, panel) : undefined;
+  const input = (ops) => api(`/v1/agents/${agent.id}/browser/panel/${panel}/input`, { method: 'POST', body: { ops } });
+  const until = async (f, secs = 30) => { for (let i = 0; i < secs * 2; i++) { if (f()) return true; await sleep(500); } return false; };
+  const loaded = stream ? await until(() => stream.seen.frames > 0 && stream.seen.urls.some((u) => u.endsWith('/login'))) : false;
+  const click = async (sel) => {
+    const p = await eyes(agent, 'the-internet', `(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
+    return input([{ k: 'mouse', type: 'move', ...p }, { k: 'mouse', type: 'down', ...p }, { k: 'mouse', type: 'up', ...p }]);
+  };
+  if (loaded) {
+    await click('#username'); await input([{ k: 'text', text: 'tomsmith' }]);
+    await click('#password'); await input([{ k: 'text', text: 'SuperSecretPassword!' }, { k: 'key', key: 'Enter' }]);
+  }
+  const signedIn = loaded && await until(() => stream.seen.urls.at(-1)?.endsWith('/secure'));
+  const says = signedIn ? String(await eyes(agent, 'the-internet', 'document.querySelector("#flash")?.innerText || ""')) : '';
+  const close = async () => {
+    const r = panel ? await api(`/v1/agents/${agent.id}/browser/panel/${panel}`, { method: 'DELETE' }) : { status: 0 };
+    if (stream) { await Promise.race([stream.done, sleep(10_000)]); stream.stop(); }
+    return r;
+  };
+  return { open, panel, stream, input, loaded, signedIn, says, close };
+}
+/** What the agent's own browser tool sees on the demo's members-only page, in a tab of its own. */
+async function agentSeesSecure(agent) {
+  await inAgent(agent, ['openclaw', 'browser', 'open', `${DEMO}/secure`], 120_000);
+  await sleep(3000);
+  return (await inAgent(agent, ['openclaw', 'browser', 'snapshot'], 120_000)).out;
+}
+/** This agent's kept browser profiles on this machine (Keep its logins), by their labels. */
+const keptProfiles = (agent) => docker('volume', 'ls', '-q', '--filter', 'label=hatchabot.role=browser-logins', '--filter', `label=hatchabot.browser-of=${containerOf(agent)}`).out.trim().split('\n').filter(Boolean);
+
 async function main() {
   const existing = (await api('/v1/agents')).json.filter((a) => a.name?.startsWith(PREFIX));
   if (existing.length) throw new Error(`Test agents from an earlier run are still there: ${existing.map((a) => a.name).join(', ')} — delete them first.`);
@@ -214,45 +253,21 @@ async function main() {
     ];
   });
   await scenario('B2d sign in to a site yourself: the panel signs it in on a demo login page, and the agent carries on signed in (HB-0680)', async () => {
-    // A public demo site with published test credentials (the-internet.herokuapp.com):
-    // nobody's account. Clicks, text and Enter through the app's own routes, as the app's page sends them.
-    const SITE = 'https://the-internet.herokuapp.com';
     const before = await pageTabs(agent);
-    const open = await api(`/v1/agents/${agent.id}/browser/panel`, { method: 'POST', body: { w: 1000, h: 700, url: `${SITE}/login` } });
-    const panel = open.json.panel;
-    const stream = panel ? panelStream(agent, panel) : undefined;
-    const input = (ops) => api(`/v1/agents/${agent.id}/browser/panel/${panel}/input`, { method: 'POST', body: { ops } });
-    const until = async (f, secs = 30) => { for (let i = 0; i < secs * 2; i++) { if (f()) return true; await sleep(500); } return false; };
-    const loaded = stream ? await until(() => stream.seen.frames > 0 && stream.seen.urls.some((u) => u.endsWith('/login'))) : false;
-    const click = async (sel) => {
-      const p = await eyes(agent, 'the-internet', `(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
-      return input([{ k: 'mouse', type: 'move', ...p }, { k: 'mouse', type: 'down', ...p }, { k: 'mouse', type: 'up', ...p }]);
-    };
-    if (loaded) {
-      await click('#username'); await input([{ k: 'text', text: 'tomsmith' }]);
-      await click('#password'); await input([{ k: 'text', text: 'SuperSecretPassword!' }, { k: 'key', key: 'Enter' }]);
-    }
-    const signedIn = loaded && await until(() => stream.seen.urls.at(-1)?.endsWith('/secure'));
-    const says = signedIn ? String(await eyes(agent, 'the-internet', 'document.querySelector("#flash")?.innerText || ""')) : '';
-    const refused = panel ? await input([{ k: 'go', url: 'javascript:alert(1)' }]) : { status: 0 };
+    const s = await panelSignIn(agent);
+    const refused = s.panel ? await s.input([{ k: 'go', url: 'javascript:alert(1)' }]) : { status: 0 };
     // The agent's own tool, in a tab of its own, on the members-only page.
-    let agentSees = '';
-    if (signedIn) {
-      await inAgent(agent, ['openclaw', 'browser', 'open', `${SITE}/secure`], 120_000);
-      await sleep(3000);
-      agentSees = (await inAgent(agent, ['openclaw', 'browser', 'snapshot'], 120_000)).out;
-    }
-    const closed = panel ? await api(`/v1/agents/${agent.id}/browser/panel/${panel}`, { method: 'DELETE' }) : { status: 0 };
-    if (stream) { await Promise.race([stream.done, sleep(10_000)]); stream.stop(); }
+    const agentSees = s.signedIn ? await agentSeesSecure(agent) : '';
+    const closed = await s.close();
     await sleep(2000);
     const after = await pageTabs(agent);
     return [
-      ['opened through the app (owner, on this machine)', open.status === 201 && !!panel, JSON.stringify(open.json).slice(0, 200)],
-      ['its stream shows the page: frames and the address', loaded, JSON.stringify(stream?.seen ?? {}).slice(0, 300)],
-      ['signed in with clicks, text and Enter alone', signedIn && /secure area/i.test(says), `${stream?.seen.urls.at(-1)} ${says}`.slice(0, 200)],
+      ['opened through the app (owner, on this machine)', s.open.status === 201 && !!s.panel, JSON.stringify(s.open.json).slice(0, 200)],
+      ['its stream shows the page: frames and the address', s.loaded, JSON.stringify(s.stream?.seen ?? {}).slice(0, 300)],
+      ['signed in with clicks, text and Enter alone', s.signedIn && /secure area/i.test(s.says), `${s.stream?.seen.urls.at(-1)} ${s.says}`.slice(0, 200)],
       ['an address that is not http(s) is refused', refused.status === 400, String(refused.status)],
       ['the agent\'s own browser tool then sees the members-only page', /Secure Area/.test(agentSees) && !/You must login/.test(agentSees), agentSees.slice(-300)],
-      ['closed: its stream says so, and its tab is gone', closed.status === 204 && stream?.seen.closed.at(-1) === 'Closed.' && Number(after) <= Number(before) + 1, `closed ${JSON.stringify(stream?.seen.closed)}; page tabs ${before} → ${after} (the agent's own tab may stay)`],
+      ['closed: its stream says so, and its tab is gone', closed.status === 204 && s.stream?.seen.closed.at(-1) === 'Closed.' && Number(after) <= Number(before) + 1, `closed ${JSON.stringify(s.stream?.seen.closed)}; page tabs ${before} → ${after} (the agent's own tab may stay)`],
     ];
   });
   await scenario('B3 the agent restarts: its browser follows, and still works', async () => {
@@ -268,12 +283,42 @@ async function main() {
       ['it still opens and reads the page', r.ok, r.out],
     ];
   });
+  await scenario('B3b keep its logins: a sign-in outlives a restart, and is gone after Forget logins (HB-0680)', async () => {
+    const on = await api(`/v1/agents/${agent.id}/browser/logins`, { method: 'PUT', body: { keep: true } });
+    const up1 = await browserUp(agent);
+    const kept1 = keptProfiles(agent);
+    const s = up1 ? await panelSignIn(agent) : { signedIn: false, close: async () => ({}) };
+    await s.close();
+    // Then the agent stops and starts: Hatchabot closes its browser first, so it writes the profile.
+    await sleep(5000);
+    const st = hbt(['stop', agent.name, '--wait']), go = hbt(['start', agent.name, '--wait']);
+    agent = await settle(agent.id, 'RUNNING', 10);
+    const up2 = await browserUp(agent);
+    const afterRestart = up2 ? await agentSeesSecure(agent) : '';
+    const info = await api(`/v1/agents/${agent.id}/browser`);
+    // Forgotten: a new, empty profile; the old one deleted from the machine.
+    const forgot = await api(`/v1/agents/${agent.id}/browser/logins`, { method: 'DELETE' });
+    const up3 = await browserUp(agent);
+    const afterForget = up3 ? await agentSeesSecure(agent) : '';
+    const kept2 = keptProfiles(agent);
+    return [
+      ['switched on through the app', on.status === 200 && on.json?.keepsLogins === true, JSON.stringify(on.json).slice(0, 200)],
+      ['its browser runs on a kept profile of its own', up1 && kept1.length === 1, kept1.join(' ')],
+      ['signed in through the panel', s.signedIn],
+      ['stopped and started', st.code === 0 && go.code === 0, `${st.out} ${go.out}`.slice(-200)],
+      ['after the restart the agent is still signed in', /Secure Area/.test(afterRestart) && !/You must login/.test(afterRestart), afterRestart.slice(-300)],
+      ['the app says it keeps them, and lists the site', info.json?.keepsLogins === true && (info.json?.sites ?? []).some((x) => x.site === 'the-internet.herokuapp.com'), JSON.stringify(info.json).slice(0, 300)],
+      ['forgotten through the app', forgot.status === 200 && /^Forgotten/.test(forgot.json?.message ?? ''), JSON.stringify(forgot.json).slice(0, 200)],
+      ['after Forget it is signed in nowhere', up3 && /You must login|Login Page/.test(afterForget), afterForget.slice(-300)],
+      ['the old profile is deleted, a new one in its place', kept2.length === 1 && kept2[0] !== kept1[0], `${kept1.join(' ')} → ${kept2.join(' ')}`],
+    ];
+  });
   await scenario('B4 switched off: its browser is gone and the tool is off', async () => {
     agent = await setBrowser(agent, false);
     let gone = false;
-    for (let i = 0; i < 30 && !gone; i++) { gone = docker('inspect', `${containerOf(agent)}-browser`).code !== 0; if (!gone) await sleep(5000); }
+    for (let i = 0; i < 30 && !gone; i++) { gone = docker('inspect', `${containerOf(agent)}-browser`).code !== 0 && keptProfiles(agent).length === 0; if (!gone) await sleep(5000); }
     const st = await inAgent(agent, ['openclaw', 'browser', 'status', '--json'], 120_000);
-    return [['its browser container is gone', gone], ['OpenClaw\'s browser tool is off', toolOff(st.out), st.out.slice(0, 200)]];
+    return [['its browser container is gone, and the logins it kept', gone, keptProfiles(agent).join(' ')], ['OpenClaw\'s browser tool is off', toolOff(st.out), st.out.slice(0, 200)]];
   });
 }
 

@@ -301,6 +301,8 @@ Commands:
   browser <agent> [on|off]     Its own browser (docs/browser.md): show, or switch it
                                (rebuilds the agent). Off by default — browsing is
                                costly in tokens; for sites it must use
+  browser <agent> forget       Forget the logins its browser keeps (Keep its logins,
+                               switched on in the app): it starts again, empty
   memory <agent> [<cap>|default]
                                Its container's memory cap ("4g"): show, set (applied
                                live, kept across rebuilds), or back to the default
@@ -3206,9 +3208,16 @@ async function main() {
       return;
     }
     case 'browser': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot browser <agent> [on|off]'));
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot browser <agent> [on|off|forget]'));
       const want = rest[1];
-      if (want !== undefined && want !== 'on' && want !== 'off') fail('usage: hatchabot browser <agent> [on|off]');
+      if (want !== undefined && want !== 'on' && want !== 'off' && want !== 'forget') fail('usage: hatchabot browser <agent> [on|off|forget]');
+      // Forget logins (HB-0680): the owner's own sign-in, as in the app. Keeping
+      // them is switched on in the app only, where its warning names who can steer it.
+      if (want === 'forget') {
+        const r: any = await (await api(ctx, `/v1/agents/${a.id}/browser/logins`, { method: 'DELETE' })).json();
+        console.log(`"${a.name}": ${r.message}`);
+        return;
+      }
       if (want) {
         // Already so: the server changes nothing and starts no rebuild.
         if (!!a.browser === (want === 'on')) { console.log(`"${a.name}" ${want === 'on' ? 'already has its own browser' : 'has no browser'}: nothing to change.`); return; }
@@ -3228,7 +3237,8 @@ async function main() {
         return;
       }
       const b: any = await (await api(ctx, `/v1/agents/${a.id}/browser`)).json();
-      console.log(`"${a.name}": browser ${b.on ? (b.running ? 'on, running' : 'on, not running yet') : 'off'}${b.chromium ? ` (Chromium ${b.chromium})` : ''}`);
+      console.log(`"${a.name}": browser ${b.on ? (b.running ? 'on, running' : 'on, not running yet') : 'off'}${b.chromium ? ` (Chromium ${b.chromium})` : ''}${b.keepsLogins ? `, keeps its logins${b.profileMB ? ` (${b.profileMB} MB)` : ''}` : ''}`);
+      if (b.keepsLogins && b.sites?.length) console.log(`  signed in through its panel at: ${b.sites.slice(0, 10).map((x: { site: string }) => x.site).join(', ')}`);
       return;
     }
     case 'memory': {

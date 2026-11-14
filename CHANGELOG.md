@@ -2,6 +2,21 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.185.0] — 2026-11-13
+
+### Added
+- **Keep its logins: an agent's browser can stay signed in through restarts.** Agent page → Advanced → Browser → **Keep its logins** keeps what you sign it in to through **Sign in to a site** on this machine, through restarts, sleeps, rebuilds and new browser images, until you forget it. Off by default. Before it goes on, the app says what it means and names everyone who can steer the agent: the people who can message it, a Telegram group it is open to, the agents that may consult it. Each of them could ask a signed-in agent to act as you there, and so could a page that tricks it. Sign it in only where you would let it act for you (docs/browser.md, "Keep its logins").
+- **Forget logins** (beside the switch, or `hatchabot browser "<agent>" forget`) starts its browser again signed in nowhere and deletes what it kept from the machine. The Browser row shows that it keeps logins, how much space they take, and the sites you signed it in to, with the day. `hatchabot browser "<agent>"` says the same.
+
+### Security
+- Kept logins are never in a nightly backup, a download, a template or a clone: a backup is files anyone with the disk can read, and the cookies in it work like passwords. Moving an agent to another machine or another Hatchabot does not carry them; archiving or deleting it, switching its browser off, or `uninstall --purge` deletes them.
+- Alerts counts a browser that keeps logins as a powerful capability, like sending email: "its own browser, keeps logins".
+
+### For developers
+- Each kept profile is a Docker volume labelled `hatchabot.role=browser-logins`, named for the agent's container and an id the agent's record holds; Forget gives a new id, so the old profile is never mounted again, and the browser sweep deletes it once its machine answers. Before anything ends such a browser, the provider closes it with `Browser.close` from the agent's container so Chromium writes its profile (src/orchestrator/browser.ts, src/providers/localDockerProvider.ts).
+- New routes: PUT and DELETE `/v1/agents/:id/browser/logins` (the owner only; switching on or off is a step-up at the public address).
+- The `browser` live test adds scenario B3b: a sign-in that outlives an agent restart, and is gone after Forget logins.
+
 ## [2.184.0] — 2026-11-13
 
 ### Added

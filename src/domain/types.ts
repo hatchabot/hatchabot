@@ -247,6 +247,10 @@ export interface Agent {
   cronTriggers?: boolean;
   /** Its own browser for OpenClaw's browser tool (src/orchestrator/browser.ts). Off by default. */
   browser?: boolean;
+  /** Keep its logins (HB-0680): the id of the browser profile it keeps on disk; unset, its browser keeps nothing past a restart. */
+  browserLogins?: string;
+  /** The sites its sign-in panel opened while it keeps that profile, newest first. */
+  browserSites?: Array<{ site: string; at: string }>;
   /** Which engine does its semantic memory search: the one baked into the
    *  image (default), or the machine's shared service. Applies on rebuild. */
   embedMode?: 'baked' | 'shared';

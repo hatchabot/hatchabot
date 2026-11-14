@@ -2060,6 +2060,13 @@ encrypted connection only; the page's input becomes the browser's commands
 from a fixed list that reads no cookies and runs no script; nothing typed
 is stored. [browser.md](browser.md#sign-in-to-a-site).
 
+**Keep its logins** (beside it, off by default) keeps those sign-ins on
+this machine through restarts, sleeps and rebuilds, until you forget them.
+Before it goes on, the app names everyone who can steer the agent, since
+each of them could ask it to act as you there. **Forget logins** starts its
+browser again, signed in nowhere. Never in a backup, a download, a template
+or a clone. [browser.md](browser.md#keep-its-logins).
+
 ## The memory search service
 
 Every runtime image since 2026.9.6 carries no embedding engine of its own:

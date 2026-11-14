@@ -3,9 +3,12 @@
 Status: approved by the owner on 2026-11-13 with the three recommended
 choices (below, "Decisions for the owner"), after a trial in throwaway
 containers that day (below, "The trial"). Built in two releases: the panel
-first (built for v2.184.0: docs/browser.md, "Sign in to a site"), then Keep
-its logins. The agent's own browser is described in
-docs/browser.md.
+(v2.184.0: docs/browser.md, "Sign in to a site"), then Keep its logins
+(v2.185.0: docs/browser.md, "Keep its logins"). One change from section 2
+as built: each kept profile's volume carries an id the agent's record holds,
+and Forget gives it a new one, so a forgotten profile is never mounted again
+even while its machine cannot be reached; the sweep deletes it once it can.
+The agent's own browser is described in docs/browser.md.
 
 Today an agent's browser keeps nothing: its profile is in memory, so a
 restart of the agent forgets every site it was signed in to, and nobody can

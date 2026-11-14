@@ -278,6 +278,7 @@ const CLOSED_WHY = {
   replaced: 'Opened again in another window, so this one closed.',
   person: 'Closed.',
   gone: 'The browser closed: the agent stopped, restarted or was rebuilt.',
+  restarted: 'Its browser started again, to keep or forget its logins. Open it again to sign in.',
   shutdown: 'Hatchabot is restarting.',
 } as const;
 export type PanelCloseReason = keyof typeof CLOSED_WHY;
@@ -303,6 +304,8 @@ class Panel {
     size: PanelSize,
     readonly idleMs: number,
     readonly onClosed: (p: Panel, why: PanelCloseReason, detail?: string) => void,
+    /** Each address its page reaches (a kept profile lists the sites). */
+    readonly onUrl?: (url: string) => void,
   ) {
     this.#size = size;
     channel.onMessage((m) => this.#fromRelay(m));
@@ -416,11 +419,11 @@ class Panel {
         const f = (p.frame ?? {}) as Record<string, unknown>;
         if (f.parentId || typeof f.id !== 'string' || typeof f.url !== 'string') return;
         this.#mainFrame = f.id;
-        this.#emit({ t: 'url', url: f.url.slice(0, 2048) });
+        this.#url(f.url);
         return;
       }
       case 'Page.navigatedWithinDocument':
-        if (p.frameId === this.#mainFrame && typeof p.url === 'string') this.#emit({ t: 'url', url: p.url.slice(0, 2048) });
+        if (p.frameId === this.#mainFrame && typeof p.url === 'string') this.#url(p.url);
         return;
       case 'Page.frameStartedLoading':
       case 'Page.frameStoppedLoading':
@@ -429,6 +432,12 @@ class Panel {
       default:
         return; // everything else the tab says stays here
     }
+  }
+
+  #url(url: string): void {
+    if (this.closed) return;
+    this.#emit({ t: 'url', url: url.slice(0, 2048) });
+    try { this.onUrl?.(url.slice(0, 2048)); } catch { /* the page goes on */ }
   }
 
   /** One frame at a time: sent, taken by the stream, then acknowledged so the browser sends the next. */
@@ -450,7 +459,12 @@ class Panel {
 export class BrowserPanels {
   #byId = new Map<string, Panel>();
   #byAgent = new Map<string, Panel>();
-  constructor(private readonly opts: { idleMs?: number; log?: (agentId: string, event: string, detail: Record<string, unknown>) => void } = {}) {}
+  constructor(private readonly opts: {
+    idleMs?: number;
+    log?: (agentId: string, event: string, detail: Record<string, unknown>) => void;
+    /** Each address a panel's page reaches, for its agent. */
+    onUrl?: (agentId: string, url: string) => void;
+  } = {}) {}
 
   /** A new panel for `agentId`, its relay already started; one already open for that agent is closed. */
   open(agentId: string, ownerId: string, channel: BrowserPanelChannel, size: PanelSize, url?: string): string {
@@ -459,7 +473,7 @@ export class BrowserPanels {
       this.#byId.delete(gone.id);
       if (this.#byAgent.get(gone.agentId) === gone) this.#byAgent.delete(gone.agentId);
       this.opts.log?.(gone.agentId, 'browser.panel_closed', { why, ...(why === 'gone' && detail ? { detail: detail.slice(0, 200) } : {}) });
-    });
+    }, this.opts.onUrl ? (u) => this.opts.onUrl!(agentId, u) : undefined);
     this.#byId.set(p.id, p);
     this.#byAgent.set(agentId, p);
     if (url) p.run([{ method: 'Page.navigate', params: { url } }]);

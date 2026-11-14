@@ -105,7 +105,8 @@ import { RecentTracker, RECENT_CAP, orderRecent, previewFor, previewLine, type R
 import { COST_BANDS, COST_PERIODS, costBadgesOn, costsFor, DEFAULT_COST_PERIOD, TtlCache, windowPricing, spendSeries, SPEND_RANGES, isSpendRange, isCostPeriod, type AgentCost } from '../orchestrator/agentCosts.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
-import { browserImage, browserSweep, containerOf, browserRefreshDate } from '../orchestrator/browser.js';
+import { browserImage, browserSweep, containerOf, browserRefreshDate, browserLoginsVolume, newBrowserLogins } from '../orchestrator/browser.js';
+import { browserSteerers, siteOf } from '../orchestrator/browserLogins.js';
 import { BrowserPanels, PANEL_IDLE_MS, panelAddress, panelCommands, panelSize, panelTransportOk, type PanelSink } from '../orchestrator/browserPanel.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { CACHE_READ_DEFAULT, CACHE_WRITE_MULTIPLIER, estimateCost, priceList, pricesNothing, PRICES_CHECKED, PRICES_SOURCE } from '../orchestrator/pricing.js';
@@ -888,6 +889,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return {
       ...agent,
       gatewayToken: undefined,
+      // Keep its logins (HB-0680): whether it does. Its profile's id and the
+      // sites are the owner's, from GET /v1/agents/:id/browser.
+      browserLogins: undefined,
+      browserSites: undefined,
+      keepsLogins: agent.browser && agent.browserLogins ? true : undefined,
       // An answered bot-token step is setup's to take up, not the owner's:
       // shown as setting up, so no app or CLI reads it as asked again.
       pendingAction: agent.pendingAction?.received ? undefined : agent.pendingAction,
@@ -4360,7 +4366,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Which Chromium it is, and the day the image's was last refreshed (HB-0677).
     const chromium = b?.running && c ? await p?.browserVersion?.(c).catch(() => undefined) : undefined;
     const refreshed = browserRefreshDate();
-    return { on: !!agent.browser, running: !!b?.running, image: browserImage().image, ...(chromium ? { chromium } : {}), ...(refreshed ? { refreshed } : {}) };
+    // Keep its logins (HB-0680): whether it does, the sites its panel opened,
+    // how big the profile is, and who besides the owner can steer it (the dialog names them).
+    const kept = agent.browserLogins && b?.running && b.logins === agent.browserLogins && c ? await p?.browserProfileBytes?.(c).catch(() => undefined) : undefined;
+    return {
+      on: !!agent.browser, running: !!b?.running, image: browserImage().image, ...(chromium ? { chromium } : {}), ...(refreshed ? { refreshed } : {}),
+      keepsLogins: !!agent.browserLogins, sites: agent.browserSites ?? [], ...(kept !== undefined ? { profileMB: Math.max(1, Math.round(kept / 1048576)) } : {}),
+      steeredBy: agent.browser ? browserSteerers(store, agent) : [],
+    };
   });
 
   // ---- "Sign in to a site": the owner sees the agent's browser and clicks and
@@ -4369,7 +4382,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // encrypted connection only, since what is typed is a password; nothing of
   // it is stored or logged. A panel lasts until it is closed, ten minutes pass
   // with no input, or the browser goes (the agent stops or restarts).
-  const panels = new BrowserPanels({ log: (agentId, e, d) => trace(agentId)(e, d) });
+  const panels = new BrowserPanels({
+    log: (agentId, e, d) => trace(agentId)(e, d),
+    // An agent that keeps its logins lists the sites its panel opened (the host only).
+    onUrl: (agentId, url) => {
+      const a = store.getAgent(agentId);
+      const site = siteOf(url);
+      if (a?.browserLogins && site) store.noteAgentBrowserSite(agentId, a.browserLogins, site);
+    },
+  });
   app.addHook('onClose', async () => { panels.closeAll('shutdown'); });
   const PANEL_PLAIN_HTTP = 'The sign-in panel opens only over an encrypted connection: this Hatchabot\'s https address, a device on your tailnet, or this machine itself. What you type in it is a password, so over plain http on your network it stays shut.';
   const PANEL_GONE = 'That panel has closed. Open it again.';
@@ -4445,6 +4466,53 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     if (agent) panels.get(req.params.panel, agent.id, agent.ownerId)?.close('person');
     return reply.code(204).send();
+  });
+
+  // ---- Keep its logins (HB-0680, docs/browser.md): the browser's profile on a
+  // volume of its own, so a sign-in survives restarts, until it is forgotten.
+  // The owner only, never a guest or the manager; switching it on is a step-up
+  // at the public address. Each change gives it a new profile (an id on the
+  // agent), so its browser starts again, empty; the old profile is never
+  // mounted again, and the sweep deletes it from the machine once it can.
+  const applyLogins = async (agent: Agent, was: string | undefined): Promise<{ done: boolean; message: string }> => {
+    panels.closeAgent(agent.id, 'restarted');
+    const p = providerFor(agent.hostId);
+    const c = containerOf(agent.runtimeRef, p);
+    const oldVol = was && c ? browserLoginsVolume(c, was) : undefined;
+    const swept = await Promise.race([browsersNow(agent.id), new Promise<undefined>((r) => setTimeout(() => r(undefined), 20_000).unref())]);
+    // Still there, or not known to be gone: a machine that does not answer lists nothing.
+    const answers = p.reachable ? await p.reachable().catch(() => false) : true;
+    const listed = answers ? await p.listBrowserLogins?.().catch(() => undefined) : undefined;
+    const left = !!oldVol && !(swept?.removed ?? []).includes(oldVol) && (!listed || listed.some((v) => v.name === oldVol));
+    const now = store.getAgent(agent.id) ?? agent;
+    const running = now.state === 'RUNNING';
+    const message = left
+      ? 'Its browser will not use them again. Its machine has not deleted them yet: that happens within minutes once it answers.'
+      : running ? (now.browserLogins ? 'Its browser starts again, empty, keeping what you sign in to from now on.' : 'Its browser starts again, empty, and keeps nothing past a restart.')
+      : 'Saved: its browser starts that way when the agent next runs.';
+    return { done: !left, message };
+  };
+  app.put<{ Params: { id: string }; Body: { keep?: unknown } | undefined }>('/v1/agents/:id/browser/logins', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (typeof req.body?.keep !== 'boolean') return reply.code(400).send({ error: 'Say keep: true or false.' });
+    if (agent.ops || !agent.browser) return reply.code(409).send({ error: 'Its browser is off: turn it on under Advanced → Browser first.' });
+    if (agent.state === 'ARCHIVED') return reply.code(409).send({ error: 'It is archived: restore it first.' });
+    const keep = req.body.keep;
+    if (keep === !!agent.browserLogins) return { keepsLogins: keep, done: true, message: keep ? 'It already keeps its logins.' : 'It keeps no logins.' };
+    store.setAgentBrowserLogins(agent.id, keep ? newBrowserLogins() : null);
+    trace(agent.id)(keep ? 'browser.logins_kept' : 'browser.logins_forgotten', keep ? {} : { why: 'switched off' });
+    return { keepsLogins: keep, ...(await applyLogins(agent, agent.browserLogins)) };
+  });
+  // Forget logins: a new, empty profile; it goes on keeping what comes next.
+  app.delete<{ Params: { id: string } }>('/v1/agents/:id/browser/logins', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (!agent.browserLogins) return reply.code(409).send({ error: 'It keeps no logins: a restart already forgets what it signed in to.' });
+    store.setAgentBrowserLogins(agent.id, newBrowserLogins());
+    trace(agent.id)('browser.logins_forgotten', { why: 'forget' });
+    const r = await applyLogins(agent, agent.browserLogins);
+    return { keepsLogins: true, ...r, message: r.done ? `Forgotten. ${r.message}` : `Forgotten: ${r.message[0]!.toLowerCase()}${r.message.slice(1)}` };
   });
 
   // A started or woken agent may carry sessions pinned to a runtime its config

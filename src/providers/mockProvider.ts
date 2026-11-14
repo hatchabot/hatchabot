@@ -95,6 +95,13 @@ export class MockProvider implements RuntimeProvider {
 
   async stop(runtimeRef: string): Promise<void> {
     this.#require(runtimeRef).phase = 'stopped';
+    this.#closeKept(runtimeRef.replace(/^mock:\/\//, ''));
+  }
+  /** As the real one: a browser that keeps logins is closed (it writes its profile), then it is not running. */
+  #closeKept(agentContainer: string): void {
+    if (!this.browsers.get(agentContainer) || !this.browserLoginsOf.get(agentContainer)) return;
+    this.browserCloses.push(agentContainer);
+    this.browsers.set(agentContainer, false);
   }
 
   async destroy(runtimeRef: string, opts?: { purge?: boolean }): Promise<void> {
@@ -343,14 +350,41 @@ export class MockProvider implements RuntimeProvider {
   /** Each agent's browser, as tests see it: agent container → running. */
   browsers = new Map<string, boolean>();
   browserSpecs: Array<import('../orchestrator/browser.js').BrowserSpec> = [];
+  /** The kept profile each browser runs on (Keep its logins), the volumes of them, and the browsers closed before they went. */
+  browserLoginsOf = new Map<string, string>();
+  loginVolumes = new Map<string, { agentContainer: string; agentId?: string; logins: string }>();
+  browserCloses: string[] = [];
+  profileBytes = new Map<string, number>();
   async ensureBrowser(spec: import('../orchestrator/browser.js').BrowserSpec) {
     this.browserSpecs.push(spec);
-    if (this.browsers.get(spec.agentContainer)) return 'running' as const;
+    const same = (this.browserLoginsOf.get(spec.agentContainer) ?? '') === (spec.logins ?? '');
+    if (this.browsers.get(spec.agentContainer) && same) return 'running' as const;
     this.browsers.set(spec.agentContainer, true);
+    if (spec.logins) {
+      this.browserLoginsOf.set(spec.agentContainer, spec.logins);
+      const { browserLoginsVolume } = await import('../orchestrator/browser.js');
+      const v = browserLoginsVolume(spec.agentContainer, spec.logins);
+      if (!this.loginVolumes.has(v)) this.loginVolumes.set(v, { agentContainer: spec.agentContainer, ...(spec.agentId ? { agentId: spec.agentId } : {}), logins: spec.logins });
+    } else this.browserLoginsOf.delete(spec.agentContainer);
     return 'started' as const;
   }
-  async stopBrowser(agentContainer: string) { this.browsers.delete(agentContainer); }
-  async listBrowsers() { return [...this.browsers].map(([agentContainer, running]) => ({ name: `${agentContainer}-browser`, agentContainer, running })); }
+  async stopBrowser(agentContainer: string) { this.#closeKept(agentContainer); this.browsers.delete(agentContainer); this.browserLoginsOf.delete(agentContainer); }
+  async listBrowsers() {
+    return [...this.browsers].map(([agentContainer, running]) => {
+      const logins = this.browserLoginsOf.get(agentContainer);
+      return { name: `${agentContainer}-browser`, agentContainer, running, ...(logins ? { logins } : {}) };
+    });
+  }
+  async listBrowserLogins() { return [...this.loginVolumes].map(([name, v]) => ({ name, ...v })); }
+  /** Refused, as Docker does, while a browser runs on it. */
+  async removeBrowserLogins(volume: string) {
+    const v = this.loginVolumes.get(volume);
+    if (!v) return true;
+    if (this.browsers.has(v.agentContainer) && this.browserLoginsOf.get(v.agentContainer) === v.logins) return false;
+    this.loginVolumes.delete(volume);
+    return true;
+  }
+  async browserProfileBytes(agentContainer: string) { return this.browsers.get(agentContainer) ? this.profileBytes.get(agentContainer) ?? 31 * 1024 * 1024 : undefined; }
   /** Each sign-in panel's relay, as tests drive it: what was sent to it, and a way to answer or end it. */
   panelRelays: Array<{ agentContainer: string; sent: Array<{ id: number; method: string; params?: Record<string, unknown> }>; emit: (m: Record<string, unknown>) => void; end: (detail?: string) => void; closed: boolean }> = [];
   openBrowserPanel(agentContainer: string): import('../orchestrator/browserPanel.js').BrowserPanelChannel {

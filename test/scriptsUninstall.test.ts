@@ -967,6 +967,23 @@ describe('scripts/uninstall.sh finds, stops and reports every runtime of its age
     expect(r.stdout).toContain('removed 1 service containers (doormen, browsers, memory search)');
   });
 
+  it('--purge removes the logins each agent\'s browser kept, by the agent they belong to; without it they stay (HB-0680)', () => {
+    const KEPT = `"volume ls -q --filter label=hatchabot.role=browser-logins --filter label=hatchabot.browser-of=hatchabot-garden-notes-22222222") echo hatchabot-garden-notes-22222222-browser-logins-0a1b2c3d4e5f ;;
+  ${VOLS}`;
+    const w = stateWorld([MODERN]);
+    dockerShim(w, KEPT);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(calls(w)).toContain('docker volume rm hatchabot-garden-notes-22222222-browser-logins-0a1b2c3d4e5f');
+    expect(calls(w)).toContain('docker volume rm hatchabot-garden-notes-22222222-vol');
+
+    const kept = stateWorld([MODERN]);
+    dockerShim(kept, KEPT);
+    const k = run(kept, ['--yes']);
+    expect(k.status, k.stdout + k.stderr).toBe(0);
+    expect(calls(kept).filter((c) => c.startsWith('docker volume rm'))).toEqual([]);
+  });
+
   it('--purge is not held back by agents on a runner that were deleted in the app; one that is not deleted still holds it', () => {
     const gone = { id: '33333333-cccc', name: 'Chore Chart', ref: 'docker://hatchabot-chore-chart-33333333', state: 'DELETED', host: 'h-runner' };
     const w = stateWorld([MODERN, gone]);

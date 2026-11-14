@@ -38,6 +38,8 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/browser/panel': 'app: browser — the sign-in panel: the owner clicks and types in the agent\'s browser themselves (a password never passes through a model)',
   'POST /v1/agents/:id/browser/panel/:panel/input': 'app: browser — the sign-in panel\'s clicks and typing',
   'DELETE /v1/agents/:id/browser/panel/:panel': 'app: browser — closing the sign-in panel',
+  'PUT /v1/agents/:id/browser/logins': 'app: browser — Keep its logins is decided with its warning (who can steer the agent) in front of the owner, not in a chat',
+  'DELETE /v1/agents/:id/browser/logins': 'app: browser — Forget logins, beside the switch (and `hatchabot browser <agent> forget`)',
   'POST /v1/agents/:id/icons/suggest': 'app: browser — ideas to choose from in the icon dialog; it changes nothing (the dialog\'s Save is PATCH /v1/agents/:id)',
   'POST /v1/agents/:id/checkpoint': 'checkpoint_memory',
   'POST /v1/agents/:id/compact': 'compact_agent',

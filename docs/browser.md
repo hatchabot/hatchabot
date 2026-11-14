@@ -66,7 +66,8 @@ signed in.
 
 **How long it lasts:** until the agent restarts (a restart, a sleep, a
 rebuild, a stop). The browser's profile lives in memory: nothing it is
-signed in to is kept on disk, in backups or in downloads.
+signed in to is kept on disk, in backups or in downloads. To keep a
+sign-in past a restart, switch on **Keep its logins** (below).
 
 **What it means:** while it is signed in, the agent can act as you on that
 site, and so can a page that tricks it or anyone who can message it. It can
@@ -102,6 +103,62 @@ turn it away. Two-step codes work: you type them.
   the first. It closes after ten minutes with nothing clicked or typed;
   the browser keeps the page.
 
+## Keep its logins
+
+**Keep its logins** (Advanced → **Browser**, beside **Sign in to a site**;
+off by default, only with the browser on) keeps the agent's browser
+profile on this machine, so it stays signed in through restarts, sleeps,
+rebuilds and new browser images, until you forget it. Before it goes on, the
+app says what it means and names everyone who can steer the agent: the
+people who can message it (each with how: Telegram, web chat…), everyone
+in a Telegram group it is open to, the agents that may consult it, and
+people let in inside OpenClaw itself. Each of them can ask a signed-in
+agent to act as you on those sites, and so can a page that tricks it.
+
+- **Its browser starts again, empty,** each time it is switched on, off or
+  forgotten: sign it in afterwards, through **Sign in to a site**.
+- **Forget logins** (beside the switch, or `hatchabot browser "<agent>"
+  forget`) starts it again on a new, empty profile, and deletes the old one
+  from the machine. It goes on keeping what you sign it in to next.
+  Switching the setting off forgets them too. The sites still count the
+  agent signed in: to end a session there, sign out on the site, or change
+  that password.
+- **What the app shows:** "keeps logins" and the profile's size beside
+  the browser's state, and the sites you opened in the sign-in panel,
+  newest first, with the day. Alerts' line for the agent says "its own
+  browser, keeps logins", a powerful capability like sending email.
+
+| What happens | Its logins |
+| --- | --- |
+| The agent restarts, sleeps and wakes, is rebuilt | kept |
+| A release refreshes the browser image | kept (after a downgrade to an older Chromium, forget them if it will not start) |
+| The browser is switched off, or Keep its logins | deleted |
+| Forget logins | deleted; it keeps what comes next |
+| The agent moves to a runner or to another Hatchabot | not carried: sign in again there |
+| The agent is archived or deleted; `uninstall --purge` | deleted |
+| Nightly backups, downloads, templates, clones | **never included** |
+
+**Why never in a backup:** a backup set is files anyone with the disk can
+read, often on a NAS, and the cookies in a profile are as good as plain
+text there (Chromium in a container has no keyring to lock them with). A
+restore would also bring back sign-ins you forgot on purpose. Signing in
+again takes a minute.
+
+**How it is kept:** a Docker volume per agent, labelled as this
+install's and named for the agent's container and an id the agent's
+record holds. Forget gives the agent a new id, so the old profile is never
+mounted again, even when its machine cannot be reached at that moment; the
+sweep deletes it once it can. A new volume is made the browser's user's and
+set to "continue where you left off": without that, Chromium drops session
+cookies when it ends, and a session cookie is how most sites keep a
+sign-in. Before anything ends a browser that keeps logins (a stop, a sleep,
+a rebuild, a new browser in its place), Hatchabot closes it the way
+Chromium writes its profile, over its port from the agent's side, and
+waits about two seconds for it to finish. An end nobody chose (power lost)
+loses what changed in the last half minute or so. A side effect: the tabs
+open when it closed open again, and idle-tab cleanup closes them after two
+hours. A profile past 500 MB is said in the agent's timeline once a day.
+
 ## How it works
 
 - Each agent with the browser on gets **its own Chromium**, in a container
@@ -111,7 +168,8 @@ turn it away. Two-step codes work: you type them.
   change reaches running browsers at the next sweep, which replaces them.
   Agents without the browser run none, and their browser tool is switched off.
 - Its profile lives in memory: **nothing it logs into is kept** across a
-  restart of the agent. It starts with no cookies and no saved logins.
+  restart of the agent. It starts with no cookies and no saved logins,
+  unless **Keep its logins** is on (above).
 - **What a page can make of it is held to the least** (set at every build of
   the agent):
   - the agent cannot run its own scripts in a page (OpenClaw's
@@ -168,7 +226,9 @@ turn it away. Two-step codes work: you type them.
 
 ## Checking it
 
-- `hatchabot browser "<agent>"` — on or off, running or not, and its Chromium.
+- `hatchabot browser "<agent>"` — on or off, running or not, and its Chromium;
+  whether it keeps its logins, how big they are, and the sites its sign-in
+  panel opened. `hatchabot browser "<agent>" forget` forgets them.
 - `hatchabot doctor` — the Chromium the agents' browsers run on this
   machine; it warns when one still runs an older image, or when the image
   is over 30 days old (upgrade for a current Chromium).
@@ -178,4 +238,5 @@ turn it away. Two-step codes work: you type them.
 - The live test `browser` (docs/live-tests.md) does both, and checks the
   isolation, that scripts and private addresses are refused, that a page
   sending itself to one later does not reach it, and that the sign-in panel
-  signs it in to a demo login page, on a test agent.
+  signs it in to a demo login page, on a test agent; with Keep its logins on,
+  that the sign-in outlives a restart and is gone after Forget logins.

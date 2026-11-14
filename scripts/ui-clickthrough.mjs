@@ -575,6 +575,60 @@ const SCENARIOS = String.raw`(() => {
         v2Close();
       }
     },
+    browserKeepLogins: async () => {
+      // HB-0680 part 2: Keep its logins, on only after a warning that names who can steer the
+      // agent; then Forget logins, the sites its panel signed in to, and how big the profile is.
+      let a1 = v2Find('a1');
+      const was = { browser: a1.browser, keeps: a1.keepsLogins };
+      const steer = ['Sam (Telegram)', 'everyone in its Telegram group'];
+      const change = (sel, v) => { sel.value = v; sel.dispatchEvent(new Event('change', { bubbles: true })); };
+      window.__override['/v1/agents/a1/browser'] = { on: true, running: true, chromium: '156.0.0.0', keepsLogins: false, sites: [], steeredBy: steer };
+      try {
+        a1.browser = true; a1.keepsLogins = undefined;
+        openV2Agent('a1', 'advanced');
+        const sel = await until(() => document.getElementById('v2BrowserKeep'));
+        ok('off to start, and no Forget', sel.value === 'off' && !document.getElementById('v2BrowserForget'));
+        // Cancelled: nothing sent, and the switch goes back.
+        window.__confirms = []; window.__confirmAnswer = false;
+        change(sel, 'on');
+        await until(() => window.__confirms.length === 1);
+        await sleep(50);
+        const warn = window.__confirms[0];
+        ok('the warning names who can steer it', steer.every((x) => warn.includes(x)));
+        ok('and says what it means', /act as you/.test(warn) && /never your email, bank or password manager/.test(warn) && /not in backups or downloads/.test(warn) && /starts again, empty/.test(warn));
+        ok('cancelled: back to off, nothing sent', sel.value === 'off' && calls('PUT', /\/browser\/logins$/).length === 0);
+        window.__confirmAnswer = true;
+        change(sel, 'on');
+        const put = await until(() => calls('PUT', /\/v1\/agents\/a1\/browser\/logins$/)[0]);
+        eq('switched on', put.body, { keep: true });
+        // Keeping: the switch on, Forget beside it, the sites and the size.
+        a1 = v2Find('a1'); a1.browser = true; a1.keepsLogins = true;
+        window.__override['/v1/agents/a1/browser'] = { on: true, running: true, keepsLogins: true, profileMB: 31, sites: [{ site: 'accounts.example.org', at: '2026-11-13T10:00:00Z' }, { site: 'shop.example.net', at: '2026-11-12T09:00:00Z' }], steeredBy: steer };
+        openV2Agent('a1', 'advanced');
+        const forget = await until(() => document.getElementById('v2BrowserForget'));
+        const sites = await until(() => !document.getElementById('v2BrowserSites').hidden && document.getElementById('v2BrowserSites'));
+        ok('the sites, newest first: ' + sites.textContent, /accounts\.example\.org.*shop\.example\.net/.test(sites.textContent));
+        await until(() => /keeps logins/.test(document.getElementById('v2BrowserState').textContent));
+        ok('says it keeps them, and how much: ' + document.getElementById('v2BrowserState').textContent, /keeps logins \(31 MB\)/.test(document.getElementById('v2BrowserState').textContent));
+        ok('the switch shows on', document.getElementById('v2BrowserKeep').value === 'on');
+        window.__confirms = [];
+        forget.click();
+        const del = await until(() => calls('DELETE', /\/v1\/agents\/a1\/browser\/logins$/)[0]);
+        ok('Forget asks first, then forgets', !!del && /signed in nowhere/.test(window.__confirms[0] || ''));
+        // Switched off: asked too.
+        a1 = v2Find('a1'); a1.browser = true; a1.keepsLogins = true;
+        openV2Agent('a1', 'advanced');
+        window.__confirms = [];
+        change(await until(() => document.getElementById('v2BrowserKeep')), 'off');
+        const off = await until(() => calls('PUT', /\/v1\/agents\/a1\/browser\/logins$/).find((c) => c.body?.keep === false));
+        ok('off: asked, then sent', !!off && /what it kept is deleted/.test(window.__confirms[0] || ''));
+      } finally {
+        delete window.__override['/v1/agents/a1/browser'];
+        window.__confirmAnswer = true;
+        a1 = v2Find('a1'); a1.browser = was.browser; a1.keepsLogins = was.keeps;
+        v2Close();
+      }
+    },
     groupArrows: async () => {
       const family = byText('#v2groups .v2ghead', 'Family');
       ok('Family header', !!family);
@@ -10823,6 +10877,26 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/browser'];
         a1.browser = was;
         if (bpDlg.open) bpClose();
+        v2Close();
+      }
+    },
+    phoneBrowserKeepLogins: async () => {
+      // HB-0680 part 2 on a phone: the switch, Forget logins and the sites, all on the screen.
+      const a1 = v2Find('a1'), was = { browser: a1.browser, keeps: a1.keepsLogins };
+      window.__override['/v1/agents/a1/browser'] = { on: true, running: true, keepsLogins: true, profileMB: 31, sites: [{ site: 'accounts.example.org', at: '2026-11-13T10:00:00Z' }, { site: 'a-rather-long-sign-in-host-name.example.net', at: '2026-11-12T09:00:00Z' }], steeredBy: [] };
+      try {
+        a1.browser = true; a1.keepsLogins = true;
+        openV2Agent('a1', 'advanced');
+        const sel = await until(() => document.getElementById('v2BrowserKeep'));
+        const sites = await until(() => !document.getElementById('v2BrowserSites').hidden && document.getElementById('v2BrowserSites'));
+        sel.scrollIntoView({ block: 'center' });
+        await sleep(50);
+        const out = [sel, document.getElementById('v2BrowserForget'), sites].filter((el) => { const r = el.getBoundingClientRect(); return r.left < -0.5 || r.right > innerWidth + 0.5; });
+        ok('the switch, Forget and the sites are on the screen: ' + out.map((el) => el.id).join(', '), out.length === 0);
+        ok('no sideways scroll', document.documentElement.scrollWidth <= innerWidth);
+      } finally {
+        delete window.__override['/v1/agents/a1/browser'];
+        a1.browser = was.browser; a1.keepsLogins = was.keeps;
         v2Close();
       }
     },

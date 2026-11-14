@@ -402,8 +402,16 @@ export interface RuntimeProvider {
   containerName?(runtimeRef: string): string;
   /** An agent's own browser (src/orchestrator/browser.ts): start it, or keep the one sharing the agent's current network. */
   ensureBrowser?(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'>;
+  /** Remove it; one that keeps logins is closed first, so it writes its profile. */
   stopBrowser?(agentContainer: string): Promise<void>;
-  listBrowsers?(): Promise<Array<{ name: string; agentContainer: string; running: boolean }>>;
+  /** `logins`: the kept profile it runs on, if any. */
+  listBrowsers?(): Promise<Array<{ name: string; agentContainer: string; running: boolean; logins?: string }>>;
+  /** This install's kept browser profiles (Keep its logins), from their labels. */
+  listBrowserLogins?(): Promise<Array<{ name: string; agentContainer: string; agentId?: string; logins?: string }>>;
+  /** Remove one; false when Docker refuses (a browser still holds it) or it is not one. */
+  removeBrowserLogins?(volume: string): Promise<boolean>;
+  /** How big an agent's running browser's profile is, in bytes. */
+  browserProfileBytes?(agentContainer: string): Promise<number | undefined>;
   /** The Chromium an agent's running browser is ("154.0.8037.92"), or undefined when it cannot be asked. */
   browserVersion?(agentContainer: string): Promise<string | undefined>;
   /** "Sign in to a site" (src/orchestrator/browserPanel.ts): a relay in the agent's container, on a tab of its own in its browser. */

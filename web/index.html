@@ -1277,7 +1277,7 @@
     <button class="cbtn" type="button" onclick="bpSend({ k: 'key', key: 'Backspace' })" aria-label="Backspace" title="Backspace">⌫</button>
     <button class="cbtn" type="button" onclick="bpSend({ k: 'key', key: 'Tab' })" title="Press Tab in the page">Tab</button>
   </form>
-  <div class="bp-note">Click a box in the page and type. What you type goes to that page only; Hatchabot keeps none of it. The agent stays signed in until it restarts and can act as you there: sign it in only where you would let it act for you.</div>
+  <div class="bp-note" id="bpNote">Click a box in the page and type. What you type goes to that page only; Hatchabot keeps none of it. The agent stays signed in until it restarts and can act as you there: sign it in only where you would let it act for you.</div>
 </dialog>
 
 <dialog id="loginDlg" closedby="none">
@@ -15923,7 +15923,11 @@ function v2Pane(a, tab) {
           <option value="off"${a.browser ? '' : ' selected'}>Off</option><option value="on"${a.browser ? ' selected' : ''}>On</option></select></label>
         <span class="sub" id="v2BrowserState"></span>
         ${a.browser && run ? B('Sign in to a site…', `bpOpen('${id}')`, 'id="v2BrowserSignIn" title="See its browser and sign it in to a site yourself"') : ''}
-        <div class="sub" style="flex-basis:100%">A Chromium of its own that it can open pages in, click and fill forms — for sites it must use, not for looking things up (web search is far cheaper: one browsing question can take 300K tokens). It runs beside the agent, with none of its files, up to 1 GB. <b>Sign in to a site</b> shows you its browser, to sign it in yourself (or past a cookie banner or a CAPTCHA); a sign-in lasts until the agent restarts.</div>`) : ''}
+        ${a.browser ? `<label style="margin:0">Keep its logins <select id="v2BrowserKeep" data-saves onchange="v2SetKeepLogins('${id}', this.value === 'on', this)">
+          <option value="off"${a.keepsLogins ? '' : ' selected'}>Off</option><option value="on"${a.keepsLogins ? ' selected' : ''}>On</option></select></label>` : ''}
+        ${a.keepsLogins ? B('Forget logins', `v2ForgetLogins('${id}')`, 'id="v2BrowserForget" title="Its browser starts again, signed in nowhere"') : ''}
+        <div class="sub" id="v2BrowserSites" style="flex-basis:100%" hidden></div>
+        <div class="sub" style="flex-basis:100%">A Chromium of its own that it can open pages in, click and fill forms — for sites it must use, not for looking things up (web search is far cheaper: one browsing question can take 300K tokens). It runs beside the agent, with none of its files, up to 1 GB. <b>Sign in to a site</b> shows you its browser, to sign it in yourself (or past a cookie banner or a CAPTCHA); a sign-in lasts until the agent restarts. <b>Keep its logins</b> keeps them on this machine until you forget them, never in a backup or a download.</div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${built ? row('Recovery', `<div id="v2RecoveryRow" data-agent="${esc(a.id)}" style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline"><span class="sub">Loading…</span></div>`) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
@@ -16239,9 +16243,46 @@ async function v2LoadBrowser(id) {
   try {
     const b = await api(`/v1/agents/${id}/browser`);
     if (!el) return;
-    el.textContent = !b.on ? '' : b.running ? `· running${b.chromium ? ` (Chromium ${b.chromium})` : ''}` : '· starting (within a minute of the agent)';
+    el.textContent = !b.on ? '' : (b.running ? `· running${b.chromium ? ` (Chromium ${b.chromium})` : ''}` : '· starting (within a minute of the agent)') + (b.keepsLogins ? ` · keeps logins${b.profileMB ? ` (${b.profileMB} MB)` : ''}` : '');
     el.style.color = b.on && b.running ? 'var(--ok)' : '';
+    // The sites its sign-in panel opened while it keeps its logins, newest first, with the day.
+    const sites = $('v2BrowserSites');
+    if (sites) {
+      const list = b.keepsLogins ? (b.sites || []).slice(0, 12) : [];
+      sites.hidden = !list.length;
+      sites.innerHTML = list.length ? 'Signed in through its panel: ' + list.map((x) => `${esc(x.site)} <span style="opacity:.75">(${esc(new Date(x.at).toLocaleDateString([], { month: 'short', day: 'numeric' }))})</span>`).join(', ') : '';
+    }
   } catch { if (el) el.textContent = ''; }
+}
+/*
+ * Keep its logins (HB-0680; docs/browser.md): its browser's sign-ins kept on
+ * this machine until they are forgotten. Switched on only after the warning,
+ * which names who besides you can steer the agent; each change starts its
+ * browser again, empty.
+ */
+async function v2SetKeepLogins(id, on, el) {
+  const a = v2Find(id), name = a?.name ?? 'this agent';
+  const undo = () => { if (el) el.value = on ? 'off' : 'on'; };
+  if (on) {
+    let who;
+    try { who = (await api(`/v1/agents/${id}/browser`)).steeredBy || []; } catch (e) { toast(e.message, 8000); undo(); return; }
+    const list = who.length ? who.map((w) => `  • ${w}`).join('\n') : '  • nobody else: only you message it';
+    if (!confirm(`Keep ${name}'s logins?\n\nSites you sign in to in its browser stay signed in until you forget them. While they are, the agent can act as you there, and so can a web page that tricks it, or anyone who can message it:\n${list}\n\nIt can also copy a sign-in out of its browser. Sign it in only where you would let it act for you: never your email, bank or password manager. Logins are not in backups or downloads.\n\nIts browser starts again, empty: sign it in after.`)) { undo(); return; }
+  } else if (!confirm(`Stop keeping ${name}'s logins?\n\nIts browser starts again, signed in nowhere, and what it kept is deleted from this machine.`)) { undo(); return; }
+  try {
+    const r = await api(`/v1/agents/${id}/browser/logins`, { method: 'PUT', body: { keep: on } });
+    toast(r?.message || (on ? 'It keeps its logins now.' : 'It keeps no logins now.'), 9000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 8000); undo(); }
+}
+async function v2ForgetLogins(id) {
+  const name = v2Find(id)?.name ?? 'this agent';
+  if (!confirm(`Forget the logins ${name}'s browser keeps?\n\nIts browser starts again, signed in nowhere, and goes on keeping what you sign it in to next. The sites themselves still count it signed in: to end a session there, sign out of it on the site, or change that password.`)) return;
+  try {
+    const r = await api(`/v1/agents/${id}/browser/logins`, { method: 'DELETE' });
+    toast(r?.message || 'Forgotten.', 9000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 8000); }
 }
 /*
  * "Sign in to a site" (HB-0680; docs/browser-logins-design.md): the agent's own
@@ -16264,6 +16305,8 @@ async function bpOpen(id) {
   bp.abort?.abort();
   bp = { gen, q: [], agent: id, panel: null, ended: false, fw: 0, fh: 0, urlTyped: false };
   $('bpTitle').textContent = `Sign in to a site: ${a?.name ?? 'its browser'}`;
+  // How long a sign-in lasts: until a restart, or until forgotten when it keeps its logins.
+  $('bpNote').textContent = `Click a box in the page and type. What you type goes to that page only; Hatchabot keeps none of it. The agent stays signed in ${a?.keepsLogins ? 'until you forget its logins (it keeps them)' : 'until it restarts'} and can act as you there: sign it in only where you would let it act for you.`;
   $('bpScreen').removeAttribute('src');
   $('bpUrl').value = ''; $('bpType').value = '';
   $('bpAgain').hidden = true;

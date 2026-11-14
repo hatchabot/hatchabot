@@ -217,11 +217,13 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
     if (rwMount) capabilities.push('read-write host folder');
     if (a.sharedMemory) capabilities.push('shared memory');
     // Its own browser (docs/browser.md): it reads and acts on pages anyone
-    // wrote. No saved logins and no private addresses, so not a powerful
+    // wrote. No private addresses, and without saved logins not a powerful
     // capability on its own; listed so the page does not leave it out (HB-0675).
-    if (a.browser === true) capabilities.push('its own browser');
+    // Keeping its logins it can act as its owner on those sites (HB-0680): powerful.
+    const keeps = a.browser === true && !!a.browserLogins;
+    if (a.browser === true) capabilities.push(keeps ? 'its own browser, keeps logins' : 'its own browser');
 
-    const powerful = capabilities.some((c) => c.startsWith('send email') || c === 'read-write host folder');
+    const powerful = keeps || capabilities.some((c) => c.startsWith('send email') || c === 'read-write host folder');
     let exposure: AgentExposure['exposure'] = 'low';
     const reasons: string[] = [];
     if (wideAudience) reasons.push(group !== 'off' ? `group chat (${group})` : `${audienceCount} people can message it`);

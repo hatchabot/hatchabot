@@ -2460,8 +2460,8 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### "Sign in to a site" says its browser is not running yet, or the panel closes saying the browser closed
 - **Check:** `hatchabot browser "<agent>"` says whether its browser runs; the agent's timeline shows `browser.panel_closed` with why.
-- **Cause:** the browser starts within a minute of the agent, and goes with it: a restart, a sleep, a rebuild or a stop ends the panel and every sign-in in it (the profile lives in memory).
-- **Fix:** wait a minute after the agent starts, then open the panel again and sign in again.
+- **Cause:** the browser starts within a minute of the agent, and goes with it: a restart, a sleep, a rebuild or a stop ends the panel and every sign-in in it (the profile lives in memory). Switching **Keep its logins** on or off, or **Forget logins**, starts the browser again too ("Its browser started again, to keep or forget its logins").
+- **Fix:** wait a minute after the agent starts, then open the panel again and sign in again. To keep sign-ins past a restart, switch on **Keep its logins** (docs/browser.md).
 - **Fixed in:** `v2.184.0` (the panel)
 - **Code:** `src/orchestrator/browserPanel.ts` — `BrowserPanels`, `channelFromChild`; `src/providers/localDockerProvider.ts` — `openBrowserPanel`
 
@@ -2471,6 +2471,20 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** choose another way to sign in that the site offers (a password and a code), or give the agent an account of its own on that site that it can use with a password. Hatchabot does not disguise the browser.
 - **Fixed in:** not a Hatchabot bug; documented with `v2.184.0`
 - **Code:** `src/orchestrator/browser.ts` — `browserImage` (the image, `docker/Dockerfile.browser`)
+
+### An agent that keeps its logins is signed out after a restart
+- **Check:** `hatchabot browser "<agent>"` says "keeps its logins". Its timeline shows `browser.logins_forgotten` (forgotten, or switched off) or `browser.logins_removed` since the sign-in; or the machine lost power, or Docker or the machine restarted, within a minute of the sign-in.
+- **Cause:** a kept profile is written when Hatchabot closes the browser before a stop, sleep or rebuild, and by Chromium itself about every 30 seconds. An end nobody chose (power lost, Docker restarted) loses what changed in its last half minute. The browser is also started again on a new, empty profile when its logins are switched on, switched off or forgotten, and they are deleted when the agent moves to another machine, is archived, or its browser is switched off. A site can also end a session itself (its own time limit, a password change, a sign-out elsewhere).
+- **Fix:** sign it in again through **Sign in to a site**, and leave it a minute before anything restarts it. If it is signed out after every ordinary restart, check that the agent's machine is on Hatchabot 2.185.0 or later and that the timeline shows no `browser.start_failed` for it.
+- **Fixed in:** — (Keep its logins is new in `v2.185.0`)
+- **Code:** `src/providers/localDockerProvider.ts` — `ensureBrowser`, `stop`; `src/orchestrator/browser.ts` — `BROWSER_CLOSE_SOURCE`, `BROWSER_PROFILE_PREP`, `browserSweep`
+
+### Its browser does not start after Keep its logins went on: "Could not ready the place its browser keeps its logins"
+- **Check:** the timeline has `browser.start_failed` with `browser logins prep failed`, `browser logins unlock failed`, `browser logins volume` or `is not a browser profile of this install`.
+- **Cause:** a kept profile is a Docker volume of its own. A new one is made the browser's user's by a short-lived container that may change owners and nothing else; then, before each start, another removes the lock a browser removed without closing leaves. A Docker that refuses the capability (some rootless or hosted setups), a full disk, or a volume of the same name that is not labelled as this agent's profile stops the browser rather than start it on a profile it cannot use.
+- **Fix:** fix what the error names (disk space; on a rootless Docker, check that `docker run --rm --cap-add CHOWN --user 0:0 alpine chown 1001 /tmp` works). For a name clash, look at the volume (`docker volume inspect <name>`) and remove it if it is not Hatchabot's. Or switch Keep its logins off: the browser then starts with its profile in memory, as before.
+- **Fixed in:** —
+- **Code:** `src/providers/localDockerProvider.ts` — `ensureBrowser`; `src/orchestrator/browser.ts` — `BROWSER_PROFILE_PREP`, `BROWSER_PROFILE_UNLOCK`, `browserLoginsVolume`
 
 ### "its browser did not start" every minute for every agent
 - **Check:** the Setup log repeats "browser image build failed".

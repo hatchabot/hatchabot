@@ -56,6 +56,24 @@ describe('computePosture — per-agent Telegram exposure', () => {
     expect(report.agents.find((a) => a.id === 'plain')!.capabilities).not.toContain('its own browser');
   });
 
+  it('a browser that keeps its logins is said, and is a powerful capability: it can act as its owner on those sites (HB-0680)', () => {
+    const store = baseStore();
+    agent(store, 'signed');
+    store.setAgentBrowser('signed', true);
+    store.setAgentBrowserLogins('signed', '0a1b2c3d4e5f');
+    const report = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'identity' });
+    const signed = report.agents.find((a) => a.id === 'signed')!;
+    expect(signed.capabilities).toContain('its own browser, keeps logins');
+    expect(signed.exposure).toBe('medium');
+    expect(signed.reasons).toContain('has a powerful capability');
+    // Switched off, the browser keeps nothing: back to a plain browser.
+    store.setAgentBrowser('signed', false);
+    store.setAgentBrowser('signed', true);
+    const again = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'identity' }).agents.find((a) => a.id === 'signed')!;
+    expect(again.capabilities).toContain('its own browser');
+    expect(again.exposure).toBe('low');
+  });
+
   it('a wide-audience agent with NO powerful capability is MEDIUM, not HIGH', () => {
     const store = baseStore();
     agent(store, 'chatty');

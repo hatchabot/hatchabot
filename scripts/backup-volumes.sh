@@ -312,6 +312,16 @@ if ! all_vols="$(docker volume ls -q)"; then
   exit 1
 fi
 vols="$(printf '%s\n' "$all_vols" | grep -E "^(${PREFIX}|agentclaw)-" || true)"
+# An agent's kept browser logins (Keep its logins, docs/browser.md): never in a
+# set. A backup is files anyone with the disk can read, often on a NAS, and the
+# cookies in one are as good as passwords; a restore would bring back sign-ins
+# forgotten on purpose. Left out by their label, and not called orphans either.
+# The registry above names them nowhere, so a set never waits for one. Only a
+# volume whose label AND name say so: an agent's own volume is never left out.
+logins_vols="$(docker volume ls -q --filter label=hatchabot.role=browser-logins 2>/dev/null | grep -E -- '-browser-logins-[0-9a-f]{12}$' || true)"
+if [ -n "$logins_vols" ] && [ -n "$vols" ]; then
+  vols="$(printf '%s\n' "$vols" | grep -vxF -f <(printf '%s\n' "$logins_vols") || true)"
+fi
 
 # What the registry (the DB copy just made) says should be backed up, one
 # line per agent that has a runtime (its volume by the provider's own rule,
