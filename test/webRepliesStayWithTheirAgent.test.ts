@@ -75,6 +75,7 @@ function page(names: string[], extra: Record<string, unknown> = {}, consts: stri
     $, console, Intl, encodeURIComponent, Math, Date, Promise, String, JSON, Map, Set, Number, Array, Object, crypto: webcrypto, Uint8Array,
     agents: AGENTS.map((a) => ({ ...a })), profiles: [], agentClasses: [], appConfig: {},
     cronRead: 0, cronTriggerWrite: 0,
+    sharingEpoch: 0, sharingView: 0, sharingReads: new WeakMap(), pagePerson: 'synthetic-owner', pagePersonAway: false, pageSignedOut: false,
     api: async (url: string, init?: Init) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, toast: (t: string) => { toasts.push(t); }, refresh: async () => {},
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), fmtBytes: String,
@@ -87,6 +88,8 @@ function page(names: string[], extra: Record<string, unknown> = {}, consts: stri
   // for where an edit form's answer goes (forAgent), as shipped.
   if (!('agentPrefix' in extra)) vm.runInContext(source('agentPrefix'), c);
   if (!('forAgent' in extra)) vm.runInContext(source('forAgent'), c);
+  if (!('sharingRead' in extra)) vm.runInContext(source('sharingRead'), c);
+  for (const n of ['v2Find', 'v2Mine']) if (!(n in extra)) vm.runInContext(constant(n), c);
   for (const n of names) vm.runInContext(source(n), c);
   for (const n of consts) vm.runInContext(constant(n), c);
   return { c: c as Record<string, any>, $, calls, toasts };
@@ -933,6 +936,33 @@ describe('Bulk Connect says which sleeping agents take it at their next Start or
 });
 
 describe('the Telegram tab: people who use another agent, and a search test, are the agent they were read for', () => {
+  it.each(['unrelated sheet closes', 'session ends', 'account changes'])('machine-wide access when %s retains account-scoped guards', async (change) => {
+    const reading = gate();
+    const { c, $ } = page(['loadAccessMap'], { api: () => reading.p, accessRowsHTML: () => '' });
+    const pending = c.loadAccessMap();
+    if (change === 'unrelated sheet closes') c.sharingView++;
+    else if (change === 'session ends') c.sharingEpoch++;
+    else c.pagePerson = 'other-synthetic-owner';
+    reading.open({ agents: [{ agentId: 'a1', name: 'Current account access', summary: { mismatches: 0, missing: 0, pending: 0 }, groups: [] }] });
+    await pending;
+    if (change === 'unrelated sheet closes') expect($('accessMapOut').innerHTML).toContain('Current account access');
+    else expect($('accessMapOut').innerHTML).not.toContain('Current account access');
+  });
+  it.each(['newer read', 'reopened sheet', 'ended session', 'different person', 'lost ownership'])("a known-people read cannot restore controls after %s", async (change) => {
+    const listed = gate();
+    const { c, $ } = page(['renderKnownPeople'], { api: () => listed.p });
+    const pending = c.renderKnownPeople();
+    if (change === 'newer read') {
+      c.api = async () => [{ userId: 'current-person', name: 'Current person' }];
+      await c.renderKnownPeople();
+    } else if (change === 'reopened sheet') c.sharingView++;
+    else if (change === 'ended session') c.sharingEpoch++;
+    else if (change === 'different person') c.pagePerson = 'other-synthetic-owner';
+    else c.agents[0].role = 'user';
+    listed.open([{ userId: 'old-person', name: 'Old person' }]); await pending;
+    expect($('tgKnownPeople').innerHTML).not.toContain('Old person');
+    if (change === 'newer read') expect($('tgKnownPeople').innerHTML).toContain('Current person');
+  });
   it("A's list, answered after B's forms opened, is not drawn; Add adds to the agent the list was drawn for", async () => {
     const listed = gate();
     const { c, $, calls } = page(['renderKnownPeople', 'addKnownPerson'], { api: () => listed.p, renderEditMembers: async () => {} });

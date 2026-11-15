@@ -3,7 +3,7 @@
 Known problems, as the person running Hatchabot sees them, with what causes them and how they were fixed.
 Search this file for the exact text you see (an error, a `hatchabot doctor` line, a tile or log message).
 Each entry says how to **confirm** it before acting: run that check first, since several symptoms share their wording.
-**Fixed in** names the release that fixed it in code: on an older install the fix is to upgrade (`hatchabot upgrade`); `—` means a setting or the machine.
+**Fixed in** names the release that fixed it in code: on an older install the fix is to upgrade (`hatchabot upgrade`); `—` means a setting, the machine, or an explicitly unreleased fix.
 **Code** names the file to read to go deeper.
 
 ## Install and upgrade
@@ -2495,8 +2495,8 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ### An agent's browser does not start: "browser fence failed"
 - **Check:** the Setup log says "its browser did not start" with `browser fence failed:` and an iptables error, such as `can't initialize iptables table` or `Permission denied`.
-- **Cause:** since v2.182.0, before an agent's browser starts, Hatchabot sets a firewall rule that keeps the browser off private addresses (your LAN, this machine, the tailnet), in the network the browser shares with its agent. It does this from a short-lived container with the `NET_ADMIN` capability. Where that can't be done (a kernel without nftables or connection tracking, or a Docker that refuses the capability), the browser is not started rather than started without the rule. A page could otherwise send it to a private address on its own, after the agent has finished with the page (HB-0679).
-- **Fix:** on that machine, `docker run --rm --cap-add NET_ADMIN --entrypoint iptables <the hatchabot-browser image> -S` should list rules, not an error; fix what the error names (load the kernel's `nf_tables` and `nf_conntrack` modules, or allow the capability). Until then, switch the browser off for agents on that machine. Hatchabot tries again after a minute, then after twice as long each time, up to an hour.
+- **Cause:** since v2.182.0, before an agent's browser starts, Hatchabot sets a firewall rule that keeps the browser off private addresses (your LAN, this machine, the tailnet), in the network the browser shares with its agent. The updated startup does this inside the browser container itself, temporarily using `NET_ADMIN` plus the capabilities needed to drop privileges. It then verifies user/group 1001, empty capability sets and no-new-privileges before starting Chromium. Where that can't be done (a kernel without nftables or connection tracking, or a Docker that refuses the capability), the browser is not started rather than started without the rule. A page could otherwise send it to a private address on its own, after the agent has finished with the page (HB-0679).
+- **Fix:** on that machine, `docker run --rm --cap-add NET_ADMIN --user 0:0 --entrypoint iptables <the hatchabot-browser image> -S` should list rules, not an error; fix what the error names (load the kernel's `nf_tables` and `nf_conntrack` modules, or allow the capability). Until then, switch the browser off for agents on that machine. Hatchabot tries again after a minute, then after twice as long each time, up to an hour.
 - **Fixed in:** —
 - **Code:** `src/orchestrator/browser.ts` — `BROWSER_FENCE_SCRIPT`, `browserSweep`; `src/providers/localDockerProvider.ts` — `ensureBrowser`
 
@@ -6795,3 +6795,185 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** use a build with this fix. New messages carry a unique receipt marker and use it for gateway idempotency. History checks pending markers before trimming the display; an incomplete read can prove receipt but cannot prove absence. Legacy messages retain the older fallback.
 - **Fixed in:** `v2.185.1` (HB-0643).
 - **Code:** `web/index.html` — `webChatMessageId`, `webChatOfferUnsure`, `openWebChatPanel`; `src/orchestrator/webChat.ts` — `webChatPrefix`, `historyScript`, `webChatHistory`; `src/api/webChat.ts` — `registerWebChatRoutes`
+
+
+## Browser voice and Telegram voice notes
+
+### A saved Gemini key says voice is ready, but an agent cannot transcribe a voice note
+- **Check:** inspect Settings → Connections → Voice & media, then check whether the affected agent was rebuilt after the key was saved or removed. Check whether its Google AI source supplies its own key. A saved shared key alone is not a transcription test.
+- **Cause:** the shared key is injected when a runtime is built; existing containers retain their previous environment. A Google AI source's own key takes precedence. Earlier UI copy treated storage as proof of working voice.
+- **Fix:** rebuild the affected agent after changing the shared key, then try a short Telegram voice note. Check provider access and quota if transcription still fails. Browser Talk is configured separately under the agent's Advanced → Voice card; saving the shared key does not test that path.
+- **Fixed in:** `v2.186.0` (HB-0715); existing agents still require Rebuild.
+- **Code:** `web/index.html` — `saveMediaKey`, `loadRuntimeCaps`; `src/orchestrator/provision.ts` — `MEDIA_KEY_REF`, `buildRuntimeSpec`
+
+### Browser Talk is configured, but no microphone input or spoken reply works
+- **Check:** open the agent's Advanced → Voice card as its owner and Recheck. Distinguish Configured from unavailable, unsupported, busy or not running. Use HTTPS or localhost, check microphone permission and input device, then explicitly start the microphone through Try voice. Follow the short real-device checks in docs/voice.md.
+- **Cause:** configuration readiness is a read-only runtime check, not a completed provider call. Browser permissions, network access, provider quota and audio output can still fail. An unavailable runtime is not proof of missing credentials, and guests do not receive Talk permission.
+- **Fix:** start the agent or wait for its operation, then recheck. Configure voice opens that agent's OpenClaw Talk settings. Set Talk Agent to the slug shown on the card, then save the provider settings, recheck and try the microphone from its conversation. An older internal main agent can otherwise make the runtime catalog ambiguous or select the wrong credential source. Use a supported runtime if Talk is unsupported. End the call before changing agents; closing a console tab releases its frame. A provider may answer directly, so the same agent session does not guarantee every spoken answer goes through the text model.
+- **Fixed in:** `v2.186.0` for owner setup and readiness controls (HB-0716); real microphone, provider and playback acceptance is still required.
+- **Code:** `src/orchestrator/voice.ts` — `readVoiceStatus`; `src/api/routes.ts` — `'/v1/agents/:id/voice'`; `web/index.html` — `v2LoadVoice`, `v2VoiceOpen`, `voiceBrowserNote`, `openGateway`, `pageSessionEnded`; `docs/voice.md`
+
+
+### OpenAI browser Talk fails its audio handshake through the embedded console
+- **Check:** browser developer tools show a failed POST to the root path /plugins/openai/realtime/calls after starting a brokered OpenAI voice session. The request should stay under the selected agent's console proxy. This case concerns brokered OpenAI offers, not direct provider connections.
+- **Cause:** OpenClaw 2026.9.8 resolves its brokered SDP offer against the gateway origin, dropping Hatchabot's per-agent console prefix. A cached document can also retain the pre-fix console page if the proxy forwards gateway validators for rewritten HTML.
+- **Fix:** use the updated console and reopen its tab. A small owner-console script rewrites only that same-origin POST to the current agent's authenticated proxy, preserving its reservation header, SDP body and cancellation signal. Rewritten documents do not reuse gateway validators. Guests remain unable to use this owner-only path; external provider URLs are unchanged. Complete the manual audio checks in docs/voice.md before treating a real call as verified.
+- **Fixed in:** `v2.186.0` (HB-0717).
+- **Code:** `src/api/controlUiRebase.ts` — `TALK_PROXY_SCRIPT`, `withTalkProxy`; `src/api/routes.ts` — `'/v1/agents/:id/ui/*'`; `test/controlUiRebase.test.ts`; `test/consoleGuests.test.ts`
+
+
+## Sharing, voice and browser audit follow-up
+
+### A channel identity changes owner while its admission is pending
+- **Check:** Approve a pending Telegram identity as yourself while another account claims it, or while your owner seat becomes bound to another identity.
+- **Cause:** Admission checked identity ownership only before waiting and could persist an account link after seat binding failed.
+- **Fix:** Recheck identity and agent context after approval, commit account linking and seat binding together, and remove the just-granted channel access when admission fails.
+- **Fixed in:** `v2.186.0` (HB-0718); live voice/browser acceptance remains required where applicable.
+- **Code:** `src/orchestrator/members.ts`
+
+### Member admission races a stop, revoke or lifecycle operation
+- **Check:** Approve a pairing, add a known member or accept a known-identity invite while a lifecycle action or revocation is pending.
+- **Cause:** Those admission paths did not share the lifecycle exclusion used by revocation; failed partial grants could outlive the invite attempt.
+- **Fix:** Serialize admission with lifecycle changes, recheck the destination after waits, and roll back partial channel grants without consuming a refused invite.
+- **Fixed in:** `v2.186.0` (HB-0719); live voice/browser acceptance remains required where applicable.
+- **Code:** `src/api/routes.ts`; `src/orchestrator/members.ts`
+
+### A shared template finishes after its source changes owners or runtimes
+- **Check:** Share or clone an agent while a slow core-file or scheduled-task read waits, then transfer or replace the source.
+- **Cause:** Export retained an earlier source snapshot across asynchronous reads.
+- **Fix:** Reject exports whose owner, runtime, host or lifecycle changed after a read; keep downstream clone preparation tied to that same source.
+- **Fixed in:** `v2.186.0` (HB-0720); live voice/browser acceptance remains required where applicable.
+- **Code:** `src/orchestrator/template.ts`; `src/api/routes.ts`
+
+### Browser replacement continues after Docker refuses to remove the old browser
+- **Check:** A changed browser image, profile or memory limit needs replacement, but Docker refuses removal.
+- **Cause:** The provider ignored removal failures, and treated an unreadable browser inspection as absence, then continued into profile unlock and replacement setup.
+- **Fix:** Require a trustworthy inspection and successful removal or confirmed absence before proceeding; report uncertainty and leave the old profile alone.
+- **Fixed in:** `v2.186.0` (HB-0723); live voice/browser acceptance remains required where applicable.
+- **Code:** `src/providers/localDockerProvider.ts`
+
+### An agent restart separates Chromium from its network fence
+- **Check:** The agent restarts between the separate firewall setup and Chromium container starts.
+- **Cause:** The two Docker commands could join different network namespaces even though they used the same agent container name.
+- **Fix:** Set the fence inside the browser startup namespace, then drop to user/group 1001 with no capabilities and no new privileges before Chromium. Verify the drop and readiness marker; disable root healthchecks and use explicit unprivileged diagnostics.
+- **Fixed in:** `v2.186.0` (HB-0724); live voice/browser acceptance remains required where applicable.
+- **Code:** `src/orchestrator/browser.ts`; `src/providers/localDockerProvider.ts`; `docker/Dockerfile.browser`
+
+### Reopened Sharing screens display obsolete people or access
+- **Check:** Switch accounts, reopen the same agent sheet, or start a newer sharing read before an older one finishes.
+- **Cause:** Reads were guarded by agent ID alone; some member/access caches survived session changes.
+- **Fix:** Bind reads to the account, session, sheet opening, element and request order; clear sensitive displays and caches when the session ends.
+- **Fixed in:** `v2.186.0` (HB-0728); live voice/browser acceptance remains required where applicable.
+- **Code:** `web/index.html`
+
+### Copying an invite opens the next invitation's knock window
+- **Check:** Start copying or sharing one Telegram invite, then open another invite before the clipboard or native share operation finishes.
+- **Cause:** The completion read the global current invitation instead of the one actually shared.
+- **Fix:** Capture the invitation and its view lifetime; open a knock window only while that exact invitation is still current.
+- **Fixed in:** `v2.186.0` (HB-0729); live voice/browser acceptance remains required where applicable.
+- **Code:** `web/index.html`
+
+### Keep its logins asks or changes an agent after leaving its screen
+- **Check:** Start changing Keep its logins while the list of people who can steer the browser is slow, then leave or switch agents.
+- **Cause:** The delayed read prompted and wrote using an obsolete view; overlapping submissions were also possible.
+- **Fix:** Check the originating view before confirmation and mutation, and disable overlapping changes while one is pending.
+- **Fixed in:** `v2.186.0` (HB-0730); live voice/browser acceptance remains required where applicable.
+- **Code:** `web/index.html`
+
+### Talk keeps recording or playing after switching console tabs
+- **Check:** Start or begin starting a voice call, then switch to a different agent's console.
+- **Cause:** Cached console frames stayed loaded while their voice controls became hidden.
+- **Fix:** Retire active or starting Talk through the pinned runtime controller before hiding the frame. Unload that frame if retirement is unavailable or fails; retain ordinary text-chat tabs.
+- **Fixed in:** `v2.186.0` (HB-0731); live voice/browser acceptance remains required where applicable.
+- **Code:** `web/index.html`; `src/api/controlUiRebase.ts`
+
+### A closed console reopens, or a late approval reloads another agent
+- **Check:** Press Escape while a console is opening, or switch consoles while a manual or automatic approval is waiting.
+- **Cause:** Pending opens ignored native close while opening; approval completions used the current global frame instead of their originating frame.
+- **Fix:** Cancel pending opens on native close and bind approvals to their original agent, frame, request and session.
+- **Fixed in:** `v2.186.0` (HB-0732); live voice/browser acceptance remains required where applicable.
+- **Code:** `web/index.html`
+
+### A revoked or replaced console receives a delayed connection or private reply
+- **Check:** Remove guest access, change ownership/runtime, sign out or cancel a voice offer while the proxy is waiting.
+- **Cause:** HTTP and socket handshakes retained earlier permissions across readiness and gateway waits; private stateless logout did not retire all pending access, and client cancellation did not cancel the upstream offer.
+- **Fix:** Revalidate permissions and runtime before forwarding and delivery, track pending browser sessions through logout, close obsolete sockets, propagate cancellation and handle truncated upstream responses.
+- **Fixed in:** `v2.186.0` (HB-0734); live voice/browser acceptance remains required where applicable.
+- **Code:** `src/api/routes.ts`; `src/api/consoleSockets.ts`
+
+### Browser device approval runs after its owner or runtime changes
+- **Check:** Approve a new console browser while its pending-device read is delayed, then change the agent owner, runtime or lifecycle.
+- **Cause:** The approval loop kept the original owner/runtime snapshot after waiting.
+- **Fix:** Recheck ownership, runtime, session and lifecycle before approving devices and before reporting success.
+- **Fixed in:** `v2.186.0` (HB-0735); live voice/browser acceptance remains required where applicable.
+- **Code:** `src/api/routes.ts`
+
+### Browser metadata returns old private sites after an ownership change
+- **Check:** Open browser details while a slow runner listing or profile-size read waits, then transfer the agent or replace its browser/profile.
+- **Cause:** The metadata route returned its original agent snapshot without another ownership or runtime check.
+- **Fix:** Discard obsolete metadata, return no old site history after access loss, and read current site history when the browser context is unchanged.
+- **Fixed in:** `v2.186.0` (HB-0736); live voice/browser acceptance remains required where applicable.
+- **Code:** `src/api/routes.ts`
+
+### A delayed browser sweep starts obsolete settings or removes a current login profile
+- **Check:** Change browser settings, kept profile or runtime while a runner image/start/profile listing is delayed.
+- **Cause:** The sweep used an earlier agent/profile snapshot through slow provider operations and cleanup.
+- **Fix:** Re-read current agent and host context around waits, cancel obsolete starts, and judge every kept profile against current state immediately before removal.
+- **Fixed in:** `v2.186.0` (HB-0725); live browser acceptance remains required where applicable.
+- **Code:** `src/orchestrator/browser.ts`; `src/providers/localDockerProvider.ts`
+
+### A browser mounts or removes a profile it does not own
+- **Check:** A same-named Docker volume has another install/agent's labels, or inspecting the profile fails.
+- **Cause:** Profile setup treated inspection failures as missing and trusted too few ownership fields; deletion trusted the name shape.
+- **Fix:** Fail closed on unreadable inspection, validate ownership labels and expected names, re-inspect after creation, and verify ownership before deletion.
+- **Fixed in:** `v2.186.0` (HB-0726); live browser acceptance remains required where applicable.
+- **Code:** `src/providers/localDockerProvider.ts`
+
+### A delayed copy-sharing result overwrites another draft or restores signed-out inbox data
+- **Check:** Reopen Send to person, change its draft, switch agents, or sign out while its privacy scan, send or inbox read waits.
+- **Cause:** Those completions lacked a full view, draft and account lifetime check.
+- **Fix:** Keep scans and sends attached to the original draft and opening; discard obsolete inbox reads and clear its cache on session end.
+- **Fixed in:** `v2.186.0` (HB-0733); live browser acceptance remains required where applicable.
+- **Code:** `web/index.html`
+
+### A definition push modifies a child after it was transferred or detached
+- **Check:** push a master's definition while a source/child read is delayed, then change ownership or the parent relationship. The obsolete child turn must be refused rather than reported as pushed.
+- **Cause:** the child list was filtered before asynchronous work; the queued turn later checked only running state, allowing an earlier owner/parent decision to persist.
+- **Fix:** revalidate the master after reads and the child's owner, parent, runtime, host, slug and lifecycle before reads, snapshots, writes and final metadata updates. Retry from the current master's page after the transfer is complete.
+- **Fixed in:** `v2.186.0` (HB-0721).
+- **Code:** `src/api/routes.ts`; `test/templateSharingRaces.test.ts`
+
+### CI times out in importKeepsOpenSetup, then importAnswersInBody
+- **Check:** The UI job reports both import scenarios timing out while the remaining scenarios finish; the first waits for the later import's peek, and the second finds a leftover setup dialog.
+- **Cause:** Chrome advanced the test's virtual deadline before real Blob/gzip I/O completed. Cleanup did not join the later import, which opened its form during the next scenario.
+- **Fix:** The overlap test now awaits the actual import or an observable form replacement, preserves its overlap assertions, and drains both pending operations before continuing.
+- **Fixed in:** `v2.186.0` (HB-0737).
+- **Code:** `scripts/ui-clickthrough.mjs` `importKeepsOpenSetup` `importAnswersInBody`
+
+### CI times out waiting for the second-factor dialog during file or media tests
+- **Check:** The UI job fails in rawFetchSecondFactor waiting for the dialog to open, although the same test passes locally. Delaying a cloned response-body read reproduces the timeout before the upload prompt opens.
+- **Cause:** The test's virtual-clock deadline could expire before native response/file I/O or a media event completed. Merely closing the dialog also left a pending prompt alive.
+- **Fix:** The tests await observable dialog/media changes and operation completion, preserve retry and cancellation assertions, and cancel pending prompts while settling tracked operations during cleanup.
+- **Fixed in:** `v2.186.0` (HB-0738).
+- **Code:** `scripts/ui-clickthrough.mjs` `rawFetchSecondFactor` `mediaAtThePublicAddressAsksWhenItFails`
+
+### CI times out while checking every knowledge-pack entry
+- **Check:** The knowledge-pack test exceeds its five-second limit in the troubleshooting-entry check, without reporting a missing path, symbol or release. A focused run passes but spends time repeatedly reading the same large source files.
+- **Cause:** Each documentation reference independently read and inspected its source file, even when hundreds of earlier references named that file.
+- **Fix:** The checker reuses file contents and metadata within the run. All documentation assertions remain in place; the test deadline is unchanged.
+- **Fixed in:** `v2.186.0` (HB-0739).
+- **Code:** `test/knowledgePack.test.ts` `checkRefs`
+
+### A queued invitation opening disappears after an earlier dialog closes
+- **Check:** In a queued/programmatic reopen, hold the newer invitation API response and deliver the previous dialog's close event. The newer response is discarded, leaving no dialog or invitation to share. Separate ordinary user-click timing has not been established as a trigger.
+- **Cause:** Close cleanup cleared the current request while the dialog was closed, without checking whether that request was the opening previously displayed.
+- **Fix:** Cleanup now identifies the displayed opening. An older close event preserves a newer pending request; closing the displayed invitation still cancels that opening.
+- **Fixed in:** `v2.186.0` (HB-0740).
+- **Code:** `web/index.html` `invite` `shareInviteTg`
+
+### Legacy-container or release-checksum integration tests exceed five seconds
+- **Check:** A full test run reports a five-second timeout in the uninstall naming or legacy release-checksum case, while the same case passes unchanged in isolation and reports no behavioral assertion failure.
+- **Cause:** These fixtures run complete sandboxed shell workflows with multiple real subprocesses, but inherited the default unit-test deadline. Machine scheduling and startup time could exceed it.
+- **Fix:** The affected subprocess integration groups now have a bounded 30-second allowance. Pure unit tests, behavior assertions and child-process limits retain their previous settings.
+- **Fixed in:** `v2.186.0` (HB-0741).
+- **Code:** `test/dockerNames.test.ts`; `test/releaseManifestInstall.test.ts`

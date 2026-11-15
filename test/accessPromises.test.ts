@@ -173,8 +173,18 @@ describe('your Hatchabot agent is yours alone (finding 4)', () => {
     w.knocks([{ id: tgId(7), code: 'K1', meta: { firstName: 'Stranger' } }]);
     expect(said(await w.f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/approve', headers: H, payload: { code: 'K1', kind: 'telegram' } }))).toEqual(alone);
     expect(w.store.getActiveMembershipByChannelUser('a1', tgId(7))).toBeFalsy();
-    const me = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/approve', headers: H, payload: { code: 'K1', kind: 'telegram', asSelf: true } });
+    // The owner seat is already tgId(1). Calling the stranger "me" must not
+    // leave that seat on one identity and the account linked to another.
+    const other = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/approve', headers: H, payload: { code: 'K1', kind: 'telegram', asSelf: true } });
+    expect(other.statusCode).toBe(400);
+    expect(w.store.accountTelegram(OWNER)).toBeUndefined();
+    expect(w.provider.execLog.some((c) => c[0] === 'pairing' && c[1] === 'approve')).toBe(false);
+    w.knocks([{ id: tgId(1), code: 'ME1', meta: { firstName: 'Owner' } }]);
+    const me = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/approve', headers: H, payload: { code: 'ME1', kind: 'telegram', asSelf: true } });
     expect(me.statusCode).toBe(200);
+    expect(w.store.accountTelegram(OWNER)).toBe(tgId(1));
+    expect(w.store.getMembership('a1', OWNER)?.channelUserId).toBe(tgId(1));
+    expect(w.store.getActiveMembershipByChannelUser('a1', tgId(7))).toBeUndefined();
     // A link minted for it before the refusal existed opens nothing either.
     w.store.insertInvite({ id: 'i-old', agentId: 'a1', code: 'OLDLINK234', role: 'user', createdBy: OWNER, createdAt: 'now', expiresAt: new Date(Date.now() + 60_000).toISOString() });
     expect((await w.f.inject({ method: 'POST', url: '/v1/join', payload: { code: 'OLDLINK234', name: 'X', channel: 'telegram' } })).statusCode).toBe(400);

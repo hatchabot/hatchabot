@@ -191,7 +191,14 @@ hours. A profile past 500 MB is said in the agent's timeline once a day.
     cannot open a connection to a private address (loopback, the LAN, the
     tailnet, link-local). The agent itself keeps its reach (a model on your
     LAN, say). Where the rule cannot be set, the browser does not start;
-    see the troubleshooting entry "browser fence failed";
+    see the troubleshooting entry "browser fence failed". The startup shell
+    sets this rule in Chromium's own namespace, then drops to user/group 1001,
+    removes every capability and enables no-new-privileges before starting it.
+    Startup has only the privileges needed to set the rule and drop identity
+    and capabilities; a small root-owned /run tmpfs holds the iptables lock.
+    Healthchecks are disabled and provider diagnostics explicitly use user
+    1001. This changed startup path still requires the real Docker/kernel
+    smoke test before promotion;
   - tabs it leaves idle for two hours are closed, and a conversation keeps
     at most eight (OpenClaw's `browser.tabCleanup`: on by default, and
     Hatchabot sets it on; OpenClaw 2026.9.8 has no setting for the times).

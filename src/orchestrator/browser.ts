@@ -38,6 +38,8 @@ export interface BrowserSpec {
   dockerfile: string;
   /** docker --memory for the browser container. */
   memory: string;
+  /** Rechecked around slow provider work: a changed owner/runtime/profile cancels this request. */
+  stillWanted?: () => boolean;
 }
 
 let cached: { dockerfile: string; image: string } | undefined;
@@ -63,9 +65,9 @@ export const BROWSER_UID = 1001;
 export const BROWSER_FENCED_V4 = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.168.0.0/16', '198.18.0.0/15', '224.0.0.0/4', '240.0.0.0/4'];
 export const BROWSER_FENCED_V6 = ['::/128', '::1/128', 'fc00::/7', 'fe80::/10', 'ff00::/8'];
 /**
- * The fence (HB-0679), run as root with NET_ADMIN only, once per browser start,
- * in a throwaway container in the agent's network namespace, before Chromium
- * starts. OpenClaw refuses a private address the agent asks for, and guards
+ * The fence (HB-0679), run by the browser's startup shell in its own network
+ * namespace before it drops privileges and starts Chromium. OpenClaw refuses
+ * a private address the agent asks for, and guards
  * page loads while an action runs; a page that sends itself to one LATER (a
  * timer) went out unguarded and reached it (2026-11-12). This holds the
  * browser's user off those addresses in the kernel; the agent (another user)
@@ -95,7 +97,37 @@ iptables -w -C OUTPUT -m owner --uid-owner ${BROWSER_UID} -j HB_BROWSER && echo 
  * every port on its address also opened wildcard listeners in this namespace.
  * A changed fence replaces existing browsers too, even on the same image.
  */
-export const BROWSER_FENCE_VERSION = createHash('sha256').update(BROWSER_FENCE_SCRIPT).digest('hex').slice(0, 16);
+/** The marker is written only after the fence and the verified privilege drop. */
+export const BROWSER_READY_FILE = '/tmp/.hatchabot-browser-fenced';
+/** Kept equal to the browser image's default ENTRYPOINT + CMD. */
+export const BROWSER_CHROMIUM_ARGV = ['chromium', '--headless', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+  '--no-first-run', '--no-default-browser-check', '--user-data-dir=/profile',
+  '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=9222', 'about:blank'];
+/** Refuse to launch if the kernel did not apply every part of the drop. */
+export const BROWSER_UNPRIVILEGED_SCRIPT = `set -e
+checked=0
+while read -r key a b c d; do
+  case "$key" in
+    Uid:|Gid:) [ "$a $b $c $d" = "${BROWSER_UID} ${BROWSER_UID} ${BROWSER_UID} ${BROWSER_UID}" ] || exit 1; checked=$((checked+1)) ;;
+    CapInh:|CapPrm:|CapEff:|CapBnd:|CapAmb:) case "$a" in ''|*[!0]*) exit 1 ;; esac; checked=$((checked+1)) ;;
+    Groups:) [ -z "$a$b$c$d" ] || exit 1; checked=$((checked+1)) ;;
+    NoNewPrivs:) [ "$a" = 1 ] || exit 1; checked=$((checked+1)) ;;
+  esac
+done < /proc/self/status
+[ "$checked" -eq 9 ]
+umask 077
+: > ${BROWSER_READY_FILE}
+exec "$@"`;
+/**
+ * Fence and Chromium start in the very same container namespace (HB-0724).
+ * A separate fence container could finish before the agent restarted, then
+ * Chromium joined the new, unfenced namespace. Startup alone has NET_ADMIN
+ * and the three capabilities needed to drop uid/gid and the bounding set;
+ * Chromium gets none. Docker exec callers must explicitly use BROWSER_UID.
+ */
+export const BROWSER_START_SCRIPT = `${BROWSER_FENCE_SCRIPT}
+exec setpriv --reuid=${BROWSER_UID} --regid=${BROWSER_UID} --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs sh -c '${BROWSER_UNPRIVILEGED_SCRIPT.replace(/'/g, `'\\''`)}' sh "$@"`;
+export const BROWSER_FENCE_VERSION = createHash('sha256').update(BROWSER_START_SCRIPT).update(JSON.stringify(BROWSER_CHROMIUM_ARGV)).digest('hex').slice(0, 16);
 
 /**
  * Keep its logins (HB-0680, docs/browser-logins-design.md). The profile is a
@@ -228,33 +260,56 @@ async function sweepHost(
 ): Promise<void> {
   const p = deps.providerFor(hostId);
   if (!p.ensureBrowser || !p.listBrowsers || !p.stopBrowser) return;
+  const host = deps.store.getHost(hostId);
+  const hostStillCurrent = () => {
+    const current = deps.store.getHost(hostId);
+    return current?.ownerId === host?.ownerId && current?.provider === host?.provider
+      && JSON.stringify(current?.settings) === JSON.stringify(host?.settings);
+  };
   if (p.reachable && !(await p.reachable().catch(() => false))) return;
-  // The agents as they are now, not when an earlier sweep began.
-  const agents = deps.store.listAllActiveAgents();
-  const want = new Map<string, { agentId: string; logins?: string }>();
-  for (const a of agents) {
-    const c = a.hostId === hostId ? containerOf(a.runtimeRef, p) : undefined;
-    if (a.hostId === hostId && a.browser === true && a.state === 'RUNNING' && c) want.set(c, { agentId: a.id, ...(a.browserLogins ? { logins: a.browserLogins } : {}) });
-  }
+  const wanted = () => {
+    const want = new Map<string, { agentId: string; logins?: string; stillWanted: () => boolean }>();
+    for (const a of deps.store.listAllActiveAgents()) {
+      const c = a.hostId === hostId ? containerOf(a.runtimeRef, p) : undefined;
+      if (a.browser !== true || a.state !== 'RUNNING' || !c) continue;
+      const stillWanted = () => {
+        const current = deps.store.getAgent(a.id);
+        return hostStillCurrent() && current?.ownerId === a.ownerId && current.hostId === hostId
+          && current.runtimeRef === a.runtimeRef && current.state === 'RUNNING' && current.browser === true
+          && current.browserLogins === a.browserLogins;
+      };
+      want.set(c, { agentId: a.id, ...(a.browserLogins ? { logins: a.browserLogins } : {}), stillWanted });
+    }
+    return want;
+  };
   const have = await p.listBrowsers().catch(() => []);
   for (const b of have) {
-    if (want.has(b.agentContainer)) continue;
+    if (!hostStillCurrent()) return;
+    if (wanted().has(b.agentContainer)) continue;
     try { await p.stopBrowser(b.agentContainer); out.removed.push(b.name); deps.log?.(undefined, 'browser.removed', { container: b.name }); }
     catch { out.failed.push(b.name); }
   }
   const img = browserImage();
   const key = `${hostId}|${img.image}`;
   const now = deps.now ?? Date.now;
-  for (const [c, { agentId, logins }] of want) {
+  for (const [c, { agentId, logins, stillWanted }] of wanted()) {
     if (only && agentId !== only) continue;
+    if (!stillWanted()) continue;
     // A build that failed here waits out its back-off: no new build, no line per agent per minute.
     const failed = st.buildFailed.get(key);
     if (failed && now() < failed.until) { out.failed.push(c); continue; }
     try {
-      const r = await p.ensureBrowser({ agentContainer: c, agentId, ...(logins ? { logins } : {}), ...img, memory: deps.memory ?? (process.env.HATCHABOT_BROWSER_MEMORY?.trim() || '1g') });
+      const r = await p.ensureBrowser({ agentContainer: c, agentId, ...(logins ? { logins } : {}), ...img, memory: deps.memory ?? (process.env.HATCHABOT_BROWSER_MEMORY?.trim() || '1g'), stillWanted });
+      if (!stillWanted()) { await p.stopBrowser(c); continue; }
       st.buildFailed.delete(key);
       if (r === 'started') { out.started.push(c); deps.log?.(agentId, 'browser.started', {}); }
     } catch (err) {
+      // A cancelled request is expected, but confirm a possibly started stale
+      // browser is gone before suppressing its failure.
+      if (!stillWanted()) {
+        try { await p.stopBrowser(c); } catch { out.failed.push(c); }
+        continue;
+      }
       out.failed.push(c);
       const message = err instanceof Error ? err.message : String(err);
       // A fence that cannot be set fails the same way for every agent there: it backs off too.
@@ -268,7 +323,7 @@ async function sweepHost(
       }
     }
   }
-  await sweepLogins(deps, st, hostId, p, agents, want, out, now);
+  if (hostStillCurrent()) await sweepLogins(deps, st, hostId, p, wanted(), out, now, hostStillCurrent);
 }
 
 /**
@@ -283,17 +338,17 @@ async function sweepLogins(
   st: BrowserSweepState,
   hostId: string,
   p: RuntimeProvider,
-  agents: ReturnType<Store['listAllActiveAgents']>,
   want: Map<string, { agentId: string; logins?: string }>,
   out: { removed: string[] },
   now: () => number,
+  hostStillCurrent: () => boolean,
 ): Promise<void> {
   if (p.listBrowserLogins && p.removeBrowserLogins) {
-    const byId = new Map(agents.map((a) => [a.id, a]));
     for (const v of await p.listBrowserLogins().catch(() => [])) {
-      const a = v.agentId ? byId.get(v.agentId) : undefined;
+      if (!hostStillCurrent()) return;
+      const a = v.agentId ? deps.store.getAgent(v.agentId) : undefined;
       const c = a ? containerOf(a.runtimeRef, p) : undefined;
-      const why = !a ? 'agent gone'
+      const why = !a || a.state === 'DELETED' ? 'agent gone'
         : a.hostId !== hostId ? 'moved'
         : a.state === 'ARCHIVED' ? 'archived'
         : a.browser !== true ? 'browser off'

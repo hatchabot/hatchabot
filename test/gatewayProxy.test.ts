@@ -259,7 +259,7 @@ describe('approving the console for a new browser', () => {
     provider.execResponses.set('devices approve', { code: 0, stdout: '', stderr: '' });
     const app = Fastify();
     await registerRoutes(app, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
-    return { app, provider };
+    return { app, provider, store };
   };
 
   it('approves only a recent request, for the owner', async () => {
@@ -316,6 +316,26 @@ describe('approving the console for a new browser', () => {
     } finally {
       if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
     }
+  });
+
+  it.each(['owner', 'runtime', 'stopped'])('does not approve devices after %s changed during the pending read', async (kind) => {
+    const { app, provider, store } = await setup();
+    let reached!: () => void, release!: () => void;
+    const atRead = new Promise<void>((r) => { reached = r; });
+    const held = new Promise<void>((r) => { release = r; });
+    provider.execShell = async () => {
+      reached(); await held;
+      return { code: 0, stdout: JSON.stringify([{ requestId: 'synthetic-browser', ts: Date.now() }]), stderr: '' };
+    };
+    const response = app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': OWNER } }).then((r) => r);
+    await atRead;
+    if (kind === 'owner') (store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-next-owner', 'a1');
+    else if (kind === 'runtime') store.setAgentRuntimeRef('a1', 'mock://replacement');
+    else store.setAgentState('a1', 'STOPPED');
+    release();
+    expect((await response).statusCode).toBe(404);
+    expect(provider.execLog.filter((a) => a[0] === 'devices' && a[1] === 'approve')).toEqual([]);
+    await app.close();
   });
 });
 

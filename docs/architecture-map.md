@@ -265,6 +265,9 @@ written into OpenClaw by the seed, so channel changes usually need a rebuild.
 - `src/openclaw/configWriter.ts` — `channelPluginDir`, `CHANNEL_ACCOUNT`: channel settings written into OpenClaw.
 - `src/api/routes.ts` — `'/v1/agents/:id/telegram'`, `'/v1/agents/:id/channels/:kind'`, `'/v1/pool'`, `'/v1/bot-inventory'`, `'/v1/agents/:id/invites'`, `'/v1/join'`, `'/v1/agents/:id/pairing/approve'`, `'/v1/agents/:id/members'`, `sweepPendingPairings`: channels, pool, invites and members.
 - `src/store/store.ts` — `channels`, `discord_bots`, `memberships`, `member_identities`, `invites`, `pairing_windows`: where it is stored.
+- `src/orchestrator/members.ts` — `admitMember`, `removeUnboundChannelAccess`: admission rechecks identity ownership after provider waits and removes unbound approvals when a late check fails. The admission routes share lifecycle exclusion with revocation.
+- `src/orchestrator/template.ts` — `exportTemplate`: rejects an export if its source owner/runtime changes during core-file or schedule reads; clone preparation also rechecks the source before copying private settings.
+- `web/index.html` — `sharingRead`, `sharingForget`, `inviteCurrent`, `openInviteKnockWindow`: sharing reads and invite completions stay with their originating account, sheet and invitation; logout clears their caches and displays.
 - `web/join.html` — `postJoin`, `joinWeb`, `joinWebAccount`, `initWebChat`, `setWebMode`, `showFactorNote`: the page an invite link opens. A web chat invite offers each way this Hatchabot signs in (Google; a username and password where password accounts are on; "Join as …" when `/v1/invites/:code` says the browser is signed in, `signedInAs`); the head script follows the app's light or dark `theme`.
 - `src/api/publicAccess.ts` — `factorRefusal`: what `/v1/join` says to a good sign-in refused for want of a second factor.
 - `web/index.html` — `v2LoadChans`, `v2AddTelegram`, `chanConnect`, `openChanSetup`, `loadPool`, `addPoolBot`, `invite`, `renderEditMembers`, `approve`, `denyPair`: the Messaging pane, pool and members. Settings → Messaging (`V2_SETTINGS`, `showTab`) holds the spare bots of Telegram (`loadPool`), Slack and Discord (`loadPoolPane`), one at a time: `v2SettingsShown` picks the pane (the one a link names, else the last shown) and `#v2MsgApp` is the list that changes it.
@@ -280,14 +283,30 @@ own sessions. A simpler chat route runs one turn inside the container.
 - `src/api/routes.ts` — `'/v1/agents/:id/ui'`, `'/v1/agents/:id/ui/*'`, `'/v1/agents/:id/console/access'`, `'/v1/agents/:id/console/approve'`, `gatewayAddr`, `consoleHeaders`, `revalidateConsoleSockets`: the console proxy and its WebSocket upgrade handler.
 - `src/api/consoleProxy.ts` — `withConsoleIdentity`, `guestRequestVerdict`, `spliceGuest`, `scrubForGuest`, `GuestReplies`, `Outbox`, `GUEST_METHODS`: what a guest may do through the proxy, how replies are matched to requests, and what waits to be sent to each side.
 - `src/api/consoleWorkerStub.ts` — `CONSOLE_WORKER_STUB`: the stand-in service worker the proxy answers each console's `sw.js` with (keeps nothing, clears OpenClaw's caches, unregisters); OpenClaw's own cached one copy of the console per agent and filled the browser's storage.
-- `src/api/controlUiRebase.ts` — `rebaseControlUi`: rewrites the console page to live under the proxy path.
+- `src/api/controlUiRebase.ts` — `rebaseControlUi`, `withTalkProxy`, `TALK_PROXY_SCRIPT`: rewrites the console page to live under the proxy path; owner consoles route the same-origin OpenAI brokered Talk offer through their own agent's proxy while leaving other fetches unchanged.
 - `src/api/consoleSockets.ts` — `ConsoleSockets`: open console WebSockets, closed when rights change.
+- `src/api/routes.ts` — `consoleContext`, `consoleStillCurrent`, `watchConsoleSession`, `watchConsoleHttp`: revalidation across proxy waits; pending and established console access ends when its browser signs out or its runtime changes. Cancellation propagates to the gateway request.
 - `src/openclaw/consoleIdentity.ts` — `consoleGatewayRoles`, `consoleGatewayAuth`, `GUEST_SCOPES`: the trusted-proxy roles written into the gateway.
 - `src/orchestrator/consoleAccess.ts` — `ConsoleAccess`, `consoleSyncBatch`, `gatewayCallAs`, `trackGuest`, `promiseRoom`: keeps the gateway's allowed users in step with members, and counts each guest's open consoles.
 - `src/api/webChat.ts` — `registerWebChatRoutes`, `webChatNeedsRebuild`, `'/v1/agents/:id/chat'`: the simple web chat routes.
 - `src/api/routes.ts` — `webChatPeople`, `'/v1/agents/:id/web-chat/people'`: sharing an agent for web chat with someone already on this Hatchabot, no link (who is offered whom, Google and password accounts apart); `src/store/store.ts` `listSignInAccounts`. In the page: `loadWebChatPeople`, `shareWebChatWith`, `#tgShareRow` (Sharing → Members).
 - `src/orchestrator/webChat.ts` — `runWebChatTurn`, `webChatHistory`, `webChatSessionKey`, `webChatPrefix`, `historyScript`: a web chat turn inside the container. New sends carry a validated UUID receipt marker and use it for gateway idempotency; history scans requested receipts before the display cap and reports absence only after a complete read.
 - `web/index.html` — `openGateway`, `openWebChat`, `openGuestConsole`, `openWebChatPanel`, `webChatSend`, `approveConsoleBrowser`: opening the console and chat. `webChatCanSend` permits one message at a time without waiting for history. `webChatMessageId`, `webChatOfferUnsure` and `webChatAnswered` correlate uncertain new sends by receipt, independent of runner clocks and the visible history. Legacy messages retain text/time fallback using `serverAheadMs` and `SERVER_CLOCK_TRIP_MS`. `askMgmtForImage` respects `pageSecondFactorBusy` and closes only the AI-source dialog when opening management help.
+
+## Browser voice
+
+The owner's Advanced → Voice card reads the running agent's Talk catalog,
+then opens its existing console for configuration or an explicit microphone
+trial. Configuration readiness does not prove a successful audio call. The
+setup guide and manual audio acceptance checks are in docs/voice.md.
+
+- `src/orchestrator/voice.ts` — `readVoiceStatus`, `VoiceStatus`: the bounded read-only Talk catalog query, strict readiness parsing and fixed provider labels; no raw credentials or runtime errors are exposed.
+- `src/api/routes.ts` — `'/v1/agents/:id/voice'`: owner-only readiness; lifecycle checks and ownership/runtime/source revalidation after the read.
+- `web/index.html` — `v2LoadVoice`, `v2VoiceOpen`, `v2VoiceForget`, `voiceBrowserNote`, `openGateway`: the Voice card, stale-read guards, browser prerequisites and explicit console destinations.
+- `web/index.html` — `consoleStopTalk`: retires active or starting Talk before a cached console is hidden; unloads that frame if retirement fails. `src/api/controlUiRebase.ts` — `__hatchabotStopTalk`: the pinned runtime controller hook, which never toggles an idle conversation into recording.
+- `test/voice.test.ts`, `test/voiceRoutes.test.ts`: catalog parsing, error redaction, ownership and delayed-read regression tests.
+- `scripts/ui-clickthrough.mjs`: Voice card, console navigation and shared Gemini key wording scenarios.
+- `scripts/live.mjs` — `LIVE_TESTS`: console smoke-test triggers. Real audio acceptance is described separately in docs/voice.md.
 
 ## The Hatchabot agent (manager) and its tools
 
@@ -328,6 +347,7 @@ agent's network namespace (docs/browser.md).
 
 - `src/orchestrator/browser.ts` — `browserSweep`, `browserImage`, `browserRefreshDate`, `BROWSER_CDP_URL`, `containerOf`: keeping the browsers in step with the agents, each beside its agent's container as the provider names it. `BROWSER_FENCE_SCRIPT`, `BROWSER_FENCE_VERSION`, `BROWSER_UID`, `BROWSER_FENCED_V4`: the rule that keeps the browser's user (not the agent's) off private addresses in the network they share.
 - `src/providers/localDockerProvider.ts` — `ensureBrowser`, `stopBrowser`, `listBrowsers`, `browserVersion`, `containerName`: the containers; the fence is set before each browser starts (none without it); a changed fence version replaces older browsers even on the same image; a new image's build removes the ones it replaces.
+- `src/orchestrator/browser.ts` — `BROWSER_START_SCRIPT`, `BROWSER_UNPRIVILEGED_SCRIPT`, `BROWSER_READY_FILE`, `BROWSER_CHROMIUM_ARGV`: fence startup in the browser's own namespace, verified privilege drop and the marker required before readiness. `docker/Dockerfile.browser` supplies setpriv and disables healthchecks; provider diagnostics explicitly use the browser uid.
 - `src/openclaw/configWriter.ts` — `browser.enabled`: OpenClaw's attach-only profile, or the tool off.
 - `src/api/routes.ts` — `applyCronTriggers`, `oweRebuild`: apply the saved event-trigger permission in order; persist unapplied changes for the next start or wake and report pending application. `web/index.html` — `saveCronTriggers`: the Schedule tab switch and its pending message.
 - `src/api/routes.ts` — `'/v1/agents/:id/browser'`, `browsersNow`: the switch (PATCH `browser`), its state (with Keep its logins: whether, the sites, the size, `steeredBy`), the sweep.

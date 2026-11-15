@@ -29,6 +29,8 @@ export interface ConsoleSocket {
   public: boolean;
   /** When the browser last sent anything on it. */
   lastActive: number;
+  /** Runtime/host identity captured before the asynchronous handshake. */
+  stillCurrent?(): boolean;
   close(): void;
 }
 

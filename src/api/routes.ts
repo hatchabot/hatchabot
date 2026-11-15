@@ -39,7 +39,7 @@ import { hashPassword, newRecoveryCode, normalizeRecoveryCode, onThisMachine, pa
 import { loopbackIsRemote, noteFailure, throttled } from './auth.js';
 import { cookieFromHeader, readSessionCookie, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
 import { foreignRequest } from './requestOrigin.js';
-import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
+import { isControlUiDocument, rebaseControlUi, TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH, withTalkProxy } from './controlUiRebase.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
 import { limitsDrift, wantedLimits, type LimitsCheckSummary } from '../orchestrator/swap.js';
 import { writeFile as writeFileAsync } from 'node:fs/promises';
@@ -109,6 +109,7 @@ import { browserImage, browserSweep, containerOf, browserRefreshDate, browserLog
 import { browserSteerers, siteOf } from '../orchestrator/browserLogins.js';
 import { BrowserPanels, PANEL_IDLE_MS, panelAddress, panelCommands, panelSize, panelTransportOk, type PanelSink } from '../orchestrator/browserPanel.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
+import { readVoiceStatus } from '../orchestrator/voice.js';
 import { CACHE_READ_DEFAULT, CACHE_WRITE_MULTIPLIER, estimateCost, priceList, pricesNothing, PRICES_CHECKED, PRICES_SOURCE } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
@@ -172,7 +173,7 @@ import { folderMountNameProblem, MAX_DATA_SOURCES, MAX_MOUNT_NAME, RESERVED_GIT_
 import { agentHealth, aiSourceHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
-import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
+import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, removeUnboundChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
 import { replaceSection, removeSectionEverywhere, readSection, DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar, grantedServices, isGoogleService,
@@ -4368,6 +4369,38 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       healthMs: Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000,
     });
   }
+  // Read only: configuration readiness is not a microphone or provider test.
+  // Talk requires operator.talk, which guests' console scopes do not grant.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/voice', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    const waiting = (a: Agent) => isBusy(a.id) || operationRefusal(store, a.id) ||
+      a.state === 'PROVISIONING' || a.state === 'REBUILDING';
+    if (waiting(agent)) return { status: 'busy' };
+    if (agent.state !== 'RUNNING' || !agent.runtimeRef) return { status: 'not_running' };
+    // Discard a reading if its runtime, runner or AI source changed while the
+    // gateway was answering. These snapshots stay internal, never in the reply.
+    const context = (a: Agent) => JSON.stringify([
+      a.runtimeRef, a.hostId, a.aiProfileId, a.appliedProfileAt,
+      store.getHost(a.hostId), store.getAIProfile(a.aiProfileId),
+    ]);
+    const before = context(agent);
+    let provider: RuntimeProvider;
+    try { provider = providerFor(agent.hostId); }
+    catch { return { status: 'unavailable' }; }
+    const result = await readVoiceStatus(provider, agent.runtimeRef);
+    const current = ownedAgent(req, agent.id);
+    if (!current || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (waiting(current)) return { status: 'busy' };
+    if (current.state !== 'RUNNING' || !current.runtimeRef) return { status: 'not_running' };
+    if (context(current) !== before) return { status: 'unavailable' };
+    try {
+      if (providerFor(current.hostId) !== provider) return { status: 'unavailable' };
+    } catch { return { status: 'unavailable' }; }
+    return result;
+  });
+
   // ---- each agent's own browser (src/orchestrator/browser.ts) -----------------
   const browsersNow = (only?: string) => browserSweep({
     store,
@@ -4380,8 +4413,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   }
   (app as unknown as { browsersNow?: typeof browsersNow }).browsersNow = browsersNow;
   app.get<{ Params: { id: string } }>('/v1/agents/:id/browser', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
     const agent = ownedAgent(req, req.params.id);
-    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    const context = (a: Agent) => JSON.stringify([a.hostId, a.runtimeRef, a.state, a.browser, a.browserLogins, store.getHost(a.hostId)]);
+    const before = context(agent);
     const p = agent.runtimeRef ? providerFor(agent.hostId) : undefined;
     const c = containerOf(agent.runtimeRef, p);
     const b = p && c ? (await p.listBrowsers?.().catch(() => []))?.find((x) => x.agentContainer === c) : undefined;
@@ -4391,10 +4427,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Keep its logins (HB-0680): whether it does, the sites its panel opened,
     // how big the profile is, and who besides the owner can steer it (the dialog names them).
     const kept = agent.browserLogins && b?.running && b.logins === agent.browserLogins && c ? await p?.browserProfileBytes?.(c).catch(() => undefined) : undefined;
+    const fresh = ownedAgent(req, agent.id);
+    if (!fresh || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (context(fresh) !== before) return reply.code(409).send({ error: 'Its browser changed while it was checked. Check again.' });
     return {
       on: !!agent.browser, running: !!b?.running, image: browserImage().image, ...(chromium ? { chromium } : {}), ...(refreshed ? { refreshed } : {}),
-      keepsLogins: !!agent.browserLogins, sites: agent.browserSites ?? [], ...(kept !== undefined ? { profileMB: Math.max(1, Math.round(kept / 1048576)) } : {}),
-      steeredBy: agent.browser ? browserSteerers(store, agent) : [],
+      keepsLogins: !!fresh.browserLogins, sites: fresh.browserSites ?? [], ...(kept !== undefined ? { profileMB: Math.max(1, Math.round(kept / 1048576)) } : {}),
+      steeredBy: fresh.browser ? browserSteerers(store, fresh) : [],
     };
   });
 
@@ -9208,10 +9247,39 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** Who may open this agent's console, and as what: its owner, or a web-chat guest. Never the management agent's guest. */
   const consoleCaller = (userId: string, id: string): { agent: Agent; role: ConsoleRole } | undefined => {
     const agent = store.getAgent(id);
-    if (!agent || agent.state === 'DELETED') return undefined;
+    if (!agent || agent.state === 'DELETED' || agent.state === 'DELETING') return undefined;
     if (agent.ownerId === userId) return { agent, role: 'owner' };
     if (agent.ops || !agent.gatewayToken) return undefined;
     return store.webChatAllowed(agent.id, userId) ? { agent, role: 'guest' } : undefined;
+  };
+  // Both HTTP and socket handshakes wait on runners and gateway readiness.
+  // Those waits must not carry earlier permissions or an earlier runtime on.
+  const consoleContext = (a: Agent): string => JSON.stringify([
+    a.ownerId, a.runtimeRef, a.hostId, a.gatewayPort, a.gatewayToken, a.slug, store.getHost(a.hostId),
+  ]);
+  const consoleStillCurrent = (me: string, caller: { agent: Agent; role: ConsoleRole }, context: string): boolean => {
+    const now = consoleCaller(me, caller.agent.id);
+    return !!now && now.role === caller.role && now.agent.state === 'RUNNING' && consoleContext(now.agent) === context;
+  };
+  const pendingConsoleSessions = new Set<{ session: string | undefined; revoked: boolean }>();
+  const watchConsoleSession = (req: FastifyRequest | import('node:http').IncomingMessage, me: string) => {
+    const https = requestIsHttps(req), cookie = typeof req.headers.cookie === 'string' ? req.headers.cookie : undefined;
+    // Bearer/in-process requests retain their existing auth path. Recheck a
+    // browser cookie only when it was the authenticated person at entry.
+    const browser = app.principalFromCookieHeader?.(cookie, https)?.ownerId === me;
+    const pending = { session: readSessionCookie(cookie, https)?.value, revoked: false };
+    pendingConsoleSessions.add(pending);
+    return {
+      valid: () => !pending.revoked && (!browser || app.principalFromCookieHeader?.(cookie, https)?.ownerId === me) &&
+        (!isPublic(req) || (!!app.publicAccess && !app.publicAccess.refuseSession('raw' in req ? req.raw : req, me))),
+      done: () => { pendingConsoleSessions.delete(pending); },
+    };
+  };
+  const watchConsoleHttp = (req: FastifyRequest, reply: FastifyReply, me: string) => {
+    const session = watchConsoleSession(req, me);
+    reply.raw.once('finish', session.done);
+    reply.raw.once('close', session.done);
+    return { ...session, valid: () => !reply.raw.destroyed && session.valid() };
   };
   /**
    * The headers one console request carries to the gateway. On an identity
@@ -9317,21 +9385,31 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/console/pending', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent || agent.state !== 'RUNNING') return reply.code(404).send({ error: 'Not found' });
-    return { pending: (await pendingConsoleRequests(agent)).length };
+    const session = watchConsoleHttp(req, reply, agent.ownerId), context = consoleContext(agent);
+    const pending = await pendingConsoleRequests(agent);
+    if (!session.valid() || !consoleStillCurrent(agent.ownerId, { agent, role: 'owner' }, context)) return reply.code(404).send({ error: 'Not found' });
+    return { pending: pending.length };
   });
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/console/approve', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef || agent.state !== 'RUNNING') return reply.code(404).send({ error: 'Not found' });
+    const session = watchConsoleHttp(req, reply, agent.ownerId), context = consoleContext(agent);
+    const current = () => session.valid() && consoleStillCurrent(agent.ownerId, { agent, role: 'owner' }, context);
+    if (isBusy(agent.id) || operationRefusal(store, agent.id)) return reply.code(409).send({ error: 'The agent is busy. Try again when its operation finishes.' });
     const pending = await pendingConsoleRequests(agent);
+    if (!current()) return reply.code(404).send({ error: 'Not found' });
     if (!pending.length) {
       return reply.code(409).send({ error: 'Nothing is waiting for approval. Open the console first — it asks once per browser.' });
     }
     let approved = 0;
     for (const r of pending) {
+      if (!current()) return reply.code(404).send({ error: 'Not found' });
+      if (isBusy(agent.id) || operationRefusal(store, agent.id)) return reply.code(409).send({ error: 'The agent is busy. Try again when its operation finishes.' });
       const res = await providerFor(agent.hostId).exec(agent.runtimeRef, ['devices', 'approve', r.requestId], { timeoutMs: 20_000 });
       if (res.code === 0) approved++;
     }
+    if (!current()) return reply.code(404).send({ error: 'Not found' });
     trace(agent.id)('console.device_approved', { approved, requested: pending.length });
     return { approved };
   });
@@ -9353,13 +9431,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const caller = consoleCaller(me, req.params.id);
     if (!caller) return reply.code(404).send({ error: 'Not found' });
     const { agent, role } = caller;
+    const session = watchConsoleHttp(req, reply, me);
     if (agent.state !== 'RUNNING' && !(agent.hibernatedAt && agent.state === 'STOPPED')) {
       return { role, console: 'unavailable', reason: 'It is not running right now.' };
     }
     // A sleeping agent: what it runs is known once it is awake; the owner's
     // console wakes it, a guest is offered the chat here meanwhile.
     if (agent.state !== 'RUNNING') return { role, console: role === 'owner' ? 'token' : 'unavailable', reason: 'It is asleep.' };
+    const context = consoleContext(agent);
     const ready = await consoleAccess.ensureReady(agent);
+    if (!session.valid() || !consoleStillCurrent(me, caller, context)) return reply.code(404).send({ error: 'Not found' });
     if (role === 'owner') return { role, console: ready.mode === 'unavailable' ? (ready.identity ? 'identity' : 'token') : ready.mode, ...(ready.mode === 'unavailable' ? { reason: ready.reason } : {}) };
     if (ready.mode !== 'identity') {
       return { role, console: ready.mode === 'token' ? 'needs-rebuild' : 'unavailable', reason: ready.mode === 'token' ? needsRebuildForGuests(agent.name) : ready.reason };
@@ -9385,6 +9466,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const me = ownerIdOf(req);
     const caller = consoleCaller(me, req.params.id);
     if (!caller) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
+    const session = watchConsoleHttp(req, reply, me);
+    // An owner console's small compatibility shim keeps OpenAI's brokered
+    // Talk offer under this agent's proxy. Never forwarded to the gateway.
+    if (`/${req.params['*']}` === TALK_PROXY_SCRIPT_PATH) {
+      if (caller.role !== 'owner' || (req.method !== 'GET' && req.method !== 'HEAD')) return reply.code(404).send({ error: 'Not found' });
+      return reply.header('cache-control', 'no-store').type('text/javascript; charset=utf-8').send(TALK_PROXY_SCRIPT);
+    }
     // The console's service worker is not OpenClaw's: every agent's console
     // registered one under its own path on this one site and cached its own
     // copy of the console (55 MB a build, three builds kept), and fifty agents
@@ -9397,13 +9485,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     // A machine already known not to answer: say so in words, without waiting on it.
     if ((slowHostUntil.get(caller.agent.hostId) ?? 0) > Date.now()) return machineAway(reply, caller.agent);
+    const hostContext = JSON.stringify(store.getHost(caller.agent.hostId));
     const target = await consoleTarget(caller.agent).catch(() => undefined);
+    const fresh = consoleCaller(me, caller.agent.id);
+    if (!session.valid() || !fresh || fresh.role !== caller.role || fresh.agent.ownerId !== caller.agent.ownerId) return reply.code(404).send({ error: 'Not found' });
+    const targetCaller = target && { agent: target.agent, role: caller.role };
+    const context = target && consoleContext(target.agent);
+    const current = () => session.valid() && !!targetCaller && !!context && targetCaller.agent.ownerId === caller.agent.ownerId &&
+      hostContext === JSON.stringify(store.getHost(caller.agent.hostId)) && consoleStillCurrent(me, targetCaller, context);
+    if (target && !current()) return reply.code(404).send({ error: 'Not found' });
     if (!target) {
       if (store.getHost(caller.agent.hostId)?.kind !== 'local') return machineAway(reply, caller.agent);
       return reply.code(404).send({ error: 'No debug gateway for this agent.' });
     }
     let path = `/${req.params['*'] ?? ''}`;
     const ready = await consoleAccess.ensureReady(target.agent);
+    if (!current()) return reply.code(404).send({ error: 'Not found' });
     const identity = ready.mode === 'identity' || (ready.mode === 'unavailable' && !!ready.identity);
     if (caller.role === 'guest') {
       // A guest only ever reaches an identity gateway, and only its chat's paths.
@@ -9428,8 +9525,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       host: `127.0.0.1:${target.addr.port}`, connection: 'close',
     };
     if (isDocument || guestConfig) delete forwarded['accept-encoding'];
-    // What a guest gets is not the gateway's own bytes: no validators that would let a cache mix them up.
-    if (caller.role === 'guest' && (isDocument || guestConfig)) { delete forwarded['if-none-match']; delete forwarded['if-modified-since']; }
+    // Rewritten pages have Hatchabot's scripts and prefix. A gateway 304
+    // could otherwise keep a cached page from before these changes.
+    if (isDocument || guestConfig) { delete forwarded['if-none-match']; delete forwarded['if-modified-since']; }
     // The body as it will be sent, and a content-length that matches it: a
     // parsed JSON body re-serialised can be shorter than the client's declared
     // length, and the gateway then waits for bytes that never come (30th audit).
@@ -9454,25 +9552,31 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           (res) => {
             const chunks: Buffer[] = [];
             res.on('data', (c) => chunks.push(c));
+            res.on('error', reject);
+            res.on('aborted', () => reject(new Error('the gateway closed its response')));
             res.on('end', () =>
               resolve({ status: res.statusCode ?? 502, headers: res.headers, body: Buffer.concat(chunks) }),
             );
           },
         );
+        const cancel = () => r.destroy(new Error('the console request was cancelled'));
+        reply.raw.once('close', cancel);
+        r.once('close', () => reply.raw.off('close', cancel));
         r.on('error', reject);
         r.on('timeout', () => r.destroy(new Error('the gateway did not answer in time')));
         if (outBody) r.end(outBody); else r.end();
       },
     ).catch(() => undefined as never);
+    if (!current()) return reply.code(404).send({ error: 'Not found' });
     if (!upstream) return reply.code(502).send({ error: "The agent's gateway did not answer." });
-    const guestRewrite = caller.role === 'guest' && (isDocument || guestConfig);
+    const rewritten = isDocument || guestConfig;
     for (const [k, v] of Object.entries(upstream.headers)) {
       // set-cookie: the gateway is the least-trusted component; it must not plant cookies on our origin.
       // CORS: OpenClaw has handlers that echo any Origin back as allowed; relayed,
       // that would let a page on another site (a neighbouring tenant's) read the
       // console's answers with this browser's cookie. Hatchabot allows no other origin.
       if (v === undefined || /^(transfer-encoding|connection|content-length|set-cookie|access-control-[a-z-]+|timing-allow-origin)$/i.test(k)) continue;
-      if (guestRewrite && /^(etag|last-modified)$/i.test(k)) continue;
+      if (rewritten && /^(etag|last-modified)$/i.test(k)) continue;
       // OpenClaw forbids framing outright (X-Frame-Options: DENY and
       // frame-ancestors 'none'), which forced the console into a separate tab.
       // Served through us it is same-origin, so permit framing by THIS app and
@@ -9495,7 +9599,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const prefix = `/v1/agents/${req.params.id}/ui`;
       const page = rebaseControlUi(body.toString('utf8'), prefix);
       // A guest's sidebar starts with only what a guest can open (consoleProxy.ts GUEST_VIEW_SCRIPT).
-      body = Buffer.from(caller.role === 'guest' ? withGuestView(page, prefix) : page, 'utf8');
+      body = Buffer.from(caller.role === 'guest' ? withGuestView(page, prefix) : withTalkProxy(page, prefix), 'utf8');
     }
     if (guestConfig && upstream.status === 200 && !upstream.headers['content-encoding']) {
       const cfg = guestControlUiConfig(body.toString('utf8'));
@@ -9531,6 +9635,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const now = consoleCaller(s.ownerId, s.agentId);
     if (!now || now.role !== s.role) return 'no longer allowed on this agent';
+    if (s.stillCurrent && !s.stillCurrent()) return 'the agent runtime changed';
     return undefined;
   };
   const revalidateConsoleSockets = (): number => consoleSockets.size() === 0 ? 0
@@ -9550,6 +9655,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // sockets too. Reads change nothing and are not worth a sweep.
   app.addHook('onResponse', async (req, reply) => {
     if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS' || reply.statusCode >= 400) return;
+    if (req.routeOptions.url === '/v1/logout') {
+      const ended = readSessionCookie(req.headers.cookie, requestIsHttps(req))?.value;
+      if (ended) {
+        for (const pending of pendingConsoleSessions) if (pending.session === ended) pending.revoked = true;
+        consoleSockets.sweep((s) => readSessionCookie(s.cookie, s.https)?.value === ended ? 'signed out' : undefined);
+      }
+    }
     revalidateConsoleSockets();
   });
   // …and for what no request announces: the public idle limit, a session that
@@ -9591,10 +9703,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // guest the owner gave web chat.
     const caller = consoleCaller(principal.ownerId, m[1]!);
     if (!caller || caller.agent.state !== 'RUNNING') return deny();
+    const session = watchConsoleSession(rawReq, principal.ownerId);
+    socket.once('close', session.done);
+    const context = consoleContext(caller.agent);
+    const current = () => !socket.destroyed && session.valid() && consoleStillCurrent(principal.ownerId, caller, context) &&
+      resolve(rawReq.headers.cookie, requestIsHttps(rawReq as RequestLike))?.ownerId === principal.ownerId &&
+      (!isPublic(rawReq) || (!!app.publicAccess && !app.publicAccess.refuseSession(rawReq, principal.ownerId)));
     socket.on('error', () => {}); // the awaits below must not leave an unhandled error
     const addr = await gatewayAddr(caller.agent).catch(() => undefined);
-    if (!addr) return deny();
+    if (!addr || !current()) return deny();
     const ready = await consoleAccess.ensureReady(caller.agent).catch(() => ({ mode: 'unavailable' as const, reason: 'error', identity: false }));
+    if (!current()) return deny();
     const identity = ready.mode === 'identity' || (ready.mode === 'unavailable' && !!ready.identity);
     const guest = caller.role === 'guest';
     if (guest && ready.mode !== 'identity') return deny();
@@ -9661,6 +9780,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     });
     upReq = up;
     up.on('upgrade', (upRes, upSocket, upHead) => {
+      if (!current()) { upSocket.destroy(); socket.destroy(); forgetGuest?.(); return; }
+      session.done(); // from here the established socket's cookie is tracked below
       if (guest) {
         clearTimeout(connecting);
         // The guest left while the gateway was answering: nothing to splice.
@@ -9682,6 +9803,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ownerId: principal.ownerId, agentId: caller.agent.id, role: caller.role,
         cookie: rawReq.headers.cookie, https: requestIsHttps(rawReq as RequestLike), public: isPublic(rawReq),
         lastActive: Date.now(), close: () => { socket.destroy(); upSocket.destroy(); },
+        stillCurrent: () => consoleStillCurrent(principal.ownerId, caller, context),
       };
       const forgetSocket = consoleSockets.add(entry);
       socket.on('close', forgetSocket);
@@ -15576,8 +15698,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (agent.ops) return reply.code(409).send({ error: 'The management agent is not a template: its files name tools only it has.' });
       if (busyNow(agent, reply)) return reply;
       const deps = { store, provider: providerFor(agent.hostId), log: trace() };
+      const assertCloneSourceCurrent = () => {
+        const now = ownedAgent(req, agent.id);
+        if (!now || now.state !== 'RUNNING' || now.runtimeRef !== agent.runtimeRef || now.hostId !== agent.hostId
+            || now.slug !== agent.slug || providerFor(now.hostId) !== deps.provider) {
+          throw new TransferError('The source agent changed while copying. Refresh and try again.');
+        }
+      };
+      markBusy(agent.id);
       try {
         const { data } = await exportTemplate(deps, agent.id, { includeMemory: true });
+        assertCloneSourceCurrent();
         const name = (req.body as { name?: string } | null)?.name?.trim() || `${agent.name} (copy)`;
         // Faithful copy: reuse the source's own filled values; lenient so a
         // required env/datasource field (whose materialized record lives on
@@ -15602,6 +15733,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // nobody told (review, 2026-10-22).
         const envNotCopied: string[] = [];
         let carried: Awaited<ReturnType<typeof readCloneMemory>>;
+        // The draft appears in the roster while its private settings copy.
+        // A concurrent lifecycle action must not provision it half-filled.
+        markBusy(clone.id);
         try {
           store.setAgentParent(clone.id, agent.id); // lineage: a clone is a child
           // A faithful copy carries its environment variables too (new secret
@@ -15610,11 +15744,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // answer so the owner is told, not left with tools that fail (night review).
           for (const e of store.listAgentEnv(agent.id)) {
             const value = await secrets.get(e.secretRef).catch(() => undefined);
+            assertCloneSourceCurrent();
             if (value === undefined) { envNotCopied.push(e.name); continue; }
             const id = randomUUID();
             const secretRef = `agent-env/${id}`;
             created.push(secretRef);
             await secrets.put(secretRef, value);
+            assertCloneSourceCurrent();
             store.insertAgentEnv({ id, agentId: clone.id, name: e.name, secretRef, createdAt: new Date().toISOString() });
           }
           notCopied = store.listDataSources(agent.id).map((d) => d.mountName);
@@ -15622,6 +15758,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // saves lives there, not in MEMORY.md (2026-09-30). Seeded like the
           // rest, before the first build; what could not come is named.
           carried = await readCloneMemory(deps.provider, agent.runtimeRef!, agent.slug);
+          assertCloneSourceCurrent();
           if (Object.keys(carried.files).length) store.setAgentSeed(clone.id, carried.files);
           // `telegram: false`: web-only, as create — no pool bot taken (2026-10-08).
           if ((req.body as { telegram?: unknown } | null)?.telegram === false) store.setAgentWebOnly(clone.id, true);
@@ -15636,6 +15773,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           } catch { /* best-effort; the error below is what the user sees */ }
           trace(clone.id)('agent.clone_failed', { sourceAgentId: agent.id, error: String((err as Error).message ?? err).slice(0, 200) });
           throw new TransferError(`Couldn't copy ${agent.name}'s settings to the clone: ${String((err as Error).message ?? err).slice(0, 200)}. Nothing was kept; try again.`);
+        } finally {
+          clearBusy(clone.id);
         }
         if (envNotCopied.length) trace(clone.id)('agent.clone_env_skipped', { sourceAgentId: agent.id, names: envNotCopied.join(', ') });
         kickProvision(clone.id, { webOnlyIfNoBot: true });
@@ -15647,6 +15786,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
+      } finally {
+        clearBusy(agent.id);
       }
     },
   );
@@ -15709,6 +15850,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (busyNow(master, reply)) return reply;
     const children = store.listChildren(master.id).filter((c) => c.ownerId === ownerIdOf(req));
     if (!children.length) return reply.code(400).send({ error: 'This agent has no derived children.' });
+    const assertMasterCurrent = () => {
+      const now = ownedAgent(req, master.id);
+      if (!now || now.state !== 'RUNNING' || now.runtimeRef !== master.runtimeRef || now.hostId !== master.hostId || now.slug !== master.slug) {
+        throw new TransferError('The master changed while preparing its definition. Refresh and try again.');
+      }
+    };
     /**
      * One file as it is: its text, '' when it is there and empty, undefined
      * when it is not there. A read that failed throws (SnapshotError): `head …
@@ -15736,11 +15883,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // (HB-0311).
     let layer: { soul?: string; agents?: string; persona?: string };
     try {
-      layer = master.paramFiles ?? await whileBusy(master.id, async () => ({
-        soul: await readCapped(master, 'SOUL.md'),
-        agents: await readCapped(master, 'AGENTS.md'),
-        persona: typeof master.persona === 'string' ? master.persona : undefined,
-      }));
+      layer = master.paramFiles ?? await whileBusy(master.id, async () => {
+        const soul = await readCapped(master, 'SOUL.md');
+        assertMasterCurrent();
+        const agents = await readCapped(master, 'AGENTS.md');
+        assertMasterCurrent();
+        return { soul, agents, persona: typeof master.persona === 'string' ? master.persona : undefined };
+      });
+      assertMasterCurrent();
     } catch (err) {
       if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
       if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
@@ -15777,6 +15927,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // The child as it is at its turn, not as read before the wait: its
           // own values applied meanwhile went back to the old ones.
           const fresh = freshRunning(child.id, (a) => `not running (${a.state})`);
+          const assertChildCurrent = () => {
+            assertMasterCurrent();
+            const now = ownedAgent(req, child.id);
+            if (!now || now.parentAgentId !== master.id || now.state !== 'RUNNING'
+                || now.runtimeRef !== fresh.runtimeRef || now.hostId !== fresh.hostId || now.slug !== fresh.slug) {
+              throw new TransferError('The child changed owner, master or runtime while waiting for its definition. Refresh and try again.');
+            }
+          };
+          assertChildCurrent();
           // Same split as the /params route: env creds and datasource repo
           // bindings never live in paramValues, so a required one must not
           // fail the resolve and block the push. Resolved against the MASTER's
@@ -15814,6 +15973,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
               return undefined;
             })
             : undefined;
+          assertChildCurrent();
           const childData = readSection(childAgentsMd ?? '', DATA_SOURCES_HEADING);
           // Its Google accounts too: another agent's addresses must not reach it, nor its own go missing (HB-0394).
           const childGoogle = readSection(childAgentsMd ?? '', GOOGLE_ACCOUNTS_HEADING);
@@ -15834,6 +15994,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           if (masterUnsure) throw new Error(`${master.name}'s AGENTS.md has a code fence that doesn't close above "${masterUnsure.replace(/^#+ /, '')}"; fix it there and push again`);
           // Checked before the snapshot: a child not pushed gets none (ninth review).
           await autoSnapshot(snapshotDeps(fresh), child.id, 'pre-params');
+          assertChildCurrent();
           // Both files or neither: a SOUL.md written and an AGENTS.md that
           // failed left the child half on the new definition, with the
           // bookkeeping below skipped (review, 2026-10-22). What was written
@@ -15842,8 +16003,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // back as nothing: the pre-params snapshot is the way back for it.
           // One that was there and empty goes back empty.
           const written: Array<[string, string | undefined]> = [];
-          const write = (nameF: string, text: string) =>
-            writeFileInAgent(providerFor(fresh.hostId), fresh.runtimeRef!, workspacePath(fresh.slug, nameF), Buffer.from(text, 'utf8').toString('base64'));
+          const write = async (nameF: string, text: string) => {
+            assertChildCurrent();
+            const result = await writeFileInAgent(providerFor(fresh.hostId), fresh.runtimeRef!, workspacePath(fresh.slug, nameF), Buffer.from(text, 'utf8').toString('base64'));
+            assertChildCurrent();
+            return result;
+          };
           try {
             for (const [nameF, text] of [['SOUL.md', layer.soul], ['AGENTS.md', layer.agents]] as const) {
               if (typeof text !== 'string') continue;
@@ -15882,6 +16047,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           }
           // Recorded before the turn ends, so a snapshot waiting on it takes
           // these files with these values and this layer (HB-0566).
+          assertChildCurrent();
           if (persona !== undefined) store.setAgentPersona(child.id, persona);
           // The pushed RAW layer becomes the child's new template layer, so its
           // own Setup-values edits keep working against the CURRENT definition —
@@ -16573,6 +16739,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // an open window on every channel would hand the seat to whoever DMs first.
     const joinKind = pairingKind(body.channel);
     if (!joinKind) return reply.code(400).send({ error: 'Unknown channel.' });
+    let admissionTurn: string | undefined;
     try {
       // Full invite (phase 4): when the invitee signs in, the membership is
       // keyed to their real account, so they can log in and see this agent.
@@ -16585,6 +16752,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         } catch (err) {
           return reply.code(err instanceof IdentityError ? err.statusCode : 401).send({ error: err instanceof IdentityError ? err.userMessage : "That sign-in didn't verify — try again." });
         }
+      }
+      // Verification can wait. Re-read the invitation before taking its
+      // agent's turn, and leave the single-use code intact if it is busy.
+      const currentInvite = checkInvite(store, body.code);
+      if (currentInvite.valid) {
+        const joiningAgent = store.getAgent(currentInvite.agentId)!;
+        if (busyNow(joiningAgent, reply)) return reply;
+        markBusy(joiningAgent.id);
+        admissionTurn = joiningAgent.id;
       }
       // The app they chose must still be one this agent is on: one removed
       // since their invite page loaded burned the single-use code for a seat
@@ -16603,6 +16779,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       store.setInviteRedeemedVia(body.code, joinKind);
       const agent = store.getAgent(joined.agentId)!;
       const channelRow = store.getChannelForAgent(agent.id, joinKind);
+      const admissionProvider = providerFor(agent.hostId);
+      const channelsBefore = JSON.stringify(store.listChannelsForAgent(agent.id));
+      const joinStillCurrent = () => {
+        const now = store.getAgent(agent.id);
+        return !!now && now.ownerId === agent.ownerId && now.runtimeRef === agent.runtimeRef && now.hostId === agent.hostId
+          && now.state === agent.state && providerFor(now.hostId) === admissionProvider
+          && JSON.stringify(store.listChannelsForAgent(agent.id)) === channelsBefore
+          && store.getMembership(agent.id, joined.membershipUserId)?.status === 'active';
+      };
       // Someone who already uses another of this owner's agents is not a
       // stranger: their Telegram id is on file, so admit them outright rather
       // than making them do the pairing dance a second time. The allowlist is
@@ -16634,18 +16819,31 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const matchesExpected = !expected || knownIdRaw === expected
         || (!!knownIdRaw && joinKind === 'telegram' && (await handleOf(knownIdRaw))?.toLowerCase() === expected.toLowerCase());
       const knownId = matchesExpected ? knownIdRaw : undefined;
+      if (!joinStillCurrent()) throw new AdmitError('The agent or your membership changed while joining. Ask the owner for a new invitation.');
       if (knownId && agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
+        const grantOpts = { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: joinKind, accountId: joinKind === 'telegram' ? channelRow.accountId : CHANNEL_ACCOUNT, channelUserId: knownId };
+        const grantDeps = { store, provider: admissionProvider, log: trace(agent.id) };
+        let granted = false;
         try {
-          await grantChannelAccess(
-            { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-            { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: joinKind, accountId: joinKind === 'telegram' ? channelRow.accountId : CHANNEL_ACCOUNT, channelUserId: knownId },
-          );
-          if (joinKind === 'telegram') store.bindMembershipChannelUser(agent.id, joined.membershipUserId, knownId);
-          else store.bindMemberIdentity(agent.id, joined.membershipUserId, joinKind, knownId);
+          await grantChannelAccess(grantDeps, grantOpts);
+          granted = true;
+        } catch (err) {
+          app.log.error({ err }, 'known-invitee grant failed'); // fall through to pairing after cleanup
+        }
+        const identityNow = !accountId ? undefined : joinKind === 'telegram'
+          ? store.knownChannelUserId(accountId) : store.identityOfUserAnywhere(accountId, joinKind);
+        const current = joinStillCurrent() && identityNow === knownId;
+        const bound = granted && current && (joinKind === 'telegram'
+          ? store.bindMembershipChannelUser(agent.id, joined.membershipUserId, knownId)
+          : store.bindMemberIdentity(agent.id, joined.membershipUserId, joinKind, knownId));
+        if (!bound) {
+          if (!(await removeUnboundChannelAccess(grantDeps, grantOpts, knownId))) {
+            throw new AdmitError('The chat approval could not be removed after joining failed. Ask the owner to check the agent\'s channel access.');
+          }
+          if (!current || granted) throw new AdmitError('Your membership or chat identity changed while joining. Ask the owner for a new invitation.');
+        } else {
           trace(agent.id)('member.known_admitted', { userId: joined.membershipUserId });
           await restDoor(agent);
-        } catch (err) {
-          app.log.error({ err }, 'known-invitee grant failed'); // fall through to pairing
         }
       }
       if (!store.memberIdentities(agent.id, joined.membershipUserId)[joinKind]
@@ -16695,10 +16893,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         channels: ways,
       });
     } catch (err) {
-      if (err instanceof InviteInvalidError) {
+      if (err instanceof InviteInvalidError || err instanceof AdmitError) {
         return reply.code(400).send({ error: err.userMessage });
       }
       throw err;
+    } finally {
+      if (admissionTurn) clearBusy(admissionTurn);
     }
   });
 
@@ -16937,18 +17137,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     '/v1/agents/:id/pairing/approve',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
+      if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+      if (busyNow(agent, reply)) return reply;
+      if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'Start the agent before approving a request.' });
       const code = (req.body as { code?: string } | null)?.code;
-      const kind = agent ? await kindForCode(agent, (req.body as { kind?: unknown } | null)?.kind, code) : 'telegram';
-      if (!kind) return reply.code(400).send({ error: 'Unknown channel.' });
-      const channel = agent && store.getChannelForAgent(agent.id, kind);
-      // "That's me — link & approve" (owner-only by construction: ownedAgent
-      // gates this route). Binds the owner seat + links the account's Telegram.
-      const asSelf = (req.body as { asSelf?: boolean } | null)?.asSelf === true;
-      if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
-      // Linking yourself is fine; letting anyone else into it is not (2026-09-30).
-      if (agent.ops && !asSelf) return reply.code(400).send({ error: OPS_ALONE });
       if (!code) return reply.code(400).send({ error: 'code required' });
+      // Hold through channel discovery, runtime approval and the seat commit.
+      // A removal, move or stop must not finish underneath a late approval.
+      markBusy(agent.id);
       try {
+        const kind = await kindForCode(agent, (req.body as { kind?: unknown } | null)?.kind, code);
+        const fresh = ownedAgent(req, agent.id);
+        if (!fresh || fresh.runtimeRef !== agent.runtimeRef || fresh.hostId !== agent.hostId || fresh.state !== agent.state) {
+          return reply.code(409).send({ error: 'The agent changed while reading requests. Refresh and try again.' });
+        }
+        if (!kind) return reply.code(400).send({ error: 'Unknown channel.' });
+        const channel = store.getChannelForAgent(agent.id, kind);
+        // "That's me — link & approve" (owner-only by construction: ownedAgent
+        // gates this route). Binds the owner seat + links the account's Telegram.
+        const asSelf = (req.body as { asSelf?: boolean } | null)?.asSelf === true;
+        if (!channel) return reply.code(404).send({ error: 'Not found' });
+        // Linking yourself is fine; letting anyone else into it is not (2026-09-30).
+        if (agent.ops && !asSelf) return reply.code(400).send({ error: OPS_ALONE });
         const admitted = await admitMember(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           {
@@ -16981,6 +17191,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       } catch (err) {
         if (err instanceof AdmitError) return reply.code(400).send({ error: err.userMessage });
         throw err;
+      } finally {
+        clearBusy(agent.id);
       }
     },
   );
@@ -17100,6 +17312,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/members/known', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (busyNow(agent, reply)) return reply;
     if (agent.ops) return reply.code(400).send({ error: OPS_ALONE });
     const parsed = z.object({ userId: z.string().min(1) }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -17114,42 +17327,74 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(409).send({ error: `This agent has no app you know ${person.name} on — send them an invite instead.` });
     }
     if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'Start the agent first — its allowlist lives in the container.' });
+    const admissionProvider = providerFor(agent.hostId);
+    const channelsBefore = JSON.stringify(store.listChannelsForAgent(agent.id));
+    const attempted: typeof grants = [];
+    let committed = false;
+    markBusy(agent.id);
     try {
       for (const g of grants) {
+        attempted.push(g);
         await grantChannelAccess(
-          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+          { store, provider: admissionProvider, log: trace(agent.id) },
           { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: g.ch.kind, accountId: g.ch.kind === 'telegram' ? g.ch.accountId : CHANNEL_ACCOUNT, channelUserId: g.id },
         );
       }
+      const fresh = ownedAgent(req, agent.id);
+      if (!fresh || fresh.state !== 'RUNNING' || fresh.runtimeRef !== agent.runtimeRef || fresh.hostId !== agent.hostId
+          || providerFor(fresh.hostId) !== admissionProvider || JSON.stringify(store.listChannelsForAgent(agent.id)) !== channelsBefore) {
+        throw new AdmitError('The agent changed while granting access. Refresh and try again.');
+      }
+      // Someone removed from this agent before keeps their old seat: it is
+      // taken up again, as an invite does. A second row hit UNIQUE(agent_id,
+      // user_id) after the allowlist was written — a 500, a seat left revoked
+      // and a runtime that let them in anyway (audit #071).
+      store.transact(() => {
+        const current = store.getMembership(agent.id, person.userId);
+        if (person.identities.telegram) {
+          const holder = store.getActiveMembershipByChannelUser(agent.id, person.identities.telegram);
+          if (holder && holder.userId !== person.userId) throw new AdmitError('That Telegram identity now belongs to another member. Refresh and try again.');
+        }
+        if (current) {
+          if (current.status !== 'active') store.reactivateMembership(agent.id, person.userId, person.name);
+          if (person.identities.telegram && !store.bindMembershipChannelUser(agent.id, person.userId, person.identities.telegram)) {
+            throw new AdmitError('Their Telegram identity changed while granting access. Refresh and try again.');
+          }
+        } else {
+          store.insertMembership({
+            id: randomUUID(),
+            agentId: agent.id,
+            userId: person.userId,
+            role: 'user',
+            displayName: person.name,
+            channelUserId: person.identities.telegram,
+            status: 'active',
+            joinedAt: new Date().toISOString(),
+          });
+        }
+        for (const g of grants) if (g.ch.kind !== 'telegram' && !store.bindMemberIdentity(agent.id, person.userId, g.ch.kind, g.id)) {
+          throw new AdmitError('Their chat identity changed while granting access. Refresh and try again.');
+        }
+      });
+      committed = true;
+      trace(agent.id)('member.added_known', { userId: person.userId, on: grants.map((g) => g.ch.kind) });
+      await restDoor(agent);
+      return { added: true, name: person.name };
     } catch (err) {
+      if (!committed) {
+        let removed = true;
+        for (const g of attempted) {
+          const done = await removeUnboundChannelAccess({ store, provider: admissionProvider, log: trace(agent.id) },
+            { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: g.ch.kind, accountId: g.ch.kind === 'telegram' ? g.ch.accountId : CHANNEL_ACCOUNT }, g.id);
+          removed = done && removed;
+        }
+        if (!removed) return reply.code(400).send({ error: 'Adding the person failed and the chat approval could not be removed. Check the agent\'s channel access before trying again.' });
+      }
       if (err instanceof AdmitError) return reply.code(400).send({ error: err.userMessage });
       throw err;
+    } finally {
+      clearBusy(agent.id);
     }
-    // Someone removed from this agent before keeps their old seat: it is
-    // taken up again, as an invite does. A second row hit UNIQUE(agent_id,
-    // user_id) after the allowlist was written — a 500, a seat left revoked
-    // and a runtime that let them in anyway (audit #071).
-    store.transact(() => {
-      if (store.getMembership(agent.id, person.userId)) {
-        store.reactivateMembership(agent.id, person.userId, person.name);
-        if (person.identities.telegram) store.bindMembershipChannelUser(agent.id, person.userId, person.identities.telegram);
-      } else {
-        store.insertMembership({
-          id: randomUUID(),
-          agentId: agent.id,
-          userId: person.userId,
-          role: 'user',
-          displayName: person.name,
-          channelUserId: person.identities.telegram,
-          status: 'active',
-          joinedAt: new Date().toISOString(),
-        });
-      }
-      for (const g of grants) if (g.ch.kind !== 'telegram') store.bindMemberIdentity(agent.id, person.userId, g.ch.kind, g.id);
-    });
-    trace(agent.id)('member.added_known', { userId: person.userId, on: grants.map((g) => g.ch.kind) });
-    await restDoor(agent);
-    return { added: true, name: person.name };
   });
 
   /**

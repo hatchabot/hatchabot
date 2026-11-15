@@ -25,7 +25,7 @@ const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB)
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
 import { batchConfigCommands, buildConfigCommands, describeConfigCommands, seedInvocation, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 import { publishedRuntimeImage, type PublishedImage } from '../orchestrator/releaseManifest.js';
-import { BROWSER_CLOSE_SOURCE, BROWSER_FENCE_SCRIPT, BROWSER_FENCE_VERSION, BROWSER_LOGINS_RE, BROWSER_LOGINS_ROLE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_UID, browserLoginsVolume } from '../orchestrator/browser.js';
+import { BROWSER_CHROMIUM_ARGV, BROWSER_CLOSE_SOURCE, BROWSER_FENCE_VERSION, BROWSER_LOGINS_RE, BROWSER_LOGINS_ROLE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_READY_FILE, BROWSER_START_SCRIPT, BROWSER_UID, browserLoginsVolume } from '../orchestrator/browser.js';
 import { channelFromChild, PANEL_RELAY_SOURCE, type BrowserPanelChannel } from '../orchestrator/browserPanel.js';
 
 const execFileP = promisify(execFile);
@@ -2453,27 +2453,58 @@ export class LocalDockerProvider implements RuntimeProvider {
    * every start. A volume of that name that is not labelled as this profile
    * is never mounted.
    */
-  async #loginsVolume(agent: string, agentId: string | undefined, logins: string, image: string): Promise<string> {
+  #ownsBrowserProfile(raw: string, volume: string, expected?: { agent: string; agentId?: string; logins: string }): boolean {
+    try {
+      const labels = JSON.parse(raw) as Record<string, unknown> | null;
+      if (!labels || typeof labels !== 'object' || Array.isArray(labels)) return false;
+      const agent = labels['hatchabot.browser-of'], logins = labels['hatchabot.browser-logins'];
+      return labels['hatchabot.role'] === BROWSER_LOGINS_ROLE && labels['hatchabot.browser-prefix'] === this.prefix
+        && typeof agent === 'string' && !!agent && typeof logins === 'string' && BROWSER_LOGINS_RE.test(logins)
+        && volume === browserLoginsVolume(agent, logins)
+        && (!expected || (agent === expected.agent && logins === expected.logins
+          // The agent-id label was optional; the container, install and
+          // random profile-id labels still bind an older profile. A present
+          // agent-id must agree with the current request.
+          && (!expected.agentId || labels['hatchabot.agent'] === undefined || labels['hatchabot.agent'] === ''
+            || labels['hatchabot.agent'] === expected.agentId)));
+    } catch { return false; }
+  }
+  async #loginsVolume(agent: string, agentId: string | undefined, logins: string, image: string, current: () => void): Promise<string> {
     const vol = browserLoginsVolume(agent, logins);
     const failed = "Could not ready the place its browser keeps its logins, so it was not started.";
     const oneShot = (user: string, caps: string[], script: string) => this.#docker([
       'run', '--rm', '--network', 'none', '--label', 'hatchabot.role=browser-prep', '--user', user,
       '--cap-drop', 'ALL', ...caps, '--security-opt', 'no-new-privileges', '-v', `${vol}:/profile`, '--entrypoint', 'sh', image, '-c', script,
     ], IO_TIMEOUT_MS);
-    const seen = await this.#docker(['volume', 'inspect', '--format', '{{ index .Labels "hatchabot.browser-logins" }}', vol]);
+    const inspect = () => this.#docker(['volume', 'inspect', '--format', '{{json .Labels}}', vol]);
+    let seen = await inspect();
+    current();
+    let created = false;
     if (seen.code !== 0) {
+      if (!/no such volume/i.test(seen.stderr)) throw new ProviderError(`browser logins check failed: ${seen.stderr.slice(-300)}`, failed);
       const made = await this.#docker(['volume', 'create',
         '--label', `hatchabot.role=${BROWSER_LOGINS_ROLE}`, '--label', `hatchabot.browser-of=${agent}`, '--label', `hatchabot.browser-prefix=${this.prefix}`,
         '--label', `hatchabot.browser-logins=${logins}`, ...(agentId ? ['--label', `hatchabot.agent=${agentId}`] : []), vol]);
       if (made.code !== 0) throw new ProviderError(`browser logins volume: ${made.stderr.slice(-300)}`, failed);
-      const prep = await oneShot('0:0', ['--cap-add', 'CHOWN'], BROWSER_PROFILE_PREP);
-      if (prep.code !== 0 || !/^READY$/m.test(prep.stdout)) {
-        await this.#docker(['volume', 'rm', vol]);
-        throw new ProviderError(`browser logins prep failed: ${`${prep.stderr} ${prep.stdout}`.trim().slice(-300)}`, failed);
-      }
-    } else if (seen.stdout.trim() !== logins) {
+      current();
+      // Docker create is idempotent: a volume appearing between inspect and
+      // create must still carry all of this profile's ownership labels.
+      seen = await inspect();
+      current();
+      created = true;
+    }
+    if (seen.code !== 0) throw new ProviderError(`browser logins check failed: ${seen.stderr.slice(-300)}`, failed);
+    if (!this.#ownsBrowserProfile(seen.stdout, vol, { agent, agentId, logins })) {
       throw new ProviderError(`volume ${vol} is not a browser profile of this install`, failed);
     }
+    if (created) {
+      const prep = await oneShot('0:0', ['--cap-add', 'CHOWN'], BROWSER_PROFILE_PREP);
+      if (prep.code !== 0 || !/^READY$/m.test(prep.stdout)) {
+        await this.removeBrowserLogins(vol);
+        throw new ProviderError(`browser logins prep failed: ${`${prep.stderr} ${prep.stdout}`.trim().slice(-300)}`, failed);
+      }
+    }
+    current();
     const unlock = await oneShot(`${BROWSER_UID}:${BROWSER_UID}`, [], BROWSER_PROFILE_UNLOCK);
     if (unlock.code !== 0 || !/^UNLOCKED$/m.test(unlock.stdout)) throw new ProviderError(`browser logins unlock failed: ${`${unlock.stderr} ${unlock.stdout}`.trim().slice(-300)}`, failed);
     return vol;
@@ -2506,12 +2537,17 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
   async browserVersion(agentContainer: string): Promise<string | undefined> {
-    const r = await this.#docker(['exec', this.#browserName(agentContainer), 'chromium', '--version']);
+    const r = await this.#docker(['exec', '--user', `${BROWSER_UID}:${BROWSER_UID}`, this.#browserName(agentContainer), 'chromium', '--version']);
     return r.code === 0 ? /(\d+\.\d+\.\d+\.\d+)/.exec(r.stdout)?.[1] : undefined;
   }
   async ensureBrowser(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'> {
+    const current = () => {
+      if (spec.stillWanted && !spec.stillWanted()) throw new ProviderError('browser settings changed during startup', 'The browser settings changed. Its next check will use the current settings.');
+    };
+    current();
     const agent = spec.agentContainer;
     const a = await this.#docker(['inspect', agent, '--format', '{{.State.Running}}|{{.State.StartedAt}}']);
+    current();
     const [running, startedAt] = a.stdout.trim().split('|');
     if (a.code !== 0 || running !== 'true') throw new ProviderError(`agent container ${agent} is not running`, 'The agent is not running, so its browser cannot start.');
     const name = this.#browserName(agent);
@@ -2525,6 +2561,10 @@ export class LocalDockerProvider implements RuntimeProvider {
     // And only on the profile asked for: a kept one (its id), or one in memory.
     if (spec.logins && !BROWSER_LOGINS_RE.test(spec.logins)) throw new ProviderError(`bad browser logins id ${spec.logins}`, "Could not start the agent's browser.");
     const cur = await this.#docker(['inspect', name, '--format', '{{.State.Running}}|{{ index .Config.Labels "hatchabot.browser-with" }}|{{.Config.Image}}|{{ index .Config.Labels "hatchabot.browser-memory" }}|{{.HostConfig.Memory}}|{{ index .Config.Labels "hatchabot.browser-logins" }}|{{ index .Config.Labels "hatchabot.browser-fence" }}']);
+    current();
+    if (cur.code !== 0 && !NO_SUCH_CONTAINER.test(cur.stderr)) {
+      throw new ProviderError(`browser check failed: ${cur.stderr.slice(-300)}`, "Could not check the previous browser, so its replacement was not started.");
+    }
     const [bRunning, bWith, bImage, bAsked = '', bMemory = '', bLogins = '', bFence = ''] = cur.stdout.trim().split('|');
     const had = bAsked && bAsked !== '<no value>' ? dockerMemoryBytes(bAsked) : (/^\d+$/.test(bMemory) ? Number(bMemory) : undefined);
     const wantMemory = dockerMemoryBytes(spec.memory);
@@ -2535,36 +2575,46 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (cur.code === 0) {
       // On the same kept profile again (a new image or memory limit): closed first, so it writes it.
       if (bRunning === 'true' && bWith === startedAt && haveLogins && sameLogins) await this.#closeKeptBrowser(agent);
-      await this.#docker(['rm', '-f', name]);
+      current();
+      const removed = await this.#docker(['rm', '-f', name]);
+      if (removed.code !== 0 && !NO_SUCH_CONTAINER.test(removed.stderr)) {
+        throw new ProviderError(`browser removal failed: ${removed.stderr.slice(-300)}`, "Could not remove the previous browser, so its replacement was not started.");
+      }
     }
+    current();
     await this.#ensureBrowserImage(spec.image, spec.dockerfile);
-    // The fence first (HB-0679): set before Chromium makes its first request,
-    // or the browser is not started. It lives in the agent's network
-    // namespace, so it lasts as long as the agent runs; a restarted agent has
-    // a new one, and gets its new browser and fence here again.
-    const fence = await this.#docker([
-      'run', '--rm', '--network', `container:${agent}`, '--label', 'hatchabot.role=browser-fence',
-      '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--security-opt', 'no-new-privileges',
-      '--user', '0:0', '--entrypoint', 'sh', spec.image, '-c', BROWSER_FENCE_SCRIPT,
-    ], IO_TIMEOUT_MS);
-    if (fence.code !== 0 || !/^FENCED$/m.test(fence.stdout)) {
-      throw new ProviderError(`browser fence failed: ${`${fence.stderr} ${fence.stdout}`.trim().slice(-500)}`, "Could not keep the agent's browser off private addresses, so it was not started.");
-    }
+    current();
     const profile = spec.logins
-      ? ['-v', `${await this.#loginsVolume(agent, spec.agentId, spec.logins, spec.image)}:/profile`]
+      ? ['-v', `${await this.#loginsVolume(agent, spec.agentId, spec.logins, spec.image, current)}:/profile`]
       : ['--tmpfs', `/profile:size=512m,uid=${BROWSER_UID},gid=${BROWSER_UID}`];
+    current();
     const run = await this.#docker([
       'run', '-d', '--name', name, '--network', `container:${agent}`,
       '--label', 'hatchabot.role=browser', '--label', `hatchabot.browser-of=${agent}`, '--label', `hatchabot.browser-with=${startedAt}`,
       '--label', `hatchabot.browser-prefix=${this.prefix}`, '--label', `hatchabot.browser-memory=${spec.memory}`,
       '--label', `hatchabot.browser-logins=${spec.logins ?? 'none'}`,
       '--label', `hatchabot.browser-fence=${BROWSER_FENCE_VERSION}`,
-      '--read-only', '--tmpfs', '/tmp:size=256m', ...profile,
-      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+      // iptables needs its root-owned /run/xtables.lock during startup.
+      '--read-only', '--tmpfs', '/tmp:size=256m', '--tmpfs', '/run:size=1m,mode=0755', ...profile,
+      // Startup fences this exact namespace, then drops every capability and
+      // uid/gid before Chromium. No healthcheck or exec inherits startup root.
+      '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--cap-add', 'SETUID', '--cap-add', 'SETGID', '--cap-add', 'SETPCAP',
+      '--security-opt', 'no-new-privileges', '--user', '0:0', '--entrypoint', 'sh', '--no-healthcheck',
       '--memory', spec.memory, '--pids-limit', '512', '--shm-size', '256m',
-      spec.image,
+      spec.image, '-c', BROWSER_START_SCRIPT, 'sh', ...BROWSER_CHROMIUM_ARGV,
     ], IO_TIMEOUT_MS);
     if (run.code !== 0) throw new ProviderError(`browser failed: ${run.stderr.slice(-500)}`, "Could not start the agent's browser.");
+    if (spec.stillWanted && !spec.stillWanted()) { await this.stopBrowser(agent); current(); }
+    // A detached run can succeed while its startup immediately refuses the
+    // fence or privilege drop. Wait boundedly for that proof, as user 1001.
+    const ready = await this.#docker(['exec', '--user', `${BROWSER_UID}:${BROWSER_UID}`, name, 'sh', '-c',
+      `n=0; until [ -f ${BROWSER_READY_FILE} ]; do n=$((n+1)); [ "$n" -lt 100 ] || exit 1; sleep 0.1; done; echo READY`,
+    ], 15_000);
+    if (spec.stillWanted && !spec.stillWanted()) { await this.stopBrowser(agent); current(); }
+    if (ready.code !== 0 || !/^READY$/m.test(ready.stdout)) {
+      await this.#docker(['rm', '-f', name]);
+      throw new ProviderError('browser fence failed: startup did not confirm the fence and privilege drop', "Could not confirm that the agent's browser is ready and fenced off private addresses.");
+    }
     return 'started';
   }
   async stopBrowser(agentContainer: string): Promise<void> {
@@ -2607,11 +2657,14 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
   async removeBrowserLogins(volume: string): Promise<boolean> {
     if (!/-browser-logins-[0-9a-f]{12}$/.test(volume)) return false;
+    const seen = await this.#docker(['volume', 'inspect', '--format', '{{json .Labels}}', volume]);
+    if (seen.code !== 0) return /no such volume/i.test(seen.stderr);
+    if (!this.#ownsBrowserProfile(seen.stdout, volume)) return false;
     const r = await this.#docker(['volume', 'rm', volume]);
     return r.code === 0 || /no such volume/i.test(r.stderr);
   }
   async browserProfileBytes(agentContainer: string): Promise<number | undefined> {
-    const r = await this.#docker(['exec', this.#browserName(agentContainer), 'du', '-sk', '/profile'], 30_000);
+    const r = await this.#docker(['exec', '--user', `${BROWSER_UID}:${BROWSER_UID}`, this.#browserName(agentContainer), 'du', '-sk', '/profile'], 30_000);
     const kb = r.code === 0 ? /^(\d+)/.exec(r.stdout.trim())?.[1] : undefined;
     return kb ? Number(kb) * 1024 : undefined;
   }

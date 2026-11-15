@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -23,6 +23,8 @@ import { makeWorld, seedRunningAgent, as, type World } from './support/world.js'
 
 const ID = '0a1b2c3d4e5f';
 const ID2 = 'f5e4d3c2b1a0';
+const stubDirs: string[] = [];
+afterEach(() => { vi.unstubAllEnvs(); for (const dir of stubDirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe('the profile, the volume and the close', () => {
   it('ids, names and scripts', () => {
@@ -57,24 +59,32 @@ describe('the container (docker argv)', () => {
    */
   function stub(o: { browser?: { with: string; logins: string; memory?: number; fence?: string }; volume?: string; prep?: string; closes?: boolean } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'hb-logins-'));
+    stubDirs.push(dir);
+    vi.stubEnv('HOME', dir); vi.stubEnv('PATH', dir);
+    vi.stubEnv('GIT_CONFIG_COUNT', '1'); vi.stubEnv('GIT_CONFIG_KEY_0', 'core.hooksPath'); vi.stubEnv('GIT_CONFIG_VALUE_0', '/dev/null');
     const log = join(dir, 'argv.log');
     const bin = join(dir, 'docker');
     const b = o.browser;
-    writeFileSync(bin, `#!/usr/bin/env bash
-cat > /dev/null &
+    writeFileSync(bin, `#!/bin/bash
 printf '%s\\n' "$*" >> ${JSON.stringify(log)}
 case "$*" in
   "inspect hatchabot-a1 --format "*) echo "true|2026-11-13T10:00:00Z" ;;
-  "inspect hatchabot-a1-browser --format "*browser-with*) ${b ? `echo "true|${b.with}|${browserImage().image}||${b.memory ?? 1024 ** 3}|${b.logins}|${b.fence ?? BROWSER_FENCE_VERSION}"` : 'exit 1'} ;;
+  "inspect hatchabot-a1-browser --format "*browser-with*) ${b ? `echo "true|${b.with}|${browserImage().image}||${b.memory ?? 1024 ** 3}|${b.logins}|${b.fence ?? BROWSER_FENCE_VERSION}"` : 'echo "no such container" >&2; exit 1'} ;;
   "inspect hatchabot-a1-browser --format "*) ${b ? `echo "true|${b.logins}"` : 'exit 1'} ;;
   "image inspect "*) echo sha256:x ;;
-  "volume inspect "*) ${o.volume !== undefined ? `echo "${o.volume}"` : 'echo "Error: no such volume" >&2; exit 1'} ;;
-  "volume create "*) echo made ;;
-  "volume ls "*) printf '%s\\n' 'hatchabot-a1-browser-logins-${ID}|hatchabot-a1|a1|${ID}' 'hatchabot-a1-browser-logins-${ID2}|hatchabot-a1|a1|${ID2}' 'hatchabot-zz-browser-logins-${ID}|hatchabot-zz|<no value>|${ID}' ;;
+  "volume inspect "*)
+    if [ ${o.volume !== undefined ? '1' : '0'} = 1 ] || [ -f "$HOME/created" ] || [ -f "$HOME/listed" ]; then
+      vol="\${!#}"; profile="\${vol##*-}"; agent="\${vol%-browser-logins-*}"
+      ${o.volume !== undefined ? `profile='${o.volume}'` : ''}
+      printf '{"hatchabot.role":"browser-logins","hatchabot.browser-of":"%s","hatchabot.browser-prefix":"hatchabot","hatchabot.browser-logins":"%s","hatchabot.agent":"a1"}\\n' "$agent" "$profile"
+    else echo "Error: no such volume" >&2; exit 1; fi ;;
+  "volume create "*) : > "$HOME/created"; echo made ;;
+  "volume ls "*) : > "$HOME/listed"; printf '%s\\n' 'hatchabot-a1-browser-logins-${ID}|hatchabot-a1|a1|${ID}' 'hatchabot-a1-browser-logins-${ID2}|hatchabot-a1|a1|${ID2}' 'hatchabot-zz-browser-logins-${ID}|hatchabot-zz|<no value>|${ID}' ;;
   "run --rm --network none "*UNLOCKED*) echo UNLOCKED ;;
   "run --rm --network none "*) ${o.prep ?? 'echo READY'} ;;
   "run --rm "*) echo FENCED ;;
   "exec hatchabot-a1 node "*) ${o.closes === false ? 'exit 1' : 'echo CLOSING'} ;;
+  "exec --user 1001:1001 hatchabot-a1-browser sh "*) echo READY ;;
   "wait "*) echo 0 ;;
   "run -d "*) echo newid ;;
 esac
@@ -152,7 +162,7 @@ exit 0
   it('one on a profile forgotten, or switched off, is removed at once: nothing of it is wanted', async () => {
     const forgot = stub({ browser: { with: '2026-11-13T10:00:00Z', logins: ID } });
     expect(await forgot.p.ensureBrowser({ ...spec, logins: ID2 })).toBe('started');
-    expect(forgot.argv().some((l) => l.startsWith('exec '))).toBe(false);
+    expect(forgot.argv().some((l) => l.startsWith('exec hatchabot-a1 node '))).toBe(false);
     expect(forgot.argv()).toContain('rm -f hatchabot-a1-browser');
     expect(forgot.argv().find((l) => l.startsWith('run -d'))).toContain(`hatchabot-a1-browser-logins-${ID2}:/profile`);
     const off = stub({ browser: { with: '2026-11-13T10:00:00Z', logins: ID } });
@@ -249,6 +259,33 @@ describe('the sweep keeps each machine\'s profiles in step with its agents', () 
     expect([...w.p.loginVolumes.keys()]).toEqual([browserLoginsVolume('kitchen', ID2)]);
     expect(r.removed).toContain(browserLoginsVolume('kitchen', ID));
     expect(w.logs).toContainEqual(['kitchen', 'browser.logins_removed', { why: 'forgotten' }]);
+  });
+
+  it('does not delete the currently kept profile using an earlier sweep snapshot (HB-0725)', async () => {
+    const w = world();
+    w.store.setAgentBrowserLogins('garden', ID);
+    const volume = browserLoginsVolume('garden', ID2);
+    w.p.listBrowserLogins = async () => {
+      w.store.setAgentBrowserLogins('garden', ID2);
+      w.p.loginVolumes.set(volume, { agentContainer: 'garden', agentId: 'garden', logins: ID2 });
+      return [{ name: volume, agentContainer: 'garden', agentId: 'garden', logins: ID2 }];
+    };
+    expect((await browserSweep(w.deps)).removed).not.toContain(volume);
+    expect(w.p.loginVolumes.has(volume)).toBe(true);
+  });
+
+  it('cancels a stale browser request after the provider yields and does not report a start (HB-0725)', async () => {
+    const w = world(), ensure = w.p.ensureBrowser.bind(w.p);
+    w.store.setAgentBrowserLogins('kitchen', ID);
+    w.p.ensureBrowser = async (spec) => {
+      const result = await ensure(spec);
+      if (spec.agentContainer === 'kitchen') w.store.setAgentBrowser('kitchen', false);
+      return result;
+    };
+    const result = await browserSweep(w.deps);
+    expect(w.p.browsers.has('kitchen')).toBe(false);
+    expect(result.started).not.toContain('kitchen');
+    expect(w.logs.some(([a, event]) => a === 'kitchen' && event === 'browser.started')).toBe(false);
   });
 
   it('switched off, the browser switched off, archived, deleted or moved: deleted; one still in use is tried again', async () => {

@@ -10,6 +10,7 @@ import { registerRoutes } from '../src/api/routes.js';
 import { FrameReader, GUEST_CONNECT_TIMEOUT_MS, GUEST_IDLE_TO_CLOSE_MS, GUEST_ROOM_EVERY_MS, MAX_GUEST_CONSOLES, encodeFrame } from '../src/api/consoleProxy.js';
 import { consoleIdentity, guestConsoleSessionKey, OWNER_ROLE } from '../src/openclaw/consoleIdentity.js';
 import { ConsoleAccess, consoleAllowUsers, consoleSyncBatch, parseConsoleState } from '../src/orchestrator/consoleAccess.js';
+import { TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH } from '../src/api/controlUiRebase.js';
 
 /**
  * The console with identities, end to end through the real routes: who may
@@ -34,6 +35,9 @@ interface FakeGateway {
   http: IncomingHttpHeaders[];
   /** The path of each HTTP request, as the gateway got it. */
   urls: string[];
+  /** Raw SDP handshakes accepted by this particular gateway. */
+  offers: Array<{ url: string; method: string; headers: IncomingHttpHeaders; body: Buffer }>;
+  holdHttp?: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => boolean;
   upgrades: Array<{ url: string; headers: IncomingHttpHeaders }>;
   /** Upgrades for this identity are held, not answered (a gateway that hangs mid-handshake) until letIn. */
   holdFor?: string;
@@ -60,18 +64,37 @@ interface FakeGateway {
 /** The app's document and its boot settings, as 2026.9 serves them (just the parts the proxy touches). */
 const FAKE_DOCUMENT = '<!doctype html><html data-openclaw-control-ui-base-path=""><head><meta charset="UTF-8" /><script>theme()</script><script type="module" src="/assets/app.js"></script></head><body></body></html>';
 const FAKE_UI_CONFIG = JSON.stringify({ basePath: '', communityInvite: true, terminalEnabled: true, cliAgentsEnabled: true });
+const FAKE_SDP_ANSWER = 'v=0\r\ns=fixture-answer\r\nt=0 0\r\n';
 
 /** An OpenClaw gateway stand-in: HTTP answers "ok"; a WebSocket gets a challenge, a hello, and an echo per request. */
 async function fakeGateway(): Promise<FakeGateway> {
-  const g: FakeGateway = { port: 0, http: [], urls: [], upgrades: [], held: [], letIn: () => {}, conns: [], received: [], scopes: () => [], refusedConnects: [], dropAll: () => {}, dropped: [] };
+  const g: FakeGateway = { port: 0, http: [], urls: [], offers: [], upgrades: [], held: [], letIn: () => {}, conns: [], received: [], scopes: () => [], refusedConnects: [], dropAll: () => {}, dropped: [] };
   const holding: Array<() => void> = [];
   g.letIn = () => { for (const go of holding.splice(0)) go(); };
   const server: Server = createServer((req, res) => {
     g.http.push(req.headers);
     g.urls.push(req.url ?? '');
+    if (g.holdHttp?.(req, res)) return;
     const path = (req.url ?? '').split('?')[0];
-    if (path === '/chat') { res.setHeader('content-type', 'text/html; charset=utf-8'); res.setHeader('etag', '"doc"'); res.end(FAKE_DOCUMENT); return; }
+    if (path === '/chat') {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      res.setHeader('etag', '"doc"');
+      if (req.headers['if-none-match'] === '"doc"') { res.statusCode = 304; res.end(); }
+      else res.end(FAKE_DOCUMENT);
+      return;
+    }
     if (path === '/control-ui-config.json') { res.setHeader('content-type', 'application/json'); res.end(FAKE_UI_CONFIG); return; }
+    if (path === '/plugins/openai/realtime/calls' && req.method === 'POST') {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        g.offers.push({ url: req.url!, method: req.method!, headers: req.headers, body: Buffer.concat(chunks) });
+        res.statusCode = 201;
+        res.setHeader('content-type', 'application/sdp');
+        res.end(FAKE_SDP_ANSWER);
+      });
+      return;
+    }
     res.setHeader('content-type', 'text/plain'); res.end('ok');
   });
   const sockets = new Set<import('node:net').Socket>();
@@ -193,6 +216,7 @@ async function world(opts: {
     return u ? { ownerId: u, via: 'identity' as const } : undefined;
   });
   await registerRoutes(app, { store, secrets: { get: async () => '', put: async () => {}, delete: async () => {} } as never, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never, ...(opts.authMode ? { authMode: opts.authMode } : {}) });
+  app.post('/v1/logout', async () => ({ ok: true })); // stateless-cookie logout; hooks must still retire console access
   await app.listen({ port: 0, host: '127.0.0.1' });
   toClose.push({ close: () => { const raw = app.server as Server; raw.closeAllConnections?.(); raw.close(); } });
   const port = (app.server.address() as { port: number }).port;
@@ -304,6 +328,137 @@ describe('what the gateway is told about the person (HTTP)', () => {
     const h = gw.http.at(-1)!;
     expect(h['x-hatchabot-user']).toBeUndefined();
     expect(h['x-forwarded-for']).toBeUndefined();
+  });
+});
+
+describe('console access after asynchronous waits', () => {
+  function gate() {
+    let reached!: () => void, release!: () => void;
+    return { reached: new Promise<void>((r) => { reached = r; }), held: new Promise<void>((r) => { release = r; }), arrive: () => reached(), release: () => release() };
+  }
+  function change(w: Awaited<ReturnType<typeof world>>, kind: string) {
+    if (kind === 'guest revoked') w.store.revokeMembership('a1', GUEST);
+    else if (kind === 'runtime replaced') w.store.setAgentRuntimeRef('a1', 'mock://replacement');
+    else {
+      const db = (w.store as unknown as { db: Database.Database }).db;
+      if (kind === 'owner changed') db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-new-owner', 'a1');
+      else if (kind === 'host changed') db.prepare('UPDATE hosts SET settings = ? WHERE id = ?').run('{"dockerHost":"tcp://runner.example.test:2376"}', 'h1');
+      else db.prepare('UPDATE agents SET state = ? WHERE id = ?').run(kind, 'a1');
+    }
+  }
+
+  it.each(['guest revoked', 'owner changed', 'runtime replaced', 'host changed', 'DELETING', 'STOPPED'])('refuses an HTTP request after %s while preparing the console', async (kind) => {
+    const w = await world(), g = gate();
+    const ready = await w.access.ensureReady(w.store.getAgent('a1')!);
+    vi.spyOn(w.access, 'ensureReady').mockImplementation(async () => { g.arrive(); await g.held; return ready; });
+    const user = kind === 'guest revoked' ? GUEST : OWNER;
+    const response = w.app.inject({ method: 'GET', url: '/v1/agents/a1/ui/chat', headers: { 'x-hatchabot-owner': user } }).then((r) => r);
+    await g.reached; change(w, kind); g.release();
+    expect((await response).statusCode).toBe(404);
+    expect(w.gw.http).toEqual([]);
+  });
+
+  it.each(['guest revoked', 'owner changed', 'runtime replaced', 'host changed', 'DELETING'])('discards a private HTTP reply after %s while the gateway answers', async (kind) => {
+    const w = await world(), g = gate();
+    let answer!: () => void;
+    w.gw.holdHttp = (_req, res) => { answer = () => res.end('private delayed reply'); g.arrive(); return true; };
+    const user = kind === 'guest revoked' ? GUEST : OWNER;
+    const response = w.app.inject({ method: 'GET', url: '/v1/agents/a1/ui/chat', headers: { 'x-hatchabot-owner': user } }).then((r) => r);
+    await g.reached; change(w, kind); answer();
+    const r = await response;
+    expect(r.statusCode).toBe(404);
+    expect(r.body).not.toContain('private delayed reply');
+  });
+
+  it('does not report console access after a guest was removed during readiness', async () => {
+    const w = await world(), g = gate();
+    const ready = await w.access.ensureReady(w.store.getAgent('a1')!);
+    vi.spyOn(w.access, 'ensureReady').mockImplementation(async () => { g.arrive(); await g.held; return ready; });
+    const response = w.app.inject({ method: 'GET', url: '/v1/agents/a1/console/access', headers: { 'x-hatchabot-owner': GUEST } }).then((r) => r);
+    await g.reached; w.store.revokeMembership('a1', GUEST); g.release();
+    expect((await response).statusCode).toBe(404);
+  });
+
+  it.each(['guest revoked', 'owner changed', 'runtime replaced', 'host changed', 'DELETING'])('refuses a WebSocket after %s during the gateway handshake', async (kind) => {
+    const w = await world();
+    const user = kind === 'guest revoked' ? GUEST : OWNER;
+    w.gw.holdFor = user === GUEST ? w.guestId : w.ownerId;
+    // Warm readiness before holding the actual browser's handshake.
+    w.gw.holdFor = undefined;
+    await w.access.ensureReady(w.store.getAgent('a1')!);
+    w.gw.holdFor = user === GUEST ? w.guestId : w.ownerId;
+    const c = openConsole(w.port, user);
+    expect(await c.until(() => w.gw.held.length > 0)).toBe(true);
+    change(w, kind); w.gw.letIn();
+    expect(await c.ready).toBeUndefined();
+    expect(await c.until(() => c.isClosed())).toBe(true);
+  });
+
+  it('discards an HTTP response when its stateless browser session signs out', async () => {
+    const w = await world(), g = gate();
+    let answer!: () => void;
+    w.gw.holdHttp = (_req, res) => { answer = () => res.end('private delayed reply'); g.arrive(); return true; };
+    const cookie = `hbu=${OWNER}; hatchabot_session=synthetic-session`;
+    const response = w.app.inject({ method: 'GET', url: '/v1/agents/a1/ui/chat', headers: { cookie, 'x-hatchabot-owner': OWNER } }).then((r) => r);
+    await g.reached;
+    await w.app.inject({ method: 'POST', url: '/v1/logout', headers: { cookie, 'x-hatchabot-owner': OWNER } });
+    answer();
+    expect((await response).statusCode).toBe(404);
+  });
+
+  it('cancels a pending socket on logout even though its cookie would still verify', async () => {
+    const w = await world();
+    await w.access.ensureReady(w.store.getAgent('a1')!);
+    w.gw.holdFor = w.ownerId;
+    const cookie = `hbu=${OWNER}; hatchabot_session=synthetic-session`;
+    const c = openConsole(w.port, OWNER, { cookie });
+    expect(await c.until(() => w.gw.held.length > 0)).toBe(true);
+    await w.app.inject({ method: 'POST', url: '/v1/logout', headers: { cookie, 'x-hatchabot-owner': OWNER } });
+    w.gw.letIn();
+    expect(await c.ready).toBeUndefined();
+  });
+
+  it('closes only the signed-out browser\'s established console, then detects a runtime change on the other', async () => {
+    const w = await world();
+    const cookie = `hbu=${OWNER}; hatchabot_session=synthetic-session-one`;
+    const a = openConsole(w.port, OWNER, { cookie });
+    const b = openConsole(w.port, OWNER, { cookie: `hbu=${OWNER}; hatchabot_session=synthetic-session-two` });
+    expect((await a.ready)?.ok).toBe(true);
+    expect((await b.ready)?.ok).toBe(true);
+    await w.app.inject({ method: 'POST', url: '/v1/logout', headers: { cookie, 'x-hatchabot-owner': OWNER } });
+    expect(await a.until(() => a.isClosed())).toBe(true);
+    expect(b.isClosed()).toBe(false);
+    w.store.setAgentRuntimeRef('a1', 'mock://replacement');
+    w.app.consoleSockets!.revalidate();
+    expect(await b.until(() => b.isClosed())).toBe(true);
+  });
+
+  it('returns a bounded gateway error when an upstream response disconnects mid-body', async () => {
+    const w = await world();
+    w.gw.holdHttp = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/sdp', 'content-length': '500' });
+      res.write('partial synthetic answer');
+      setImmediate(() => res.destroy());
+      return true;
+    };
+    const response = await w.app.inject({ method: 'GET', url: '/v1/agents/a1/ui/chat', headers: { 'x-hatchabot-owner': OWNER } });
+    expect(response.statusCode).toBe(502);
+    expect(response.body).not.toContain('partial synthetic answer');
+  });
+
+  it('cancels the gateway handshake when the browser cancels its voice offer', async () => {
+    const w = await world(), g = gate();
+    let closed!: () => void;
+    const upstreamClosed = new Promise<void>((r) => { closed = r; });
+    w.gw.holdHttp = (_req, res) => { res.once('close', closed); g.arrive(); return true; };
+    const controller = new AbortController();
+    const response = fetch(`http://127.0.0.1:${w.port}/v1/agents/a1/ui/plugins/openai/realtime/calls`, {
+      method: 'POST', headers: { 'x-hatchabot-owner': OWNER, 'content-type': 'application/sdp' }, body: 'synthetic offer', signal: controller.signal,
+    }).catch((e: Error) => e);
+    await g.reached;
+    controller.abort();
+    expect(await response).toBeInstanceOf(Error);
+    await upstreamClosed;
   });
 });
 
@@ -1153,6 +1308,106 @@ describe("a guest's page over HTTP (2026-09-30)", () => {
     expect(g).toMatchObject({ communityInvite: false, terminalEnabled: true });
     const o = await (await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/control-ui-config.json`, { headers: { 'x-hatchabot-owner': OWNER } })).json() as { communityInvite?: boolean };
     expect(o.communityInvite).toBe(true);
+  });
+});
+
+describe('owner Talk through the agent console proxy', () => {
+  it('serves the owner shim for GET and HEAD locally, without contacting a gateway', async () => {
+    const w = await world();
+    const exec = vi.spyOn(w.provider, 'exec');
+    const url = `http://127.0.0.1:${w.port}/v1/agents/a1/ui${TALK_PROXY_SCRIPT_PATH}`;
+    for (const method of ['GET', 'HEAD']) {
+      const response = await fetch(url, { method, headers: { 'x-hatchabot-owner': OWNER } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toMatch(/javascript/);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.text()).toBe(method === 'GET' ? TALK_PROXY_SCRIPT : '');
+    }
+    expect(exec).not.toHaveBeenCalled();
+    expect(w.gw.http).toEqual([]);
+    expect(w.gw.upgrades).toEqual([]);
+  });
+
+  it('denies the owner shim to guests and strangers, and refuses methods other than GET or HEAD', async () => {
+    const w = await world();
+    const url = `http://127.0.0.1:${w.port}/v1/agents/a1/ui${TALK_PROXY_SCRIPT_PATH}`;
+    for (const owner of [GUEST, OTHER, 'user-stranger']) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = await fetch(url, { method, headers: { 'x-hatchabot-owner': owner } });
+        expect(response.status).toBe(404);
+        expect(await response.text()).not.toContain('window.fetch');
+      }
+    }
+    const response = await fetch(url, { method: 'POST', headers: { 'x-hatchabot-owner': OWNER } });
+    expect(response.status).toBe(404);
+    expect(w.gw.http).toEqual([]);
+    expect(w.gw.upgrades).toEqual([]);
+  });
+
+  it('loads the owner shim before the upstream module, including a cached document request; guests get only their own view shim', async () => {
+    const w = await world();
+    const url = `http://127.0.0.1:${w.port}/v1/agents/a1/ui/chat`;
+    const owner = await fetch(url, { headers: { 'x-hatchabot-owner': OWNER, 'if-none-match': '"doc"' } });
+    expect(owner.status).toBe(200);
+    expect(w.gw.http.at(-1)!['if-none-match']).toBeUndefined();
+    expect(owner.headers.get('etag')).toBeNull();
+    const page = await owner.text();
+    const tag = `<script src="/v1/agents/a1/ui${TALK_PROXY_SCRIPT_PATH}"></script>`;
+    expect(page.indexOf(tag)).toBeGreaterThan(-1);
+    expect(page.indexOf(tag)).toBeLessThan(page.indexOf('<script type="module"'));
+    expect(page).not.toContain('guest-view.js');
+    const guest = await fetch(url, { headers: { 'x-hatchabot-owner': GUEST } });
+    expect(guest.status).toBe(200);
+    const guestPage = await guest.text();
+    expect(guestPage).toContain('/__hatchabot/guest-view.js');
+    expect(guestPage).not.toContain(TALK_PROXY_SCRIPT_PATH);
+  });
+
+  it('forwards the original SDP bytes and reservation bearer to the selected agent, then returns its SDP answer', async () => {
+    const w = await world();
+    const selected = await fakeGateway();
+    const token = randomBytes(16).toString('hex');
+    const { runtimeRef } = await w.provider.provision({ agentId: 'a2', slug: 'garden', workspace: { files: {}, configPatch: { agentId: 'garden', authMode: 'api-key' } }, env: {} });
+    await w.provider.start(runtimeRef);
+    w.store.insertAgent({ ...w.store.getAgent('a1')!, id: 'a2', name: 'Garden', slug: 'garden', runtimeRef });
+    const db = (w.store as unknown as { db: Database.Database }).db;
+    db.prepare('UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?').run(selected.port, token, 'a2');
+    const selectedAgent = w.store.getAgent('a2')!;
+    const selectedOwner = consoleIdentity(token, 'owner', OWNER);
+    selected.scopes = (identity) => identity === selectedOwner ? ['operator.admin'] : [];
+    w.provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ mode: 'trusted-proxy', roles: true, allowUsers: consoleAllowUsers(w.store, selectedAgent, token), trustedProxies: ['172.18.0.1'], route: '172.18.0.1' }) });
+    const offer = 'v=0\r\no=- 123 2 IN IP4 127.0.0.1\r\ns=fixture-offer\r\nt=0 0\r\na=sendrecv\r\n';
+    const authorization = 'Bearer made-up-voice-reservation';
+    const response = await fetch(`http://127.0.0.1:${w.port}/v1/agents/a2/ui/plugins/openai/realtime/calls?reservation=fixture`, {
+      method: 'POST', headers: { 'x-hatchabot-owner': OWNER, 'content-type': 'application/sdp', authorization }, body: offer,
+    });
+    expect(response.status).toBe(201);
+    expect(response.headers.get('content-type')).toMatch(/application\/sdp/);
+    expect(await response.text()).toBe(FAKE_SDP_ANSWER);
+    expect(w.gw.http).toEqual([]);
+    expect(selected.offers).toHaveLength(1);
+    const received = selected.offers[0]!;
+    expect(received.url).toBe('/plugins/openai/realtime/calls?reservation=fixture');
+    expect(received.method).toBe('POST');
+    expect(received.body).toEqual(Buffer.from(offer));
+    expect(received.headers['content-type']).toBe('application/sdp');
+    expect(received.headers.authorization).toBe(authorization);
+    expect(received.headers['content-length']).toBe(String(Buffer.byteLength(offer)));
+    expect(received.headers['x-hatchabot-user']).toBe(selectedOwner);
+    expect(received.headers['x-hatchabot-owner']).toBeUndefined();
+  });
+
+  it('does not forward guest or foreign SDP offers even when they supply a reservation bearer', async () => {
+    const w = await world();
+    const url = `http://127.0.0.1:${w.port}/v1/agents/a1/ui/plugins/openai/realtime/calls`;
+    for (const owner of [GUEST, OTHER, 'user-stranger']) {
+      const response = await fetch(url, {
+        method: 'POST', headers: { 'x-hatchabot-owner': owner, 'content-type': 'application/sdp', authorization: 'Bearer made-up-voice-reservation' }, body: 'v=0\r\n',
+      });
+      expect(response.status).toBe(owner === GUEST ? 403 : 404);
+    }
+    expect(w.gw.offers).toEqual([]);
+    expect(w.gw.http).toEqual([]);
   });
 });
 

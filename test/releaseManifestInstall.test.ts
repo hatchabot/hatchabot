@@ -27,6 +27,10 @@ const shim = (bin: string, name: string, body: string) => writeFileSync(join(bin
 const sha = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex');
 const read = (p: string) => readFileSync(p, 'utf8');
 const hasSetsid = spawnSync('sh', ['-c', 'command -v setsid']).status === 0;
+// Full sandbox install/upgrade/image workflows spawn several real processes.
+// Shared-runner load exceeded Vitest's default 5 s (HB-0741); allow bounded
+// integration time without changing assertions or the subprocess deadlines.
+const SCRIPT_TIMEOUT = 30_000;
 
 const TAG = 'v2.0.1';
 /** A release from v2.159.0 on, when every release has a manifest: one missing is refused, never legacy (B071). */
@@ -156,7 +160,7 @@ function installWorld() {
 }
 const NAME = `hatchabot-${TAG}-linux-x64.tar.gz`;
 
-describe('install.sh when the bundle will not fit or will not move (HB-0429, HB-0438)', () => {
+describe('install.sh when the bundle will not fit or will not move (HB-0429, HB-0438)', { timeout: SCRIPT_TIMEOUT }, () => {
   const REAL_MV = spawnSync('sh', ['-c', 'command -v mv'], { encoding: 'utf8' }).stdout.trim();
   // A move that fails, part-way for the copy to the folder beside the install, as a full disk does.
   const failingMv = (w: ReturnType<typeof installWorld>, to: string) => shim(w.bin, 'mv', `for last; do :; done
@@ -258,7 +262,7 @@ exec ${JSON.stringify(REAL_MV)} "$@"`);
   });
 });
 
-describe('install.sh checks the bundle against the release manifest (#38)', () => {
+describe('install.sh checks the bundle against the release manifest (#38)', { timeout: SCRIPT_TIMEOUT }, () => {
   it('a bundle the manifest vouches for is installed, without the .sha256, and the manifest is kept', () => {
     const w = installWorld();
     publish(w, TAG, 'linux-x64');
@@ -389,7 +393,7 @@ function upgradeWorld() {
 }
 const UNAME = `hatchabot-${TAG}-linux-arm64.tar.gz`;
 
-describe('scripts/upgrade.sh checks the next bundle against the release manifest (#38)', () => {
+describe('scripts/upgrade.sh checks the next bundle against the release manifest (#38)', { timeout: SCRIPT_TIMEOUT }, () => {
   it('a bundle the manifest vouches for goes in; the manifest is kept in the data directory', () => {
     const w = upgradeWorld();
     publish(w, TAG, 'linux-arm64');
@@ -476,7 +480,7 @@ exit 0`);
   return { ...w, run, release };
 }
 
-describe('scripts/build-runtime-image.sh pulls the image the release manifest names, by digest (#47)', () => {
+describe('scripts/build-runtime-image.sh pulls the image the release manifest names, by digest (#47)', { timeout: SCRIPT_TIMEOUT }, () => {
   it('pulls by digest, checks its label, and tags it as the runtime image — no tag is trusted', () => {
     const w = imageWorld();
     w.release(manifestFor(TAG, {}));

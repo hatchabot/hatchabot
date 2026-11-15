@@ -35,3 +35,61 @@ export function isControlUiDocument(path: string): boolean {
   const last = path.split('?')[0]!.split('/').pop() ?? '';
   return !/\.[a-z0-9]{1,12}$/i.test(last);
 }
+
+export const TALK_PROXY_SCRIPT_PATH = '/__hatchabot/talk-offer.js';
+
+/** OpenClaw 2026.9.8 resolves its brokered OpenAI SDP offer at the origin's
+ * root, ignoring the console base path. Keep that one POST on this agent's
+ * authenticated proxy. External providers and every other fetch are left
+ * alone. This external script runs only in owner consoles, before their app;
+ * it needs no inline CSP exception, credentials, microphone or audio API. */
+export const TALK_PROXY_SCRIPT = String.raw`(() => {
+  const suffix = '/__hatchabot/talk-offer.js';
+  const source = document.currentScript && document.currentScript.src;
+  if (!source || typeof window.fetch !== 'function') return;
+  const script = new URL(source, window.location.href);
+  if (script.origin !== window.location.origin || !script.pathname.endsWith(suffix)) return;
+  const prefix = script.pathname.slice(0, -suffix.length);
+  if (!/^\/v1\/agents\/[^/]+\/ui$/.test(prefix)) return;
+  // OpenClaw 2026.9.8 exposes its retained chat panes in light DOM. Its toggle
+  // retires session ownership and local media synchronously before awaiting
+  // provider cleanup. Never invoke it on an idle pane: that would start a call.
+  window.__hatchabotStopTalk = function() {
+    let active = false, stopped = true;
+    const pending = [];
+    for (const pane of document.querySelectorAll('openclaw-chat-pane')) {
+      const state = pane.state;
+      if (!state || !(state.realtimeTalkSession || state.realtimeTalkActive)) continue;
+      active = true;
+      try {
+        if (typeof state.toggleRealtimeTalk !== 'function') { stopped = false; continue; }
+        pending.push(Promise.resolve(state.toggleRealtimeTalk()));
+        if (state.realtimeTalkSession || state.realtimeTalkActive) stopped = false;
+      } catch { stopped = false; }
+    }
+    return { active, stopped, done: Promise.all(pending).then(() => true, () => false) };
+  };
+  const fetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    const request = typeof Request !== 'undefined' && input instanceof Request;
+    const method = String(init && init.method !== undefined ? init.method : request ? input.method : 'GET').toUpperCase();
+    let url;
+    try { url = new URL(request ? input.url : String(input), window.location.href); }
+    catch { return fetch(input, init); }
+    if (method !== 'POST' || url.origin !== window.location.origin || url.pathname !== '/plugins/openai/realtime/calls') {
+      return fetch(input, init);
+    }
+    url.pathname = prefix + url.pathname;
+    return fetch(request ? new Request(url, input) : url.href, init);
+  };
+})();`;
+
+/** Like the guest view, load before the gateway's app without changing its
+ * existing inline scripts (whose hashes appear in its CSP). */
+export function withTalkProxy(html: string, prefix: string): string {
+  const src = `${prefix.replace(/\/+$/, '')}${TALK_PROXY_SCRIPT_PATH}`
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const tag = `<script src="${src}"></script>`;
+  if (/<script\b/i.test(html)) return html.replace(/<script\b/i, () => `${tag}\n<script`);
+  return /<\/head>/i.test(html) ? html.replace(/<\/head>/i, () => `${tag}\n</head>`) : `${tag}${html}`;
+}

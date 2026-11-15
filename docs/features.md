@@ -242,6 +242,12 @@ The header holds:
   Every section on every tab is drawn inside its own outlined card.
 - **Check an agent's health on its Overview**: the result appears right
   there, not in another panel.
+- **Set up browser voice under Advanced → Voice** (agent owners): check the
+  running agent's Talk configuration, open its voice settings, then try its
+  existing console conversation. A configured result is not a tested call;
+  start the microphone explicitly in the console. Browser voice needs HTTPS
+  or localhost and microphone support. Telegram voice-note transcription has
+  a separate shared key whose changes apply on Rebuild. See [Voice](voice.md).
 - Long introductions show two lines; **More** reveals the rest.
 - **Hatchabot itself is the first tile**: your manager, fixed first in
   Default, with a small gold star on its left edge and a stronger gold

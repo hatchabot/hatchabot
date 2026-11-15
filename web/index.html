@@ -1887,14 +1887,15 @@
     </details>
 
     <details class="sec-drawer" id="mediaKeyDrawer">
-      <summary><b>🎙 Voice &amp; media</b> <span class="sub">— a Gemini key lets every agent transcribe voice notes</span></summary>
+      <summary><b>🎙 Voice &amp; media</b> <span class="sub">— shared key for Telegram voice notes</span></summary>
       <div class="sub" style="margin-top:8px">
-        With a <b>Gemini API key</b> (free tier at
-        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>),
-        every agent can <b>transcribe Telegram voice notes</b> — audio is sent to
-        Gemini for transcription, then answered by the agent's own AI as usual.
-        Applies to each agent on its next <b>Rebuild</b>. <b>Shared credential:</b>
-        injected into every agent on the server, so anyone who owns an agent here
+        A <b>Gemini API key</b> can provide transcription for <b>Telegram voice notes</b>:
+        audio is sent to Gemini, then the agent answers using its own AI source.
+        Get a key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>.
+        Saving does not test the key or change running agents. Existing agents receive it on their next
+        <b>Rebuild</b>, unless their Gemini AI source supplies its own key.
+        <b>Browser Talk</b> needs separate voice settings. <b>Shared credential:</b>
+        available to agents across this server, so anyone who owns an agent here
         can use it (and a technical user could read it). Use a key scoped to this
         purpose, not a personal all-services one.
       </div>
@@ -4293,9 +4294,9 @@ function setupSteps() {
         and a backup nobody has looked at is not a backup. ${backupAgeH === null ? 'Nothing has been backed up yet.' : `The newest set is ${Math.round(backupAgeH / 24)} days old${backupIncomplete ? ', and it is incomplete' : ''}.`}</p>
       <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('backups')">Open Backups</button></div>` }]),
     { key: 'gemini', optional: true, done: fleetKeys.media === true,
-      title: fleetKeys.media ? 'Voice notes are transcribed (Gemini key set)' : 'Add a Gemini key so agents understand voice notes',
-      body: `<p class="sub" style="margin:4px 0 6px">One Gemini API key lets every agent transcribe the voice notes people send it. Free tier is plenty for a household.
-        Without it, voice notes are ignored.</p>
+      title: fleetKeys.media === true ? 'Shared Gemini key saved (not tested)' : fleetKeys.media === false ? 'Add a shared key for Telegram voice notes' : 'Shared Gemini key status unavailable',
+      body: `<p class="sub" style="margin:4px 0 6px">The shared Gemini key is picked up at an agent's next Rebuild for Telegram voice-note transcription.
+        A Gemini AI source can supply its own key. A saved key does not prove transcription works. Browser Talk is configured separately.</p>
       <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('conn')">Open Connections</button></div>` },
     { key: 'brave', optional: true, done: fleetKeys.search === true,
       title: fleetKeys.search ? 'Web search uses Brave (key set)' : 'Add a Brave Search key for better web search',
@@ -4722,14 +4723,39 @@ function accessCheckedLine(ov) {
 }
 // The sheet redraws on every refresh; a reading is reused for 30 s (Verify now reloads it).
 let v2AccessCache = null;
+let sharingEpoch = 0, sharingView = 0, sharePeopleFor = null;
+const sharingReads = new WeakMap();
+/** Sharing controls are borrowed between sheets; neither an agent id nor a DOM node alone identifies their current opening. */
+function sharingRead(el, id = null) {
+  const read = {}, epoch = sharingEpoch, view = sharingView, person = pagePerson;
+  sharingReads.set(el, read);
+  return () => epoch === sharingEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut
+    && (!id || view === sharingView) && sharingReads.get(el) === read && el.isConnected
+    && (!id || (editAgentId === id && !!v2Find(id) && v2Mine(v2Find(id))));
+}
+function sharingForget() {
+  sharingEpoch++; sharePeopleFor = null; v2AccessCache = null; members = {};
+  peersLoadedFor = null; peersCurrent = null; $('peerSaveBtn').disabled = true;
+  sendOpening = null; sendAgentId = null; inboxShares = []; updateInboxBadge(0);
+  for (const id of ['tgMemberList', 'tgKnownPeople', 'tgSharePerson', 'agentPeerList', 'v2Access', 'accessMapOut', 'sendScan', 'accountEmails', 'inboxBody']) { const el = $(id); if (el) el.textContent = ''; }
+  for (const id of ['sendToEmail', 'sendMessage']) $(id).value = '';
+  for (const dlg of [sendAgentDlg, inboxDlg]) if (dlg.open) dlg.close();
+  $('tgShareRow').hidden = true;
+  invWebFor = null; invShare = null;
+  for (const id of ['invWebLink', 'invLink', 'invTgLink']) $(id).textContent = '';
+  $('invTgQr').removeAttribute('src');
+  if (inviteDlg.open) inviteDlg.close();
+}
 async function v2LoadAccess(id, fresh = false, given = null) {
+  const el = $('v2Access'); if (!el) return;
+  const current = sharingRead(el, id);
   let ov = given || (!fresh && v2AccessCache && v2AccessCache.id === id && Date.now() - v2AccessCache.at < 30_000 ? v2AccessCache.ov : null);
   if (!ov) {
     try { ov = await api(`/v1/agents/${id}/access`); }
-    catch (e) { const el = $('v2Access'); if (el && v2AgentId === id) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
+    catch (e) { if (current()) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
   }
+  if (!current()) return;
   v2AccessCache = { id, at: Date.now(), ov };
-  const el = $('v2Access'); if (!el || v2AgentId !== id) return;
   const s = ov.summary;
   const head = [s.mismatches ? `<span class="warn">⚠ ${s.mismatches} it should not have</span>` : '', s.missing ? `<span class="warn">${s.missing} not found</span>` : '', s.pending ? `${s.pending} removal${s.pending === 1 ? '' : 's'} pending` : ''].filter(Boolean).join(' · ');
   el.innerHTML = `<div class="v2acchead">
@@ -4740,22 +4766,26 @@ async function v2LoadAccess(id, fresh = false, given = null) {
     <div class="sub" style="margin-top:10px">Not checked: ${ov.notChecked.map(esc).join(' ')}</div>`;
 }
 async function v2VerifyAccess(id, btn) {
+  const current = sharingRead(btn || $('v2Access'), id);
   if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
   try {
     const r = await api(`/v1/agents/${id}/access/verify`, { method: 'POST', body: {} });
+    if (!current()) return;
     if (r.result?.status === 'not-checkable') toast(`Not checked: ${r.result.reason}. The last results stay.`, 7000);
     else toast(r.access?.summary?.mismatches ? `Checked — ${r.access.summary.mismatches} thing${r.access.summary.mismatches === 1 ? '' : 's'} it should not have.` : 'Checked — what it can reach matches what Hatchabot gave it.', 6000);
     if (r.access) await v2LoadAccess(id, true, r.access); else await v2LoadAccess(id, true);
     if (r.access?.summary?.mismatches) void refresh(false); // its Alerts line
-  } catch (e) { toast(e.message); }
-  finally { const b = $('v2AccessVerify'); if (b) { b.disabled = false; b.textContent = 'Verify now'; } }
+  } catch (e) { if (current()) toast(e.message); }
+  finally { if (current() && btn) { btn.disabled = false; btn.textContent = 'Verify now'; } }
 }
 /** Settings → Security: every agent, problems first, each opening to its rows. */
 async function loadAccessMap() {
   const el = $('accessMapOut'); if (!el) return;
+  const current = sharingRead(el);
   el.innerHTML = '<div class="sub">Loading…</div>';
   let r;
-  try { r = await api('/v1/access'); } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
+  try { r = await api('/v1/access'); } catch (e) { if (current()) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
+  if (!current()) return;
   if (!r.agents.length) { el.innerHTML = '<div class="sub">No agents yet.</div>'; return; }
   el.innerHTML = r.agents.map(ov => {
     const s = ov.summary, bad = s.mismatches > 0;
@@ -4838,17 +4868,20 @@ async function loadMediaKey() {
     const r = await api('/v1/media-key');
     const el = $('mediaKeyStatus');
     if (r.set) {
-      el.style.color = 'var(--ok)';
-      el.innerHTML = '✓ <b>Gemini media key set</b> — voice notes are transcribed. <button class="hbtn" onclick="revealFleetKey(\'media\', this)">Show</button> <code id="fleetkey-media" style="display:none;user-select:all;word-break:break-all"></code> <span class="sub">Paste a new one to replace it.</span>';
+      el.style.color = 'var(--dim)';
+      el.innerHTML = '<b>Shared Gemini key saved</b> — not tested. Existing agents pick up changes on their next Rebuild; a Gemini AI source\'s own key takes precedence. <button class="hbtn" onclick="revealFleetKey(\'media\', this)">Show</button> <code id="fleetkey-media" style="display:none;user-select:all;word-break:break-all"></code> <span class="sub">Paste a new one to replace it.</span>';
       $('mediaKey').placeholder = 'Replace key…';
     } else {
-      el.style.color = 'var(--warn)';
-      el.innerHTML = '⚠ No key — voice notes are <b>not</b> transcribed.';
+      el.style.color = 'var(--dim)';
+      el.innerHTML = 'No shared Gemini key saved. An agent may use its Gemini AI source\'s own key, or still hold a previous shared key until its next Rebuild.';
       $('mediaKey').placeholder = 'Gemini API key';
     }
     $('mediaKeyDelBtn').style.display = r.set ? '' : 'none';
-    if (r.set) $('mediaKeyDrawer')?.setAttribute('open', ''); // don't hide a live key
-  } catch { /* not the host owner — leave the section inert */ }
+    if (r.set) $('mediaKeyDrawer')?.setAttribute('open', ''); // don't hide a saved key
+  } catch {
+    $('mediaKeyStatus').style.color = 'var(--warn)';
+    $('mediaKeyStatus').textContent = 'Could not check whether a shared Gemini key is saved. Reopen Settings to try again.';
+  }
 }
 /** Show a fleet key, then copy it — the same two presses as a bot token. Machine owner only; each reveal is logged. */
 async function revealFleetKey(kind, btn) {
@@ -4871,12 +4904,12 @@ async function saveMediaKey() {
   try {
     await api('/v1/media-key', { method: 'PUT', body: { key } });
     $('mediaKey').value = '';
-    toast('Media key saved — Rebuild an agent and it can transcribe voice notes.', 10000);
+    toast('Shared Gemini key saved, not tested. Rebuild existing agents to pick it up; a Gemini AI source\'s own key takes precedence. Browser Talk is configured separately.', 14000);
     loadMediaKey();
   } catch (e) { toast(e.message, 10000); }
 }
 async function removeMediaKey() {
-  if (!confirm('Remove the media key? Agents lose voice-note transcription on their next Rebuild.')) return;
+  if (!confirm('Remove the shared Gemini key? Agents holding it keep it until their next Rebuild. A Gemini AI source\'s own key is unchanged. Browser Talk is configured separately.')) return;
   try { await api('/v1/media-key', { method: 'DELETE' }); loadMediaKey(); }
   catch (e) { toast(e.message, 10000); }
 }
@@ -5860,7 +5893,7 @@ async function loadRuntimeCaps() {
   try {
     const [c, mk] = await Promise.all([
       api('/v1/runtime/capabilities'),
-      api('/v1/media-key').catch(() => ({ set: false })),
+      api('/v1/media-key').catch(() => null),
     ]);
     const t = c.tools || {};
     const row = (name, detail, version, dot = 'var(--ok)') => `<tr><td><span style="color:${dot}">●</span> <b>${esc(name)}</b></td>
@@ -5870,7 +5903,7 @@ async function loadRuntimeCaps() {
     if (t['claude-code']) rows.push(row('Claude Code', 'the Anthropic model runtime agents think with', t['claude-code']));
     rows.push(row('Web search', 'DuckDuckGo, enabled per agent (keyless)'));
     rows.push(row('Memory search', 'semantic recall over MEMORY.md — local embeddings (or the machine\'s shared service, per agent)'));
-    rows.push(row('Voice notes', mk.set ? 'transcribed via the Gemini media key' : 'needs the Gemini media key (Settings → Connections)', '', mk.set ? 'var(--ok)' : 'var(--warn)'));
+    rows.push(row('Telegram voice notes', (mk ? mk.set ? 'Shared Gemini key saved, not tested; changes apply on Rebuild.' : 'No shared Gemini key saved; an agent may still hold a previous key until Rebuild.' : 'Shared Gemini key status unavailable.') + ' An agent may use its Gemini AI source\'s own key. Settings → Connections. Browser Talk uses separate voice settings.', '', 'var(--dim)'));
     if (t.gog) rows.push(row('Google Workspace', 'Gmail / Drive / Calendar / Sheets / Docs via <code>gog</code> — each agent connects its own account in chat', t.gog));
     if (t.python) rows.push(row('Python', 'agents run scripts; libraries install per agent (<code>pip install --target ~/.openclaw/pylibs</code>)', t.python));
     if (t.git) rows.push(row('Git + SSH', 'repo data sources with generated deploy keys', t.git));
@@ -8518,14 +8551,15 @@ function showEditTab(name) {
   if (name === 'peers' && editAgentId) void loadPeers();
 }
 
-let peersLoadedFor = null; // Save is armed only after the list loaded for this agent
+let peersLoadedFor = null, peersCurrent = null; // Save is armed only after the current list loaded
 async function loadPeers() {
   const el = $('agentPeerList'), forId = editAgentId;
-  el.innerHTML = 'Loading…'; peersLoadedFor = null; $('peerSaveBtn').disabled = true;
+  const current = sharingRead(el, forId);
+  el.innerHTML = 'Loading…'; peersLoadedFor = null; peersCurrent = null; $('peerSaveBtn').disabled = true;
   try {
     const { candidates } = await api(`/v1/agents/${forId}/peers`);
-    if (editAgentId !== forId) return;
-    peersLoadedFor = forId; $('peerSaveBtn').disabled = false;
+    if (!current()) return;
+    peersLoadedFor = forId; peersCurrent = current; $('peerSaveBtn').disabled = false;
     el.innerHTML = candidates.length
       ? candidates.map(c => `<label class="pair" style="padding:3px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
           <input type="checkbox" class="peerCb" data-id="${esc(c.id)}"${c.granted ? ' checked' : ''} style="width:auto;flex:none">
@@ -8536,11 +8570,13 @@ async function loadPeers() {
           </label></label>`).join('')
       : '<span>No other agents to consult yet.</span>';
     v2SheetBaseline(el);
-  } catch (e) { if (editAgentId === forId) el.innerHTML = esc(e.message); }
+  } catch (e) { if (current()) el.innerHTML = esc(e.message); }
 }
 async function savePeers() {
   // Never PUT from an unloaded/failed list: that would silently revoke every grant.
-  if (peersLoadedFor !== editAgentId) { toast('Peer list not loaded yet — reopen the tab.'); return; }
+  if (peersLoadedFor !== editAgentId || !peersCurrent?.()) { toast('Peer list not loaded yet — reopen the tab.'); return; }
+  if ($('peerSaveBtn').disabled) return;
+  const current = peersCurrent;
   const ids = [...document.querySelectorAll('.peerCb:checked')].map(cb => cb.dataset.id);
   const acts = [...document.querySelectorAll('.peerAct:checked')].map(cb => cb.dataset.id).filter(id => ids.includes(id));
   if (acts.length && !confirm(
@@ -8552,6 +8588,7 @@ async function savePeers() {
   const saved = v2SheetSaving('agentPeerList');
   try {
     await api(`/v1/agents/${forId}/peers`, { method: 'PUT', body: { peerIds: ids, allowActions: acts } });
+    if (!current()) return;
     saved(forId);
     // The call-agent tool + peer manifest are installed on rebuild, so offer it.
     if (ids.length) {
@@ -8567,8 +8604,8 @@ async function savePeers() {
       f.say('Saved — no peers.');
     }
     await refresh(false);
-  } catch (e) { f.fail(e); }
-  finally { $('peerSaveBtn').disabled = false; }
+  } catch (e) { if (current()) f.fail(e); }
+  finally { if (current()) $('peerSaveBtn').disabled = false; }
 }
 
 async function renderConnections() {
@@ -10645,6 +10682,8 @@ async function renderEditMembers() {
   const el = $('tgMemberList');
   if (!el) return;
   const forId = editAgentId;
+  const current = sharingRead(el, forId);
+  el.textContent = 'Loading members…';
   // Your Hatchabot agent runs your machine: no invites, no members (2026-09-30).
   const opsAgent = !!agents.find(x => x.id === forId)?.ops;
   if ($('tgInviteRow')) $('tgInviteRow').hidden = opsAgent;
@@ -10656,8 +10695,9 @@ async function renderEditMembers() {
   }
   try {
     void loadWebChatPeople(forId);
-    const ms = (members[forId] = await api(`/v1/agents/${forId}/members`));
-    if (editAgentId !== forId) return;
+    const ms = await api(`/v1/agents/${forId}/members`);
+    if (!current()) return;
+    members[forId] = ms;
     el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
       const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 12))}</span>`;
       // Someone who redeemed an invite and never messaged: their window has
@@ -10681,8 +10721,8 @@ async function renderEditMembers() {
         `<button class="danger" onclick="kick('${editAgentId}','${jsq(m.userId)}','${jsq(m.displayName || m.userId)}').then(renderEditMembers)">Remove</button>`;
       return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${web}${kickBtn}</div>`;
     }).join('') || '<div class="sub">Just you so far — Invite… below to add someone.</div>';
-  } catch (e) { if (editAgentId === forId) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
-  void renderKnownPeople();
+  } catch (e) { if (current()) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  if (current()) void renderKnownPeople();
 }
 
 /**
@@ -10714,19 +10754,23 @@ async function setWebChat(agentId, userId, name, on) {
  */
 async function reopenDoor(agentId, userId, name) {
   const url = `/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/reopen`;
+  const current = sharingRead($('tgMemberList'), agentId);
+  if (!current()) return;
   try {
     let r;
     try { r = await api(url, { method: 'POST', body: {} }); }
     catch (e) {
       if (e.code !== 'needs-handle') throw e;
+      if (!current()) return;
       const handle = prompt(`Which app ${name} joined with was never recorded, so the door would open to whoever messages first.\n\nTheir @handle (Telegram username, or their Slack / Discord name) — only they will be let in:`, '');
       if (!handle || !handle.trim()) return;
       r = await api(url, { method: 'POST', body: { handle: handle.trim() } });
     }
+    if (!current()) return;
     const where = r.on?.length === 1 ? ` on ${r.on[0][0].toUpperCase()}${r.on[0].slice(1)}` : '';
     toast(`Door open for ${r.minutes} minutes${where}${r.for ? ` for @${r.for} only` : ''} — tell ${name} to message the bot now.`, 9000);
     await renderEditMembers();
-  } catch (e) { toast(e.message, 8000); }
+  } catch (e) { if (current()) toast(e.message, 8000); }
 }
 
 async function renderKnownPeople() {
@@ -10735,15 +10779,13 @@ async function renderKnownPeople() {
   el.innerHTML = '';
   // The list is the agent's it was read for, drawn only while the forms are still its own; its
   // Add buttons add to that agent (another's forms opened meanwhile are not where they go).
-  const forId = editAgentId, f = forAgent(forId);
+  const forId = editAgentId, current = sharingRead(el, forId);
   try {
     const people = await api(`/v1/agents/${forId}/known-people`);
-    if (!people.length) return;
-    f.draw(() => {
-      el.innerHTML = `<div class="sub" style="margin-bottom:4px">Already uses another of your agents — add without an invite:</div>`
-        + people.map(p => `<div class="pair"><span class="grow"><b class="pii">${esc(p.name)}</b></span>
-          <button onclick="addKnownPerson('${jsq(forId)}','${jsq(p.userId)}','${jsq(p.name)}')">Add</button></div>`).join('');
-    });
+    if (!people.length || !current()) return;
+    el.innerHTML = `<div class="sub" style="margin-bottom:4px">Already uses another of your agents — add without an invite:</div>`
+      + people.map(p => `<div class="pair"><span class="grow"><b class="pii">${esc(p.name)}</b></span>
+        <button onclick="addKnownPerson('${jsq(forId)}','${jsq(p.userId)}','${jsq(p.name)}')">Add</button></div>`).join('');
   } catch { /* a server that doesn't offer it yet, or no agents: show nothing */ }
 }
 
@@ -11272,13 +11314,14 @@ async function invite(id, name) {
   const webOnly = web && !!a && !v2ChannelKinds(a).length;
   // A new object per opening: an answer for an invite opened before (another
   // agent's, or this one's last time) finds it gone and fills nothing (audit #063).
-  const mine = invWebFor = { id, name };
+  const mine = invWebFor = { id, name, epoch: sharingEpoch, person: pagePerson, shown: false };
+  invShare = null;
   $('invWeb').hidden = !web;
   $('invWebLink').hidden = true; $('invWebLink').textContent = '';
   $('invWebCopy').hidden = true; $('invWebBtn').hidden = false; $('invWebBtn').disabled = false;
   $('invApps').hidden = webOnly;
   document.querySelectorAll('#inviteDlg .invAppBtn').forEach((b) => { b.hidden = webOnly; });
-  if (webOnly) { $('invAgent').textContent = name; invShare = null; inviteDlg.showModal(); return; }
+  if (webOnly) { $('invAgent').textContent = name; invShare = null; mine.shown = true; inviteDlg.showModal(); return; }
   try {
     const who = prompt(
       `Who is this invite for?\n\nTheir Telegram @handle — then only they can use it, and anyone else who messages the bot is turned away.\n\nLeave blank if you don't know it: whoever redeems the web link and messages first within 30 minutes is admitted. Someone who comes by the Telegram link always waits for your tap.`,
@@ -11286,7 +11329,7 @@ async function invite(id, name) {
     );
     if (who === null) return; // cancelled
     const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: { for: who.trim() || undefined } });
-    if (invWebFor !== mine) return; // another invite was opened meanwhile
+    if (!inviteCurrent(mine)) return;
     $('invAgent').textContent = name;
     $('invLink').textContent = inv.url ?? (location.origin + inv.path);
     const link = a?.deepLink ?? '';
@@ -11296,7 +11339,7 @@ async function invite(id, name) {
     if (link) qr.src = `/v1/agents/${id}/qr.svg`;
     // A ready-to-send message, not just the bare URL. The invite's code rides
     // along: copying or sharing it opens the knock window (2026-09-30).
-    invShare = { id, name, link, code: inv.code, message: link ? `Chat with ${name} on Telegram: ${link}` : '' };
+    invShare = { id, name, link, code: inv.code, invite: mine, message: link ? `Chat with ${name} on Telegram: ${link}` : '' };
     $('invTgFor').textContent = who.trim() ? `Only @${who.trim().replace(/^@/, '')}'s message is shown; anyone else's is turned away.` : '';
     const forWho = $('invFor');
     if (forWho) {
@@ -11306,26 +11349,35 @@ async function invite(id, name) {
       forWho.style.color = who.trim() ? 'var(--ok)' : 'var(--warn)';
     }
     $('invShareBtn').style.display = (link && navigator.share) ? '' : 'none';
+    mine.shown = true;
     inviteDlg.showModal();
-  } catch (e) { toast(e.message); }
+  } catch (e) { if (inviteCurrent(mine)) toast(e.message); }
 }
 
 /** The web-chat link: minted only when asked for — each one is a way in (2026-09-29). */
 let invWebFor = null;
+function inviteCurrent(inv) {
+  return !!inv && invWebFor === inv && inv.epoch === sharingEpoch && inv.person === pagePerson && !pagePersonAway && !pageSignedOut;
+}
+inviteDlg.addEventListener('close', () => {
+  // close is queued: the next invitation may already be waiting for its API
+  // response while the dialog is still shut. Only retire an opening actually shown.
+  if (!inviteDlg.open && invWebFor?.shown) { invWebFor = null; invShare = null; }
+});
 async function makeWebChatInvite() {
-  if (!invWebFor) return;
+  if (!inviteCurrent(invWebFor) || !inviteDlg.open) return;
   // The invite this link is for: closed, and another agent's opened while it was
   // made, A's link landed in B's invite, ready to copy as B's (audit #063).
   const forInv = invWebFor;
   $('invWebBtn').disabled = true;
   try {
     const inv = await api(`/v1/agents/${forInv.id}/invites`, { method: 'POST', body: { webChat: true } });
-    if (invWebFor !== forInv) return;
+    if (!inviteCurrent(forInv) || !inviteDlg.open) return;
     $('invWebLink').textContent = inv.url ?? (location.origin + inv.path);
     $('invWebLink').hidden = false;
     $('invWebBtn').hidden = true;
     $('invWebCopy').hidden = false;
-  } catch (e) { toast(e.message, 8000); if (invWebFor === forInv) $('invWebBtn').disabled = false; }
+  } catch (e) { if (inviteCurrent(forInv) && inviteDlg.open) { toast(e.message, 8000); $('invWebBtn').disabled = false; } }
 }
 async function copyWebChatInvite() {
   const ok = await copyText($('invWebLink').textContent);
@@ -11341,12 +11393,15 @@ const SHARE_NOTE = "They chat with it on the web, with a member's rights. It app
 async function loadWebChatPeople(forId) {
   const row = $('tgShareRow');
   if (!row) return;
+  const current = sharingRead(row, forId);
+  sharePeopleFor = null;
   row.hidden = true;
+  $('tgSharePerson').textContent = '';
   const a = agents.find((x) => x.id === forId);
   if (appConfig.authMode === 'password' || !a || a.ops || !v2Mine(a)) return;
   let people = [];
   try { people = (await api(`/v1/agents/${forId}/web-chat/people`)).people || []; } catch { return; }
-  if (editAgentId !== forId) return;
+  if (!current()) return;
   const open = people.filter((p) => !p.shared);
   if (!open.length) return;
   const kind = { google: 'Google', password: 'password' };
@@ -11354,19 +11409,23 @@ async function loadWebChatPeople(forId) {
     `<option value="${esc(p.userId)}">${esc(p.label)}${p.username ? ` (${esc(p.username)})` : ''} · ${kind[p.kind] || esc(p.kind)}</option>`).join('');
   $('tgShareBtn').disabled = false;
   $('tgShareNote').textContent = SHARE_NOTE;
+  sharePeopleFor = { id: forId, current };
   row.hidden = false;
 }
 async function shareWebChatWith() {
-  const forId = editAgentId, sel = $('tgSharePerson'), userId = sel.value;
+  const target = sharePeopleFor;
+  if (!target?.current() || $('tgShareRow').hidden) return;
+  const forId = target.id, sel = $('tgSharePerson'), userId = sel.value;
   if (!userId) { $('tgShareNote').textContent = 'Choose who to share it with first.'; return; }
   const who = sel.selectedOptions[0]?.textContent.split(' · ')[0] || 'them';
   $('tgShareBtn').disabled = true;
   try {
     await api(`/v1/agents/${forId}/web-chat/people`, { method: 'POST', body: { userId } });
+    if (!target.current()) return;
     toast(`Shared with ${who}: it's on their home screen now`);
-    if (editAgentId === forId) await renderEditMembers();
+    await renderEditMembers();
   } catch (e) {
-    if (editAgentId === forId) { $('tgShareNote').textContent = e.message; $('tgShareBtn').disabled = false; }
+    if (target.current()) { $('tgShareNote').textContent = e.message; $('tgShareBtn').disabled = false; }
   }
 }
 
@@ -11411,28 +11470,32 @@ async function copyInvite() {
  * window only SHOWS their knock; the owner's tap lets them in. Returns the
  * words to add to the toast, or '' when the door could not be opened.
  */
-async function openInviteKnockWindow() {
-  if (!invShare?.code || !invShare?.id) return '';
+async function openInviteKnockWindow(inv = invShare) {
+  const current = () => invShare === inv && inviteCurrent(inv?.invite) && inviteDlg.open;
+  if (!current() || !inv?.code || !inv?.id) return null;
   try {
-    const r = await api(`/v1/agents/${invShare.id}/invites/${encodeURIComponent(invShare.code)}/knock-window`, { method: 'POST', body: {} });
+    const r = await api(`/v1/agents/${inv.id}/invites/${encodeURIComponent(inv.code)}/knock-window`, { method: 'POST', body: {} });
+    if (!current()) return null;
     return r.alreadyOpen ? ' Anyone can knock on this agent, so their request will show under Alerts.'
       : ` For the next ${r.minutes} minutes their message shows under Alerts — tap Let them in.`;
-  } catch (e) { toast(e.message, 8000); return null; }
+  } catch (e) { if (current()) toast(e.message, 8000); return null; }
 }
 
 async function copyInviteTg() {
   if (!invShare?.message) { toast('This agent has no Telegram bot yet'); return; }
-  const ok = await copyText(invShare.message);
-  const door = await openInviteKnockWindow();
+  const inv = invShare;
+  const ok = await copyText(inv.message);
+  const door = await openInviteKnockWindow(inv);
   if (door === null) return; // the reason is on screen
   toast(ok ? `Telegram invite copied — paste it to them.${door}` : `Select the link and copy it manually.${door}`, door ? 9000 : undefined);
 }
 
 async function shareInviteTg() {
   if (!invShare?.link) return;
-  try { await navigator.share({ title: `Chat with ${invShare.name}`, text: invShare.message, url: invShare.link }); }
+  const inv = invShare;
+  try { await navigator.share({ title: `Chat with ${inv.name}`, text: inv.message, url: inv.link }); }
   catch { return; /* user cancelled the share sheet, or it's unavailable — no door opened */ }
-  const door = await openInviteKnockWindow();
+  const door = await openInviteKnockWindow(inv);
   if (door) toast(`Shared.${door}`, 9000);
 }
 
@@ -11593,7 +11656,19 @@ async function kick(agentId, userId, label) {
   } catch (e) { toast(e.message); }
 }
 
-async function openGateway(id, slug) {
+/** Only named console destinations are accepted; authentication stays in the existing fragment. */
+function consoleViewUrl(id, slug, view, existing = '') {
+  const fragment = existing.includes('#') ? existing.slice(existing.indexOf('#')) : '';
+  const session = encodeURIComponent(`agent:${slug}:main`);
+  return view === 'voice-settings' ? `/v1/agents/${id}/ui/settings/talk${fragment}`
+    : `/v1/agents/${id}/ui/chat?session=${session}${fragment}`;
+}
+async function openGateway(id, slug, view) {
+  if (view !== undefined && view !== 'voice-settings' && view !== 'chat') return toast('That console view is not available.');
+  const epoch = voiceEpoch, person = pagePerson;
+  const viewAllowed = () => !view || (epoch === voiceEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut && !!v2Find(id) && v2Mine(v2Find(id)));
+  if (!viewAllowed()) return;
+  if (view) slug = v2Find(id).slug;
   // OpenClaw's own Control UI: an ADMIN console with a terminal, not a chat
   // window — whoever opens it has shell inside the agent's container. Hence
   // owner-only, and hence the ⋯ menu rather than the card's main row.
@@ -11618,15 +11693,22 @@ async function openGateway(id, slug) {
     );
     return;
   }
-  // Already open in a tab: switch to it, no reload.
-  if (consoleSwitchTo(id)) return;
+  // Plain opens keep the cached place. An explicit destination must navigate even an existing tab.
+  if (consoleSwitchTo(id)) {
+    if (view) {
+      const tab = consoleTabs.find(t => t.id === id);
+      const url = consoleViewUrl(id, slug, view, tab.url);
+      tab.url = url; consoleUrl = url; tab.frame.src = url;
+    }
+    return;
+  }
   consoleOpening++;
   consoleTabFor(id, slug);
   // A newer pick (another tab, the switcher) or closing this tab supersedes
   // this open while it waits on the network: it then stops, rather than take
   // the panel back when its answer lands.
   const ticket = ++consoleTicket;
-  const current = () => ticket === consoleTicket && consoleTabs.some(t => t.id === id && t.frame);
+  const current = () => $('consoleDlg').open && ticket === consoleTicket && consoleTabs.some(t => t.id === id && t.frame) && viewAllowed();
   // The panel opens NOW, with a spinner: the access and gateway reads below,
   // and then the console's own load, took seconds on a slow link, during
   // which a tap on the icon seemed to do nothing (Chris, 2026-10-23).
@@ -11649,10 +11731,10 @@ async function openGateway(id, slug) {
       $('consoleFrame').src = 'about:blank';
       if (!$('consoleDlg').open) $('consoleDlg').showModal();
       try { await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} }); }
-      catch (e) { $('consoleCover').lastElementChild.textContent = `Could not wake it: ${e.message}`; return; }
+      catch (e) { if (current()) $('consoleCover').lastElementChild.textContent = `Could not wake it: ${e.message}`; return; }
       for (let i = 0; i < 150; i++) {
         await new Promise((r) => setTimeout(r, 1000));
-        if (!$('consoleDlg').open) return;
+        if (!current() || !$('consoleDlg').open) return;
         // "reachable" is the gateway answering at all; its own ok can be false with a plugin warning.
         try { const h = await api(`/v1/agents/${id}/health`); if (h.reachable || h.healthy || h.ok) break; } catch { /* not yet */ }
       }
@@ -11664,6 +11746,7 @@ async function openGateway(id, slug) {
     // you are. One not rebuilt yet still takes the token, as before.
     let access = null;
     try { access = await api(`/v1/agents/${id}/console/access`); } catch { access = null; }
+    if (!current()) return;
     const g = access?.console === 'identity' ? null : await api(`/v1/agents/${id}/gateway`);
     // Proxied same-origin through the control plane so the gateway port can
     // stay bound to the host's loopback. Pass ONLY the token: the Control UI
@@ -11677,8 +11760,7 @@ async function openGateway(id, slug) {
     // like the agent had forgotten everything said on Telegram. Telegram DMs
     // live in `agent:<slug>:main` (OpenClaw's agent id is always the slug).
     if (!current()) return;
-    const session = encodeURIComponent(`agent:${slug}:main`);
-    const url = `/v1/agents/${id}/ui/chat?session=${session}${g ? `#token=${encodeURIComponent(g.token)}` : ''}`;
+    const url = consoleViewUrl(id, slug, view, g ? `#token=${encodeURIComponent(g.token)}` : '');
     // In the app, not a new tab: the proxy now permits framing by this origin
     // (and still refuses every other one).
     const a = (agents || []).find(x => x.id === id);
@@ -11707,6 +11789,7 @@ async function openGateway(id, slug) {
     markConsoleSeen(id);
     void autoApproveConsole(id);
   } catch (e) {
+    if (!current()) return;
     // The panel is open with the spinner: say what went wrong there, not only in a toast.
     consoleCoverSay(`Could not open it: ${e.message}`);
     toast(e.message);
@@ -11790,15 +11873,40 @@ function consoleFromHash() {
 }
 addEventListener('hashchange', consoleFromHash);
 function consoleShow(id) {
+  $('consoleApproveBtn').disabled = false;
   // The old lone frame, before any tab owned it.
   for (const f of $('consoleFrames').querySelectorAll('iframe')) if (!consoleTabs.some(t => t.frame === f)) f.remove();
   for (const t of consoleTabs) {
     if (!t.frame) continue;
     const on = t.id === id;
+    if (!on && !t.frame.hidden) consoleStopTalk(t);
+    if (!t.frame) continue;
     t.frame.hidden = !on;
     if (on) { t.frame.id = 'consoleFrame'; t.used = Date.now(); try { localStorage.setItem('hb-console-last', id); } catch {} } else t.frame.removeAttribute('id');
   }
   $('consoleCover').hidden = true;
+}
+/** Keep ordinary chat tabs loaded, but retire a voice call before its controls disappear. */
+function consoleStopTalk(t) {
+  const frame = t.frame;
+  if (!frame) return;
+  const unload = () => { if (t.frame === frame) { consoleUnload(t); renderConsoleTabs(); } };
+  let stop;
+  try {
+    stop = frame.contentWindow?.__hatchabotStopTalk;
+    if (typeof stop !== 'function') {
+      // A document loaded before the shim changed can still have an active call.
+      const active = [...(frame.contentDocument?.querySelectorAll('openclaw-chat-pane') || [])]
+        .some(p => p.state?.realtimeTalkSession || p.state?.realtimeTalkActive);
+      if (active) unload();
+      return;
+    }
+  } catch { return; } // a foreign/error document cannot expose the same-origin Talk controller
+  try {
+    const result = stop();
+    if (!result?.stopped) unload();
+    void Promise.resolve(result?.done).then(ok => { if (!ok) unload(); }).catch(unload);
+  } catch { unload(); }
 }
 function consoleUnload(t) { if (!t?.frame) return; t.frame.src = 'about:blank'; t.frame.remove(); t.frame = null; t.url = null; }
 function consoleUnloadAll() {
@@ -11920,10 +12028,11 @@ document.addEventListener('keydown', consoleKeys);
 // Esc closes a dialog without calling closeConsole(): blank the frame either
 // way, or the console's WebSocket and token outlive the panel.
 // The close event arrives a moment after close(): a console reopened in that
-// gap (or still opening) keeps its frame — closeConsole() already unloaded the old ones.
+// gap keeps its frame — closeConsole() already unloaded the old ones.
 $('consoleDlg')?.addEventListener('close', () => {
   markConsoleSeen(consoleAgentId);
-  if ($('consoleDlg').open || consoleOpening) return;
+  if ($('consoleDlg').open) return;
+  consoleTicket++;
   // Only an address this console put there (Esc): after closeConsole() it is
   // gone already, and one in the bar now was set since — a #console= link
   // whose hashchange has not run yet, which clearing left unopened (2026-10-10).
@@ -11955,14 +12064,17 @@ document.addEventListener('visibilitychange', consoleSeenTick); // shown again: 
  * only while this panel, for this agent, is still open.
  */
 async function autoApproveConsole(id) {
-  const stillOurs = () => $('consoleDlg').open && consoleAgentId === id;
+  const frame = $('consoleFrame'), ticket = consoleTicket, epoch = voiceEpoch, person = pagePerson;
+  const stillOurs = () => $('consoleDlg').open && consoleAgentId === id && $('consoleFrame') === frame && frame.isConnected
+    && ticket === consoleTicket && epoch === voiceEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut;
+  if (!stillOurs()) return;
   // The first time this browser opens this agent, OpenClaw shows a "pairing
   // required" screen until it is approved. Cover it with our own calm
   // "Connecting…" so nobody has to look at that; a browser we've already seen
   // through skips the cover entirely.
   const known = (() => { try { return localStorage.getItem(`hb-console-ok:${id}`) === '1'; } catch { return false; } })();
   const remember = () => { try { localStorage.setItem(`hb-console-ok:${id}`, '1'); } catch {} };
-  const uncover = () => { if (consoleAgentId === id) $('consoleCover').hidden = true; };
+  const uncover = () => { if (stillOurs()) $('consoleCover').hidden = true; };
   // A browser seen before keeps the "Opening…" spinner openGateway put up (it
   // goes when the frame has loaded); a new one is told about the approval.
   if (!known) consoleCoverSay('Connecting this browser…');
@@ -11972,6 +12084,7 @@ async function autoApproveConsole(id) {
     if (!stillOurs()) return;
     let pending = 0;
     try { pending = (await api(`/v1/agents/${id}/console/pending`)).pending || 0; } catch { uncover(); return; }
+    if (!stillOurs()) return;
     if (!pending) {
       // No request after ~3 s: this browser was approved before.
       if (i === 10) { remember(); uncover(); }
@@ -11986,6 +12099,7 @@ async function autoApproveConsole(id) {
       setTimeout(() => { if (stillOurs()) fr.src = again; }, 50);
       setTimeout(uncover, 1500); // let the console connect before showing it
     } catch {
+      if (!stillOurs()) return;
       // Couldn't do it for them — fall back to the button, which says why.
       uncover();
       $('consoleApproveBtn').hidden = false;
@@ -11996,19 +12110,25 @@ async function autoApproveConsole(id) {
 }
 
 async function approveConsoleBrowser(btn) {
+  const id = consoleAgentId, frame = $('consoleFrame'), url = consoleUrl, ticket = consoleTicket, epoch = voiceEpoch, person = pagePerson;
+  const current = () => $('consoleDlg').open && consoleAgentId === id && $('consoleFrame') === frame && frame.isConnected
+    && ticket === consoleTicket && epoch === voiceEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut;
+  if (!current()) return;
   btn.disabled = true;
   try {
-    const r = await api(`/v1/agents/${consoleAgentId}/console/approve`, { method: 'POST', body: {} });
+    const r = await api(`/v1/agents/${id}/console/approve`, { method: 'POST', body: {} });
+    if (!current()) return;
     toast(r.approved ? 'Approved — reconnecting.' : 'Nothing to approve.');
     btn.hidden = true;
     // Reload with the token still in the fragment, so it connects on its own.
-    $('consoleFrame').src = 'about:blank';
-    setTimeout(() => { $('consoleFrame').src = consoleUrl; }, 50);
-  } catch (e) { toast(e.message, 9000); }
-  finally { btn.disabled = false; }
+    frame.src = 'about:blank';
+    setTimeout(() => { if (current()) frame.src = url; }, 50);
+  } catch (e) { if (current()) toast(e.message, 9000); }
+  finally { if (current()) btn.disabled = false; }
 }
 
 function closeConsole() {
+  consoleTicket++;
   // Drop the frames so their WebSockets close and the tokens leave the DOM.
   consoleUnloadAll();
   closeConsoleSwitcher();
@@ -12254,9 +12374,16 @@ function imageDecision(d) {
 
 // Share = a trained copy for someone else. It downloads a file (you send it);
 // the recipient's Import stands up a fresh agent with its own bot.
-let sendAgentId = null;
+let sendAgentId = null, sendOpening = null;
+/** A copy is checked and sent for this opening and signed-in person only. */
+function sendCurrent(opening) {
+  return !!opening && opening === sendOpening && sendAgentDlg.open && opening.epoch === sharingEpoch && opening.person === pagePerson
+    && !pagePersonAway && !pageSignedOut && !!v2Find(opening.id) && v2Mine(v2Find(opening.id));
+}
 function openSendAgent(id, name) {
   sendAgentId = id;
+  const opening = sendOpening = { id, epoch: sharingEpoch, person: pagePerson };
+  $('sendBtn').disabled = false;
   $('sendAgentName').textContent = name;
   $('sendToEmail').value = ''; $('sendMessage').value = ''; $('sendErr').textContent = '';
   // What the copy mentions, before anything leaves (2026-09-30). The send
@@ -12264,7 +12391,7 @@ function openSendAgent(id, name) {
   const scan = $('sendScan');
   scan.style.color = ''; scan.textContent = 'Checking what the copy mentions…';
   api(`/v1/agents/${id}/export/scan?excludeMemory=1`).then(p => {
-    if (sendAgentId !== id) return;
+    if (!sendCurrent(opening)) return;
     const what = personalSummary(p), edits = editedNote(p);
     const editsHtml = edits ? `<div style="margin-top:6px">${esc(edits)}</div>` : '';
     if (edits) scan.style.color = 'var(--warn)';
@@ -12273,31 +12400,44 @@ function openSendAgent(id, name) {
     scan.innerHTML = `This copy mentions <b>${esc(what)}</b> — read it before you send it.
       <details><summary>Where</summary><div>${(p.hits || []).map(h => `${esc(h.where)}, line ${Number(h.line) || 0}: <span class="pii">${esc(h.sample)}</span>`).concat(p.more ? [`…and ${Number(p.more)} more`] : []).join('<br>')}</div>
       <div>Fix them in its Personality or Files, then send.</div></details>${editsHtml}`;
-  }).catch(e => { if (sendAgentId === id) scan.textContent = `Couldn't check what the copy mentions: ${e.message}`; });
+  }).catch(e => { if (sendCurrent(opening)) scan.textContent = `Couldn't check what the copy mentions: ${e.message}`; });
+  $('accountEmails').textContent = '';
   api('/v1/accounts').then(r => {
+    if (!sendCurrent(opening)) return;
     $('accountEmails').innerHTML = (r.accounts || []).filter(a => a.email).map(a => `<option value="${esc(a.email)}">`).join('');
   }).catch(() => {});
   sendAgentDlg.showModal();
 }
 async function doSendAgent() {
+  const opening = sendOpening;
+  if (!sendCurrent(opening) || $('sendBtn').disabled) return;
   const toEmail = $('sendToEmail').value.trim();
   if (!toEmail) { $('sendErr').textContent = 'Enter a recipient email.'; return; }
   $('sendBtn').disabled = true;
   try {
-    await api(`/v1/agents/${sendAgentId}/send`, { method: 'POST', body: { toEmail, message: $('sendMessage').value.trim() || undefined } });
+    await api(`/v1/agents/${opening.id}/send`, { method: 'POST', body: { toEmail, message: $('sendMessage').value.trim() || undefined } });
+    if (!sendCurrent(opening)) return;
     sendAgentDlg.close();
     toast(`Sent to ${toEmail} — it's in their inbox.`);
-  } catch (e) { $('sendErr').textContent = e.message; }
-  finally { $('sendBtn').disabled = false; }
+  } catch (e) { if (sendCurrent(opening)) $('sendErr').textContent = e.message; }
+  finally { if (sendCurrent(opening)) $('sendBtn').disabled = false; }
 }
+sendAgentDlg.addEventListener('close', () => { if (!sendAgentDlg.open) sendOpening = null; });
 
 // ---- inbox: agents others sent me ------------------------------------------
 async function openInbox() { inboxDlg.showModal(); loadInbox(); }
 let inboxShares = []; // last-loaded shares — acceptShare needs their .parameters
+let inboxRead = 0, inboxBadgeRead = 0;
+function inboxSession() {
+  const epoch = sharingEpoch, person = pagePerson;
+  return () => epoch === sharingEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut;
+}
 async function loadInbox() {
   const el = $('inboxBody');
+  const current = inboxSession(), read = ++inboxRead;
   try {
     const { shares } = await api('/v1/inbox');
+    if (!current() || read !== inboxRead) return;
     inboxShares = shares;
     updateInboxBadge(shares.length);
     if (!shares.length) { el.innerHTML = '<div class="sub">Nothing waiting. Agents other users send you appear here.</div>'; return; }
@@ -12307,9 +12447,11 @@ async function loadInbox() {
       <button class="primary" onclick="acceptShare('${s.id}', '${jsq(s.agentName)}')">Import</button>
       <button onclick="dismissShare('${s.id}')" title="Turn it away">Dismiss</button>
     </div>`).join('');
-  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  } catch (e) { if (current() && read === inboxRead) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 async function acceptShare(id, name) {
+  const current = inboxSession();
+  if (!current()) return;
   const cn = prompt(`Import "${name}" as — name it (it becomes a fresh agent you own, with a spare bot from your pool if there is one):`, name);
   if (cn === null) return;
   const body = { name: cn };
@@ -12317,18 +12459,21 @@ async function acceptShare(id, name) {
   const share = inboxShares.find(s => s.id === id);
   if (share?.parameters?.length) {
     const values = await collectParamValues(share.parameters, name);
-    if (values === null) return; // cancelled
+    if (values === null || !current()) return;
     body.values = values;
   }
   try {
     const r = await api(`/v1/inbox/${id}/accept`, { method: 'POST', body });
+    if (!current()) return;
     toast(`Imported as "${r.name}" — it takes a spare bot from your pool; with none free it starts in the web app and you attach one later.`, 30000);
     await loadInbox(); await refresh(true);
-  } catch (e) { toast(e.message, 20000); }
+  } catch (e) { if (current()) toast(e.message, 20000); }
 }
 async function dismissShare(id) {
-  try { await api(`/v1/inbox/${id}/dismiss`, { method: 'POST' }); await loadInbox(); }
-  catch (e) { toast(e.message); }
+  const current = inboxSession();
+  if (!current()) return;
+  try { await api(`/v1/inbox/${id}/dismiss`, { method: 'POST' }); if (current()) await loadInbox(); }
+  catch (e) { if (current()) toast(e.message); }
 }
 function updateInboxBadge(n) {
   // The header's inbox button only shows while something is waiting.
@@ -12336,7 +12481,8 @@ function updateInboxBadge(n) {
   $('v2InboxCount').textContent = n > 0 ? String(n) : '';
 }
 async function refreshInboxBadge() {
-  try { const { shares } = await api('/v1/inbox'); updateInboxBadge(shares.length); } catch {}
+  const current = inboxSession(), read = ++inboxBadgeRead;
+  try { const { shares } = await api('/v1/inbox'); if (current() && read === inboxBadgeRead) updateInboxBadge(shares.length); } catch {}
 }
 
 /**
@@ -12525,7 +12671,10 @@ function paintMachineOwnerOnly() {
 let pagePerson = null, pagePersonAway = false, pagePersonRead = 0, pageCleared = false, pageSignedOut = false;
 function pageSessionEnded() {
   sfDrop(); // a request waiting on a prompt for this session is not sent under the next one
+  sharingForget();
   bpClose(); // pictures and unsent sign-in text must not remain under the sign-in screen
+  v2VoiceForget();
+  if ($('consoleDlg').open) closeConsole(); // voice input and console sessions end with this sign-in
   pageSignedOut = true;
   pagePersonAway = true; pageCleared = false;
   window.__sfEnrolShown = false; // whoever comes next is taken to add a factor if they need one
@@ -12630,6 +12779,8 @@ function pageSecretsBack(ownerId) {
 }
 /** `next`: who has just been read, whose own one-time secret on the screen stays. */
 function pageClearLast(next = '') {
+  sharingForget();
+  v2VoiceForget();
   v2Close();
   bpClose();
   if ($('consoleDlg').open) closeConsole();
@@ -14839,6 +14990,7 @@ let v2NotesFor = null;
 /** [block id, the pane it lives in when parked] */
 const V2_MOVED = [['tgMembersBlock', 'paneEditTg'], ['imagePinRow', 'paneEditEnv'], ['embedModeRow', 'paneEditEnv'], ['memoryCapRow', 'paneEditEnv']];
 function v2ParkPanes() {
+  sharingView++;
   // Blocks that live in one editDlg pane but belong in a different place here:
   // members under Sharing (people, not plumbing), the image picker inside the
   // Runtime row (one place to say what an agent runs).
@@ -14977,6 +15129,7 @@ function v2RenderSheet() {
   if ($('v2AppRow')) void v2LoadApp(a.id);
   if ($('v2Access')) void v2LoadAccess(a.id);
   if ($('v2RecoveryRow')) void v2PaintRecovery(a.id);
+  if ($('v2Voice')) void v2LoadVoice(a.id);
 }
 
 // ---- Apps in agents (docs/apps-in-agents.md): the agent page's App row ----------------
@@ -15957,6 +16110,7 @@ function v2Pane(a, tab) {
         <div data-v2slot="imagePinRow" style="flex-basis:100%"></div>
         <div data-v2slot="embedModeRow" style="flex-basis:100%"></div>
         <div data-v2slot="memoryCapRow" style="flex-basis:100%"></div>`) : ''}
+      ${a.state !== 'ARCHIVED' ? row('Voice', `<div id="v2Voice" data-agent="${esc(a.id)}" style="flex-basis:100%"><span class="sub">Checking browser Talk…</span></div>`) : ''}
       ${built && a.state !== 'ARCHIVED' ? row('Sleep & files', `${a.ops || v2ChannelKinds(a).some(k => k !== 'telegram') ? `<span class="sub">${a.ops ? 'The manager never sleeps.' : 'On Discord or Slack it never sleeps (nothing queues their messages).'}</span>` : `<label style="margin:0">Sleep when idle <select id="v2Sleep" data-saves onchange="v2SetAgentPolicy('${id}', { hibernate: this.value || null })">
           <option value=""${a.hibernate === 'never' ? '' : ' selected'}>as the machine does</option><option value="never"${a.hibernate === 'never' ? ' selected' : ''}>never — stay awake</option></select></label>`}
         <label style="margin:0">Files it may send or receive <select id="v2FilesCap" data-saves onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
@@ -16281,6 +16435,71 @@ async function v2SetBrowser(id, on, el) {
     await refresh(false);
   } catch (e) { toast(e.message, 8000); if (el) el.value = on ? 'off' : 'on'; }
 }
+// A voice check belongs to its card and signed-in person; it never requests microphone access.
+let voiceEpoch = 0;
+function v2VoiceForget() {
+  voiceEpoch++;
+  const el = $('v2Voice');
+  if (el) { el.dataset.status = 'unavailable'; el.textContent = 'Sign in again to check browser Talk.'; }
+}
+function voiceBrowserNote() {
+  if (!window.isSecureContext) return 'Browser Talk needs HTTPS (or localhost). Reopen Hatchabot at its HTTPS address.';
+  if (typeof navigator.mediaDevices?.getUserMedia !== 'function') return 'This browser does not offer microphone access here. Try a browser with microphone support.';
+  return '';
+}
+async function v2LoadVoice(id) {
+  const el = $('v2Voice'), a = v2Find(id);
+  if (!el || el.dataset.agent !== id || !a || !v2Mine(a) || pagePersonAway || pageSignedOut) return;
+  const epoch = voiceEpoch, person = pagePerson, read = String(Number(el.dataset.read || 0) + 1);
+  const setupHint = `<p class="sub">In voice settings, set Talk Agent to <code>${esc(a.slug)}</code> so the configuration check uses this agent.</p>`;
+  el.dataset.read = read; el.dataset.status = 'checking';
+  el.innerHTML = '<b>Browser Talk</b><p class="sub" role="status">Checking voice configuration…</p>' + setupHint + '<button disabled>Recheck</button>';
+  const current = () => epoch === voiceEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut
+    && v2AgentDlg.open && v2AgentId === id && $('v2Voice') === el && el.dataset.read === read && !!v2Find(id) && v2Mine(v2Find(id));
+  let r;
+  try { r = await api(`/v1/agents/${id}/voice`); }
+  catch { r = { status: 'unavailable' }; }
+  if (!current()) return;
+  const words = {
+    configured: 'Runtime reports voice configured; a call has not been tested.',
+    unconfigured: 'Runtime does not report a configured Talk provider. Choose one in voice settings.',
+    unsupported: 'This runtime does not report browser Talk support. Check its OpenClaw version.',
+    unavailable: 'Could not check browser Talk. Open voice settings and check Talk Agent and provider configuration, then Recheck.',
+    not_running: 'Not running. Start this agent, then recheck browser Talk.',
+    busy: 'Busy with another operation. Recheck when it finishes.',
+  };
+  const status = Object.hasOwn(words, r?.status) ? r.status : 'unavailable';
+  el.dataset.status = status;
+  const provider = typeof r?.provider === 'string' ? r.provider.slice(0, 100) : '';
+  const browserNote = voiceBrowserNote(), running = v2Find(id)?.state === 'RUNNING';
+  const configure = running && window.isSecureContext && ['configured', 'unconfigured', 'unavailable'].includes(status);
+  const tryVoice = running && status === 'configured' && !browserNote;
+  el.innerHTML = `<b>Browser Talk${provider ? ' · ' + esc(provider) : ''}</b>
+    <p class="sub" role="status">${words[status]}</p>
+    ${setupHint}
+    ${browserNote ? `<p class="sub">${esc(browserNote)}</p>` : ''}
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap">
+      <button id="v2VoiceRecheck" onclick="v2LoadVoice('${jsq(id)}')">Recheck</button>
+      <button id="v2VoiceConfigure" onclick="v2VoiceOpen('${jsq(id)}','voice-settings')"${configure ? '' : ' disabled'}>Configure voice</button>
+      <button id="v2VoiceTry" onclick="v2VoiceOpen('${jsq(id)}','chat')"${tryVoice ? '' : ' disabled'}>Try voice</button>
+    </div>
+    <p class="sub">Try voice opens this agent's conversation. Press the microphone there to start; opening this card does not record audio.</p>
+    <p class="sub">Switching agents ends the voice call. Text chat tabs stay open.</p>
+    <p class="sub">Telegram voice-note transcription is separate. Its shared Gemini key is under Settings → Connections.</p>`;
+}
+async function v2VoiceOpen(id, view) {
+  const a = v2Find(id), el = $('v2Voice');
+  if (!a || !v2Mine(a) || !v2AgentDlg.open || v2AgentId !== id || el?.dataset.agent !== id || pagePersonAway || pageSignedOut) return;
+  if (view !== 'voice-settings' && view !== 'chat') return;
+  const allowed = a.state === 'RUNNING' && window.isSecureContext && (view === 'chat'
+    ? el.dataset.status === 'configured' && !voiceBrowserNote()
+    : ['configured', 'unconfigured', 'unavailable'].includes(el.dataset.status));
+  if (!allowed) return;
+  const epoch = voiceEpoch;
+  v2Close();
+  await openGateway(a.id, a.slug, view);
+  if (view === 'chat' && epoch === voiceEpoch && $('consoleDlg').open && consoleAgentId === id) toast('Press the microphone in this conversation, then make a short call to check hearing and playback.', 12000);
+}
 async function v2LoadBrowser(id) {
   const el = $('v2BrowserState');
   try {
@@ -16304,19 +16523,25 @@ async function v2LoadBrowser(id) {
  * browser again, empty.
  */
 async function v2SetKeepLogins(id, on, el) {
+  if (!el || el.disabled) return;
+  const current = sharingRead(el, id);
+  if (!current()) return;
   const a = v2Find(id), name = a?.name ?? 'this agent';
-  const undo = () => { if (el) el.value = on ? 'off' : 'on'; };
-  if (on) {
-    let who;
-    try { who = (await api(`/v1/agents/${id}/browser`)).steeredBy || []; } catch (e) { toast(e.message, 8000); undo(); return; }
-    const list = who.length ? who.map((w) => `  • ${w}`).join('\n') : '  • nobody else: only you message it';
-    if (!confirm(`Keep ${name}'s logins?\n\nSites you sign in to in its browser stay signed in until you forget them. While they are, the agent can act as you there, and so can a web page that tricks it, or anyone who can message it:\n${list}\n\nIt can also copy a sign-in out of its browser. Sign it in only where you would let it act for you: never your email, bank or password manager. Logins are not in backups or downloads.\n\nIts browser starts again, empty: sign it in after.`)) { undo(); return; }
-  } else if (!confirm(`Stop keeping ${name}'s logins?\n\nIts browser starts again, signed in nowhere, and what it kept is deleted from this machine.`)) { undo(); return; }
+  const undo = () => { if (current()) el.value = on ? 'off' : 'on'; };
+  el.disabled = true;
   try {
+    if (on) {
+      const who = (await api(`/v1/agents/${id}/browser`)).steeredBy || [];
+      if (!current()) return;
+      const list = who.length ? who.map((w) => `  • ${w}`).join('\n') : '  • nobody else: only you message it';
+      if (!confirm(`Keep ${name}'s logins?\n\nSites you sign in to in its browser stay signed in until you forget them. While they are, the agent can act as you there, and so can a web page that tricks it, or anyone who can message it:\n${list}\n\nIt can also copy a sign-in out of its browser. Sign it in only where you would let it act for you: never your email, bank or password manager. Logins are not in backups or downloads.\n\nIts browser starts again, empty: sign it in after.`)) { undo(); return; }
+    } else if (!confirm(`Stop keeping ${name}'s logins?\n\nIts browser starts again, signed in nowhere, and what it kept is deleted from this machine.`)) { undo(); return; }
     const r = await api(`/v1/agents/${id}/browser/logins`, { method: 'PUT', body: { keep: on } });
+    if (!current()) return;
     toast(r?.message || (on ? 'It keeps its logins now.' : 'It keeps no logins now.'), 9000);
     await refresh(false);
-  } catch (e) { toast(e.message, 8000); undo(); }
+  } catch (e) { if (current()) { toast(e.message, 8000); undo(); } }
+  finally { if (current()) el.disabled = false; }
 }
 async function v2ForgetLogins(id) {
   const name = v2Find(id)?.name ?? 'this agent';

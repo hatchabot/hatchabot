@@ -8,9 +8,25 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
  * every path must exist and every symbol must still be in its file; a "Fixed
  * in" must be a real release. Both are public: no addresses of any kind.
  */
-const PATH = /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)*(\/|\.(ts|mjs|cjs|js|sh|md|html|json|yml|yaml|service|timer|example|plist|runtime))$/;
+const PATH = /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)*(\/|\.(ts|mjs|cjs|js|sh|md|html|json|yml|yaml|service|timer|example|plist|runtime|browser))$/;
 const read = (p: string) => readFileSync(p, 'utf8');
 const releases = new Set([...read('CHANGELOG.md').matchAll(/^## \[(\d+\.\d+\.\d+)\]/gm)].map((m) => m[1]));
+
+type RefSource = { kind: 'missing' } | { kind: 'directory' } | { kind: 'file'; text: string; symbols: Map<string, boolean> };
+// The repository is immutable during this check. Hundreds of entries name
+// the same large routes/UI files: stat and read each path once, and reuse
+// repeated symbol searches without losing the diagnostic for any entry.
+const sources = new Map<string, RefSource>();
+function refSource(path: string): RefSource {
+  let source = sources.get(path);
+  if (!source) {
+    const st = existsSync(path) ? statSync(path) : undefined;
+    source = !st ? { kind: 'missing' } : st.isDirectory() ? { kind: 'directory' }
+      : { kind: 'file', text: read(path), symbols: new Map() };
+    sources.set(path, source);
+  }
+  return source;
+}
 
 /** Backticked tokens in order, grouped: a path, then the symbols that must be in it. */
 function refs(text: string): Array<{ path: string; symbols: string[] }> {
@@ -23,11 +39,13 @@ function refs(text: string): Array<{ path: string; symbols: string[] }> {
 }
 function checkRefs(where: string, text: string, bad: string[]) {
   for (const { path, symbols } of refs(text)) {
-    const st = existsSync(path) ? statSync(path) : undefined;
-    if (!st) { bad.push(`${where}: no ${path}`); continue; }
-    if (st.isDirectory()) continue;
-    const src = read(path);
-    for (const s of symbols) if (!src.includes(s)) bad.push(`${where}: \`${s}\` is not in ${path}`);
+    const source = refSource(path);
+    if (source.kind === 'missing') { bad.push(`${where}: no ${path}`); continue; }
+    if (source.kind === 'directory') continue;
+    for (const s of symbols) {
+      if (!source.symbols.has(s)) source.symbols.set(s, source.text.includes(s));
+      if (!source.symbols.get(s)) bad.push(`${where}: \`${s}\` is not in ${path}`);
+    }
   }
 }
 const PUBLIC = [
@@ -35,6 +53,19 @@ const PUBLIC = [
   [/\b(10|192\.168|172\.(1[6-9]|2\d|3[01])|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7]))(\.\d{1,3}){2,3}\b/, 'a private IP address'],
   [/\.ts\.net\b/, 'a Tailscale name'],
 ] as const;
+
+it('cached references still report each missing path and symbol, while accepting directories and valid symbols', () => {
+  const bad: string[] = [];
+  const text = '`src/` `directory description` `src/domain/types.ts` `Agent` `__knowledge_pack_missing_symbol__` `src/knowledge-pack-missing-fixture.ts`';
+  checkRefs('first entry', text, bad);
+  checkRefs('second entry', text, bad);
+  expect(bad).toEqual([
+    'first entry: `__knowledge_pack_missing_symbol__` is not in src/domain/types.ts',
+    'first entry: no src/knowledge-pack-missing-fixture.ts',
+    'second entry: `__knowledge_pack_missing_symbol__` is not in src/domain/types.ts',
+    'second entry: no src/knowledge-pack-missing-fixture.ts',
+  ]);
+});
 
 describe('docs/troubleshooting.md', () => {
   const doc = existsSync('docs/troubleshooting.md') ? read('docs/troubleshooting.md') : '';

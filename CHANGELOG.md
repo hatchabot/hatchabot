@@ -2,6 +2,33 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.186.0] — 2026-11-15
+
+### Upgrading
+- Reopen an agent's console after upgrading to load the Talk fixes. Browser sidecars update automatically; each machine builds the changed browser image once. Existing agents need Rebuild only when applying a changed shared Gemini key, as before.
+
+### Added
+- **An owner's agent settings now include Advanced → Voice.** Check the running agent's Talk configuration, open its voice settings, and try its own conversation. The card distinguishes configuration readiness from a tested call and explains HTTPS, microphone permission and choosing the intended Talk Agent. Real microphone, provider, playback and interruption acceptance remains required; see docs/voice.md.
+
+### Security
+- **Sharing rechecks identities, ownership and runtime state after slow operations.** Pairing and known-member admission cannot leave partial grants or inconsistent owner identities. Exports, clones and definition pushes stop when their source or destination changes ownership or runtime.
+- **Console requests and connections recheck access through logout, revocation and runtime changes.** Delayed private responses and device approvals stay tied to their original session and agent; canceled voice offers also cancel their upstream requests.
+- **Chromium sets its private-address fence in the same network namespace it uses.** Startup then drops its user, group and all capabilities before launching the browser, closing a restart race in the previous separate fence setup. Failed inspection or removal prevents replacement, and saved profiles are checked for ownership before use or deletion.
+
+### Fixed
+- OpenAI brokered Talk offers reach the selected agent's console proxy. Switching console tabs stops active or starting Talk; closing a pending console does not reopen it, and delayed approvals cannot reload another agent's console.
+- Sharing screens, invitations, copy drafts, inbox replies and browser-login controls retain their originating account and view. Delayed replies cannot overwrite a newer draft, reveal signed-out data or act on another invitation.
+- An old invitation dialog's queued close event no longer cancels a newer invitation request already waiting to open.
+- Browser sweeps discard obsolete startup requests and recheck saved profiles before cleanup. Browser details discard stale private site history after access or runtime changes.
+- Shared Gemini-key settings explain that saving a key does not apply it to existing agents or prove voice works; those agents need Rebuild, and a Google AI profile's own key takes precedence.
+
+### For developers
+- Regression coverage includes delayed sharing and console requests, browser startup and profile races, and real-page voice/session controls. Live audio acceptance and the changed startup/fence on real Docker remain required before promotion.
+- The overlapping-import UI test waits for its actual file read and drains pending imports during cleanup, so Chrome's virtual clock cannot end it early and leak a setup dialog into the next scenario.
+- Second-factor UI tests wait for observable prompts and media events across native file/response reads, and cancel pending prompts during cleanup. Slow browser I/O no longer creates a false prompt timeout.
+- Knowledge-pack checks reuse source-file reads within a run, retaining every path, symbol and release assertion without repeatedly loading large files for each troubleshooting entry.
+- Shell-based release and uninstall integration tests allow 30 seconds for their sandboxed subprocess workflows on a busy machine. Behavioral assertions and child-process limits are unchanged.
+
 ## [2.185.1] — 2026-11-14
 
 ### Upgrading

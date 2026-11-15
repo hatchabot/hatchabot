@@ -214,6 +214,15 @@ export async function exportTemplate(
   if (agent.state !== 'RUNNING') {
     throw new TransferError(`Start the agent to export a template (it's ${agent.state}).`);
   }
+  // Export also feeds Send, Clone and Derive. None may return private text
+  // read for an owner or runtime that changed while the reads were pending.
+  const assertSourceCurrent = () => {
+    const now = store.getAgent(agentId);
+    if (!now || now.ownerId !== agent.ownerId || now.runtimeRef !== agent.runtimeRef || now.hostId !== agent.hostId
+        || now.slug !== agent.slug || now.state !== 'RUNNING') {
+      throw new TransferError('The agent changed while preparing its template. Refresh and try again.');
+    }
+  };
   const profile = store.getAIProfile(agent.aiProfileId);
 
   // Persona + instructions always; MEMORY.md unless excluded (default: include,
@@ -256,6 +265,7 @@ export async function exportTemplate(
         throw err;
       }
     }
+    assertSourceCurrent();
     files[name] = name === 'AGENTS.md' ? stripManagedSections(text) : text;
     if (Buffer.byteLength(files[name]!, 'utf8') > MAX_FILE_BYTES) throw tooBig(name);
   }
@@ -273,6 +283,7 @@ export async function exportTemplate(
     // nothing said (#81).
     throw new TransferError("Couldn't read its scheduled tasks, so the copy would have none — nothing was exported. Try again in a moment.");
   }
+  assertSourceCurrent();
   const tasks = crons
     // enabled only: a task the owner deliberately switched off must not
     // come back firing on every imported copy (10th audit).

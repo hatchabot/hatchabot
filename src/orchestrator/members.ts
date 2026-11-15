@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ChannelKind } from '../domain/types.js';
+import type { Agent, ChannelKind } from '../domain/types.js';
 import { VOLUME_GONE, type RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 import { ACCOUNT_SHAPE, ID_SHAPE } from './channelIds.js';
@@ -72,6 +72,54 @@ export interface AdmitResult {
   username?: string;
 }
 
+function telegramOwnerRefusal(store: Store, agentId: string, ownerId: string, id: string, asSelf: boolean): string | undefined {
+  const seat = store.getMembership(agentId, ownerId);
+  if (!seat || seat.status !== 'active' || seat.role !== 'owner') return 'Your owner seat is no longer active. Refresh and try again.';
+  if (seat.channelUserId && seat.channelUserId !== id) return 'You are already linked to a different Telegram account on this agent.';
+  if (asSelf && store.telegramBoundOutside(id, ownerId)) {
+    return 'That Telegram account already belongs to someone on this machine (a member or another account), so it cannot be linked as you.';
+  }
+}
+
+function admissionAgentUnchanged(store: Store, before: Agent): boolean {
+  const current = store.getAgent(before.id);
+  return !!current && current.ownerId === before.ownerId && current.runtimeRef === before.runtimeRef
+    && current.hostId === before.hostId && current.state === before.state;
+}
+
+/** Undo only an unbound approval, never an existing member's access. */
+export async function removeUnboundChannelAccess(
+  deps: RevokeDeps,
+  opts: { agentId: string; runtimeRef: string; kind?: ChannelKind; accountId: string },
+  id: string,
+): Promise<boolean> {
+  const kind = opts.kind ?? 'telegram';
+  const holder = kind === 'telegram'
+    ? deps.store.getActiveMembershipByChannelUser(opts.agentId, id)
+    : deps.store.getMemberByIdentity(opts.agentId, kind, id);
+  if (!holder) {
+    let removed = false;
+    if (ID_SHAPE[kind].test(id) && ACCOUNT_SHAPE.test(opts.accountId)) {
+      const script = allowlistScrubScript([{
+        channel: kind, acct: opts.accountId, id,
+        cred: `/home/node/.openclaw/credentials/${kind}-${opts.accountId.toLowerCase()}-allowFrom.json`,
+      }]);
+      const result = await deps.provider.execShellOnVolume(opts.runtimeRef, script).catch(() => undefined);
+      removed = !!result && result.code === 0 && !result.volumeMissing;
+    }
+    deps.log?.(removed ? 'member.unbound_approval_scrubbed' : 'member.unbound_approval_scrub_failed', { agentId: opts.agentId, kind });
+    return removed;
+  }
+  return true;
+}
+
+async function refuseApprovedIdentity(deps: RevokeDeps, opts: AdmitOptions, id: string, message: string): Promise<never> {
+  if (!(await removeUnboundChannelAccess(deps, opts, id))) {
+    throw new AdmitError(`${message} The chat approval could not be removed; check the agent's channel access before trying again.`);
+  }
+  throw new AdmitError(message);
+}
+
 /**
  * The Telegram-native invite path (§12.3 without the web page): the invitee
  * simply messages the bot from anywhere — no tailnet needed — and the owner's
@@ -85,23 +133,28 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
   if (kind !== 'telegram') return admitOtherChannel(deps, { ...opts, kind });
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
+  const before = store.getAgent(opts.agentId);
+  if (!before) throw new AdmitError('The agent is no longer available.');
 
   const requests = await listPairingRequests(provider, opts.runtimeRef, opts.accountId);
+  if (!admissionAgentUnchanged(store, before)) throw new AdmitError('The agent changed while reading requests. Refresh and try again.');
   const req = requests.find((r) => r.code === opts.code);
   if (!req) throw new AdmitError('That request is no longer pending. Ask them to message again.');
 
   // Every refusal before the approval: approving first let a refused "That's
   // me" in anyway, with no member row to remove them by (night review).
   const owner = store.getAgent(opts.agentId);
-  if (owner && opts.asSelf && store.telegramBoundOutside(req.id, owner.ownerId)) {
-    // "That's me" on an id this machine already knows as SOMEBODY ELSE — a
-    // member of an agent, another account's link — would hand that person
-    // the owner's seat everywhere and their recovery links (30th audit).
-    throw new AdmitError('That Telegram account already belongs to someone on this machine (a member or another account), so it cannot be linked as you.');
+  const bindingOwner = owner && (opts.asSelf || store.knownChannelUserId(owner.ownerId) === req.id);
+  if (bindingOwner) {
+    const refusal = telegramOwnerRefusal(store, opts.agentId, owner.ownerId, req.id, !!opts.asSelf);
+    if (refusal) throw new AdmitError(refusal);
   }
 
   if (!(await approvePairing(provider, opts.runtimeRef, opts.accountId, opts.code))) {
     throw new AdmitError("Couldn't approve the request — try again.");
+  }
+  if (!admissionAgentUnchanged(store, before)) {
+    return refuseApprovedIdentity(deps, opts, req.id, 'The agent changed while approving. Refresh and try again.');
   }
 
   // The owner talking to their OWN agent should claim the owner seat, not
@@ -112,14 +165,30 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
   // twice. If this telegram id is the owner's own (known from any of their
   // agents), bind the owner seat instead.
   const agent = store.getAgent(opts.agentId);
-  if (agent && (opts.asSelf || store.knownChannelUserId(agent.ownerId) === req.id)) {
-    store.bindMembershipChannelUser(opts.agentId, agent.ownerId, req.id);
+  if (bindingOwner) {
+    if (!agent || agent.ownerId !== owner.ownerId) {
+      return refuseApprovedIdentity(deps, opts, req.id, 'The agent changed while approving. Refresh and try again.');
+    }
+    const refusal = telegramOwnerRefusal(store, opts.agentId, agent.ownerId, req.id, !!opts.asSelf);
+    if (refusal) return refuseApprovedIdentity(deps, opts, req.id, refusal);
+    let absorbed = 0;
+    try {
+      store.transact(() => {
+        if (opts.asSelf) {
+          // Link and absorb duplicates in the same transaction as the seat:
+          // a failed binding must never leave an account-level identity behind.
+          store.setAccountTelegram(agent.ownerId, req.id);
+          absorbed = store.absorbOwnerTelegram(agent.ownerId, req.id);
+        }
+        if (!store.bindMembershipChannelUser(opts.agentId, agent.ownerId, req.id)) {
+          throw new AdmitError('Your Telegram identity could not be linked to this agent. Refresh and try again.');
+        }
+      });
+    } catch (error) {
+      if (!(error instanceof AdmitError)) throw error;
+      return refuseApprovedIdentity(deps, opts, req.id, error.userMessage);
+    }
     if (opts.asSelf) {
-      // The explicit link: account-level, so it survives deleting every agent
-      // and seeds the owner seat of everything created from now on. Absorb any
-      // duplicate member rows this identity minted before the link existed.
-      store.setAccountTelegram(agent.ownerId, req.id);
-      const absorbed = store.absorbOwnerTelegram(agent.ownerId, req.id);
       log('member.telegram_linked', { agentId: opts.agentId, channelUserId: req.id, absorbed });
     } else {
       log('member.owner_self_claim', { agentId: opts.agentId, channelUserId: req.id });
@@ -198,8 +267,11 @@ async function admitOtherChannel(deps: RevokeDeps, opts: AdmitOptions & { kind: 
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
   const { kind } = opts;
+  const before = store.getAgent(opts.agentId);
+  if (!before) throw new AdmitError('The agent is no longer available.');
 
   const requests = await listPairingRequests(provider, opts.runtimeRef, opts.accountId, kind);
+  if (!admissionAgentUnchanged(store, before)) throw new AdmitError('The agent changed while reading requests. Refresh and try again.');
   const req = requests.find((r) => r.code === opts.code);
   if (!req) throw new AdmitError('That request is no longer pending. Ask them to message again.');
   const owner = store.getAgent(opts.agentId);
@@ -209,15 +281,25 @@ async function admitOtherChannel(deps: RevokeDeps, opts: AdmitOptions & { kind: 
   if (!(await approvePairing(provider, opts.runtimeRef, opts.accountId, opts.code, kind))) {
     throw new AdmitError("Couldn't approve the request — try again.");
   }
+  if (!admissionAgentUnchanged(store, before)) {
+    return refuseApprovedIdentity(deps, opts, req.id, 'The agent changed while approving. Refresh and try again.');
+  }
 
   // Their rooms too, not just their DMs: OpenClaw's approval writes only the
   // DM allow store (2026-09-30).
-  await grantRoomAccess(deps, { agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, channelUserId: req.id });
+  try {
+    await grantRoomAccess(deps, { agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, channelUserId: req.id });
+  } catch {
+    return refuseApprovedIdentity(deps, opts, req.id, 'Adding access to the rooms failed. Refresh and try again.');
+  }
+  if (!admissionAgentUnchanged(store, before)) {
+    return refuseApprovedIdentity(deps, opts, req.id, 'The agent changed while approving. Refresh and try again.');
+  }
 
   const agent = store.getAgent(opts.agentId);
   if (agent && opts.asSelf) {
     if (!store.bindMemberIdentity(opts.agentId, agent.ownerId, kind, req.id)) {
-      throw new AdmitError('You are already linked to a different account on this channel.');
+      return refuseApprovedIdentity(deps, opts, req.id, 'You are already linked to a different account on this channel.');
     }
     log('member.owner_self_claim', { agentId: opts.agentId, kind, channelUserId: req.id });
     return { userId: agent.ownerId, displayName: 'You', channelUserId: req.id, alreadyMember: true };

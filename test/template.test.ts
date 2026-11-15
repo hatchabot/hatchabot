@@ -32,6 +32,35 @@ async function world() {
   return { store, provider };
 }
 
+describe('template export retains its authorized source (HB-0720)', () => {
+  it.each(['owner', 'runtime', 'host', 'deletion'])('refuses private contents after its %s changes during a read', async (change) => {
+    const { store, provider } = await world();
+    const exec = provider.execShell.bind(provider);
+    provider.execShell = async (ref, script, options) => {
+      const result = await exec(ref, script, options);
+      if (change === 'owner') (store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('owner-b', 'a1');
+      if (change === 'runtime') store.setAgentRuntimeRef('a1', 'replacement');
+      if (change === 'host') store.setAgentHost('a1', 'other-host');
+      if (change === 'deletion') store.setAgentState('a1', 'DELETING');
+      return result;
+    };
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow('changed while');
+    expect(provider.execLog.filter((a) => a[0] === 'sh')).toHaveLength(1);
+    expect(provider.execLog.some((a) => a[0] === 'cron')).toBe(false);
+  });
+
+  it('checks again after the final scheduled-task read before returning a template', async () => {
+    const { store, provider } = await world();
+    const exec = provider.exec.bind(provider);
+    provider.exec = async (ref, args, options) => {
+      const result = await exec(ref, args, options);
+      if (args[0] === 'cron') store.setAgentRuntimeRef('a1', 'replacement');
+      return result;
+    };
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow('changed while');
+  });
+});
+
 describe('importTemplate: what the 2026-10-23 review found', () => {
   it('a template whose filled files would pass the core-file limit is refused before anything is made (R16)', async () => {
     const { store, provider } = await world();

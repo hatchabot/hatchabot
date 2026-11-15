@@ -312,6 +312,7 @@ reads inside the agent (docs/access-overview-design.md).
 | signed-in | Command-line tokens: list and revoke |
 | signed-in | An agent's OpenClaw console (the owner, or a web-chat guest in their own conversation) |
 | signed-in | Web chat |
+| signed-in | An agent's voice configuration status (owner only; no audio or credentials) |
 | signed-in | Report a problem: your drafts, the diagnostics, the installed source and docs |
 | signed-in | Your agents: list, create, settings, files, schedules, members, start and stop |
 | signed-in | Reading lists and settings (no credential is shown) |

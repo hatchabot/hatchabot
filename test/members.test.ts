@@ -292,6 +292,70 @@ describe('denyPairing', () => {
 });
 
 describe('"That\'s me — link & approve" (account-level Telegram link)', () => {
+  it('refuses an identity claimed by another account while approval is in flight (HB-0718)', async () => {
+    const { store, provider, opts } = await setup();
+    const exec = provider.exec.bind(provider);
+    provider.exec = async (runtimeRef, args, options) => {
+      const result = await exec(runtimeRef, args, options);
+      if (args[0] === 'pairing' && args[1] === 'approve') store.setAccountTelegram('other-owner', '555');
+      return result;
+    };
+    await expect(admitMember({ store, provider }, { ...opts, asSelf: true })).rejects.toBeInstanceOf(AdmitError);
+    expect(store.accountTelegram('u1')).toBeUndefined();
+    expect(store.accountTelegram('other-owner')).toBe('555');
+    expect(store.getMembership('a1', 'u1')?.channelUserId).toBeUndefined();
+    expect(store.listMemberships('a1')).toHaveLength(1);
+    expect(provider.execLog.some((args) => args[0] === 'sh-volume' && args[1]!.includes('555'))).toBe(true);
+  });
+
+  it('refuses a second owner identity before approval instead of reporting a false link (HB-0718)', async () => {
+    const { store, provider, opts } = await setup();
+    store.bindMembershipChannelUser('a1', 'u1', '777');
+    store.setAccountTelegram('u1', '777');
+    await expect(admitMember({ store, provider }, { ...opts, asSelf: true })).rejects.toBeInstanceOf(AdmitError);
+    expect(store.accountTelegram('u1')).toBe('777');
+    expect(store.getMembership('a1', 'u1')?.channelUserId).toBe('777');
+    expect(provider.execLog.some((args) => args[0] === 'pairing' && args[1] === 'approve')).toBe(false);
+  });
+
+  it('reports cleanup failure without persisting the refused account identity (HB-0718)', async () => {
+    const { store, provider, opts } = await setup();
+    const exec = provider.exec.bind(provider);
+    provider.exec = async (ref, args, options) => {
+      const result = await exec(ref, args, options);
+      if (args[0] === 'pairing' && args[1] === 'approve') store.setAccountTelegram('other-owner', '555');
+      return result;
+    };
+    provider.execShellOnVolume = async () => { throw new Error('unreachable'); };
+    await expect(admitMember({ store, provider }, { ...opts, asSelf: true })).rejects.toThrow('approval could not be removed');
+    expect(store.accountTelegram('u1')).toBeUndefined();
+  });
+
+  it('preserves another active member\'s approval when an owner link is refused late (HB-0718)', async () => {
+    const { store, provider, opts } = await setup();
+    store.insertMembership({ id: 'existing', agentId: 'a1', userId: 'u2', role: 'user', status: 'active', channelUserId: '555' });
+    const exec = provider.exec.bind(provider);
+    provider.exec = async (ref, args, options) => {
+      const result = await exec(ref, args, options);
+      if (args[0] === 'pairing' && args[1] === 'approve') store.setAccountTelegram('other-owner', '555');
+      return result;
+    };
+    await expect(admitMember({ store, provider }, { ...opts, asSelf: true })).rejects.toBeInstanceOf(AdmitError);
+    expect(store.getMembership('a1', 'u2')?.status).toBe('active');
+    expect(provider.execLog.some((a) => a[0] === 'sh-volume')).toBe(false);
+  });
+
+  it('rolls back account linking and duplicate absorption if the final owner binding fails (HB-0718)', async () => {
+    const { store, provider, opts } = await setup();
+    store.insertMembership({ id: 'existing', agentId: 'a1', userId: 'u2', role: 'user', status: 'active', channelUserId: '555' });
+    store.bindMembershipChannelUser = () => false;
+    await expect(admitMember({ store, provider }, { ...opts, asSelf: true })).rejects.toBeInstanceOf(AdmitError);
+    expect(store.accountTelegram('u1')).toBeUndefined();
+    expect(store.getMembership('a1', 'u1')?.channelUserId).toBeUndefined();
+    expect(store.getMembership('a1', 'u2')?.channelUserId).toBe('555');
+    expect(provider.execLog.some((a) => a[0] === 'sh-volume')).toBe(false);
+  });
+
   it('asSelf binds the owner seat, links the ACCOUNT, and future agents auto-admit', async () => {
     const { store, provider, opts } = await setup();
     const res = await admitMember({ store, provider }, { ...opts, asSelf: true });
@@ -510,6 +574,23 @@ describe('revoking across channels', () => {
 });
 
 describe('admitting on Slack and Discord', () => {
+  it('removes an unbound approval when the owner seat changes during room access (HB-0718)', async () => {
+    const { store, provider, opts } = await setup();
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: 'U0GRAN', code: 'SLK1' }] }), stderr: '' });
+    const exec = provider.execShellOnVolume.bind(provider);
+    provider.execShellOnVolume = async (ref, script, options) => {
+      const result = await exec(ref, script, options);
+      if (script.includes('const chRooms = cfg.channels')) store.bindMemberIdentity('a1', 'u1', 'slack', 'U0OTHER');
+      return result;
+    };
+    await expect(admitMember({ store, provider }, { ...opts, kind: 'slack', accountId: 'hatchabot', code: 'SLK1', asSelf: true })).rejects.toBeInstanceOf(AdmitError);
+    expect(store.memberIdentities('a1', 'u1')).toEqual({ slack: 'U0OTHER' });
+    const scripts = provider.execLog.filter((a) => a[0] === 'sh-volume').map((a) => a[1]!);
+    expect(scripts).toHaveLength(2);
+    expect(scripts[1]).toContain('U0GRAN');
+    expect(scripts[1]).toContain('delete from channel_pairing_allow_entries');
+  });
+
   it('a new Slack member is created, bound, and welcomed on Slack', async () => {
     const { store, provider, opts } = await setup();
     provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: 'U0GRAN', code: 'SLK1', meta: { firstName: 'Gran' } }] }), stderr: '' });

@@ -113,6 +113,36 @@ const SCENARIOS = String.raw`(() => {
   const calls = (method, re) => window.__calls.filter((c) => c.method === method && re.test(c.path));
   const eq = (what, got, want) => { if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(what + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want)); };
   const ok = (what, cond) => { if (!cond) throw new Error(what); };
+  // Native file/body reads and media events can finish after Chrome advances
+  // virtual time. Observe their UI result; until() still checks real UI deadlines.
+  const watchUi = (target, ready) => {
+    let observer;
+    const promise = new Promise(resolve => {
+      const check = () => { if (ready()) { observer?.disconnect(); resolve(); } };
+      observer = new MutationObserver(check);
+      observer.observe(target, { attributes: true, childList: true, characterData: true, subtree: true });
+      check();
+    });
+    return { promise, disconnect: () => observer.disconnect() };
+  };
+  const withSecondFactor = async (label, start, answer) => {
+    ok(label + ': no prompt left by the previous operation', !sfPending && !sfDlg.open);
+    const opened = watchUi(sfDlg, () => sfDlg.open);
+    let work;
+    try {
+      work = Promise.resolve().then(start);
+      await Promise.race([opened.promise, work.then(() => { throw new Error(label + ': finished without asking for the second factor'); })]);
+      ok(label + ': the visible prompt belongs to a pending request', sfDlg.open && !!sfPending);
+      await answer();
+      await work;
+    } finally {
+      opened.disconnect();
+      // close() alone reopens an unanswered prompt. Reject it and join its
+      // caller before another scenario changes the API fixtures.
+      sfDrop();
+      await Promise.allSettled([work]);
+    }
+  };
   const byText = (sel, text) => [...document.querySelectorAll(sel)].find((el) => el.textContent.trim().includes(text));
   const tile = (name) => [...document.querySelectorAll('#v2groups .v2agent')].find((el) => el.textContent.includes(name));
   const centre = (el) => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; };
@@ -3102,7 +3132,431 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    sharedCopyScanStaysCurrent: async () => {
+      const realFetch = window.fetch, scans = [];
+      window.fetch = (input, init) => /\/a1\/export\/scan/.test(String(input))
+        ? new Promise(resolve => scans.push(resolve)) : realFetch(input, init);
+      try {
+        openSendAgent('a1', 'Homework Helper'); await until(() => scans.length === 1);
+        sendAgentDlg.close(); openSendAgent('a1', 'Homework Helper'); await until(() => scans.length === 2);
+        scans[1](new Response(JSON.stringify({ emails: 1, hits: [{ where: 'AGENTS.md', line: 1, sample: 'person@example.com' }] })));
+        await until(() => $('sendScan').textContent.includes('1 email address'));
+        scans[0](new Response(JSON.stringify({ emails: 0, hits: [] }))); await sleep(0); await sleep(0);
+        ok('an older privacy scan cannot remove the current warning', $('sendScan').textContent.includes('1 email address'));
+      } finally { window.fetch = realFetch; if (sendAgentDlg.open) sendAgentDlg.close(); }
+    },
+    sharedCopySendStaysCurrent: async () => {
+      const realFetch = window.fetch;
+      let answer;
+      window.fetch = (input, init) => /\/a1\/send$/.test(String(input))
+        ? new Promise(resolve => { answer = resolve; }) : realFetch(input, init);
+      try {
+        openSendAgent('a1', 'Homework Helper'); $('sendToEmail').value = 'first@example.com';
+        const sending = doSendAgent(); await until(() => answer);
+        sendAgentDlg.close(); openSendAgent('a2', 'Soccer Schedule'); $('sendToEmail').value = 'second@example.com';
+        answer(new Response(JSON.stringify({ ok: true }))); await sending;
+        ok('an earlier send cannot dismiss another agent copy draft', sendAgentDlg.open && sendAgentId === 'a2' && $('sendToEmail').value === 'second@example.com');
+        ok('the current send button remains available', !$('sendBtn').disabled);
+      } finally { window.fetch = realFetch; if (sendAgentDlg.open) sendAgentDlg.close(); }
+    },
+    inboxEndsWithSession: async () => {
+      const realFetch = window.fetch, was = { away: pagePersonAway, out: pageSignedOut, cleared: pageCleared, enrol: window.__sfEnrolShown };
+      let answer;
+      window.fetch = (input, init) => /\/v1\/inbox$/.test(String(input))
+        ? new Promise(resolve => { answer = resolve; }) : realFetch(input, init);
+      try {
+        inboxDlg.showModal(); const reading = loadInbox(); await until(() => answer);
+        pageSessionEnded();
+        answer(new Response(JSON.stringify({ shares: [{ id: 'private-share', agentName: 'Previous account copy', fromEmail: 'previous@example.com', createdAt: '2026-11-14T00:00:00Z' }] }))); await reading;
+        ok('late inbox data cannot return after sign-out', !inboxDlg.open && !$('inboxBody').textContent.includes('Previous account copy') && !inboxShares.length && $('v2InboxBtn').hidden);
+      } finally {
+        window.fetch = realFetch; if (inboxDlg.open) inboxDlg.close();
+        pagePersonAway = was.away; pageSignedOut = was.out; pageCleared = was.cleared; window.__sfEnrolShown = was.enrol;
+      }
+    },
+    peerGrantsStayCurrent: async () => {
+      const realFetch = window.fetch, pending = [];
+      const answer = (resolve, granted) => resolve(new Response(JSON.stringify({ candidates: [{ id: 'a2', name: 'Soccer Schedule', granted, allowActions: granted }] })));
+      window.fetch = (input, init) => /\/a1\/peers$/.test(String(input)) && (!init?.method || init.method === 'GET')
+        ? new Promise(resolve => pending.push(resolve)) : realFetch(input, init);
+      try {
+        openV2Agent('a1', 'sharing'); await until(() => pending.length);
+        const older = pending.splice(0);
+        const loading = loadPeers(); await until(() => pending.length);
+        pending.splice(0).forEach(resolve => answer(resolve, false)); await loading;
+        older.forEach(resolve => answer(resolve, true)); await sleep(0); await sleep(0);
+        ok('an older read cannot restore revoked peer action grants', !$('agentPeerList').querySelector('.peerCb').checked && !$('agentPeerList').querySelector('.peerAct').checked);
+      } finally { pending.forEach(resolve => answer(resolve, false)); window.fetch = realFetch; v2Close(); }
+    },
+    memberReopenPromptStaysCurrent: async () => {
+      const realFetch = window.fetch, realPrompt = window.prompt;
+      let answer, prompts = 0, posts = 0;
+      window.prompt = () => { prompts++; return '@synthetic_person'; };
+      window.fetch = (input, init) => {
+        if (/\/members\/late-member\/reopen$/.test(String(input))) {
+          posts++;
+          return posts === 1 ? new Promise(resolve => { answer = resolve; }) : Promise.resolve(new Response(JSON.stringify({ minutes: 30 })));
+        }
+        return realFetch(input, init);
+      };
+      try {
+        openV2Agent('a1', 'sharing'); await sleep(0);
+        const opening = reopenDoor('a1', 'late-member', 'Example member'); await until(() => answer);
+        openV2Agent('a2', 'sharing');
+        answer(new Response(JSON.stringify({ error: 'A handle is needed.', code: 'needs-handle' }), { status: 409 })); await opening;
+        eq('an old member action cannot ask for or submit a handle from another agent view', [prompts, posts], [0, 1]);
+      } finally { window.fetch = realFetch; window.prompt = realPrompt; v2Close(); }
+    },
+    sharingReadsStayWithTheirView: async () => {
+      const realFetch = window.fetch, pending = [];
+      const was = { away: pagePersonAway, out: pageSignedOut, cleared: pageCleared, enrol: window.__sfEnrolShown };
+      const reply = (item, label) => item.resolve(new Response(JSON.stringify({ people: [{ userId: label, kind: 'password', label, shared: false }] })));
+      window.fetch = (input, init) => /\/a1\/web-chat\/people$/.test(String(input)) && (!init?.method || init.method === 'GET')
+        ? new Promise(resolve => pending.push({ resolve })) : realFetch(input, init);
+      try {
+        openV2Agent('a1', 'sharing');
+        await until(() => pending.length);
+        const older = pending.splice(0);
+        v2Close(); openV2Agent('a1', 'sharing');
+        await until(() => pending.length);
+        pending.splice(0).forEach(x => reply(x, 'Current person'));
+        await until(() => $('tgSharePerson').textContent.includes('Current person'));
+        older.forEach(x => reply(x, 'Old person'));
+        await sleep(0); await sleep(0);
+        ok('an earlier opening cannot replace the current sharing choice', $('tgSharePerson').textContent.includes('Current person') && !$('tgSharePerson').textContent.includes('Old person'));
+        const reading = loadWebChatPeople('a1'); await until(() => pending.length);
+        pageSessionEnded();
+        pending.splice(0).forEach(x => reply(x, 'Previous account person')); await reading;
+        ok('late sharing data remains cleared after sign-out', $('tgShareRow').hidden && !$('tgSharePerson').textContent.includes('Previous account'));
+        eq('access and member caches do not outlive sign-out', [v2AccessCache, Object.keys(members).length], [null, 0]);
+      } finally {
+        pending.forEach(x => reply(x, 'Cleanup')); window.fetch = realFetch; v2Close();
+        pagePersonAway = was.away; pageSignedOut = was.out; pageCleared = was.cleared; window.__sfEnrolShown = was.enrol;
+      }
+    },
+    inviteCopyStaysWithItsDialog: async () => {
+      const realCopy = copyText, realFetch = window.fetch;
+      const nativeShare = Object.getOwnPropertyDescriptor(navigator, 'share');
+      let copied, shared, copying, reopening, sending, release;
+      copyText = () => new Promise(resolve => { copied = resolve; });
+      try {
+        window.__promptAnswer = '';
+        window.__answer = { 'POST /v1/agents/a1/invites': [{ status: 201, body: { code: 'FIRST', path: '/join/FIRST' } }, { status: 201, body: { code: 'SECOND', path: '/join/SECOND' } }] };
+        await invite('a1', 'Homework Helper');
+        const count = calls('POST', /\/knock-window$/).length;
+        copying = copyInviteTg();
+        ok('the first invite started its clipboard operation', typeof copied === 'function');
+        // The old close event can arrive while the next invite waits for its
+        // response. It must not clear a newer opening that has not been shown.
+        const held = new Promise(resolve => { release = resolve; });
+        let requested = false;
+        window.fetch = (input, init) => /\/a1\/invites$/.test(String(input))
+          ? (requested = true, held.then(() => realFetch(input, init))) : realFetch(input, init);
+        inviteDlg.close(); reopening = invite('a1', 'Homework Helper');
+        ok('the next invitation is waiting for its response', requested && !inviteDlg.open);
+        inviteDlg.dispatchEvent(new Event('close'));
+        release(); await reopening;
+        ok('the earlier close cannot cancel the new invitation', inviteDlg.open && invShare?.code === 'SECOND');
+        inviteDlg.dispatchEvent(new Event('close'));
+        ok('a stale close delivered after the new invitation appears also leaves it current', inviteDlg.open && inviteCurrent(invWebFor) && invShare?.code === 'SECOND');
+        copied(true); await copying;
+        eq('a late copy cannot open the next invitation window', calls('POST', /\/knock-window$/).length, count);
+        Object.defineProperty(navigator, 'share', { configurable: true, value: () => new Promise(resolve => { shared = resolve; }) });
+        sending = shareInviteTg();
+        ok('the displayed invitation started its native share operation', typeof shared === 'function');
+        inviteDlg.close();
+        inviteDlg.dispatchEvent(new Event('close'));
+        eq('closing the displayed invitation forgets its ticket and share data', [invWebFor, invShare], [null, null]);
+        shared(); await sending;
+        eq('a native share finishing after close cannot open a window', calls('POST', /\/knock-window$/).length, count);
+      } finally {
+        if (inviteDlg.open) inviteDlg.close();
+        inviteDlg.dispatchEvent(new Event('close'));
+        release?.(); copied?.(false); shared?.();
+        await Promise.allSettled([copying, reopening, sending]);
+        if (inviteDlg.open) inviteDlg.close();
+        inviteDlg.dispatchEvent(new Event('close'));
+        copyText = realCopy; window.fetch = realFetch; window.__promptAnswer = null; window.__answer = {};
+        if (nativeShare) Object.defineProperty(navigator, 'share', nativeShare); else delete navigator.share;
+      }
+    },
+    browserKeepLoginsStaysWithItsView: async () => {
+      const realFetch = window.fetch, a = v2Find('a1'), hadBrowser = a.browser;
+      let hold = false, answer;
+      window.fetch = (input, init) => hold && /\/a1\/browser$/.test(String(input))
+        ? new Promise(resolve => { answer = resolve; }) : realFetch(input, init);
+      try {
+        a.browser = true; openV2Agent('a1', 'advanced'); await sleep(0);
+        hold = true;
+        const confirmations = window.__confirms.length, saves = calls('PUT', /\/browser\/logins$/).length;
+        const changing = v2SetKeepLogins('a1', true, $('v2BrowserKeep'));
+        await until(() => answer);
+        openV2Agent('a2', 'advanced');
+        answer(new Response(JSON.stringify({ steeredBy: ['Example guest'] }))); await changing;
+        eq('leaving the settings cancels the delayed login warning', window.__confirms.length, confirmations);
+        eq('leaving the settings does not change stored logins', calls('PUT', /\/browser\/logins$/).length, saves);
+      } finally { hold = false; a.browser = hadBrowser; window.fetch = realFetch; v2Close(); }
+    },
+    voiceCardReadiness: async () => {
+      const a = v2Find('a1'), role = a.role, state = a.state, slug = a.slug;
+      const secure = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+      const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+      let microphones = 0;
+      const setMedia = (available) => Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: available ? { getUserMedia() { microphones++; throw new Error('Microphone must not open automatically'); } } : undefined });
+      const read = async (status) => {
+        window.__override['/v1/agents/a1/voice'] = { status, provider: 'Example voice provider' };
+        $('v2VoiceRecheck').click();
+        await until(() => $('v2Voice')?.dataset.status === status);
+      };
+      try {
+        a.state = 'RUNNING'; a.role = 'owner'; setMedia(true);
+        Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+        window.__override['/v1/agents/a1/voice'] = { status: 'configured', provider: 'Example voice provider' };
+        openV2Agent('a1', 'advanced');
+        ok('Talk Agent setup hint is visible during the check', $('v2Voice').textContent.includes('In voice settings, set Talk Agent to ' + slug + ' so the configuration check uses this agent.'));
+        await until(() => $('v2Voice')?.dataset.status === 'configured');
+        eq('configured reports runtime evidence without claiming a tested call', $('v2Voice').querySelector('[role="status"]').textContent, 'Runtime reports voice configured; a call has not been tested.');
+        ok('the provider and separate Telegram path are explained', $('v2Voice').textContent.includes('Example voice provider') && $('v2Voice').textContent.includes('Telegram voice-note transcription is separate'));
+        ok('explicit configure and try controls', !$('v2VoiceConfigure').disabled && !$('v2VoiceTry').disabled);
+        eq('opening and checking never requests the microphone', microphones, 0);
+        for (const status of ['unconfigured', 'not_running', 'busy', 'unsupported', 'unavailable']) {
+          await read(status);
+          ok(status + ' does not offer a call', $('v2VoiceTry').disabled);
+          eq(status + ' settings availability', $('v2VoiceConfigure').disabled, !['unconfigured', 'unavailable'].includes(status));
+          ok(status + ' says more than a raw status', $('v2Voice').querySelector('[role="status"]').textContent.length > 25);
+          ok(status + ' keeps the Talk Agent setup hint', $('v2Voice').textContent.includes('set Talk Agent to ' + slug + ' so the configuration check uses this agent.'));
+          if (status === 'unconfigured') ok('unconfigured describes runtime evidence', $('v2Voice').textContent.includes('Runtime does not report a configured Talk provider.'));
+          if (status === 'unavailable') ok('unavailable names Talk Agent and provider configuration', $('v2Voice').textContent.includes('Open voice settings and check Talk Agent and provider configuration, then Recheck.'));
+        }
+        a.slug = 'voice<em>check</em>&"test"'; await read('configured');
+        eq('the setup hint preserves the exact slug as text', $('v2Voice').querySelector('code').textContent, a.slug);
+        ok('the slug cannot introduce markup', !$('v2Voice').querySelector('em'));
+        a.slug = slug;
+        Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
+        await read('configured');
+        ok('plain HTTP explains HTTPS and offers neither console action', $('v2Voice').textContent.includes('needs HTTPS') && $('v2VoiceConfigure').disabled && $('v2VoiceTry').disabled);
+        Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+        setMedia(false); await read('configured');
+        ok('no microphone API leaves settings available, but no call', $('v2Voice').textContent.includes('does not offer microphone access') && !$('v2VoiceConfigure').disabled && $('v2VoiceTry').disabled);
+        eq('no recording attempt, including failures', microphones, 0);
+        a.role = 'user'; openV2Agent('a1', 'advanced');
+        const reads = calls('GET', /\/v1\/agents\/a1\/voice$/).length;
+        await v2LoadVoice('a1');
+        ok('guests see no owner Voice card', !$('v2Voice'));
+        eq('guest does not request owner readiness', calls('GET', /\/v1\/agents\/a1\/voice$/).length, reads);
+      } finally {
+        a.role = role; a.state = state; a.slug = slug; v2Close();
+        if (secure) Object.defineProperty(window, 'isSecureContext', secure); else delete window.isSecureContext;
+        if (media) Object.defineProperty(navigator, 'mediaDevices', media); else delete navigator.mediaDevices;
+        delete window.__override['/v1/agents/a1/voice'];
+      }
+    },
+    voiceConsoleDestinations: async () => {
+      const a = v2Find('a1'), media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+      const stem = '/v1/agents/a1', token = 'made-up-voice-token +/#';
+      let microphones = 0;
+      try {
+        Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia() { microphones++; throw new Error('No automatic microphone'); } } });
+        for (const [path, body] of Object.entries({ '/voice': { status: 'configured' }, '/console/access': { role: 'owner', console: 'token' }, '/gateway': { token }, '/console/pending': { pending: 0 } })) window.__override[stem + path] = body;
+        if (consoleDlg.open) closeConsole();
+        consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        openV2Agent(a.id, 'advanced');
+        await until(() => $('v2Voice')?.dataset.status === 'configured');
+        $('v2VoiceConfigure').click();
+        const settings = stem + '/ui/settings/talk#token=' + encodeURIComponent(token);
+        await until(() => $('consoleFrame').getAttribute('src') === settings);
+        const frame = $('consoleFrame'), gateways = calls('GET', /\/v1\/agents\/a1\/gateway$/).length;
+        ok('Configure opens settings in the existing console', consoleDlg.open && !v2AgentDlg.open);
+        openV2Agent(a.id, 'advanced');
+        await until(() => $('v2Voice')?.dataset.status === 'configured');
+        $('v2VoiceTry').click();
+        const chat = stem + '/ui/chat?session=' + encodeURIComponent('agent:' + a.slug + ':main') + '#token=' + encodeURIComponent(token);
+        await until(() => frame.getAttribute('src') === chat);
+        ok('Try reuses the same frame', $('consoleFrame') === frame);
+        eq('and keeps its token without fetching another', calls('GET', /\/v1\/agents\/a1\/gateway$/).length, gateways);
+        eq('the remembered URL follows the explicit view', consoleTabs.find(t => t.id === a.id).url, chat);
+        await openGateway(a.id, a.slug, 'voice-settings');
+        eq('cached Configure also navigates', frame.getAttribute('src'), settings);
+        await openGateway(a.id, a.slug);
+        eq('plain open preserves the cached place', frame.getAttribute('src'), settings);
+        await openGateway(a.id, a.slug, '../other');
+        eq('arbitrary view is refused', frame.getAttribute('src'), settings);
+        ok('the page address never contains the credential', !location.href.includes('token='));
+        closeConsole();
+        window.__override[stem + '/console/access'] = { role: 'owner', console: 'identity' };
+        await openGateway(a.id, 'different-agent', 'chat');
+        const identityChat = stem + '/ui/chat?session=' + encodeURIComponent('agent:' + a.slug + ':main');
+        eq('a new identity chat uses this agent and needs no token', $('consoleFrame').getAttribute('src'), identityChat);
+        await openGateway(a.id, a.slug, 'voice-settings');
+        eq('cached identity settings keep tokenless authentication', $('consoleFrame').getAttribute('src'), stem + '/ui/settings/talk');
+        closeConsole();
+        await openGateway(a.id, a.slug, 'voice-settings');
+        eq('new identity settings route too', $('consoleFrame').getAttribute('src'), stem + '/ui/settings/talk');
+        eq('opening either console view never requests the microphone', microphones, 0);
+      } finally {
+        v2Close(); if (consoleDlg.open) closeConsole(); consoleTabs = [];
+        localStorage.removeItem('hb-console-tabs'); localStorage.removeItem('hb-console-last');
+        if (media) Object.defineProperty(navigator, 'mediaDevices', media); else delete navigator.mediaDevices;
+        for (const path of ['/voice', '/console/access', '/gateway', '/console/pending']) delete window.__override[stem + path];
+      }
+    },
+    voiceReadsStayWithTheirView: async () => {
+      const realFetch = window.fetch, pending = [];
+      let holdConsole = false, consoleReply;
+      const was = { person: pagePerson, away: pagePersonAway, out: pageSignedOut, cleared: pageCleared, reloads: window.__reloads, wanted: pageReloadWanted };
+      const answer = (entry, status, provider) => entry.resolve(new Response(JSON.stringify({ status, provider }), { status: 200 }));
+      window.fetch = async (input, init = {}) => {
+        const path = String(typeof input === 'string' ? input : input.url);
+        if (/\/voice$/.test(path)) return new Promise(resolve => pending.push({ path, resolve }));
+        if (holdConsole && /\/console\/access$/.test(path)) return new Promise(resolve => { consoleReply = resolve; });
+        return realFetch(input, init);
+      };
+      try {
+        openV2Agent('a1', 'advanced'); await until(() => pending.length === 1);
+        openV2Agent('a2', 'advanced'); await until(() => pending.length === 2);
+        answer(pending[1], 'configured', 'Second provider');
+        await until(() => $('v2Voice')?.dataset.status === 'configured');
+        answer(pending[0], 'configured', 'First provider'); await sleep(0);
+        ok('an old agent cannot replace this one', $('v2Voice').dataset.agent === 'a2' && $('v2Voice').textContent.includes('Second provider') && !$('v2Voice').textContent.includes('First provider'));
+        const older = v2LoadVoice('a2'), newer = v2LoadVoice('a2');
+        await until(() => pending.length === 4);
+        answer(pending[3], 'unconfigured'); await newer;
+        answer(pending[2], 'configured', 'Outdated provider'); await older;
+        eq('the latest recheck wins', $('v2Voice').dataset.status, 'unconfigured');
+        const closed = v2LoadVoice('a2'); await until(() => pending.length === 5);
+        const oldCard = $('v2Voice'); v2Close();
+        openV2Agent('a2', 'advanced'); await until(() => pending.length === 6);
+        answer(pending[5], 'unconfigured'); await until(() => $('v2Voice')?.dataset.status === 'unconfigured');
+        answer(pending[4], 'configured', 'Closed provider'); await closed;
+        ok('a closed card stays untouched after reopening the same agent', !oldCard.textContent.includes('Closed provider') && $('v2Voice').dataset.status === 'unconfigured');
+
+        window.__override['/v1/agents/a2/console/access'] = { role: 'owner', console: 'identity' };
+        window.__override['/v1/agents/a2/console/pending'] = { pending: 0 };
+        await openGateway('a2', v2Find('a2').slug, 'chat');
+        const ending = v2LoadVoice('a2'); await until(() => pending.length === 7);
+        pageSessionEnded();
+        ok('session end closes every console frame', !consoleDlg.open && [...$('consoleFrames').querySelectorAll('iframe')].every(f => f.getAttribute('src') === 'about:blank'));
+        ok('session end removes owner voice controls', !$('v2VoiceTry') && $('v2Voice').textContent.includes('Sign in again'));
+        answer(pending[6], 'configured', 'Signed out provider'); await ending;
+        ok('the ended session cannot restore its result', !$('v2Voice').textContent.includes('Signed out provider'));
+        // A console open can also still be waiting when the session ends. Its late access
+        // result must not fetch the old owner's gateway credential or reopen the frame.
+        pagePersonAway = false; pageSignedOut = false; holdConsole = true;
+        const gatewayReads = calls('GET', /\/v1\/agents\/a2\/gateway$/).length;
+        const opening = openGateway('a2', v2Find('a2').slug, 'voice-settings');
+        await until(() => consoleReply);
+        pageSessionEnded();
+        consoleReply(new Response(JSON.stringify({ role: 'owner', console: 'token' }), { status: 200 }));
+        await opening; holdConsole = false;
+        ok('a late console response cannot reopen after logout', !consoleDlg.open && [...$('consoleFrames').querySelectorAll('iframe')].every(f => f.getAttribute('src') === 'about:blank'));
+        eq('nor fetch the former session credential', calls('GET', /\/v1\/agents\/a2\/gateway$/).length, gatewayReads);
+        pagePersonAway = false; pageSignedOut = false; pagePerson = 'voice-person-a';
+        openV2Agent('a2', 'advanced'); await until(() => pending.length === 8);
+        const previousCard = $('v2Voice');
+        pagePersonIs('voice-person-b');
+        answer(pending[7], 'configured', 'Previous account provider'); await sleep(0);
+        ok('an account switch closes the sheet and drops its check', !v2AgentDlg.open && !previousCard.textContent.includes('Previous account provider'));
+      } finally {
+        window.fetch = realFetch; v2Close(); if (consoleDlg.open) closeConsole(); consoleTabs = [];
+        for (const entry of pending) answer(entry, 'unavailable');
+        delete window.__override['/v1/agents/a2/console/access']; delete window.__override['/v1/agents/a2/console/pending'];
+        clearTimeout(pageReloadTimer); pageReloadTimer = 0; pageReloadWanted = was.wanted;
+        pagePerson = was.person; pagePersonAway = was.away; pageSignedOut = was.out; pageCleared = was.cleared; window.__reloads = was.reloads;
+      }
+    },
     // Console tabs and the quick switcher (Chris, 2026-10-07): one frame per open agent, switching never reloads.
+    consoleApprovalStaysWithItsOpening: async () => {
+      const realFetch = window.fetch;
+      let answer, scanning = false, pendingAnswer;
+      window.fetch = (input, init = {}) => {
+        const path = String(input);
+        if (/\/a1\/console\/approve$/.test(path)) return new Promise(resolve => { answer = resolve; });
+        if (scanning && /\/a1\/console\/pending$/.test(path)) return new Promise(resolve => { pendingAnswer = resolve; });
+        return realFetch(input, init);
+      };
+      for (const id of ['a1', 'a2']) {
+        window.__override['/v1/agents/' + id + '/console/access'] = { role: 'owner', console: 'identity' };
+        window.__override['/v1/agents/' + id + '/console/pending'] = { pending: 0 };
+      }
+      try {
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        await openGateway('a1', v2Find('a1').slug);
+        const approving = approveConsoleBrowser($('consoleApproveBtn')); await until(() => answer);
+        await openGateway('a2', v2Find('a2').slug);
+        const frame = $('consoleFrame'), url = frame.getAttribute('src');
+        answer(new Response(JSON.stringify({ approved: true }))); await approving;
+        eq('a previous agent approval cannot blank the current voice/chat frame', frame.getAttribute('src'), url);
+        await sleep(70);
+        eq('its delayed reload cannot navigate the current frame either', frame.getAttribute('src'), url);
+        scanning = true; answer = null;
+        await openGateway('a1', v2Find('a1').slug);
+        const checking = autoApproveConsole('a1'); await until(() => pendingAnswer);
+        await openGateway('a2', v2Find('a2').slug);
+        pendingAnswer(new Response(JSON.stringify({ pending: 1 }))); await checking;
+        ok('a late pending read cannot submit approval after leaving its console', !answer);
+      } finally {
+        scanning = false; if (answer) answer(new Response(JSON.stringify({ approved: false })));
+        window.fetch = realFetch; if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        for (const id of ['a1', 'a2']) for (const path of ['/console/access', '/console/pending']) delete window.__override['/v1/agents/' + id + path];
+      }
+    },
+    consoleEscapeWhileOpening: async () => {
+      const realFetch = window.fetch;
+      let answer;
+      window.fetch = (input, init) => /\/a1\/console\/access$/.test(String(input))
+        ? new Promise(resolve => { answer = resolve; }) : realFetch(input, init);
+      try {
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        const opening = openGateway('a1', v2Find('a1').slug); await until(() => answer);
+        consoleDlg.close(); consoleDlg.dispatchEvent(new Event('close'));
+        answer(new Response(JSON.stringify({ role: 'owner', console: 'identity' }))); await opening;
+        ok('Escape while opening cannot be undone by a late access response', !consoleDlg.open);
+        ok('the canceled opening leaves no live frame', !consoleTabs.some(t => t.frame));
+      } finally { window.fetch = realFetch; if (consoleDlg.open) closeConsole(); consoleUnloadAll(); consoleTabs = []; localStorage.removeItem('hb-console-tabs'); }
+    },
+    consoleVoiceStopsOnSwitch: async () => {
+      const a = v2Find('a1'), b = v2Find('a2');
+      const blank = async (frame) => {
+        // The runner is a file URL; its failed /v1 iframe is an opaque error
+        // document. Install a same-origin stand-in for the proxied runtime.
+        const tab = consoleTabs.find(t => t.frame === frame), fresh = document.createElement('iframe');
+        fresh.id = 'consoleFrame'; fresh.title = 'Synthetic agent console';
+        const loaded = new Promise(resolve => fresh.addEventListener('load', resolve, { once: true }));
+        fresh.srcdoc = '<!doctype html><body>Made-up console</body>';
+        frame.replaceWith(fresh); tab.frame = fresh; await loaded;
+        return fresh;
+      };
+      for (const agent of [a, b]) {
+        window.__override['/v1/agents/' + agent.id + '/console/access'] = { role: 'owner', console: 'identity' };
+        window.__override['/v1/agents/' + agent.id + '/console/pending'] = { pending: 0 };
+      }
+      try {
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        await openGateway(a.id, a.slug);
+        let frame = await blank($('consoleFrame'));
+        let stopped = 0, beforeHidden = false;
+        frame.contentWindow.__hatchabotStopTalk = () => { stopped++; beforeHidden = !frame.hidden; return { active: true, stopped: true, done: Promise.resolve(true) }; };
+        await openGateway(b.id, b.slug);
+        eq('a voice call retires once before its frame is hidden', [stopped, beforeHidden], [1, true]);
+        ok('successful voice retirement preserves the cached conversation', frame.isConnected && frame.hidden && consoleTabs.find(t => t.id === a.id).frame === frame);
+        await openGateway(a.id, a.slug);
+        frame.contentWindow.__hatchabotStopTalk = () => ({ active: false, stopped: true, done: Promise.resolve(true) });
+        await openGateway(b.id, b.slug);
+        ok('an idle conversation stays cached', frame.isConnected && frame.hidden);
+        await openGateway(a.id, a.slug);
+        delete frame.contentWindow.__hatchabotStopTalk;
+        const pane = frame.contentDocument.createElement('openclaw-chat-pane'); pane.state = { realtimeTalkActive: true }; frame.contentDocument.body.append(pane);
+        await openGateway(b.id, b.slug);
+        ok('an older document with an active call but no stop hook is unloaded', !frame.isConnected && !consoleTabs.find(t => t.id === a.id).frame);
+        await openGateway(a.id, a.slug); frame = await blank($('consoleFrame'));
+        frame.contentWindow.__hatchabotStopTalk = () => ({ active: true, stopped: true, done: Promise.reject(new Error('Synthetic stop failure')) });
+        await openGateway(b.id, b.slug); await sleep(0);
+        ok('asynchronous retirement failure unloads only its own voice frame', !frame.isConnected && consoleTabs.find(t => t.id === b.id).frame === $('consoleFrame'));
+      } finally {
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        for (const agent of [a, b]) for (const path of ['/console/access', '/console/pending']) delete window.__override['/v1/agents/' + agent.id + path];
+      }
+    },
     consoleTabs: async () => {
       const list = await (await fetch('/v1/agents')).json();
       const mine = list.filter((x) => (x.role ? x.role === 'owner' : true) && x.state !== 'ARCHIVED' && !x.ops).slice(0, 3);
@@ -3249,6 +3703,7 @@ const SCENARIOS = String.raw`(() => {
     },
     // The owner's console on a rebuilt agent: no token in the address (Hatchabot names them); on one not rebuilt, the token as before.
     ownerConsoleIdentity: async () => {
+      const gateways = calls('GET', /\/v1\/agents\/a1\/gateway$/).length;
       try {
         window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
         const a = (await (await fetch('/v1/agents')).json()).find((x) => x.id === 'a1');
@@ -3256,7 +3711,7 @@ const SCENARIOS = String.raw`(() => {
         await until(() => document.getElementById('consoleDlg').open);
         const src = document.getElementById('consoleFrame').getAttribute('src');
         ok('no token in the address: ' + src, !src.includes('#token') && src.startsWith('/v1/agents/a1/ui/chat?session='));
-        eq('the token was not fetched', calls('GET', /\/v1\/agents\/a1\/gateway$/).length, 0);
+        eq('the token was not fetched', calls('GET', /\/v1\/agents\/a1\/gateway$/).length, gateways);
         ok('the settings gear is back for the owner', document.getElementById('consoleGearBtn').style.display !== 'none');
         closeConsole();
         window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'token' };
@@ -3353,6 +3808,7 @@ const SCENARIOS = String.raw`(() => {
     // The invite dialog's third way, with its warning; a link only when asked for. An agent in no chat app gets the web way alone.
     inviteWebChat: async () => {
       try {
+        const first = calls('POST', /\/v1\/agents\/a1\/invites$/).length;
         window.__promptAnswer = '';
         window.__answer = { 'POST /v1/agents/a1/invites': [
           { status: 201, body: { code: 'PLAIN', path: '/join/PLAIN' } },
@@ -3363,10 +3819,10 @@ const SCENARIOS = String.raw`(() => {
         ok('the web way shows', !web.hidden && web.textContent.includes('Chat on the web.'));
         ok("it says what they get, briefly: a member's rights", /with a member's rights: no scheduling, no settings/.test(web.textContent) && web.textContent.replace(/\s+/g, ' ').trim().length < 300);
         ok('no longer says it hands over your rights', !/your rights|hand your laptop/.test(web.textContent));
-        eq('only the plain invite so far', calls('POST', /\/v1\/agents\/a1\/invites$/).map((c) => c.body), [{}]);
+        eq('only the plain invite so far', calls('POST', /\/v1\/agents\/a1\/invites$/).slice(first).map((c) => c.body), [{}]);
         document.getElementById('invWebBtn').click();
         await until(() => !document.getElementById('invWebLink').hidden);
-        eq('the web chat invite', calls('POST', /\/v1\/agents\/a1\/invites$/)[1].body, { webChat: true });
+        eq('the web chat invite', calls('POST', /\/v1\/agents\/a1\/invites$/)[first + 1].body, { webChat: true });
         eq('its link', document.getElementById('invWebLink').textContent, 'https://hb.example/join/WEBCHAT');
         inviteDlg.close();
         const piano = agents.find((a) => a.name === 'Piano Practice');
@@ -3376,6 +3832,8 @@ const SCENARIOS = String.raw`(() => {
         await until(() => inviteDlg.open);
         ok('no chat-app part for an agent in no chat app', document.getElementById('invApps').hidden && !document.getElementById('invWeb').hidden);
         eq('nothing minted until asked', calls('POST', /\/invites$/).length, posts);
+        inviteDlg.close(); inviteDlg.dispatchEvent(new Event('close'));
+        eq('closing a web-only invitation also forgets its opening', [invWebFor, invShare], [null, null]);
       } finally {
         window.__promptAnswer = null; window.__answer = {};
         if (inviteDlg.open) inviteDlg.close();
@@ -4043,34 +4501,25 @@ const SCENARIOS = String.raw`(() => {
       window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
       const STEP = { status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
       const pub = appConfig.publicAddress;
+      const realSave = saveFromServer;
+      let archive;
+      const cancel = () => byText('#sfDlg button', 'Cancel').click();
       try {
         // An upload: asked, given, sent again.
         window.__answer = { 'PUT /v1/agents/a1/fs/file': [STEP, { status: 200, body: { ok: true } }] };
         const before = calls('PUT', /\/fs\/file$/).length;
-        const up = v2UploadFiles('a1', '', [new File(['made-up'], 'notes.txt')]);
-        await until(() => sfDlg.open);
-        sfDone();
-        await up;
+        await withSecondFactor('upload', () => v2UploadFiles('a1', '', [new File(['made-up'], 'notes.txt')]), () => sfDone());
         eq('the upload was sent again after the prompt', calls('PUT', /\/fs\/file$/).length - before, 2);
         // The agent's download: asked; Cancel stops it with a plain reason.
         window.__confirmAnswer = true;
         window.__answer = { 'GET /v1/agents/a1/backup': [STEP] };
-        const dl = downloadAgent('a1', 'Test Agent');
-        await until(() => sfDlg.open);
-        byText('#sfDlg button', 'Cancel').click();
-        await dl;
+        await withSecondFactor('backup', () => downloadAgent('a1', 'Test Agent'), cancel);
         ok('cancelled, said: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('The second factor was not given'));
         // Share (saveFromServer) and an import ask too.
         window.__answer = { 'GET /v1/agents/a1/export': [STEP] };
-        const share = saveFromServer('/v1/agents/a1/export', 'agent-template.json');
-        await until(() => sfDlg.open);
-        byText('#sfDlg button', 'Cancel').click();
-        await share;
+        await withSecondFactor('share', () => saveFromServer('/v1/agents/a1/export', 'agent-template.json'), cancel);
         window.__answer = { 'POST /v1/agents/import': [STEP] };
-        const imp = importAgentFile(new File(['not gzip'], 'x.hatchabot'));
-        await until(() => sfDlg.open);
-        byText('#sfDlg button', 'Cancel').click();
-        await imp;
+        await withSecondFactor('import', () => importAgentFile(new File(['not gzip'], 'x.hatchabot')), cancel);
         // A folder's .tar.gz link at the public address is fetched (so it can ask); elsewhere it is a plain link.
         const a = Object.assign(document.createElement('a'), { href: '/v1/agents/a1/fs/archive?path=' });
         let prevented = false; const ev = { preventDefault: () => { prevented = true; } };
@@ -4078,15 +4527,20 @@ const SCENARIOS = String.raw`(() => {
         ok('a plain link at the private address', sfLink(ev, a, 'f.tar.gz') === true && !prevented);
         appConfig.publicAddress = true;
         window.__answer = { 'GET /v1/agents/a1/fs/archive': [STEP] };
-        ok('fetched at the public address', sfLink(ev, a, 'f.tar.gz') === false && prevented);
-        await until(() => sfDlg.open);
-        byText('#sfDlg button', 'Cancel').click();
+        saveFromServer = (...args) => (archive = realSave(...args));
+        await withSecondFactor('archive', () => {
+          ok('fetched at the public address', sfLink(ev, a, 'f.tar.gz') === false && prevented);
+          ok('the link started its download', !!archive);
+          return archive;
+        }, cancel);
         ok('the archive link was asked for once', calls('GET', /\/fs\/archive$/).length >= 1);
       } finally {
+        sfDrop();
+        await Promise.allSettled([archive]);
+        saveFromServer = realSave;
         appConfig.publicAddress = pub;
         delete window.__override['/v1/second-factor'];
         window.__answer = {};
-        if (sfDlg.open) sfDlg.close();
       }
     },
     importPeekBounded: async () => {
@@ -4144,20 +4598,34 @@ const SCENARIOS = String.raw`(() => {
       const parameters = [{ key: 'topic', label: 'Topic', type: 'text', required: true }];
       const bytes = await new Response(new Blob([JSON.stringify({ format: 'hatchabot-template', version: 1, name: 'Later import', files: {}, parameters })]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
       const file = new File([bytes], 'later.hatchabot');
-      let first;
+      let first, second, finishFirst, changed;
       try {
         first = collectParamValues(parameters, 'Current copy');
+        finishFirst = paramFormResolve;
         $('pfv-0').value = 'Keep this answer';
         const before = calls('POST', /^\/v1\/agents\/import$/).length;
-        let finished = false;
-        const second = importAgentFile(file).then(() => { finished = true; });
-        await until(() => finished || $('paramFormName').textContent === 'Later import');
+        // File reads/decompression use real work while Chrome advances its virtual
+        // clock. Wait for completion or an actual replacement, never a timer that
+        // can expire before the peek and release the first form underneath it.
+        const replaced = new Promise(resolve => {
+          changed = new MutationObserver(() => { if ($('paramFormName').textContent === 'Later import') resolve(); });
+          changed.observe($('paramFormName'), { childList: true, characterData: true, subtree: true });
+        });
+        second = importAgentFile(file);
+        await Promise.race([second, replaced]);
         eq('the active setup and its answer remain', [$('paramFormName').textContent, $('pfv-0').value], ['Current copy', 'Keep this answer']);
         await second;
         eq('the refused concurrent import uploaded nothing', calls('POST', /^\/v1\/agents\/import$/).length, before);
         submitParamForm();
         eq('the original caller receives its own answer', await first, { topic: 'Keep this answer' });
-      } finally { if (paramFormDlg.open) cancelParamForm(); }
+      } finally {
+        changed?.disconnect();
+        if (paramFormResolve || paramFormDlg.open) cancelParamForm();
+        // Even a regression that replaced the callback must not strand the first
+        // caller or let a late second import open its form in the next scenario.
+        finishFirst?.(null);
+        await Promise.allSettled([first, second]);
+      }
     },
     importAnswersInBody: async () => {
       // HB-0093 (v2.170.0): the setup answers rode the request's address; about five full-length
@@ -6666,9 +7134,20 @@ const SCENARIOS = String.raw`(() => {
     },
     accessMachineView: async () => {
       const fineB = { ...accOv(true), agentId: 'a2', name: 'Soccer Schedule' };
+      const realFetch = window.fetch;
+      let answer;
       window.__override['/v1/access'] = { agents: [accOv(), fineB] };
+      window.fetch = (input, init) => String(input) === '/v1/access'
+        ? new Promise(resolve => { answer = resolve; }) : realFetch(input, init);
       try {
-        await openAiDlg('security');
+        openV2Agent('a1', 'sharing');
+        const opening = openAiDlg('security');
+        await until(() => answer);
+        // Settings belongs to the account. Closing the agent sheet behind it
+        // must not cancel a machine-wide access read already in flight.
+        v2Close();
+        answer(new Response(JSON.stringify({ agents: [accOv(), fineB] })));
+        await opening;
         const list = () => [...document.querySelectorAll('#accessMapOut details.v2accagent')];
         await until(() => list().length === 2);
         eq('problems first, as the server ordered', list().map((d) => d.dataset.agent), ['a1', 'a2']);
@@ -6678,7 +7157,7 @@ const SCENARIOS = String.raw`(() => {
         byText('#accessMapOut button', 'Open its Sharing tab').click();
         ok('it opens that agent on its Sharing tab', v2AgentDlg.open && v2AgentId === 'a1' && v2Tab === 'sharing' && !aiDlg.open);
         v2Close();
-      } finally { delete window.__override['/v1/access']; if (aiDlg.open) aiDlg.close(); if (v2AgentDlg.open) v2Close(); }
+      } finally { window.fetch = realFetch; delete window.__override['/v1/access']; if (aiDlg.open) aiDlg.close(); if (v2AgentDlg.open) v2Close(); }
     },
     recommended: async () => {
       // Recommended at the top of Usage (made-up items, in the server's order).
@@ -6963,7 +7442,11 @@ const SCENARIOS = String.raw`(() => {
       window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
       const STEP = { status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
       const pub = appConfig.publicAddress, realOpen = window.open;
-      const opened = []; window.open = (url, target) => { opened.push([url, target]); return {}; };
+      const realSave = saveFromServer, watching = [];
+      const changed = (target, ready) => { const w = watchUi(target, ready); watching.push(w); return w.promise; };
+      let download, tabOpened;
+      saveFromServer = (...args) => (download = realSave(...args));
+      const opened = []; window.open = (url, target) => { opened.push([url, target]); tabOpened?.(); return {}; };
       try {
         openV2Agent('a1', 'files');
         await v2LoadFiles('a1', 'notes');
@@ -6979,29 +7462,36 @@ const SCENARIOS = String.raw`(() => {
         ok('a plain link at the private address', sfOpen(ev, name, '/v1/agents/a1/fs?path=notes') === true && !prevented);
         appConfig.publicAddress = true;
         window.__answer = { 'GET /v1/agents/a1/fs': [STEP] };
+        const newTab = new Promise(resolve => { tabOpened = resolve; });
         ok('held at the public address', sfOpen(ev, name, '/v1/agents/a1/fs?path=notes') === false && prevented);
-        await until(() => sfDlg.open);
+        await changed(sfDlg, () => sfDlg.open);
         ok('no tab yet', opened.length === 0);
-        sfDone();
-        await until(() => opened.length === 1);
+        await sfDone();
+        await newTab;
         eq('then the file opens in a new tab', opened[0], [name.getAttribute('href'), '_blank']);
         // Cancelled: no tab, and said.
         window.__answer = { 'GET /v1/agents/a1/fs': [STEP] };
+        $('toast').textContent = '';
         sfOpen(ev, name, '/v1/agents/a1/fs?path=notes');
-        await until(() => sfDlg.open);
+        await changed(sfDlg, () => sfDlg.open);
         byText('#sfDlg button', 'Cancel').click();
-        await until(() => $('toast').textContent.includes('The second factor was not given'));
+        await changed($('toast'), () => $('toast').textContent.includes('The second factor was not given'));
         eq('still one tab', opened.length, 1);
         // The ⬇ at the public address is fetched, so it can ask.
         window.__answer = { 'GET /v1/agents/a1/fs/file': [STEP] };
-        down.click();
-        await until(() => sfDlg.open);
-        byText('#sfDlg button', 'Cancel').click();
+        await withSecondFactor('file download', () => {
+          down.click();
+          ok('the download link started its request', !!download);
+          return download;
+        }, () => byText('#sfDlg button', 'Cancel').click());
         ok('the file was asked for', calls('GET', /\/v1\/agents\/a1\/fs\/file$/).length >= 1);
       } finally {
+        for (const w of watching) w.disconnect();
+        sfDrop();
+        await Promise.allSettled([download]);
+        saveFromServer = realSave;
         appConfig.publicAddress = pub; window.open = realOpen; window.__answer = {};
         delete window.__override['/v1/agents/a1/fs']; delete window.__override['/v1/second-factor'];
-        if (sfDlg.open) sfDlg.close();
         if (v2AgentDlg.open) v2Close(); v2FilesPath.delete('a1');
       }
     },
@@ -8602,6 +9092,9 @@ const SCENARIOS = String.raw`(() => {
       window.__override['/v1/second-factor'] = { factors: [{ id: 'sf-1', kind: 'totp' }], backupCodes: 3, need: 'yes', methods: ['totp', 'backup'], passkeyHere: false };
       const STEP = { status: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
       const pub = appConfig.publicAddress;
+      const watching = [];
+      const changed = (target, ready) => { const w = watchUi(target, ready); watching.push(w); return w.promise; };
+      let privateError, privateBox, privateImg;
       const reads = () => calls('GET', /\/v1\/agents\/a1\/fs$/).length;
       const fileCalls = () => calls('GET', /\/v1\/agents\/a1\/fs\/file$/);
       const checks = () => fileCalls().filter((c) => /[?&]check=1$/.test(c.url)).length;
@@ -8616,42 +9109,55 @@ const SCENARIOS = String.raw`(() => {
         await v2OpenFile('a1', 'garden', 'plan.png', 2048);
         const img = $('v2Files').querySelector('img');
         ok('the picture is drawn at once', !!img);
-        await until(() => sfDlg.open);
+        await changed(sfDlg, () => sfDlg.open);
         eq('the file is checked only once its load failed', checks() - n, 1);
-        sfDone();
-        await until(() => img.getAttribute('src').endsWith('&again=1'));
+        await sfDone();
+        await changed(img, () => img.getAttribute('src').endsWith('&again=1'));
         eq('given: checked again, and the picture loaded once more; its folder not read', [checks() - n, reads() - r0], [2, 0]);
-        await until(() => $('v2Files').textContent.includes('could not be shown here'));
+        await changed($('v2Files'), () => $('v2Files').textContent.includes('could not be shown here'));
         ok('failing again, that is said', !$('v2Files').querySelector('img'));
         window.__answer = { 'GET /v1/agents/a1/fs/file': [STEP] };
         await v2OpenFile('a1', 'garden', 'walk.mp4', 2048);
-        await until(() => sfDlg.open);
+        await changed(sfDlg, () => sfDlg.open);
         byText('#sfDlg button', 'Cancel').click();
-        await until(() => $('v2Files').textContent.includes('The second factor was not given'));
+        await changed($('v2Files'), () => $('v2Files').textContent.includes('The second factor was not given'));
         ok('not given: said, and no player', !$('v2Files').querySelector('video'));
         // A reader in a frame (eighth review): the file's check first, through api(), which asks; then the frame reads the
         // sandboxed URL from the server. Its folder is not read, and the file is not downloaded through the page (ninth review).
         const filesRead = fileCalls().length, k = reads();
         window.__answer = { 'GET /v1/agents/a1/fs/file': [STEP, { body: {} }] };
-        const pdf = v2OpenFile('a1', 'garden', 'map.pdf', 2048);
-        await until(() => sfDlg.open);
-        ok('no frame before the factor is given', !$('v2Files').querySelector('iframe'));
-        sfDone();
-        await pdf;
+        await withSecondFactor('PDF', () => v2OpenFile('a1', 'garden', 'map.pdf', 2048), async () => {
+          ok('no frame before the factor is given', !$('v2Files').querySelector('iframe'));
+          await sfDone();
+        });
         const frame = $('v2Files').querySelector('iframe');
         eq('then the reader is drawn from the server URL', frame && frame.getAttribute('src'), '/v1/agents/a1/fs/file?path=' + encodeURIComponent('garden/map.pdf') + '&inline=1');
         eq('the check (check=1) asked twice, before and after the factor; nothing else of the file, and the folder not at all',
           [fileCalls().slice(filesRead).map((c) => /[?&]check=1$/.test(c.url)), reads() - k], [[true, true], 0]);
         appConfig.publicAddress = false;
-        const m = reads();
-        await v2OpenFile('a1', 'garden', 'plan.png', 2048);
-        ok('at the private address the picture is drawn', !!$('v2Files').querySelector('img'));
-        await sleep(200);
-        eq('and its failing reads nothing', reads(), m);
+        const m = reads(), privateReads = fileCalls().length;
+        privateBox = $('v2Files');
+        const privateFailed = new Promise(resolve => {
+          privateError = ev => {
+            if (ev.target !== privateImg) return;
+            // A task after dispatch lets any target listener run too. complete
+            // alone can become true before the native error has been delivered.
+            setTimeout(resolve, 0);
+          };
+          privateBox.addEventListener('error', privateError, true);
+        });
+        const privateShown = v2OpenFile('a1', 'garden', 'plan.png', 2048);
+        privateImg = $('v2Files').querySelector('img');
+        await privateShown;
+        ok('at the private address the picture is drawn', !!privateImg);
+        await privateFailed;
+        eq('and its failing reads nothing', [reads(), fileCalls().length], [m, privateReads]);
       } finally {
+        if (privateError) privateBox.removeEventListener('error', privateError, true);
+        for (const w of watching) w.disconnect();
+        sfDrop();
         appConfig.publicAddress = pub; window.__answer = {};
         delete window.__override['/v1/second-factor']; delete window.__override['/v1/agents/a1/fs'];
-        if (sfDlg.open) sfDlg.close();
         try { v2Close(); } catch {}
       }
     },
@@ -10861,6 +11367,78 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         if (reportDlg.open) reportDlg.close();
         delete window.__override['/v1/problem-reports']; delete window.__override['/v1/problem-reports/' + row.id];
+      }
+    },
+    mediaKeySavedIsNotVoiceReadiness: async () => {
+      // A stored fleet credential proves neither successful transcription nor application to a running agent.
+      const account = myAccount, keys = fleetKeys, guide = setupOpen, confirmed = window.__confirmAnswer;
+      const overrides = ['/v1/account', '/v1/media-key', '/v1/runtime/capabilities'];
+      const before = Object.fromEntries(overrides.filter(k => k in window.__override).map(k => [k, window.__override[k]]));
+      const status = () => $('mediaKeyStatus').textContent;
+      const voiceRow = () => [...$('runtimeCaps').querySelectorAll('tr')].find(r => r.querySelector('b')?.textContent === 'Telegram voice notes');
+      try {
+        window.__override['/v1/account'] = { ...account, hostOwner: true };
+        window.__override['/v1/media-key'] = { set: false };
+        window.__override['/v1/runtime/capabilities'] = { tools: { openclaw: '2026.9.8' }, missing: [] };
+        await openAiDlg('conn');
+        await loadMediaKey();
+        const help = $('mediaKeyDrawer').textContent;
+        ok('the drawer names Telegram and separates Browser Talk', help.includes('Telegram voice notes') && help.includes('Browser Talk') && help.includes('separate voice settings'));
+        ok('saving is not a test or an immediate apply', help.includes('Saving does not test the key or change running agents'));
+        ok('no price promise', !/free tier|free for|plenty for/i.test(help));
+        ok('an absent shared key does not rule out other keys', status().includes('No shared Gemini key saved') && status().includes('own key') && status().includes('previous shared key'));
+        ok('Remove is hidden without a saved key', $('mediaKeyDelBtn').style.display === 'none');
+
+        // Save through the real form, with the server reporting only that it stored the key.
+        const applies = () => calls('POST', /\/(?:rebuild|voice|voice-test|media-key)(?:\/.*)?$/).length;
+        const posts = applies(), puts = calls('PUT', /\/v1\/media-key$/).length;
+        window.__override['/v1/media-key'] = { set: true };
+        $('mediaKey').value = '  made-up-media-key  ';
+        $('mediaKeySaveBtn').click();
+        const put = await until(() => calls('PUT', /\/v1\/media-key$/)[puts]);
+        eq('only the trimmed key is saved', put.body, { key: 'made-up-media-key' });
+        await until(() => status().includes('Shared Gemini key saved'));
+        eq('the secret leaves the form after save', $('mediaKey').value, '');
+        ok('saved status says untested, rebuild and source precedence', status().includes('not tested') && status().includes('next Rebuild') && status().includes('own key takes precedence'));
+        ok('stored is not styled as working', $('mediaKeyStatus').style.color !== 'var(--ok)');
+        ok('the result keeps the same distinctions', $('toast').textContent.includes('saved, not tested') && $('toast').textContent.includes('Rebuild existing agents') && $('toast').textContent.includes('Browser Talk'));
+        eq('saving does not start a rebuild or test', applies(), posts);
+        ok('saved key keeps its Show and Remove controls', !!$('fleetkey-media') && $('mediaKeyDelBtn').style.display !== 'none');
+
+        fleetKeys = { ...keys, media: true }; setupOpen = true; renderSetup();
+        ok('the rendered setup step claims only a saved key', $('setup').textContent.includes('Shared Gemini key saved (not tested)'));
+        await loadRuntimeCaps();
+        ok('runtime capability is not a successful voice check', voiceRow()?.textContent.includes('saved, not tested') && voiceRow().textContent.includes('Rebuild') && voiceRow().textContent.includes('own key'));
+        ok('runtime voice is not green', voiceRow().querySelector('span').style.color !== 'var(--ok)');
+
+        // Removal changes the stored default; existing containers and source-specific keys can remain.
+        const deletes = calls('DELETE', /\/v1\/media-key$/).length;
+        window.__confirmAnswer = true;
+        window.__override['/v1/media-key'] = { set: false };
+        $('mediaKeyDelBtn').click();
+        await until(() => calls('DELETE', /\/v1\/media-key$/).length > deletes && status().includes('No shared Gemini key saved'));
+        const removal = window.__confirms.at(-1);
+        ok('removal explains when it applies and leaves own keys alone', removal.includes('keep it until their next Rebuild') && removal.includes("own key is unchanged"));
+        fleetKeys = { ...keys, media: false }; renderSetup();
+        ok('setup explains other keys and separate Browser Talk', $('setup').textContent.includes('A Gemini AI source can supply its own key') && $('setup').textContent.includes('Browser Talk is configured separately'));
+        await loadRuntimeCaps();
+        ok('runtime absence does not claim that voice is unavailable', voiceRow()?.textContent.includes('No shared Gemini key saved') && voiceRow().textContent.includes('previous key'));
+
+        window.__answer = { 'GET /v1/media-key': [{ status: 503, body: { error: 'made-up unavailable status' } }] };
+        await loadMediaKey();
+        ok('a failed status read is unknown', status().includes('Could not check whether'));
+        window.__answer = { 'GET /v1/media-key': [{ status: 503, body: { error: 'made-up unavailable status' } }] };
+        await loadRuntimeCaps();
+        ok('runtime keeps an unavailable read distinct from no key', voiceRow()?.textContent.includes('status unavailable') && !voiceRow().textContent.includes('No shared Gemini key'));
+        fleetKeys = { ...keys, media: null }; renderSetup();
+        ok('setup also preserves unknown', $('setup').textContent.includes('Shared Gemini key status unavailable'));
+      } finally {
+        window.__answer = {}; window.__confirmAnswer = confirmed;
+        for (const k of overrides) { if (k in before) window.__override[k] = before[k]; else delete window.__override[k]; }
+        $('mediaKey').value = '';
+        myAccount = account; fleetKeys = keys; setupOpen = guide;
+        if (aiDlg.open) aiDlg.close();
+        paintMachineOwnerOnly(); renderSetup();
       }
     },
     ownerOnlyFormsHidden: async () => {

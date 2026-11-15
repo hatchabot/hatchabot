@@ -72,7 +72,7 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
     agents: AGENTS.map((a) => ({ ...a })), profiles: PROFILES, agentClasses: [], appConfig: { authMode: 'accounts' },
     api: async (url: string, init?: { method?: string; body?: Record<string, unknown> }) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, prompt: () => '', toast: noop, refresh: async () => {},
-    editDlg: { open: false, close: () => closed.push('edit') }, v2AgentDlg: { open: false }, v2AgentId: null, editParamsFills: 0, searchTests: new Set(), inviteDlg: { showModal: noop }, proposalsDlg: { showModal: noop },
+    editDlg: { open: false, close: () => closed.push('edit') }, v2AgentDlg: { open: false }, v2AgentId: null, editParamsFills: 0, searchTests: new Set(), inviteDlg: { open: false, showModal() { this.open = true; } }, proposalsDlg: { showModal: noop },
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), ago: () => 'just now',
     sourceOptionLabel: (p: { name: string }) => p.name, localClashWarning: () => '', confirmRebuild: () => true,
     showEditTab: noop, populateImagePicker: async () => {}, embedModeText: () => '', renderSetupValues: noop, renderBotWho: noop,
@@ -82,11 +82,13 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
     v2SheetSaving: () => noop, v2SheetBaseline: noop, V2_SHEET_FORMS: [], // the sheet's record of unsaved edits (HB-0475): not what these check
     onRepoPublic: noop, onParamTypeChange: noop, v2CtlDrawn: () => '',
     invWebFor: null, invShare: null, proposalsMasterId: null, proposalsGen: 0,
+    sharingEpoch: 0, sharingView: 0, sharingReads: new WeakMap(), pagePerson: 'synthetic-owner', pagePersonAway: false, pageSignedOut: false,
     spendRange: 'week', spendAgents: [], spendChartSeq: 0, spendChartHTML: (d: unknown) => JSON.stringify(d),
     ...extra,
   });
   // Whose forms an answer is drawn in, and where it is said: the page's own helpers (forAgent, agentPrefix).
-  for (const n of ['agentPrefix', 'forAgent', ...names]) vm.runInContext(source(n), c);
+  for (const n of ['agentPrefix', 'forAgent', 'inviteCurrent', 'sharingRead', ...names]) vm.runInContext(source(n), c);
+  vm.runInContext("const v2Find = id => agents.find(a => a.id === id); const v2Mine = a => !a.role || a.role === 'owner';", c);
   return { c: c as Record<string, any>, $, calls, closed };
 }
 
@@ -105,7 +107,7 @@ describe('the AI tab: one press acts on the agent it was pressed for (audit #047
     expect(closed).toEqual([]); // B's sheet stays open
   });
 
-  it('the image pin and the peers grant rebuild the agent they saved', async () => {
+  it('the image pin rebuilds its original agent; a peer grant is saved without a later prompt in another agent view', async () => {
     const pin = page(['saveImagePin']);
     pin.$('editImage').value = 'hatchabot-runtime:candidate';
     const saved = gate();
@@ -114,11 +116,19 @@ describe('the AI tab: one press acts on the agent it was pressed for (audit #047
     expect(pin.calls.map((x) => x.url)).toEqual(['/v1/agents/a1', '/v1/agents/a1/rebuild']);
 
     const peers = page(['savePeers'], { peersLoadedFor: 'a1', document: { querySelectorAll: (sel: string) => sel === '.peerCb:checked' ? [{ dataset: { id: 'a2' } }] : [] } });
+    peers.c.peersCurrent = peers.c.sharingRead(peers.$('agentPeerList'), 'a1');
+    let confirmations = 0; peers.c.confirm = () => { confirmations++; return true; };
     const put = gate();
     peers.c.api = async (url: string, init: Init) => { peers.calls.push({ url, ...init }); return init.method === 'PUT' ? put.p : {}; };
     const p2 = peers.c.savePeers(); peers.c.editAgentId = 'a2'; put.open({}); await p2;
-    expect(peers.calls.map((x) => x.url)).toEqual(['/v1/agents/a1/peers', '/v1/agents/a1/rebuild']);
+    expect(peers.calls).toEqual([{ url: '/v1/agents/a1/peers', method: 'PUT', body: { peerIds: ['a2'], allowActions: [] } }]);
+    expect(confirmations).toBe(0);
     expect(peers.closed).toEqual([]);
+    peers.c.editAgentId = 'a1'; peers.$('peerSaveBtn').disabled = false;
+    peers.c.peersCurrent = peers.c.sharingRead(peers.$('agentPeerList'), 'a1');
+    await peers.c.savePeers();
+    expect(confirmations).toBe(1);
+    expect(peers.calls.at(-1)!.url).toBe('/v1/agents/a1/rebuild');
   });
 
   it("a source picked and not applied leaves the model button usable on the next agent's sheet", () => {

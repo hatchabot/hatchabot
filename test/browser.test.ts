@@ -8,7 +8,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { buildConfigCommands } from '../src/openclaw/configWriter.js';
-import { BROWSER_CDP_URL, BROWSER_FENCE_SCRIPT, BROWSER_FENCE_VERSION, BROWSER_FENCED_V4, BROWSER_FENCED_V6, BROWSER_UID, browserImage, browserSweep, containerOf, browserRefreshDate } from '../src/orchestrator/browser.js';
+import { BROWSER_CDP_URL, BROWSER_START_SCRIPT, BROWSER_FENCE_SCRIPT, BROWSER_FENCE_VERSION, BROWSER_FENCED_V4, BROWSER_FENCED_V6, BROWSER_UID, browserImage, browserSweep, containerOf, browserRefreshDate } from '../src/orchestrator/browser.js';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 /**
@@ -227,10 +227,11 @@ cat > /dev/null &
 printf '%s\\n' "$*" >> ${JSON.stringify(log)}
 case "$*" in
   "inspect hatchabot-a1 --format "*) echo "true|${agentStarted}" ;;
-  "inspect hatchabot-a1-browser --format "*) ${browserLabel ? `echo "true|${browserLabel}|${browserImage().image}|${askedLabel}|${browserMemory}|none|${fenceVersion}"` : 'exit 1'} ;;
+  "inspect hatchabot-a1-browser --format "*) ${browserLabel ? `echo "true|${browserLabel}|${browserImage().image}|${askedLabel}|${browserMemory}|none|${fenceVersion}"` : 'echo "no such container" >&2; exit 1'} ;;
   "image inspect "*) exit 1 ;;
   "build "*) exit 0 ;;
   "run --rm "*) ${fence} ;;
+  "exec --user 1001:1001 hatchabot-a1-browser sh "*) ${fence === 'echo FENCED' ? 'echo READY' : fence} ;;
   "run -d "*) echo newid ;;
 esac
 exit 0
@@ -248,6 +249,7 @@ exit 0
     const run = lines.find((l) => l.startsWith('run -d --name hatchabot-a1-browser'))!;
     expect(run).toContain('--network container:hatchabot-a1');
     expect(run).toContain('--read-only');
+    expect(run).toContain('--tmpfs /run:size=1m,mode=0755');
     expect(run).toContain('--cap-drop ALL');
     expect(run).toContain('--memory 1g');
     expect(run).toContain('hatchabot.browser-with=2026-10-08T10:00:00Z');
@@ -255,25 +257,26 @@ exit 0
     expect(run).not.toMatch(/-v |--volume|\/home\/node/); // nothing of the agent's
     expect(run).toContain(`/profile:size=512m,uid=${BROWSER_UID},gid=${BROWSER_UID}`);
   });
-  it('the fence is set in the agent\'s network before Chromium starts: NET_ADMIN only, then gone (HB-0679)', async () => {
+  it('the startup fences the browser\'s own namespace before dropping all privileges (HB-0724)', async () => {
     const { p, argv } = stub('2026-10-08T10:00:00Z');
     expect(await p.ensureBrowser(spec)).toBe('started');
     const lines = argv();
-    const fence = lines.findIndex((l) => l.startsWith('run --rm --network container:hatchabot-a1 '));
     const browser = lines.findIndex((l) => l.startsWith('run -d --name hatchabot-a1-browser'));
-    expect(fence).toBeGreaterThan(-1);
-    expect(fence).toBeLessThan(browser);
-    const f = lines[fence];
-    expect(f).toContain('--cap-drop ALL --cap-add NET_ADMIN');
+    expect(browser).toBeGreaterThan(-1);
+    expect(lines.some((l) => l.startsWith('run --rm --network container:'))).toBe(false);
+    const f = lines[browser];
+    expect(f).toContain('--cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP');
     expect(f).toContain('--user 0:0 --entrypoint sh');
+    expect(f).toContain('--no-healthcheck');
     expect(f).toContain(`${browserImage().image} -c set -e`);
     expect(f).not.toMatch(/--privileged|-v |--volume/);
+    expect(BROWSER_START_SCRIPT).toContain('--bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs');
   });
-  it('a fence that is not confirmed starts no browser, and says why', async () => {
+  it('a startup that is not confirmed removes its container and says why', async () => {
     for (const fence of ["echo \"iptables: can't initialize iptables table filter\" >&2; exit 4", 'echo done']) {
       const { p, argv } = stub('2026-10-08T10:00:00Z', undefined, 1024 ** 3, '', fence);
       await expect(p.ensureBrowser(spec)).rejects.toThrow(/browser fence failed/);
-      expect(argv().some((l) => l.startsWith('run -d '))).toBe(false);
+      expect(argv()).toContain('rm -f hatchabot-a1-browser');
     }
   });
   it('the fence: the browser\'s user only, new connections to every private range, Docker\'s DNS left open', () => {
@@ -332,12 +335,13 @@ case "$*" in *--ctorigdstport*) [ "\${FAIL_DNS:-0}" = 0 ] || exit 2 ;; esac
 echo "$*" >> ${JSON.stringify(log)}
 case "$*" in
   "inspect hatchabot-a1 --format"*) echo "true|2026-10-08T10:00:00Z" ;;
-  "inspect hatchabot-a1-browser"*) exit 1 ;;
+  "inspect hatchabot-a1-browser"*) echo "no such container" >&2; exit 1 ;;
   "image inspect"*) exit 1 ;;
   "build -t"*) cat > /dev/null ;;
   "run --rm "*) echo FENCED ;;
   "images hatchabot-browser "*) echo "${mine}"; echo "hatchabot-browser:0123456789ab"; echo "hatchabot-browser:<none>" ;;
-  "exec hatchabot-a1-browser chromium --version") echo "Chromium 154.0.8037.92 built on Debian GNU/Linux 12 (bookworm)" ;;
+  "exec --user 1001:1001 hatchabot-a1-browser chromium --version") echo "Chromium 154.0.8037.92 built on Debian GNU/Linux 12 (bookworm)" ;;
+  "exec --user 1001:1001 hatchabot-a1-browser sh "*) echo READY ;;
   "exec "*) exit 1 ;;
 esac
 exit 0

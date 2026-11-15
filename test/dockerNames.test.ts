@@ -25,6 +25,10 @@ afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, f
 const LEGACY = 'docker://123456abcdef';
 const MODERN = 'docker://hatchabot-meal-planner-9221b8b8';
 const RENAMED = 'docker://agentclaw-garden-notes-5a7fd6e1';
+// Full sandbox backup/uninstall workflows spawn shell and Node processes.
+// Shared-runner load exceeded Vitest's default 5 s (HB-0741); the naming
+// assertions remain unchanged, and the pure naming tests keep that default.
+const SCRIPT_TIMEOUT = 30_000;
 
 describe('dockerNames', () => {
   it('names the volume as the provider always has: slugged refs as they are, legacy ones under the old scheme', () => {
@@ -82,7 +86,7 @@ exit 0
   return { r, set, record: JSON.parse(readFileSync(join(set, 'backup-status.json'), 'utf8')) };
 }
 
-describe('scripts/backup-volumes.sh names volumes by the same rule', () => {
+describe('scripts/backup-volumes.sh names volumes by the same rule', { timeout: SCRIPT_TIMEOUT }, () => {
   it('a legacy agent\'s volume is backed up under the archive name a restore looks for: complete, no orphan, nothing missing', () => {
     const refs = [LEGACY, MODERN, RENAMED];
     const { r, set, record } = backupRun(refs, refs.map((ref) => dockerNames(ref).volume));
@@ -120,7 +124,7 @@ function uninstallLookups(refs: string[], prefix = 'hatchabot') {
   return { r, calls: existsSync(log) ? readFileSync(log, 'utf8') : '' };
 }
 
-describe('scripts/uninstall.sh names containers and volumes by the same rule (HB-0282)', () => {
+describe('scripts/uninstall.sh names containers and volumes by the same rule (HB-0282)', { timeout: SCRIPT_TIMEOUT }, () => {
   for (const prefix of ['hatchabot', 'second']) {
     it(`under the ${prefix} prefix: a legacy agent's container and volume are looked up as the provider names them`, () => {
       const refs = [LEGACY, MODERN, RENAMED];
