@@ -104,9 +104,12 @@ Hatchabot's role is to make that possible and visible, not to broker OAuth:
   what's connected (`gog auth list` via exec), with per-service scopes, a
   "disconnect" (delete the store), and the member-access warning. Possibly
   a guided "connect" that relays the URL/code without Telegram.
-- **Phase 3 (skills management):** show the agent's `skills/` in the Files
-  UI; include skills in Share templates so "a trained agent" means its
-  skills too; a curated skill library to enable per agent at creation.
+- **Phase 3 (skills management):** Advanced → Skills now offers a curated
+  library with saved per-agent selection, applied on rebuild or next start.
+  Files remain editable through Files; existing contents are preserved.
+  Share templates and clones carry reviewed catalog choices, while custom
+  skill files stay out of share templates. Creation-time selection and sharing
+  arbitrary custom skill packages remain future work.
 
 ## Guardrails (phase 1 already needs these)
 

@@ -245,6 +245,10 @@ export interface Agent {
    *  way an inbox poll wakes only when mail exists. Runs inside the agent's own
    *  container with its tool policy; off by default. */
   cronTriggers?: boolean;
+  /** Selected Hatchabot library skills. Unset keeps the legacy gog seed and upstream flags. */
+  curatedSkills?: string[];
+  /** Explicit selection last accepted by the runtime; unset means not yet known. */
+  appliedCuratedSkills?: string[];
   /** Its own browser for OpenClaw's browser tool (src/orchestrator/browser.ts). Off by default. */
   browser?: boolean;
   /** Keep its logins (HB-0680): the id of the browser profile it keeps on disk; unset, its browser keeps nothing past a restart. */

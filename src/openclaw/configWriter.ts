@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
 import { consoleGatewayAuth, consoleGatewayRoles, NO_PROXY_YET } from './consoleIdentity.js';
+import { CURATED_SKILLS, selectedCuratedSkills } from './skills.js';
 
 /** A skipIf test: is there a route binding of this agent to channel:account? */
 const hasBinding = (agentId: string, channel: string, accountId: string): string =>
@@ -653,6 +654,14 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // Event-triggered tasks: convergent like richMessages — an explicit opt-in
   // writes true, everything else re-asserts false on every provision/rebuild.
   cmds.push({ argv: ['config', 'set', 'cron.triggers.enabled', patch.cronTriggers === true ? 'true' : 'false'] });
+  // Only explicit library choices are managed. Keep legacy enablement, custom
+  // files and each entry's credentials untouched; never replace skills.entries.
+  if (!patch.ops && patch.curatedSkills !== undefined) {
+    const selected = new Set(selectedCuratedSkills(patch.curatedSkills));
+    for (const skill of CURATED_SKILLS) {
+      cmds.push({ argv: ['config', 'set', `skills.entries.${skill.id}.enabled`, selected.has(skill.id) ? 'true' : 'false'] });
+    }
+  }
   // Its own browser (src/orchestrator/browser.ts): an attach-only profile at
   // the Chromium in its network namespace. Without one the tool is OFF — the
   // image carries no browser, and a tool that cannot work only costs the model

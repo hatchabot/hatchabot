@@ -6,6 +6,36 @@ Each entry says how to **confirm** it before acting: run that check first, since
 **Fixed in** names the release that fixed it in code: on an older install the fix is to upgrade (`hatchabot upgrade`); `—` means a setting, the machine, or an explicitly unreleased fix.
 **Code** names the file to read to go deeper.
 
+## Skills
+
+### A selected skill is not available, or an unchecked skill can still use its tools
+- **Check:** open the agent's Advanced → Skills. Compare saved choices with the last build, then press Check availability on a running agent. This reports instruction visibility and missing prerequisite categories, not a successful task. Google account presence does not test sign-in or scopes; a browser enabled in configuration does not prove it runs. Web-tool permissions vary by conversation and remain unchecked.
+- **Cause:** saving choices does not change a running conversation. Provisioning creates missing skill files and updates only catalog entries' enabled switches; customized files and unrelated settings stay intact. Selecting instructions cannot satisfy missing tools or accounts. Disabling them is not access revocation. Failed or interrupted reads leave availability unknown.
+- **Fix:** save and rebuild, or let the stopped agent apply the choices at its next start, then start a new conversation. Use Connections or Browser settings for the corresponding missing prerequisite. Inspect customized skill files and OpenClaw policy for other restrictions. Retry unknown readings after its current operation finishes. To revoke access, disconnect the account or disable the relevant tool in its own settings.
+- **Fixed in:** `v2.187.0`
+- **Code:** `src/api/routes.ts` — `skillsView`, `skillsEditable`, `skillStatusReads`; `src/orchestrator/skillsStatus.ts` — `readSkillsStatus`; `src/openclaw/workspace.ts` — `buildWorkspaceSeed`; `src/openclaw/configWriter.ts` — `buildConfigCommands`
+
+### An agent looks for a command-line program in the tool catalog, or treats a shell command as JavaScript
+- **Check:** its conversation's tool trace shows a catalog lookup for a CLI such as gog or call-agent, or a JavaScript syntax error from a raw shell command passed to the Code Mode exec tool. Do not infer this cause from a generic task failure.
+- **Cause:** Code Mode exposes JavaScript tool calls. A command-line program must run through the shell exec function inside that JavaScript; its session identifier is different from a waiting Code Mode cell's run identifier. Older managed install notes did not explain this for non-Google tools.
+- **Fix:** rebuild or start the agent to refresh its managed Installing tools section, then use a new conversation. The notes explain skill reads, catalog handles, shell commands and polling. They do not grant missing tools. Scripted tests exercise the pinned protocol; ordinary-model use still requires the live skills acceptance test.
+- **Fixed in:** `v2.187.0`
+- **Code:** `src/openclaw/skills.ts` — `SKILL_TOOL_GUIDANCE`; `src/openclaw/workspace.ts` — `installConventionsSection`, `withInstallSection`; `src/orchestrator/provision.ts` — `syncDataSourceDocs`; `scripts/skills-contract.ts` — `loadPinnedContract`
+
+### A skill update is refused, or the installed version is unknown
+- **Check:** open Advanced → Skills → Preview, update and try. Compare the installed text, catalog text and version status. Refresh a stale preview. A customized file or one without a matching recorded baseline is deliberately excluded from ordinary updates.
+- **Cause:** automatic replacement would discard edits or assume an unrecorded version. Every explicit change compares the current file and its history with the preview. Rebuilds seed missing baseline metadata but do not overwrite existing instructions or history.
+- **Fix:** keep the customization, or review the comparison and explicitly choose Replace with catalog. Restore previous instructions reverses the last change; five previous copies are retained. Unknown version is not proof of a damaged file. If a killed operation left a per-skill lock, stop the agent, inspect its instructions and history in Files, and have the machine administrator remove only the stale per-skill lock directory after confirming no operation is running. Refresh before another change.
+- **Fixed in:** `v2.187.0`
+- **Code:** `src/orchestrator/skillFiles.ts` — `readSkillFile`, `mutateSkillFile`, `skillFileScript`; `src/openclaw/workspace.ts` — `buildWorkspaceSeed`; `src/api/routes.ts` — `skillFileContext`
+
+### A skill practice task is unsupported, times out, or cannot verify instruction use
+- **Check:** read the practice result and its observed-read counts. A completed answer without evidence for both instructions and sample material is not a verified practice result. Check the runtime version and model harness; the initial implementation targets OpenClaw 2026.9.8's built-in agent runner.
+- **Cause:** practice confines tools to a temporary workspace and refuses model harnesses that cannot honor that boundary. The source can fail or exceed the model-run deadline. The response-token setting is not a total dollar budget, and failed attempts may still use paid tokens.
+- **Fix:** check the configured AI source and compatibility, refresh the instruction preview, and wait two minutes before another attempt. Use the regular conversation for tasks needing real services; a practice result does not test those accounts, permissions or providers.
+- **Fixed in:** `v2.187.0`
+- **Code:** `src/orchestrator/skillTrials.ts` — `describeSkillTrial`, `runSkillTrial`, `skillTrialScript`; `src/api/routes.ts` — `skillTrialNext`; `web/index.html` — `v2SkillTry`
+
 ## Install and upgrade
 
 ### Linux: every agent fails with "Could not create the agent volume", while your terminal runs `docker` fine

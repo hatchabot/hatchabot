@@ -676,7 +676,9 @@ export async function restoreAgentFromBackup(
   // was is on disk holds the agent stopped for its owner's choice, and the
   // copy is there to put back (resumeBackupRestore).
   const safetyFile = safetyCopyPath(runtimeRef);
-  const op = beginOperation(store, 'restore-backup', agentId, { date, wasRunning, safetyFile }, { requestedBy: deps.requestedBy });
+  const op = beginOperation(store, 'restore-backup', agentId, {
+    date, wasRunning, safetyFile, appliedCuratedSkillsBefore: agent.appliedCuratedSkills,
+  }, { requestedBy: deps.requestedBy });
   deps.onOperation?.(op.id);
   try {
     return await restoreSteps(deps, op, agentId, runtimeRef, date, file, wasRunning, safetyFile);
@@ -694,6 +696,7 @@ async function restoreSteps(
 ): Promise<RestoreResult> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
+  const appliedCuratedSkillsBefore = op.get().params.appliedCuratedSkillsBefore as string[] | undefined;
   const restartIfWasRunning = () => restartAfterRestore(deps, agentId, runtimeRef, wasRunning);
   const nothingChanged = async (why: string): Promise<never> => {
     // Its memory is as it was, but a start that failed (its machine stopped
@@ -778,6 +781,7 @@ async function restoreSteps(
    */
   const rollBack = async (what: string, cause: unknown, leftAsItWas: string): Promise<never> => {
     let rollbackErr: unknown;
+    store.setAgentCuratedSkillsApplied(agentId, undefined);
     // The one-shot that failed may still be extracting into the volume: putting
     // the copy back alongside it could leave a mix of the two, restarted as
     // "left as it was" with the copy deleted (HB-0385). So it does not begin.
@@ -788,6 +792,7 @@ async function restoreSteps(
       const notDown = await confirmStopped(deps, agentId, runtimeRef);
       if (notDown) throw new Error(`its runtime could not be confirmed stopped (${notDown})`);
       await provider.importStateFromFile(runtimeRef, safetyFile, { ownCopy: true });
+      store.setAgentCuratedSkillsApplied(agentId, appliedCuratedSkillsBefore);
     } catch (e) {
       rethrowIfCrash(e);
       rollbackErr = e;
@@ -828,6 +833,9 @@ async function restoreSteps(
   forgetDmPolicy(agentId); // the restored config is whatever the archive held
   try {
     await provider.importStateFromFile(runtimeRef, archive);
+    // The replacement has that night's config. Only a successful current
+    // configuration can establish which library selection now applies.
+    store.setAgentCuratedSkillsApplied(agentId, undefined);
   } catch (err) {
     rethrowIfCrash(err);
     log('restore.import_failed', { agentId, error: String(err) });
@@ -844,6 +852,7 @@ async function restoreSteps(
           : `Restore failed (${short(err)}) — the agent was left as it was.`,
       );
     }
+    store.setAgentCuratedSkillsApplied(agentId, undefined);
     // The volume may be half-overwritten. Put the pre-restore state back, so a
     // broken archive never corrupts a working agent.
     await rollBack(
@@ -959,6 +968,7 @@ async function applyCurrentSettingsOver(deps: RestoreDeps, agentId: string, runt
       // source gone). The part that matters for safety still runs: only its
       // current bot stays; the rest follows at its next rebuild.
       log('restore.reapply_partial', { agentId, error: String(err).slice(0, 200) });
+      store.setAgentCuratedSkillsApplied(agentId, undefined);
       const res = await provider.execShellOnVolume(runtimeRef, keepOnlyTelegramAccountScript(store.getChannelForAgent(agentId, 'telegram')?.accountId));
       if (res.code !== 0) throw new Error(`dropping the old bot failed: ${res.stderr.slice(-200)}`);
       // Slack and Discord too: that night's tokens must not run either, and
@@ -1024,7 +1034,7 @@ const RESTORE_CHOICES = {
 export async function resumeBackupRestore(deps: RestoreDeps, opId: string): Promise<void> {
   const op = handleFor(deps.store, opId);
   const row = op.get();
-  const p = row.params as { date?: string; wasRunning?: boolean; safetyFile?: string };
+  const p = row.params as { date?: string; wasRunning?: boolean; safetyFile?: string; appliedCuratedSkillsBefore?: string[] };
   const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
   if (!agent?.runtimeRef || agent.state === 'DELETED') { op.fail('Interrupted by a restart; the agent is gone.'); return; }
   const date = String(p.date ?? '');
@@ -1039,6 +1049,8 @@ export async function resumeBackupRestore(deps: RestoreDeps, opId: string): Prom
     await completeRestore(deps, op, agent.id, agent.runtimeRef, date, p.wasRunning === true, p.safetyFile, []);
     return;
   }
+  // A crash may have interrupted the replacement or current configuration.
+  deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
   // Whatever its volume holds now must not run until the owner chooses. Checked
   // down, not assumed: a stop whose machine did not answer used to be
   // recorded STOPPED and told the owner it "stays stopped" (B021). Held either
@@ -1063,7 +1075,7 @@ export async function resumeBackupRestore(deps: RestoreDeps, opId: string): Prom
 export async function recoverBackupRestore(deps: RestoreDeps, opId: string, action: string): Promise<void> {
   const op = handleFor(deps.store, opId);
   const row = op.get();
-  const p = row.params as { date?: string; wasRunning?: boolean; safetyFile?: string };
+  const p = row.params as { date?: string; wasRunning?: boolean; safetyFile?: string; appliedCuratedSkillsBefore?: string[] };
   const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
   if (!agent?.runtimeRef) throw new RestoreError('The agent is gone.');
   const date = String(p.date ?? '');
@@ -1083,8 +1095,10 @@ export async function recoverBackupRestore(deps: RestoreDeps, opId: string, acti
       throw new RestoreError('The copy from before the restore is no longer on disk, so it cannot be put back. Finish the restore, or restore another backup.');
     }
     await deps.provider.importStateFromFile(ref, p.safetyFile, { ownCopy: true }).catch((err: unknown) => {
+      deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
       throw new RestoreError(`The copy from before could not be put back: ${short(err)}. It stays stopped; try again.`);
     });
+    deps.store.setAgentCuratedSkillsApplied(agent.id, p.appliedCuratedSkillsBefore);
     forgetDmPolicy(agent.id);
     // The copy is how it was when the restore began, maybe days ago: who may
     // use it and its bot follow today's records, as a finished restore's do
@@ -1106,8 +1120,10 @@ export async function recoverBackupRestore(deps: RestoreDeps, opId: string, acti
   }
   forgetDmPolicy(agent.id);
   await deps.provider.importStateFromFile(ref, file).catch((err: unknown) => {
+    deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
     throw new RestoreError(`The restore could not be finished: ${short(err)}. It stays stopped; put back the copy from before, or try again.`);
   });
+  deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
   op.step('replaced');
   // A failure here leaves it held and stopped: the owner may still put the copy back.
   const undone = await applyCurrentSettingsOver(deps, agent.id, ref).catch((err: unknown) => {

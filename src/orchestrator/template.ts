@@ -8,6 +8,7 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import { CORE_FILES, CoreFileTooBigError, MAX_FILE_BYTES, readCoreFile, SnapshotError, workspacePath } from './snapshots.js';
 import { DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSectionEverywhere, SCHEDULED_RESULTS_HEADING } from '../openclaw/workspace.js';
 import { scanPersonalData, type PersonalScan } from '../domain/personalData.js';
+import { CuratedSkillSelectionSchema } from '../openclaw/skills.js';
 
 /**
  * The sections Hatchabot writes into AGENTS.md for THIS machine and owner:
@@ -125,7 +126,7 @@ export interface TemplateManifest {
   exportedAt: string;
   /** `sharedMemory` is always true, and read by nothing here: written only
    *  because Hatchabot before v2.170.0 refuses a template without it (HB-0094). */
-  agent: { name: string; persona: string; sharedMemory?: true; icon?: string; iconColor?: string };
+  agent: { name: string; persona: string; sharedMemory?: true; icon?: string; iconColor?: string; curatedSkills?: string[] };
   files: Record<string, string>;
   ai: { vendor: string };
   /** What the agent expects to read — declarations only, never secrets. */
@@ -152,6 +153,7 @@ const TemplateSchema = z.object({
     // Its home-screen icon travels with it; a bad value is dropped, not fatal.
     icon: z.string().max(16).optional().catch(undefined),
     iconColor: z.string().max(7).optional().catch(undefined),
+    curatedSkills: CuratedSkillSelectionSchema.optional(),
   }),
   files: z
     .record(z.string().max(200), z.string().max(MAX_FILE_BYTES))
@@ -312,7 +314,8 @@ export async function exportTemplate(
     format: TEMPLATE_FORMAT,
     version: TEMPLATE_VERSION,
     exportedAt: new Date().toISOString(),
-    agent: { name: agent.name, persona, sharedMemory: true, icon: agent.icon, iconColor: agent.iconColor },
+    agent: { name: agent.name, persona, sharedMemory: true, icon: agent.icon, iconColor: agent.iconColor,
+      ...(!agent.ops && agent.curatedSkills !== undefined ? { curatedSkills: agent.curatedSkills } : {}) },
     files,
     ai: { vendor: profile?.vendor ?? 'anthropic' },
     schedules: tasks.map((c) => ({
@@ -798,6 +801,9 @@ export function importTemplate(
   }
 
   store.setAgentSeed(agent.id, seed);
+  // Only reviewed catalog IDs travel; custom skill files and credentials do
+  // not. An empty choice stays empty instead of restoring the gog default.
+  if (manifest.agent.curatedSkills !== undefined) store.setAgentCuratedSkills(agent.id, manifest.agent.curatedSkills);
 
   // A configured copy stays RE-configurable: keep the field declarations (so
   // re-sharing works and the values panel knows its schema), the values as

@@ -131,6 +131,22 @@ describe('replaceSection must not eat the user\'s file', () => {
 });
 
 describe('installConventionsSection: the rules of the house, told to the agent', () => {
+  it('refreshes old install notes with skill discovery and CLI guidance while retaining local notes', () => {
+    const old = '# Agent\n\n## Personal notes\nKeep the checklist short.\n\n' +
+      INSTALL_HEADING + '\n\n<!-- Hatchabot rewrites this section on rebuild - keep your own notes outside it. -->\n\nOld install instructions.\n\n' +
+      '## Local workflow\nKeep this customized workflow.\n';
+    const updated = withInstallSection(old);
+    expect(updated).toContain('Keep the checklist short.');
+    expect(updated).toContain('Keep this customized workflow.');
+    expect(updated).not.toContain('Old install instructions.');
+    expect(updated).toContain('skills.read');
+    expect(updated).toContain('catalog.search');
+    expect(updated).toContain('call-agent');
+    expect(updated).toContain('sessionId');
+    expect(updated).toContain('runId');
+    expect(withInstallSection(updated)).toBe(updated);
+  });
+
   it('teaches every volume-layer install path, and warns off apt', () => {
     const t = installConventionsSection();
     // Each of these mechanisms exists in the runtime; the section is the ONLY
@@ -206,7 +222,7 @@ describe("the doctor's merges of TOOLS.md into AGENTS.md (HB-0397 review)", () =
     const out = withInstallSection(doctorMerge(LEFT_BEFORE, TOOLS_BACK));
     expect(out).toContain('- The NAS is at 192.0.2.5\n- Printer: office-laser');
     expect(sections(out)).toBe(1);
-    expect(out).toContain('fast and idempotent.\n\n# TOOLS.md - Local Notes\n\n- The NAS is at 192.0.2.5');
+    expect(out).toContain(installConventionsSection() + '\n\n# TOOLS.md - Local Notes\n\n- The NAS is at 192.0.2.5');
     expect(out).toContain('## Heartbeats\n\nCheck the list.');
     expect(withInstallSection(out)).toBe(out);
   });
@@ -224,7 +240,7 @@ describe("the doctor's merges of TOOLS.md into AGENTS.md (HB-0397 review)", () =
     const tools = `# TOOLS.md - Local Notes\n\n- before it\n\n${installConventionsSection()}\n- after it, no heading\n`;
     const out = withInstallSection(doctorMerge('# AGENTS.md\n\nBe kind.\n', tools));
     expect(out).toContain('- before it');
-    expect(out).toContain('fast and idempotent.\n\n### Local notes\n\n- after it, no heading');
+    expect(out).toContain(installConventionsSection() + '\n\n### Local notes\n\n- after it, no heading');
     expect(sections(out)).toBe(1);
     expect(withInstallSection(out)).toBe(out);
     // Read the old way (heading to heading, as a template copy does), the section takes none of it either.
@@ -271,7 +287,7 @@ describe("the doctor's merges of TOOLS.md into AGENTS.md (HB-0397 review)", () =
 
   it('an edited or older copy ends where its own last lines do: notes after it, with no heading, stay (second review)', () => {
     const sec = installConventionsSection();
-    const lastEdited = sec.replace('fast and idempotent.', 'fast and idempotent!');
+    const lastEdited = sec.replace(/\.$/, '!');
     const midEdited = sec.replace('(already on PATH)', '(already on PATH; mine too)');
     const agentClaw = sec.replace(/Hatchabot/g, 'AgentClaw');
     for (const copy of [lastEdited, midEdited, agentClaw]) {

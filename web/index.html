@@ -2970,6 +2970,28 @@
   </div>
 </dialog>
 
+<dialog id="skillsDlg" style="width:min(600px,94vw)">
+  <h3>Skills for <span id="skillsAgent"></span></h3>
+  <p class="sub">Choose curated instructions for this agent. Requirements describe what a skill needs; use Check availability to inspect its running configuration.</p>
+  <p id="skillsStatus" class="sub" role="status"></p>
+  <fieldset id="skillsChoices" style="border:0;padding:0;margin:0" hidden></fieldset>
+  <section id="skillDetail" hidden style="border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px" aria-live="polite"></section>
+  <div style="margin-top:16px">
+    <h4 style="margin-bottom:6px">Runtime availability</h4>
+    <button id="skillsCheck" onclick="v2SkillsCheck()" disabled>Check availability</button>
+    <div id="skillsAvailability" class="sub" role="status" style="margin-top:8px">Not checked. This runs only when you ask.</div>
+    <p class="sub">Availability check only; no AI task or external service was tested. Results describe the running agent, not unsaved choices or changes awaiting a build.</p>
+  </div>
+  <p class="sub">Changes apply on Rebuild or the next start. Start a new chat after the build.</p>
+  <p class="sub">Your edited skill files are kept. Deselecting also disables custom versions of the same named skill; it does not revoke tools or connected accounts.</p>
+  <div id="skillsErr" class="err" role="alert"></div>
+  <div class="actions" style="flex-wrap:wrap">
+    <button id="skillsRecheck" onclick="v2SkillsRead()">Recheck</button>
+    <button id="skillsSave" class="primary" onclick="v2SkillsSave()" disabled>Save selection</button>
+    <button onclick="v2SkillsClose()">Done</button>
+  </div>
+</dialog>
+
 <dialog id="webChatDlg" style="width:min(560px,94vw)">
   <div style="display:flex;align-items:center;gap:8px">
     <h3 style="margin:0;flex:1;min-width:0">Chat with <span id="wchatAgent"></span></h3>
@@ -12674,6 +12696,7 @@ function pageSessionEnded() {
   sharingForget();
   bpClose(); // pictures and unsent sign-in text must not remain under the sign-in screen
   v2VoiceForget();
+  v2SkillsForget();
   if ($('consoleDlg').open) closeConsole(); // voice input and console sessions end with this sign-in
   pageSignedOut = true;
   pagePersonAway = true; pageCleared = false;
@@ -12781,6 +12804,7 @@ function pageSecretsBack(ownerId) {
 function pageClearLast(next = '') {
   sharingForget();
   v2VoiceForget();
+  v2SkillsForget();
   v2Close();
   bpClose();
   if ($('consoleDlg').open) closeConsole();
@@ -15073,16 +15097,21 @@ function v2EmbedPanes(a, tab) {
 
 function openV2Agent(id, tab) {
   const a = v2Find(id); if (!a) return;
+  if (skillsOpening && (skillsOpening.id !== id || (tab && tab !== 'advanced') || !v2Mine(a) || a.ops)) v2SkillsClose();
   if (v2AgentId !== id) v2Tab = 'overview';
   v2AgentId = id;
   if (tab) v2Tab = tab;
   v2RenderSheet();
   if (!v2AgentDlg.open) v2AgentDlg.showModal();
 }
-function v2Close() { v2ParkPanes(); if (v2AgentDlg.open) v2AgentDlg.close(); }
+function v2Close() { v2SkillsClose(); v2ParkPanes(); if (v2AgentDlg.open) v2AgentDlg.close(); }
 function v2RenderSheetBar() {
   const a = v2Find(v2AgentId);
   if (!a) { v2Close(); return; }
+  if (skillsOpening && !v2SkillsOwner(skillsOpening.id)) v2SkillsClose();
+  if (skillsOpening) v2SkillsSyncAvailability(skillsOpening);
+  const skillsCard = $('v2Skills');
+  if (skillsCard && !v2SkillsOwner(skillsCard.dataset.agent)) skillsCard.textContent = '';
   const st = v2Status(a);
   const chat = v2CanChat(a) && window.isSecureContext;
   $('v2AgentBar').className = `v2sbar v2st-${st.cls}`;
@@ -15130,6 +15159,7 @@ function v2RenderSheet() {
   if ($('v2Access')) void v2LoadAccess(a.id);
   if ($('v2RecoveryRow')) void v2PaintRecovery(a.id);
   if ($('v2Voice')) void v2LoadVoice(a.id);
+  if ($('v2Skills')) void v2LoadSkills(a.id);
 }
 
 // ---- Apps in agents (docs/apps-in-agents.md): the agent page's App row ----------------
@@ -16111,6 +16141,7 @@ function v2Pane(a, tab) {
         <div data-v2slot="embedModeRow" style="flex-basis:100%"></div>
         <div data-v2slot="memoryCapRow" style="flex-basis:100%"></div>`) : ''}
       ${a.state !== 'ARCHIVED' ? row('Voice', `<div id="v2Voice" data-agent="${esc(a.id)}" style="flex-basis:100%"><span class="sub">Checking browser Talk…</span></div>`) : ''}
+      ${!a.ops ? row('Skills', `<div id="v2Skills" data-agent="${esc(a.id)}" style="flex-basis:100%"><span class="sub">Reading the curated skill selection…</span></div>`) : ''}
       ${built && a.state !== 'ARCHIVED' ? row('Sleep & files', `${a.ops || v2ChannelKinds(a).some(k => k !== 'telegram') ? `<span class="sub">${a.ops ? 'The manager never sleeps.' : 'On Discord or Slack it never sleeps (nothing queues their messages).'}</span>` : `<label style="margin:0">Sleep when idle <select id="v2Sleep" data-saves onchange="v2SetAgentPolicy('${id}', { hibernate: this.value || null })">
           <option value=""${a.hibernate === 'never' ? '' : ' selected'}>as the machine does</option><option value="never"${a.hibernate === 'never' ? ' selected' : ''}>never — stay awake</option></select></label>`}
         <label style="margin:0">Files it may send or receive <select id="v2FilesCap" data-saves onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
@@ -16435,6 +16466,340 @@ async function v2SetBrowser(id, on, el) {
     await refresh(false);
   } catch (e) { toast(e.message, 8000); if (el) el.value = on ? 'off' : 'on'; }
 }
+// Curated choices are saved separately from the selection recorded at the last
+// build. Neither is a claim that a tool, credential or edited skill file works.
+let skillsEpoch = 0, skillsOpening = null;
+const skillsWrites = new Map();
+const skillsWriteVersions = new Map();
+function v2SkillsOwner(id) {
+  const a = v2Find(id);
+  return !!a && v2Mine(a) && !a.ops && !pagePersonAway && !pageSignedOut;
+}
+function v2SkillsResult(r) {
+  if (!r || !Array.isArray(r.skills) || !Array.isArray(r.selected) || !(r.applied === null || Array.isArray(r.applied)) || typeof r.canEdit !== 'boolean') {
+    throw new Error('Could not read the curated skill selection. Try Recheck.');
+  }
+  return r;
+}
+function v2SkillsSummary(r) {
+  return `${r.selected.length} selected · ${r.applied === null ? 'last build selection unknown' : r.applied.length + ' applied at last build'}${r.pending ? ' · changes pending' : ''}`;
+}
+async function v2LoadSkills(id) {
+  const el = $('v2Skills');
+  if (!el || el.dataset.agent !== id || !v2SkillsOwner(id)) return;
+  const epoch = skillsEpoch, person = pagePerson, read = String(Number(el.dataset.read || 0) + 1);
+  const version = skillsWriteVersions.get(id) || 0;
+  el.dataset.read = read;
+  const current = () => epoch === skillsEpoch && person === pagePerson && v2SkillsOwner(id)
+    && v2AgentDlg.open && v2AgentId === id && $('v2Skills') === el && el.dataset.read === read;
+  try {
+    const r = v2SkillsResult(await api(`/v1/agents/${id}/skills`));
+    if (!current()) return;
+    if ((skillsWriteVersions.get(id) || 0) !== version) throw new Error('The selection changed while reading. Open the library to recheck.');
+    el.innerHTML = `<span class="sub">${esc(v2SkillsSummary(r))}</span> <button onclick="v2SkillsOpen('${jsq(id)}')">Choose skills</button>`;
+  } catch (e) {
+    if (current()) el.innerHTML = `<span class="sub">${esc(e.message)}</span> <button onclick="v2SkillsOpen('${jsq(id)}')">Open library</button>`;
+  }
+}
+function v2SkillsCurrent(ctx = skillsOpening) {
+  return !!ctx && ctx === skillsOpening && ctx.epoch === skillsEpoch && ctx.person === pagePerson
+    && $('skillsDlg').open && v2AgentDlg.open && v2AgentId === ctx.id && v2SkillsOwner(ctx.id);
+}
+function v2SkillsClose() {
+  skillsOpening = null;
+  if ($('skillsDlg').open) $('skillsDlg').close();
+  $('skillsAgent').textContent = ''; $('skillsStatus').textContent = ''; $('skillsErr').textContent = '';
+  $('skillsChoices').textContent = ''; $('skillsChoices').hidden = true; $('skillsSave').disabled = true;
+  $('skillsAvailability').textContent = ''; $('skillsCheck').disabled = true;
+  $('skillDetail').textContent = ''; $('skillDetail').hidden = true;
+}
+function v2SkillsForget() {
+  skillsEpoch++; v2SkillsClose();
+  const el = $('v2Skills'); if (el) el.textContent = 'Sign in again to read this agent’s skill selection.';
+}
+$('skillsDlg').addEventListener('close', () => { if (!$('skillsDlg').open) v2SkillsClose(); });
+$('v2AgentDlg').addEventListener('close', () => { if (!v2AgentDlg.open) v2SkillsClose(); });
+async function v2SkillsOpen(id) {
+  if (!v2SkillsOwner(id) || !v2AgentDlg.open || v2AgentId !== id) return;
+  const ctx = skillsOpening = { id, epoch: skillsEpoch, person: pagePerson, read: 0, data: null, choices: new Set(), dirty: false, saving: false, loading: false, readFailed: false, availability: null, availabilityRead: 0, availabilityRuntime: null, checking: false };
+  $('skillsAgent').textContent = v2Find(id).name;
+  $('skillsChoices').textContent = ''; $('skillsChoices').hidden = true; $('skillsErr').textContent = '';
+  if (!$('skillsDlg').open) $('skillsDlg').showModal();
+  await v2SkillsRead(ctx);
+}
+function v2SkillsRuntime(id) {
+  const a = v2Find(id);
+  return a ? JSON.stringify([a.hostId, a.runtimeRef, a.state, a.appliedProfileAt, a.image, a.rebuildOnStart, a.updatedAt, !!a.busy, a.browser]) : '';
+}
+function v2SkillsClearAvailability(ctx) {
+  ctx.availabilityRead++; ctx.availability = null; ctx.availabilityRuntime = null; ctx.checking = false;
+  if (v2SkillsCurrent(ctx)) v2SkillsPaintAvailability(ctx);
+}
+function v2SkillRuntime(id, identityOnly = false) {
+  const a = v2Find(id);
+  return a ? JSON.stringify([a.hostId, a.runtimeRef, a.state, a.aiProfileId, a.appliedProfileAt, a.image, a.rebuildOnStart, a.browser, identityOnly ? null : a.updatedAt]) : '';
+}
+function v2SkillCurrent(ctx, detail) {
+  return v2SkillsCurrent(ctx) && ctx.detail === detail && (detail.working && detail.working !== 'trial'
+    ? detail.identity === v2SkillRuntime(ctx.id, true) : detail.runtime === v2SkillRuntime(ctx.id));
+}
+function v2SkillDiff(current, catalog) {
+  if (current === catalog) return 'No differences.';
+  const before = (current || '').split('\n'), after = catalog.split('\n');
+  let first = 0, endBefore = before.length, endAfter = after.length;
+  while (first < endBefore && first < endAfter && before[first] === after[first]) first++;
+  while (endBefore > first && endAfter > first && before[endBefore - 1] === after[endAfter - 1]) { endBefore--; endAfter--; }
+  return `@@ line ${first + 1}: installed → catalog @@\n` + before.slice(first, endBefore).map(line => '- ' + line).join('\n')
+    + '\n' + after.slice(first, endAfter).map(line => '+ ' + line).join('\n');
+}
+function v2SkillPaint(ctx, detail) {
+  if (!v2SkillCurrent(ctx, detail)) return;
+  const el = $('skillDetail'), skill = ctx.data.skills.find(s => s.id === detail.id), view = detail.data;
+  el.hidden = false;
+  const pre = text => `<pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:300px;overflow:auto;font-size:12px">${esc(text)}</pre>`;
+  el.innerHTML = `<h4>${esc(skill.name)}</h4>${skill.setup?.length ? '<p class="sub">' + skill.setup.map(esc).join('<br>') + '</p>' : ''}
+    ${skill.examples?.length ? '<p class="sub">Example: ' + skill.examples.map(esc).join('<br>') + '</p>' : ''}
+    ${detail.loading ? '<p>Reading instructions…</p>' : ''}${detail.error ? '<p class="err" role="alert">' + esc(detail.error) + '</p>' : ''}`;
+  if (!view) { if (!detail.loading) el.innerHTML += `<button onclick="v2SkillOpen('${jsq(detail.id)}')">Refresh preview</button>`; return; }
+  const labels = { current: 'Matches the catalog', update_available: 'Catalog update available', customized: 'Customized instructions — automatic replacement refused', untracked: 'Local instructions; original version unknown', missing: 'Not installed', unavailable: 'No agent volume to inspect yet' };
+  el.innerHTML += `<p class="sub">${esc(labels[view.state] || 'Could not determine the installed version')}. Catalog ${esc(view.catalog.version)}; installed ${esc(view.installed.version || 'unknown')}.</p>
+    <details><summary>Catalog instructions</summary>${pre(view.catalog.content)}</details>
+    <details><summary>Installed instructions</summary>${pre(view.installed.content === null ? 'No installed instructions.' : view.installed.content)}</details>
+    <details open><summary>Changes from installed to catalog</summary>${pre(v2SkillDiff(view.installed.content, view.catalog.content))}</details>
+    <div class="actions" style="flex-wrap:wrap">
+      <button data-skill-action="update" onclick="v2SkillChange('update')"${!view.canUpdate || detail.working || skillsWrites.has(ctx.id) ? ' disabled' : ''}>${view.state === 'missing' ? 'Install instructions' : 'Update instructions'}</button>
+      <button data-skill-action="replace" onclick="v2SkillChange('replace')"${!view.canReplace || detail.working || skillsWrites.has(ctx.id) ? ' disabled' : ''}>Replace with catalog…</button>
+      <button data-skill-action="rollback" onclick="v2SkillChange('rollback')"${!view.canRollback || detail.working || skillsWrites.has(ctx.id) ? ' disabled' : ''}>Restore previous instructions…</button>
+      <button onclick="v2SkillOpen('${jsq(detail.id)}')"${detail.working ? ' disabled' : ''}>Refresh preview</button>
+    </div>
+    <p class="sub">File changes are immediate and keep a previous copy for rollback. Start a new conversation afterward. The skill selection is saved separately.</p>
+    <h4 style="margin-top:14px">Try this skill</h4>
+    ${skill.trial ? `<p><b>${esc(skill.trial.title)}</b></p><p class="sub">${esc(skill.trial.prompt)}</p>` : ''}
+    <p class="sub">One AI practice task with these installed instructions and made-up sample data. It can only read its temporary workspace. It does not test external accounts or services. The model run is limited to 60 seconds and requests at most 512 output tokens per response; metered AI charges apply, with no guaranteed dollar cap. Closing this dialog does not cancel an active run.</p>
+    <button id="skillTry" onclick="v2SkillTry()"${view.installed.content === null || v2Find(ctx.id)?.state !== 'RUNNING' || detail.working || skillsWrites.has(ctx.id) ? ' disabled' : ''}>Run practice task</button>
+    <div id="skillTrialResult" class="sub" role="status" style="margin-top:8px"></div>`;
+  if (detail.working) $('skillTrialResult').textContent = detail.working === 'trial' ? 'Running one practice task…' : 'Changing instructions…';
+  if (detail.trial) {
+    const r = detail.trial, evidence = r.evidence || {};
+    $('skillTrialResult').innerHTML = `<p>${esc(r.message || 'Practice finished.')}</p><p>Skill read: ${evidence.skillRead ? 'observed' : 'not observed'} · sample read: ${evidence.fixtureRead ? 'observed' : 'not observed'} · tool calls: ${Number.isInteger(evidence.toolCalls) ? evidence.toolCalls : 0}</p>`
+      + (r.output ? pre(r.output) : '') + (r.usage ? `<p>Reported usage: ${Number.isFinite(r.usage.total) ? r.usage.total + ' tokens' : 'token total unavailable'}${Number.isFinite(r.usage.costUsd) ? ' · $' + r.usage.costUsd.toFixed(4) : ' · cost unavailable'}.</p>` : '<p>Usage and cost were not reported.</p>');
+  }
+}
+async function v2SkillOpen(id) {
+  const ctx = skillsOpening;
+  if (!v2SkillsCurrent(ctx) || !ctx.data || ctx.loading || ctx.saving || skillsWrites.has(ctx.id) || !ctx.data.skills.some(s => s.id === id)) return;
+  const detail = ctx.detail = { id, runtime: v2SkillRuntime(ctx.id), identity: v2SkillRuntime(ctx.id, true), updatedAt: v2Find(ctx.id).updatedAt, loading: true, data: null, error: '', working: false, trial: null };
+  v2SkillPaint(ctx, detail);
+  try {
+    const result = await api(`/v1/agents/${ctx.id}/skills/${id}/file`);
+    if (!v2SkillCurrent(ctx, detail)) return;
+    if (!result?.catalog || typeof result.catalog.content !== 'string' || !result.installed || !(result.installed.content === null || typeof result.installed.content === 'string')) throw new Error('Could not read the instructions. Refresh the preview.');
+    detail.data = result;
+  } catch (e) { if (v2SkillCurrent(ctx, detail)) detail.error = e.message; }
+  finally { if (v2SkillCurrent(ctx, detail)) { detail.loading = false; v2SkillPaint(ctx, detail); } }
+}
+async function v2SkillAction(action) {
+  const ctx = skillsOpening, detail = ctx?.detail;
+  if (!detail || !v2SkillCurrent(ctx, detail) || !detail.data?.revision || detail.working || skillsWrites.has(ctx.id)) return;
+  const trial = action === 'trial', token = {};
+  if (trial && (detail.data.installed.content === null || v2Find(ctx.id)?.state !== 'RUNNING')) return;
+  if (!trial && !({ update: detail.data.canUpdate, replace: detail.data.canReplace, rollback: detail.data.canRollback })[action]) return;
+  const prompt = action === 'replace' ? 'Replace your installed instructions with the catalog version? Your current file will be saved for rollback.'
+    : action === 'rollback' ? 'Restore the previous instructions? Your current file will be saved for rollback.' : null;
+  if (prompt && !confirm(prompt)) return;
+  skillsWrites.set(ctx.id, token); skillsWriteVersions.set(ctx.id, (skillsWriteVersions.get(ctx.id) || 0) + 1);
+  detail.working = action; detail.error = ''; detail.trial = null; v2SkillsClearAvailability(ctx); v2SkillPaint(ctx, detail); v2SkillsPaint(ctx);
+  try {
+    const result = await api(`/v1/agents/${ctx.id}/skills/${detail.id}/${trial ? 'try' : 'file'}`, { method: 'POST', body: { expectedRevision: detail.data.revision, ...(trial ? {} : { action }) } });
+    if (!v2SkillCurrent(ctx, detail)) return;
+    if (trial) detail.trial = result;
+    else {
+      const a = v2Find(ctx.id);
+      if (a.updatedAt !== detail.updatedAt && a.updatedAt !== result.agentUpdatedAt) {
+        detail.data = null; detail.error = 'The agent changed again. Refresh the preview to inspect its current instructions.'; return;
+      }
+      detail.data = result;
+      if (typeof result.agentUpdatedAt === 'string') a.updatedAt = result.agentUpdatedAt;
+      detail.updatedAt = a.updatedAt;
+    }
+  } catch (e) {
+    if (v2SkillCurrent(ctx, detail)) { detail.error = e.message; if (!trial) detail.data = null; }
+  } finally {
+    if (skillsWrites.get(ctx.id) === token) { skillsWrites.delete(ctx.id); skillsWriteVersions.set(ctx.id, (skillsWriteVersions.get(ctx.id) || 0) + 1); }
+    if (v2SkillCurrent(ctx, detail)) { detail.runtime = v2SkillRuntime(ctx.id); detail.working = false; v2SkillPaint(ctx, detail); v2SkillsPaint(ctx); }
+    v2SkillsFinishWrite(ctx);
+  }
+}
+function v2SkillChange(action) { return v2SkillAction(action); }
+function v2SkillTry() { return v2SkillAction('trial'); }
+function v2SkillsFinishWrite(previous) {
+  const ctx = skillsOpening;
+  if (!v2SkillsCurrent(ctx) || ctx.id !== previous.id) return;
+  if (ctx !== previous) {
+    ctx.readFailed = true;
+    $('skillsErr').textContent = 'A previous change finished. Recheck the saved selection before editing.';
+    v2SkillsClearAvailability(ctx);
+  }
+  v2SkillsSyncAvailability(ctx); v2SkillsPaint(ctx);
+}
+function v2SkillsSyncAvailability(ctx) {
+  if (ctx.availabilityRuntime !== null && ctx.availabilityRuntime !== v2SkillsRuntime(ctx.id)) v2SkillsClearAvailability(ctx);
+  if (ctx.detail && !v2SkillCurrent(ctx, ctx.detail)) { ctx.detail = null; $('skillDetail').hidden = true; $('skillDetail').textContent = ''; }
+}
+function v2SkillsPaintAvailability(ctx) {
+  if (!v2SkillsCurrent(ctx)) return;
+  $('skillsCheck').disabled = !ctx.data || ctx.loading || ctx.saving || ctx.readFailed || ctx.checking || skillsWrites.has(ctx.id);
+  $('skillsCheck').textContent = ctx.checking ? 'Checking…' : 'Check availability';
+  const el = $('skillsAvailability'), r = ctx.availability;
+  if (ctx.checking) { el.textContent = 'Checking the running agent’s instructions and prerequisites…'; return; }
+  if (!r) { el.textContent = 'Not checked. This runs only when you ask.'; return; }
+  const overall = {
+    unavailable: 'Could not check runtime availability. Try again when its machine is reachable.',
+    unsupported: 'This runtime does not support the skill availability check. Check its OpenClaw version.',
+    busy: 'Another operation is under way. Check availability when it finishes.',
+    not_running: 'Start the agent, then check availability.',
+  };
+  if (r.status !== 'checked') { el.textContent = overall[r.status] || overall.unavailable; return; }
+  const labels = {
+    available: 'Instructions available', disabled: 'Disabled in the runtime', blocked: 'Blocked by runtime policy',
+    missing_requirements: 'Missing runtime requirements', not_installed: 'Instructions not found', unavailable: 'Could not check this skill',
+  };
+  const prerequisite = {
+    google_accounts: { present: 'Google account found; sign-in and scopes were not tested.', missing: 'No Google account found.', unchecked: 'Google accounts were not checked.' },
+    browser: { present: 'Browser enabled in the runtime; running it and its permissions were not tested.', missing: 'Browser is not enabled in the runtime.', unchecked: 'Browser configuration was not checked.' },
+    web_tools: { present: 'Web tools reported available; no search was tested.', missing: 'Web tools reported unavailable.', unchecked: 'Web tools were not checked; availability varies by conversation.' },
+    jira_access: { unchecked: 'Jira connector or browser sign-in was not checked; open this skill’s preview for setup.' },
+    image_generation: { unchecked: 'Image-generation provider access was not checked; open this skill’s preview for setup.' },
+  };
+  const rows = new Map(r.skills.filter(s => s && typeof s.id === 'string').map(s => [s.id, s]));
+  const checked = Number.isFinite(Date.parse(r.checkedAt)) ? `<div>Checked ${esc(new Date(r.checkedAt).toLocaleString())}.</div>` : '';
+  el.innerHTML = checked + ctx.data.skills.map(skill => {
+    const status = rows.get(skill.id) || {}, words = Object.hasOwn(labels, status.status) ? labels[status.status] : labels.unavailable;
+    const missing = [['tools', 'tool'], ['environment', 'environment setting'], ['configuration', 'configuration setting'], ['platform', 'platform requirement']]
+      .flatMap(([key, noun]) => { const n = status.missing?.[key]; return Number.isInteger(n) && n > 0 ? [`${n} ${noun}${n === 1 ? '' : 's'}`] : []; });
+    const deps = (Array.isArray(status.dependencies) ? status.dependencies : []).filter(d => d && Object.hasOwn(prerequisite, d.kind));
+    return `<div style="margin-top:10px"><b>${esc(skill.name)}: ${words}</b>${missing.length ? '<div>Missing: ' + missing.join(', ') + '.</div>' : ''}
+      ${deps.map(d => `<div>${Object.hasOwn(prerequisite[d.kind], d.status) ? prerequisite[d.kind][d.status] : prerequisite[d.kind].unchecked}${d.kind === 'google_accounts' ? ' <button data-skills-setup="google_accounts" onclick="v2SkillsSetup(\'google_accounts\')">Connections</button>' : d.kind === 'browser' ? ' <button data-skills-setup="browser" onclick="v2SkillsSetup(\'browser\')">Browser settings</button>' : ''}</div>`).join('')}</div>`;
+  }).join('');
+}
+async function v2SkillsCheck() {
+  const ctx = skillsOpening;
+  if (!v2SkillsCurrent(ctx) || !ctx.data || ctx.loading || ctx.saving || ctx.readFailed || ctx.checking || skillsWrites.has(ctx.id)) return;
+  const read = ++ctx.availabilityRead, version = skillsWriteVersions.get(ctx.id) || 0, runtime = v2SkillsRuntime(ctx.id);
+  ctx.availability = null; ctx.availabilityRuntime = runtime; ctx.checking = true; v2SkillsPaintAvailability(ctx);
+  const current = () => v2SkillsCurrent(ctx) && ctx.availabilityRead === read && runtime === v2SkillsRuntime(ctx.id)
+    && version === (skillsWriteVersions.get(ctx.id) || 0);
+  try {
+    const r = await api(`/v1/agents/${ctx.id}/skills/status`);
+    if (!current()) return;
+    ctx.availability = r && ['checked', 'unavailable', 'unsupported', 'busy', 'not_running'].includes(r.status) && Array.isArray(r.skills)
+      ? r : { status: 'unavailable', skills: [] };
+  } catch {
+    if (current()) ctx.availability = { status: 'unavailable', skills: [] };
+  } finally {
+    if (v2SkillsCurrent(ctx) && ctx.availabilityRead === read) {
+      ctx.checking = false;
+      if (!current()) v2SkillsClearAvailability(ctx);
+      else v2SkillsPaintAvailability(ctx);
+    }
+  }
+}
+function v2SkillsSetup(kind) {
+  const ctx = skillsOpening;
+  if (!v2SkillsCurrent(ctx) || !['google_accounts', 'browser'].includes(kind)) return;
+  v2SkillsSyncAvailability(ctx);
+  if (ctx.availability?.status !== 'checked' || !ctx.availability.skills.some(s => Array.isArray(s?.dependencies) && s.dependencies.some(d => d?.kind === kind))) return;
+  const changed = ctx.choices.size !== ctx.data.selected.length || ctx.data.selected.some(id => !ctx.choices.has(id));
+  if (changed && !confirm('Leave without saving these skill choices?')) return;
+  const id = ctx.id;
+  v2SkillsClose(); openV2Agent(id, kind === 'google_accounts' ? 'knowledge' : 'advanced');
+  const target = $(kind === 'google_accounts' ? 'paneEditConn' : 'v2Browser');
+  target?.scrollIntoView({ block: 'nearest' });
+  if (kind === 'browser') target?.focus();
+}
+function v2SkillsEditable(ctx) {
+  const a = v2Find(ctx.id);
+  return v2SkillsCurrent(ctx) && !!ctx.data?.canEdit && a.state !== 'ARCHIVED' && !a.busy
+    && !ctx.loading && !ctx.saving && !ctx.readFailed && !skillsWrites.has(ctx.id);
+}
+function v2SkillsPaint(ctx) {
+  if (!v2SkillsCurrent(ctx)) return;
+  const r = ctx.data, editable = v2SkillsEditable(ctx);
+  $('skillsRecheck').disabled = ctx.loading || ctx.saving || skillsWrites.has(ctx.id);
+  $('skillsSave').disabled = !editable || !ctx.dirty;
+  $('skillsSave').textContent = ctx.saving ? 'Saving…' : 'Save selection';
+  v2SkillsPaintAvailability(ctx);
+  $('skillsStatus').textContent = ctx.loading ? 'Reading the saved selection…'
+    : !r ? 'The selection could not be read.'
+    : `${v2SkillsSummary(r)}. ${r.message || ''}${skillsWrites.has(ctx.id) && !ctx.saving ? ' A previous save is still finishing. Recheck before changing the selection.' : ''}`;
+  $('skillsChoices').hidden = !r;
+  if (!r) return;
+  $('skillsChoices').innerHTML = r.skills.map(s => `<div style="padding:12px 0;border-bottom:1px solid var(--line)">
+    <label style="display:flex;gap:9px;align-items:flex-start;margin:0"><input type="checkbox" data-skill="${esc(s.id)}" style="width:auto;margin-top:3px"${ctx.choices.has(s.id) ? ' checked' : ''}${editable ? '' : ' disabled'} onchange="v2SkillsChanged()">
+      <span style="min-width:0"><b>${esc(s.name)}</b> <span class="sub">Catalog v${esc(s.version)}</span><br><span class="sub">${esc(s.description)}</span></span></label>
+    <div class="sub" style="margin:5px 0 0 25px">${s.applied === null ? 'Last build selection unknown' : s.applied ? 'Applied at last build' : 'Not applied at last build'}${s.requirements?.length ? '<br>Requires: ' + s.requirements.map(esc).join('; ') : ''}</div>
+    <button data-skill-preview="${esc(s.id)}" onclick="v2SkillOpen('${jsq(s.id)}')"${ctx.loading || ctx.saving || skillsWrites.has(ctx.id) ? ' disabled' : ''}>Preview, update and try</button>
+  </div>`).join('');
+}
+function v2SkillsChanged() {
+  const ctx = skillsOpening;
+  if (!ctx || !v2SkillsEditable(ctx)) return;
+  ctx.choices = new Set([...$('skillsChoices').querySelectorAll('input[data-skill]:checked')].map(el => el.dataset.skill));
+  ctx.dirty = ctx.data.managed === false || ctx.choices.size !== ctx.data.selected.length || ctx.data.selected.some(id => !ctx.choices.has(id));
+  $('skillsSave').disabled = !ctx.dirty;
+  $('skillsErr').textContent = '';
+  v2SkillsClearAvailability(ctx);
+}
+async function v2SkillsRead(ctx = skillsOpening) {
+  if (!v2SkillsCurrent(ctx) || ctx.saving) return;
+  const read = ++ctx.read;
+  const version = skillsWriteVersions.get(ctx.id) || 0;
+  v2SkillsClearAvailability(ctx);
+  ctx.loading = true; $('skillsErr').textContent = ''; v2SkillsPaint(ctx);
+  try {
+    const r = v2SkillsResult(await api(`/v1/agents/${ctx.id}/skills`));
+    if (!v2SkillsCurrent(ctx) || ctx.read !== read) return;
+    if ((skillsWriteVersions.get(ctx.id) || 0) !== version) throw new Error('The selection changed while reading. Recheck before saving.');
+    ctx.data = r; ctx.readFailed = false;
+    if (!ctx.dirty) ctx.choices = new Set(r.selected);
+    else {
+      const known = new Set(r.skills.map(s => s.id));
+      ctx.choices = new Set([...ctx.choices].filter(id => known.has(id)));
+    }
+    ctx.dirty = r.managed === false || ctx.choices.size !== r.selected.length || r.selected.some(id => !ctx.choices.has(id));
+  } catch (e) {
+    if (!v2SkillsCurrent(ctx) || ctx.read !== read) return;
+    ctx.readFailed = true; $('skillsErr').textContent = e.message;
+  } finally {
+    if (v2SkillsCurrent(ctx) && ctx.read === read) { ctx.loading = false; v2SkillsPaint(ctx); }
+  }
+}
+async function v2SkillsSave() {
+  const ctx = skillsOpening;
+  if (!ctx || !v2SkillsEditable(ctx) || !ctx.dirty) return;
+  const selected = ctx.data.skills.filter(s => ctx.choices.has(s.id)).map(s => s.id), token = {};
+  let saved = false;
+  v2SkillsClearAvailability(ctx);
+  skillsWriteVersions.set(ctx.id, (skillsWriteVersions.get(ctx.id) || 0) + 1);
+  skillsWrites.set(ctx.id, token); ctx.saving = true; $('skillsErr').textContent = ''; v2SkillsPaint(ctx);
+  try {
+    const r = v2SkillsResult(await api(`/v1/agents/${ctx.id}/skills`, { method: 'PUT', body: { selected } }));
+    if (!v2SkillsCurrent(ctx)) return;
+    ctx.data = r; ctx.choices = new Set(r.selected); ctx.dirty = false;
+    saved = true;
+  } catch (e) {
+    if (v2SkillsCurrent(ctx)) $('skillsErr').textContent = e.message;
+  } finally {
+    if (skillsWrites.get(ctx.id) === token) {
+      skillsWrites.delete(ctx.id);
+      skillsWriteVersions.set(ctx.id, (skillsWriteVersions.get(ctx.id) || 0) + 1);
+    }
+    ctx.saving = false;
+    if (v2SkillsCurrent(ctx)) { v2SkillsPaint(ctx); if (saved) void v2LoadSkills(ctx.id); }
+    v2SkillsFinishWrite(ctx);
+  }
+}
+
 // A voice check belongs to its card and signed-in person; it never requests microphone access.
 let voiceEpoch = 0;
 function v2VoiceForget() {

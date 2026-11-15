@@ -88,6 +88,13 @@ export const LIVE_TESTS = [
     area: ['docker', 'src/openclaw/workspace.ts', 'src/openclaw/skills.ts', 'scripts/google-scenarios.mjs', LIB, { path: 'src/orchestrator/provision.ts', near: /google/i }],
   },
   {
+    name: 'skills', cmd: ['node', 'scripts/skills-scenarios.mjs'], against: 'install', minutes: '10–18', aiTurns: 'two',
+    needs: 'room for 1 web-only agent and a configured AI source; no Google account or external browser service',
+    proves: 'selection reaches the runtime, customized instructions survive disable/re-enable and explicit replacement/rollback, a plain Code Mode task invokes its skill fixture, and isolated practice observes skill and sample reads',
+    area: ['src/openclaw/skills.ts', 'src/openclaw/workspace.ts', 'src/openclaw/configWriter.ts', 'src/orchestrator/skillsStatus.ts', 'src/orchestrator/skillFiles.ts', 'src/orchestrator/skillTrials.ts', 'src/orchestrator/provision.ts', 'scripts/skills-scenarios.mjs', LIB,
+      { path: ROUTES, near: /\/skills|readSkillsStatus/ }, { path: STORE, near: /curatedSkills|curated_skills/i }],
+  },
+  {
     name: 'candidate-gate', cmd: ['bash', 'scripts/candidate-gate.sh'], defaultArgs: ['hatchabot-runtime:latest'], against: 'install', minutes: '5–10', aiTurns: 'one',
     needs: 'the image to check (default: this machine\'s default image)',
     proves: 'an agent on that image builds, answers, and keeps its memory search and tools',

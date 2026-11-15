@@ -139,6 +139,8 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(['POST', 'DELETE'], /^\/v1\/agents\/:id\/env(\/:envId)?$/, 'step-up', 'An agent\'s environment variables'),
   // The Files tab reads and writes the agent's whole home: its config and tokens are there.
   r('*', /^\/v1\/agents\/:id\/fs(\/file)?$/, 'step-up', 'An agent\'s Files tab (its home holds its config and tokens)'),
+  r([...READ, 'POST'], /^\/v1\/agents\/:id\/skills\/:skill\/file$/, 'step-up', 'Skill instruction previews, updates and rollback (owner only)'),
+  r(['POST'], /^\/v1\/agents\/:id\/skills\/:skill\/try$/, 'step-up', 'Skill practice tasks using installed instructions (owner only; metered AI)'),
   r(['POST', 'PATCH', 'DELETE'], /^\/v1\/agents\/:id\/data-sources(\/:dsId)?$/, 'step-up', 'Folders of this machine given to an agent, and bringing in workspaces'),
   r(['POST'], /^\/v1\/agents\/:id\/data-sources\/:dsId\/check$/, 'step-up', 'Folders of this machine given to an agent, and bringing in workspaces'),
   r(['GET'], /^\/v1\/agents\/:id\/app$/, 'signed-in', 'Apps in agents: which app an agent runs'),
@@ -168,6 +170,8 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r('*', /^\/v1\/agents\/:id\/ui(\/.*)?$/, 'signed-in', 'An agent\'s OpenClaw console (the owner, or a web-chat guest in their own conversation)'),
   r('*', /^\/v1\/agents\/:id\/chat$/, 'signed-in', 'Web chat'),
   r(READ, /^\/v1\/agents\/:id\/voice$/, 'signed-in', 'An agent\'s voice configuration status (owner only; no audio or credentials)'),
+  r([...READ, 'PUT'], /^\/v1\/agents\/:id\/skills$/, 'signed-in', 'Curated skill choices (owner only; no tools or credentials granted)'),
+  r(READ, /^\/v1\/agents\/:id\/skills\/status$/, 'signed-in', 'Skill availability checks (owner only; no AI tasks or credentials returned)'),
   r('*', /^\/v1\/(problem-reports(\/:id(\/sent)?)?|diagnostics|known-problems|source(\/search)?)$/, 'signed-in', 'Report a problem: your drafts, the diagnostics, the installed source and docs'),
   r('*', /^\/v1\/agents(\/.*)?$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),
   r(READ, /^\/v1\/(recent|costs)$/, 'signed-in', 'Your agents: list, create, settings, files, schedules, members, start and stop'),

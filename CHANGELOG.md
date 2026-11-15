@@ -2,6 +2,21 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.187.0] — 2026-11-15
+
+### Added
+- **Advanced → Skills** offers seven curated instruction packs with per-agent selection: Google Workspace, research, browser workflows, writing, planning, Jira, and image generation. Setup guidance explains which accounts, tools or providers are needed; selecting a skill grants no additional access.
+- **Check availability** reports instruction visibility and configured prerequisites without starting an agent or claiming a successful external task.
+- **Preview, update and try** compares installed instructions with the catalog, detects customization, preserves previous files for rollback, and refuses stale updates. Rebuilds keep edited files; replacing a customized file requires an explicit choice.
+- **Practice tasks** use installed instructions and sample data in a separate read-only workspace. They report observed reads and available usage information, with a time limit and response-token setting. They do not test external integrations, and metered AI charges still apply.
+
+### Fixed
+- Shared agent instructions explain Code Mode skill discovery, shell commands and delayed-result polling for all agents. Templates and full transfers retain curated selections; failed moves and restore recovery preserve or invalidate the applied selection accurately.
+- Skill previews, changes and practice results remain tied to the originating owner, session and runtime. File changes use revision checks, guarded paths and retained rollback history.
+
+### For developers
+- Added a registered live skills acceptance runner and nine isolated scenarios against pinned OpenClaw protocol modules. Real-model and external-service acceptance remains a live-install validation step before promotion.
+
 ## [2.186.0] — 2026-11-15
 
 ### Upgrading

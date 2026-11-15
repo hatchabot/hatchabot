@@ -173,6 +173,38 @@ the host.
 - `web/index.html` — `addGitSource`: the agent sheet's "add a repo" form.
 - `docs/data-sources.md`: the design.
 
+## Curated skills per agent
+
+The library saves instruction choices; normal provisioning applies them.
+Legacy agents keep the Google Workspace seed without changing their manual
+OpenClaw switches until their owner saves a selection. Rebuilds preserve edited
+files; explicit previewed updates and rollback manage their versions.
+
+- `src/openclaw/skills.ts` — `CURATED_SKILLS`, `CuratedSkillSelectionSchema`, `selectedCuratedSkills`, `SKILL_TOOL_GUIDANCE`: the reviewed catalog, fixed IDs, validation, legacy default and shared Code Mode guidance.
+- `src/store/store.ts` — `setAgentCuratedSkills`, `setAgentCuratedSkillsApplied`: desired selection and the selection configured by the last successful provider build.
+- `src/openclaw/workspace.ts` — `buildWorkspaceSeed`, `installConventionsSection`: selected files, created only when absent by the provider; common tool guidance in the existing managed install section so customized skill files stay intact.
+- `src/openclaw/configWriter.ts` — `buildConfigCommands`: enable/disable leaves for catalog IDs only, preserving unrelated skills and entry credentials.
+- `src/orchestrator/provision.ts` — `buildRuntimeSpec`, `recordApplied`: render the selection and record what the provider applied.
+- `src/api/routes.ts` — `'/v1/agents/:id/skills'`, `skillsView`, `skillsEditable`: owner-only catalog and saved choices, lifecycle refusals and the next-start rebuild obligation.
+- `src/orchestrator/skillsStatus.ts` — `readSkillsStatus`: bounded, read-only inventory for the agent's slug; fixed status/reason counts and separate Google-account presence and browser-enabled checks, with no raw runtime details.
+- `src/api/routes.ts` — `'/v1/agents/:id/skills/status'`, `skillStatusReads`: explicit owner-only inspection, coalesced identical in-flight reads, and session/ownership/lifecycle/context checks after waiting.
+- `src/orchestrator/template.ts` — `exportTemplate`, `importTemplate`: reviewed selections in templates and clones, without custom skill files.
+- `src/orchestrator/transfer.ts` — `exportAgent`, `importAgent`: selections in full transfers.
+- `src/orchestrator/moveHost.ts` — `MoveParams`; `src/store/store.ts` — `restoreAgentApplied`: a failed host move restores the source runtime's applied selection.
+- `src/orchestrator/backups.ts` — `restoreAgentFromBackup`, `resumeBackupRestore`, `recoverBackupRestore`: replacement volumes have unknown applied selection until current configuration succeeds; a safety-copy rollback restores the earlier selection.
+- `web/index.html` — `v2SkillsOpen`, `v2SkillsSave`, `v2SkillsCurrent`, `v2SkillsCheck`, `v2SkillsClearAvailability`, `v2SkillsSetup`: the Advanced library, saved/applied states, on-demand runtime inspection, setup links and delayed-response guards.
+- `test/skillsRoutes.test.ts`, `test/curatedSkills.test.ts`: access, lifecycle, catalog and selection regression coverage.
+- `test/skillsStatus.test.ts`, `test/skillsStatusRoutes.test.ts`: strict runtime projection, bounded checks and permission/context changes during reads.
+- `scripts/skills-contract.ts` — `loadPinnedContract`, `PINNED_CONTRACT_FILES`: scripted execution against hash-verified pinned Code Mode modules, in an isolated fixture environment; not model-choice or full-workspace-discovery evidence.
+- `scripts/skills-scenarios.mjs` — `runSkillsScenarios`: live acceptance on one disposable web-only agent; selection, custom-file preservation and a plain-language Code Mode fixture request, with bounded cleanup. Registered in `scripts/live.mjs` as `skills`.
+- `test/skillsScenarios.test.ts`: injected acceptance boundaries and sandboxed helper checks, including failure evidence, deadlines and cleanup identity.
+- `src/orchestrator/skillFiles.ts` — `readSkillFile`, `mutateSkillFile`, `skillFileScript`: instruction previews, version/hash checks, guarded file writes and five-copy rollback history on the agent volume.
+- `src/orchestrator/skillTrials.ts` — `describeSkillTrial`, `runSkillTrial`, `skillTrialScript`: bounded practice runs with installed instructions, local fixtures and observed-read evidence.
+- `src/api/routes.ts` — `'/v1/agents/:id/skills/:skill/file'`, `'/v1/agents/:id/skills/:skill/try'`, `skillFileContext`: owner/session/context fences, file serialization and practice cooldown.
+- `src/store/store.ts` — `touchAgentSkills`: invalidates displayed readings after file changes.
+- `web/index.html` — `v2SkillOpen`, `v2SkillChange`, `v2SkillTry`, `v2SkillDiff`: instruction comparison, explicit replacement/rollback and opt-in practice results.
+- `test/skillFiles.test.ts`, `test/skillFileRoutes.test.ts`, `test/skillTrials.test.ts`, `test/skillVersionSeed.test.ts`: file isolation, rollback, API authorization, practice boundaries and seed-version tracking.
+
 ## Google connections and what each agent can reach
 
 A Google account is connected once (the OAuth consent), kept in the vault,

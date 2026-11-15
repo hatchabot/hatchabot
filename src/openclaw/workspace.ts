@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { WorkspaceSeed } from '../providers/provider.js';
-import { GOG_SKILL_MD } from './skills.js';
+import { CURATED_SKILLS, selectedCuratedSkills, SKILL_TOOL_GUIDANCE } from './skills.js';
 
 export interface WorkspaceInput {
   agentName: string;
@@ -7,6 +8,8 @@ export interface WorkspaceInput {
   persona: string;
   /** True for one-to-many agents: MEMORY.md becomes a shared knowledge base. */
   sharedMemory: boolean;
+  /** Unset retains the historical gog seed; [] seeds no library skills. */
+  curatedSkills?: string[];
   /** Verbatim file contents to seed instead of the generated ones — how a
    *  template import lands its trained SOUL.md / AGENTS.md. Keys not given fall
    *  back to the generated default (so an imported template gets a fresh
@@ -694,7 +697,9 @@ HOME, never into the system:
 - **Anything you had to place outside HOME** must be reinstalled after a
   rebuild: append the install command to \`~/.openclaw/on-rebuild.sh\` and make
   it executable. It runs after every rebuild with a 5-minute cap - keep it
-  fast and idempotent.`;
+  fast and idempotent.
+
+${SKILL_TOOL_GUIDANCE}`;
 }
 
 /**
@@ -778,9 +783,16 @@ Durable facts about the person this agent serves.
     'AGENTS.md': agents,
     'MEMORY.md': memory,
     // Seeded skills (the seed never overwrites, so an agent's edits stick).
-    // gog: the Google-connections tool — binary ships in the image, and this
-    // card teaches the chat-based connect flow (docs/connections-design.md).
-    'skills/gog/SKILL.md': GOG_SKILL_MD,
+    // Undefined selection keeps the original Google-connections card.
+    ...Object.fromEntries(CURATED_SKILLS.filter((skill) => selectedCuratedSkills(input.curatedSkills).includes(skill.id))
+      .flatMap((skill) => [
+        [`skills/${skill.id}/SKILL.md`, skill.content],
+        // Seeded once alongside the instructions. A later catalog release
+        // keeps this baseline so an untouched old file can be updated safely;
+        // local edits differ from its hash and still require explicit replace.
+        [`.hatchabot-skills/${skill.id}.json`, JSON.stringify({ format: 1, id: skill.id,
+          base: { hash: createHash('sha256').update(skill.content).digest('hex'), version: skill.version }, history: [] })],
+      ])),
     ...(input.seedFiles ?? {}),
   };
 }

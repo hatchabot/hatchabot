@@ -7,8 +7,8 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
-import { operationRefusal } from '../src/orchestrator/operations.js';
+import { moveAgentToHost, resumeMoveHost } from '../src/orchestrator/moveHost.js';
+import { operationRefusal, SimulatedCrash } from '../src/orchestrator/operations.js';
 import { TransferError } from '../src/orchestrator/transfer.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
@@ -33,6 +33,44 @@ async function crossDaemonWorld(): Promise<{ w: World; target: MockProvider; dep
 }
 
 describe('moveAgentToHost — across two daemons', () => {
+  it('recovers the prior empty skill selection from the durable move record after interruption', async () => {
+    const { w, target, deps } = await crossDaemonWorld();
+    try {
+      const id = await seedRunningAgent(w);
+      w.store.setAgentCuratedSkillsApplied(id, []);
+      w.store.setAgentCuratedSkills(id, ['hatchabot-writing']);
+      target.start = async () => { throw new SimulatedCrash(); };
+      await expect(moveAgentToHost(deps, id, 'h2')).rejects.toBeInstanceOf(SimulatedCrash);
+      expect(w.store.getAgent(id)?.appliedCuratedSkills).toEqual(['hatchabot-writing']);
+      const op = w.store.listOperations([id])[0]!;
+      expect(op.params.appliedBefore).toMatchObject({ curatedSkills: [] });
+      target.start = async () => { throw new Error('isolated target start failure'); };
+      await resumeMoveHost({ ...deps, providerForHost: (hostId: string) => hostId === 'h1' ? w.provider : target }, op.id);
+      expect(w.store.getOperation(op.id)?.status).toBe('rolled_back');
+      expect(w.store.getAgent(id)).toMatchObject({ hostId: 'h1', state: 'RUNNING', curatedSkills: ['hatchabot-writing'], appliedCuratedSkills: [] });
+    } finally { await w.f.close(); }
+  });
+
+  it.each([undefined, [], ['gog']])('restores the source skill selection %j when the configured target fails', async (appliedBefore) => {
+    const { w, target, deps } = await crossDaemonWorld();
+    try {
+      const id = await seedRunningAgent(w);
+      if (appliedBefore !== undefined) w.store.setAgentCuratedSkillsApplied(id, appliedBefore);
+      w.store.setAgentCuratedSkills(id, ['hatchabot-writing']);
+      w.store.setRebuildOnStart(id, '2026-11-05T00:00:00.000Z');
+      target.start = async () => {
+        // The target accepted the new configuration before it failed to boot.
+        expect(w.store.getAgent(id)?.appliedCuratedSkills).toEqual(['hatchabot-writing']);
+        throw new Error('isolated target start failure');
+      };
+      await expect(moveAgentToHost(deps, id, 'h2')).rejects.toThrow(/rolled back/);
+      expect(w.store.getAgent(id)).toMatchObject({ hostId: 'h1', state: 'RUNNING', curatedSkills: ['hatchabot-writing'], appliedCuratedSkills: appliedBefore, rebuildOnStart: '2026-11-05T00:00:00.000Z' });
+      const view = await w.f.inject({ method: 'GET', url: `/v1/agents/${id}/skills`, headers: as(w.owner) });
+      expect(view.statusCode).toBe(200);
+      expect(view.json()).toMatchObject({ selected: ['hatchabot-writing'], applied: appliedBefore ?? null, pending: true });
+    } finally { await w.f.close(); }
+  });
+
   it('copies the volume, starts on the target, and retires the source runtime', async () => {
     const { w, target, deps } = await crossDaemonWorld();
     const id = await seedRunningAgent(w, { memory: 'precious-memory' });

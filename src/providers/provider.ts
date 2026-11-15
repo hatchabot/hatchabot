@@ -140,6 +140,8 @@ export interface OpenClawConfigPatch {
   console?: { trustedProxies: string[]; ownerIdentity: string; guestIdentities: string[] };
   /** cron.triggers.enabled — see Agent.cronTriggers. Written convergently. */
   cronTriggers?: boolean;
+  /** Explicit library selection; absent leaves upstream skill enablement untouched. */
+  curatedSkills?: string[];
   /** Its own browser: OpenClaw attaches to it (browser.ts). Unset or false: the browser tool is off. Written convergently. */
   browser?: boolean;
   /** OpenClaw's agents.defaults.userTimezone (IANA): timestamps, schedules and "now" in the prompt. Undefined = leave it. */

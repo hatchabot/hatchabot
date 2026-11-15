@@ -95,6 +95,29 @@ describe('importTemplate: a description filled past the backup limit (HB-0309)',
   });
 });
 
+describe('curated choices in templates and clones', () => {
+  it.each([undefined, [], ['gog', 'hatchabot-writing']])('carries %j without carrying customized skill files', async (selection) => {
+    const { store, provider } = await world();
+    if (selection !== undefined) store.setAgentCuratedSkills('a1', selection);
+    const { data } = await exportTemplate({ store, provider }, 'a1');
+    const manifest = parseTemplate(data);
+    expect(manifest.agent.curatedSkills).toEqual(selection);
+    expect(Object.keys(manifest.files).some((p) => p.startsWith('skills/'))).toBe(false);
+    const { agent } = importTemplate({ store, provider }, data, { ownerId: 'owner-b', name: 'Copy' });
+    expect(store.getAgent(agent.id)!.curatedSkills).toEqual(selection);
+    expect(store.getAgent(agent.id)!.appliedCuratedSkills).toBeUndefined();
+  });
+
+  it('refuses unreviewed skill IDs in a template before creating a copy', async () => {
+    const { store, provider } = await world();
+    const { data } = await exportTemplate({ store, provider }, 'a1');
+    const manifest = parseTemplate(data);
+    manifest.agent.curatedSkills = ['../arbitrary'];
+    expect(() => importTemplate({ store, provider }, gzipSync(JSON.stringify(manifest)), { ownerId: 'owner-b' })).toThrow();
+    expect(store.listAgents('owner-b')).toEqual([]);
+  });
+});
+
 describe('exportTemplate', () => {
   it('captures the trained files + needs, and leaks NO identity', async () => {
     const { store, provider } = await world();

@@ -825,6 +825,7 @@ export async function buildRuntimeSpec(
         slug: agent.slug,
         persona: agent.persona,
         sharedMemory: agent.sharedMemory,
+        curatedSkills: agent.ops ? undefined : agent.curatedSkills,
         // A template import stashes its trained SOUL.md/AGENTS.md here; the seed
         // script only writes files that don't yet exist, so this seeds once.
         seedFiles,
@@ -843,6 +844,7 @@ export async function buildRuntimeSpec(
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
         cronTriggers: agent.cronTriggers === true,
+        curatedSkills: agent.ops ? undefined : agent.curatedSkills?.slice(),
         browser: agent.browser === true && !agent.ops,
         userTimezone: agentTimeZone(),
         embed,
@@ -1402,6 +1404,8 @@ export function recordApplied(store: Store, agentId: string, spec?: RuntimeSpec)
   else if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
   // Whose searches its Brave calls spend, until the next build (sourceUsage.ts attributeBrave).
   if (agent && rendered) store.recordAppliedSearchKey(agentId, rendered.searchKey);
+  const skills = spec?.workspace.configPatch.curatedSkills;
+  if (agent && !agent.ops && skills !== undefined) store.setAgentCuratedSkillsApplied(agentId, skills);
   // This container was made from the settings as they are: nothing is owed to
   // its next start. Only with a spec: a model written onto a stopped agent's
   // volume (applyModelNow) makes no container, and the old one still lacks the

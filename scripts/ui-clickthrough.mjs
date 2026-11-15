@@ -144,6 +144,28 @@ const SCENARIOS = String.raw`(() => {
     }
   };
   const byText = (sel, text) => [...document.querySelectorAll(sel)].find((el) => el.textContent.trim().includes(text));
+  const skillReply = (selected = ['gog'], applied = ['gog'], extra = {}) => ({
+    skills: [['gog', 'Google connections'], ['hatchabot-research', 'Research'], ['hatchabot-browser', 'Browser workflow'], ['hatchabot-writing', 'Writing'], ['hatchabot-planning', 'Planning']].map(([id, name]) => ({
+      id, name, description: 'Curated instructions for ' + name.toLowerCase() + '.', requirements: id === 'gog' ? ['A connected Google account'] : id === 'hatchabot-browser' ? ['An enabled browser'] : [],
+      version: '1', selected: selected.includes(id), applied: applied === null ? null : applied.includes(id),
+      trial: { title: 'Practice with sample material', prompt: 'Revise the made-up sample without sending it.' },
+    })),
+    selected, applied, managed: true, pending: applied === null || JSON.stringify(selected) !== JSON.stringify(applied), canEdit: true,
+    message: 'Saved choices apply on rebuild or next start.', ...extra,
+  });
+  const skillAvailabilityReply = () => ({ status: 'checked', checkedAt: '2026-11-15T12:00:00Z', skills: [
+    { id: 'gog', status: 'available', dependencies: [{ kind: 'google_accounts', status: 'present' }] },
+    { id: 'hatchabot-research', status: 'available', dependencies: [{ kind: 'web_tools', status: 'unchecked' }] },
+    { id: 'hatchabot-browser', status: 'available', dependencies: [{ kind: 'browser', status: 'present' }] },
+    { id: 'hatchabot-writing', status: 'available', dependencies: [] },
+    { id: 'hatchabot-planning', status: 'available', dependencies: [] },
+  ] });
+  const skillFileReply = (extra = {}) => ({
+    id: 'hatchabot-writing', revision: 'a'.repeat(64), state: 'customized',
+    catalog: { version: '1.1.0', hash: 'b'.repeat(64), content: '# Writing\nNew catalog instructions\n' },
+    installed: { version: '1.0.0', hash: 'c'.repeat(64), content: '# Writing\nMy local <img src=x> notes\n' },
+    canUpdate: false, canReplace: true, canRollback: true, history: [], ...extra,
+  });
   const tile = (name) => [...document.querySelectorAll('#v2groups .v2agent')].find((el) => el.textContent.includes(name));
   const centre = (el) => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; };
   const pointer = (type, target, x, y) => target.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, bubbles: true, cancelable: true }));
@@ -3296,6 +3318,353 @@ const SCENARIOS = String.raw`(() => {
         eq('leaving the settings cancels the delayed login warning', window.__confirms.length, confirmations);
         eq('leaving the settings does not change stored logins', calls('PUT', /\/browser\/logins$/).length, saves);
       } finally { hold = false; a.browser = hadBrowser; window.fetch = realFetch; v2Close(); }
+    },
+    skillsLibrarySelection: async () => {
+      const a = v2Find('a1'), was = { role: a.role, state: a.state, ops: a.ops }, path = '/v1/agents/a1/skills';
+      const checked = id => $('skillsChoices').querySelector('[data-skill="' + id + '"]');
+      try {
+        a.role = 'owner'; a.state = 'RUNNING'; a.ops = false;
+        const original = skillReply(['gog'], null, { managed: false, pending: false });
+        original.skills[1].name = 'Research <em>instructions</em>';
+        original.skills[1].requirements = ['Read <script> as text'];
+        window.__override[path] = original;
+        openV2Agent(a.id, 'advanced'); await v2SkillsOpen(a.id);
+        eq('the curated library has five choices', $('skillsChoices').querySelectorAll('input[data-skill]').length, 5);
+        ok('the legacy Google default can be saved explicitly', checked('gog').checked && !$('skillsSave').disabled);
+        ok('an unknown legacy build is not a pending saved change', !$('skillsStatus').textContent.includes('changes pending'));
+        ok('unknown last build and informational requirements are explicit', $('skillsDlg').textContent.includes('last build selection unknown') && $('skillsDlg').textContent.includes('use Check availability'));
+        ok('names and requirements cannot create markup', !$('skillsChoices').querySelector('em,script') && $('skillsChoices').textContent.includes('Research <em>instructions</em>'));
+        // Measure the sheet after its normal slide-in, not its initial 24px offset.
+        $('skillsDlg').getAnimations().forEach(animation => animation.finish());
+        const bounds = $('skillsDlg').getBoundingClientRect();
+        ok('the library fits the viewport: ' + JSON.stringify({ left: bounds.left, right: bounds.right, width: innerWidth, scroll: $('skillsDlg').scrollWidth, client: $('skillsDlg').clientWidth }), bounds.left >= -1 && bounds.right <= innerWidth + 1 && $('skillsDlg').scrollWidth <= $('skillsDlg').clientWidth + 1);
+        ok('selection does not promise installed or ready skills', !/installed|ready to use/i.test($('skillsDlg').textContent));
+        ok('custom files, access and new chats are explained', $('skillsDlg').textContent.includes('edited skill files are kept') && $('skillsDlg').textContent.includes('custom versions of the same named skill') && $('skillsDlg').textContent.includes('does not revoke tools or connected accounts') && $('skillsDlg').textContent.includes('new chat after the build'));
+        const rebuilds = calls('POST', /\/rebuild$/).length, writes = calls('PUT', /\/skills$/).length;
+        window.__answer = { ['PUT ' + path]: [{ body: skillReply(['gog'], null) }] };
+        await v2SkillsSave();
+        eq('unchanged legacy defaults become an explicit selection', calls('PUT', /\/skills$/).slice(writes).map(c => c.body), [{ selected: ['gog'] }]);
+        ok('saved choices need no further save', $('skillsSave').disabled);
+        ok('saving the legacy default explicitly marks it pending', $('skillsStatus').textContent.includes('changes pending'));
+        checked('hatchabot-writing').click();
+        const selected = ['gog', 'hatchabot-writing'];
+        window.__override[path] = skillReply(selected, ['gog']);
+        window.__answer = { ['PUT ' + path]: [{ body: window.__override[path] }] };
+        await v2SkillsSave();
+        eq('only the selected catalog ids are saved', calls('PUT', /\/skills$/).at(-1).body, { selected });
+        ok('saved selection remains separate from applied selection', $('skillsStatus').textContent.includes('2 selected') && $('skillsStatus').textContent.includes('1 applied at last build') && $('skillsStatus').textContent.includes('changes pending'));
+        eq('saving never starts a rebuild', calls('POST', /\/rebuild$/).length, rebuilds);
+        v2SkillsClose(); await v2SkillsOpen(a.id);
+        ok('reopening reads the persisted selection', checked('gog').checked && checked('hatchabot-writing').checked);
+        checked('gog').click(); checked('hatchabot-writing').click();
+        window.__answer = { ['PUT ' + path]: [{ body: skillReply([], ['gog']) }] };
+        await v2SkillsSave();
+        eq('an explicit empty selection is preserved', calls('PUT', /\/skills$/).at(-1).body, { selected: [] });
+        v2SkillsClose(); window.__answer = { ['GET ' + path]: [{ status: 503, body: { error: 'The library is temporarily unavailable.' } }] };
+        await v2SkillsOpen(a.id);
+        ok('an unavailable read is not an empty selection ready to save', $('skillsChoices').hidden && $('skillsSave').disabled && $('skillsErr').textContent.includes('unavailable'));
+        window.__answer = {};
+        a.state = 'ARCHIVED'; window.__override[path] = skillReply([], ['gog'], { canEdit: false, message: 'Restore the agent before changing its skills.' });
+        openV2Agent(a.id, 'advanced'); await v2SkillsOpen(a.id);
+        ok('archived agents have a readable library with no editing', [...$('skillsChoices').querySelectorAll('input')].every(el => el.disabled) && $('skillsSave').disabled && $('skillsStatus').textContent.includes('Restore'));
+        const before = calls('GET', /\/skills$/).length;
+        a.role = 'user'; v2RefreshSheet();
+        ok('a refresh revoking ownership clears an already open library', !$('skillsDlg').open && !$('skillsChoices').textContent && !$('v2Skills')?.textContent);
+        openV2Agent(a.id, 'advanced'); await v2SkillsOpen(a.id);
+        ok('members get no library or owner controls', !$('v2Skills') && !$('skillsDlg').open);
+        eq('member cannot request the owner selection', calls('GET', /\/skills$/).length, before);
+        a.role = 'owner'; a.ops = true; openV2Agent(a.id, 'advanced'); await v2SkillsOpen(a.id);
+        ok('the management agent is excluded', !$('v2Skills') && !$('skillsDlg').open);
+        eq('management agent did not request a selection', calls('GET', /\/skills$/).length, before);
+      } finally { Object.assign(a, was); v2Close(); delete window.__override[path]; window.__answer = {}; }
+    },
+    skillsSaveKeepsDraft: async () => {
+      const realFetch = window.fetch, path = '/v1/agents/a1/skills', replies = [], running = [];
+      const checked = id => $('skillsChoices').querySelector('[data-skill="' + id + '"]');
+      window.__override[path] = skillReply();
+      window.fetch = (input, init = {}) => String(input) === path && init.method === 'PUT'
+        ? new Promise(resolve => replies.push({ resolve, body: JSON.parse(init.body) })) : realFetch(input, init);
+      try {
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); checked('hatchabot-writing').click();
+        const saving = v2SkillsSave(); running.push(saving);
+        eq('the first save carries the draft', replies[0].body, { selected: ['gog', 'hatchabot-writing'] });
+        ok('choices and Save are disabled during the request', [...$('skillsChoices').querySelectorAll('input')].every(el => el.disabled) && $('skillsSave').disabled);
+        await v2SkillsSave(); eq('a second press cannot duplicate the save', replies.length, 1);
+        replies[0].resolve(new Response(JSON.stringify({ error: 'The selection could not be saved (made up).' }), { status: 503 })); await saving;
+        ok('failure retains the choices and offers retry', checked('hatchabot-writing').checked && !$('skillsSave').disabled && $('skillsErr').textContent.includes('could not be saved'));
+        window.__override[path] = skillReply(['gog'], ['gog'], { canEdit: false, message: 'An operation is under way. Try again later.' });
+        await v2SkillsRead();
+        ok('a busy recheck retains the draft but disables saving', checked('hatchabot-writing').checked && $('skillsSave').disabled && $('skillsStatus').textContent.includes('under way'));
+        window.__override[path] = skillReply(); await v2SkillsRead();
+        ok('a later recheck makes the same draft editable again', checked('hatchabot-writing').checked && !$('skillsSave').disabled);
+        const retry = v2SkillsSave(); running.push(retry);
+        replies[1].resolve(new Response(JSON.stringify(skillReply(['gog', 'hatchabot-writing'])))); await retry;
+        ok('successful retry keeps its selection and clears the error', checked('hatchabot-writing').checked && $('skillsSave').disabled && !$('skillsErr').textContent);
+      } finally {
+        v2SkillsClose(); for (const r of replies) r.resolve(new Response(JSON.stringify({ error: 'Cleanup' }), { status: 503 }));
+        await Promise.allSettled(running); window.fetch = realFetch; delete window.__override[path]; v2Close();
+      }
+    },
+    skillsReadsStayCurrent: async () => {
+      const realFetch = window.fetch, pending = [], allReads = [], runs = [];
+      const was = { person: pagePerson, away: pagePersonAway, out: pageSignedOut, cleared: pageCleared, enrol: window.__sfEnrolShown, wanted: pageReloadWanted, reloads: window.__reloads };
+      const answer = (entry, r) => entry.resolve(new Response(JSON.stringify(r)));
+      window.fetch = (input, init = {}) => /\/skills$/.test(String(input)) && (!init.method || init.method === 'GET')
+        ? new Promise(resolve => { const entry = { path: String(input), resolve }; pending.push(entry); allReads.push(entry); }) : realFetch(input, init);
+      try {
+        openV2Agent('a1', 'advanced'); const first = v2SkillsOpen('a1'); runs.push(first);
+        const old = pending.splice(0);
+        openV2Agent('a2', 'advanced'); const second = v2SkillsOpen('a2'); runs.push(second);
+        pending.splice(0).forEach(e => answer(e, skillReply(['hatchabot-writing']))); await second;
+        old.forEach(e => answer(e, skillReply(['gog']))); await first;
+        eq('the old agent cannot replace the current library', [$('skillsAgent').textContent, [...$('skillsChoices').querySelectorAll('input:checked')].map(el => el.dataset.skill)], [v2Find('a2').name, ['hatchabot-writing']]);
+        const older = v2SkillsRead(); runs.push(older); const early = pending.pop();
+        const newer = v2SkillsRead(); runs.push(newer); const late = pending.pop();
+        answer(late, skillReply(['hatchabot-planning'])); await newer; answer(early, skillReply(['gog'])); await older;
+        ok('the newer read wins', $('skillsChoices').querySelector('[data-skill="hatchabot-planning"]').checked);
+        const beforeClose = v2SkillsRead(); runs.push(beforeClose); const closed = pending.pop();
+        v2SkillsClose(); const reopened = v2SkillsOpen('a2'); runs.push(reopened); answer(pending.pop(), skillReply(['hatchabot-research'])); await reopened;
+        answer(closed, skillReply(['gog'])); await beforeClose;
+        ok('reopening the same agent does not revive an earlier answer', $('skillsChoices').querySelector('[data-skill="hatchabot-research"]').checked);
+        const ending = v2SkillsRead(); runs.push(ending); const signedOut = pending.pop();
+        pageSessionEnded(); answer(signedOut, skillReply(['gog'])); await ending;
+        ok('session end clears and cannot restore skill choices', !$('skillsDlg').open && !$('skillsChoices').textContent && !$('v2Skills').querySelector('button'));
+        pagePersonAway = false; pageSignedOut = false; pagePerson = 'skills-person-a';
+        const changing = v2SkillsOpen('a2'); runs.push(changing); const account = pending.pop();
+        pagePersonIs('skills-person-b'); answer(account, skillReply(['gog'])); await changing;
+        ok('another account cannot inherit the previous library', !$('skillsDlg').open && !$('skillsChoices').textContent);
+      } finally {
+        v2SkillsClose(); allReads.forEach(e => answer(e, skillReply())); await Promise.allSettled(runs); window.fetch = realFetch; v2Close();
+        clearTimeout(pageReloadTimer); pageReloadTimer = 0; pageReloadWanted = was.wanted; window.__reloads = was.reloads;
+        pagePerson = was.person; pagePersonAway = was.away; pageSignedOut = was.out; pageCleared = was.cleared; window.__sfEnrolShown = was.enrol;
+      }
+    },
+    skillsSaveReopenFencesOldReads: async () => {
+      const realFetch = window.fetch, path = '/v1/agents/a1/skills', runs = [], replies = [];
+      let holdRead = false, readReply;
+      window.__override[path] = skillReply();
+      window.fetch = (input, init = {}) => {
+        if (String(input) !== path) return realFetch(input, init);
+        if (init.method === 'PUT') return new Promise(resolve => replies.push(resolve));
+        if (holdRead) return new Promise(resolve => { readReply = resolve; });
+        return realFetch(input, init);
+      };
+      try {
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1');
+        $('skillsChoices').querySelector('[data-skill="hatchabot-writing"]').click();
+        const saving = v2SkillsSave(); runs.push(saving);
+        v2SkillsClose(); holdRead = true;
+        const reopening = v2SkillsOpen('a1'); runs.push(reopening);
+        ok('a new opening has an in-flight read', typeof readReply === 'function');
+        replies[0](new Response(JSON.stringify(skillReply(['gog', 'hatchabot-writing'])))); await saving;
+        readReply(new Response(JSON.stringify(skillReply()))); await reopening;
+        ok('a pre-save read cannot re-enable old choices after the save finishes', $('skillsSave').disabled && $('skillsErr').textContent.includes('changed while reading'));
+        holdRead = false; window.__override[path] = skillReply(['gog', 'hatchabot-writing']); await v2SkillsRead();
+        ok('a fresh read shows the saved choice', $('skillsChoices').querySelector('[data-skill="hatchabot-writing"]').checked && !$('skillsErr').textContent);
+        $('skillsChoices').querySelector('[data-skill="hatchabot-planning"]').click();
+        const lateSave = v2SkillsSave(); runs.push(lateSave);
+        v2SkillsClose(); await v2SkillsOpen('a1');
+        ok('reopening during a save blocks another write', [...$('skillsChoices').querySelectorAll('input')].every(el => el.disabled) && $('skillsStatus').textContent.includes('previous save'));
+        await v2SkillsSave(); eq('reopening cannot duplicate the write', replies.length, 2);
+        window.__override['/v1/agents/a2/skills'] = skillReply(['hatchabot-research']);
+        openV2Agent('a2', 'advanced'); await v2SkillsOpen('a2');
+        replies[1](new Response(JSON.stringify({ error: 'First agent save failed.' }), { status: 503 })); await lateSave;
+        ok('a late save failure cannot overwrite another agent dialog', $('skillsAgent').textContent === v2Find('a2').name && !$('skillsErr').textContent && $('skillsChoices').querySelector('[data-skill="hatchabot-research"]').checked);
+      } finally {
+        v2SkillsClose(); holdRead = false; readReply?.(new Response(JSON.stringify(skillReply())));
+        replies.forEach(resolve => resolve(new Response(JSON.stringify({ error: 'Cleanup' }), { status: 503 })));
+        await Promise.allSettled(runs); window.fetch = realFetch; delete window.__override[path]; delete window.__override['/v1/agents/a2/skills']; v2Close();
+      }
+    },
+    skillsAvailabilityIsExplicit: async () => {
+      const path = '/v1/agents/a1/skills', statusPath = path + '/status';
+      const checks = () => calls('GET', /\/skills\/status$/).length;
+      const text = () => $('skillsAvailability').textContent;
+      window.__override[path] = skillReply(); window.__override[statusPath] = skillAvailabilityReply();
+      try {
+        const before = checks();
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); await v2SkillsRead(); v2RefreshSheet();
+        eq('opening, rechecking selections and sheet polling never probe the runtime', checks(), before);
+        ok('the runtime check starts only on request', text().includes('Not checked') && !$('skillsCheck').disabled);
+        await v2SkillsCheck();
+        eq('one explicit runtime check', checks(), before + 1);
+        ok('visible instructions are distinguished from actual use', text().includes('Instructions available') && $('skillsDlg').textContent.includes('no AI task or external service was tested'));
+        ok('account discovery does not promise valid credentials', text().includes('Google account found; sign-in and scopes were not tested'));
+        ok('a browser setting does not promise a working browser', text().includes('running it and its permissions were not tested'));
+        ok('web tool limits are stated per conversation', text().includes('availability varies by conversation'));
+        const labels = [['disabled', 'Disabled in the runtime'], ['blocked', 'Blocked by runtime policy'], ['missing_requirements', 'Missing runtime requirements'], ['not_installed', 'Instructions not found'], ['unavailable', 'Could not check this skill']];
+        const mixed = skillAvailabilityReply();
+        mixed.skills.forEach((s, i) => { s.status = labels[i][0]; });
+        mixed.skills[2].missing = { tools: 2, environment: 1, configuration: 1, platform: 1 };
+        mixed.skills[0].dependencies[0].status = 'missing'; mixed.skills[2].dependencies[0].status = 'missing';
+        window.__override[statusPath] = mixed; await v2SkillsCheck();
+        ok('each failure mode has its own fixed label', labels.every(([, label]) => text().includes(label)));
+        ok('missing requirements are counts, separate from account and browser setup', text().includes('2 tools, 1 environment setting, 1 configuration setting, 1 platform requirement') && text().includes('No Google account found') && text().includes('Browser is not enabled'));
+        for (const [status, words] of [['not_running', 'Start the agent'], ['busy', 'Another operation'], ['unsupported', 'does not support'], ['unavailable', 'Could not check runtime']]) {
+          window.__override[statusPath] = { status, skills: [] }; await v2SkillsCheck();
+          ok(status + ' is clear and replaces earlier runtime results', text().includes(words) && !text().includes('Instructions available') && !$('skillsAvailability').querySelector('button'));
+        }
+        window.__override[statusPath] = { status: '<img src=x onerror=alert(1)>', skills: [] }; await v2SkillsCheck();
+        ok('unknown status is safely unavailable', text().includes('Could not check runtime') && !$('skillsAvailability').querySelector('img'));
+        window.__override[statusPath] = skillAvailabilityReply(); await v2SkillsCheck();
+        await v2SkillsRead(); ok('rereading saved choices clears the runtime result', text().includes('Not checked'));
+        await v2SkillsCheck(); $('skillsChoices').querySelector('[data-skill="hatchabot-writing"]').click();
+        ok('an edited selection clears the runtime result', text().includes('Not checked'));
+        await v2SkillsCheck(); window.__answer = { ['PUT ' + path]: [{ body: skillReply(['gog', 'hatchabot-writing']) }] };
+        await v2SkillsSave(); ok('saving clears even a more recent runtime check', text().includes('Not checked'));
+        const count = checks(); v2SkillsClose(); await v2SkillsOpen('a1');
+        ok('reopening starts unchecked', text().includes('Not checked')); eq('reopening does not probe', checks(), count);
+      } finally { v2Close(); delete window.__override[path]; delete window.__override[statusPath]; window.__answer = {}; }
+    },
+    skillsAvailabilitySetupLinks: async () => {
+      const path = '/v1/agents/a1/skills', statusPath = path + '/status';
+      window.__override[path] = skillReply(); window.__override[statusPath] = skillAvailabilityReply();
+      try {
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); await v2SkillsCheck();
+        const writes = calls('PUT', /\/skills$/).length, rebuilds = calls('POST', /\/rebuild$/).length;
+        $('skillsAvailability').querySelector('[data-skills-setup="google_accounts"]').click();
+        ok('Connections opens this agent Data tab', !$('skillsDlg').open && v2AgentId === 'a1' && v2Tab === 'knowledge' && $('v2Pane').contains($('paneEditConn')));
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); await v2SkillsCheck();
+        $('skillsAvailability').querySelector('[data-skills-setup="browser"]').click();
+        ok('Browser settings stays with this agent', !$('skillsDlg').open && v2AgentId === 'a1' && v2Tab === 'advanced' && document.activeElement === $('v2Browser'));
+        await v2SkillsOpen('a1'); $('skillsChoices').querySelector('[data-skill="hatchabot-writing"]').click(); await v2SkillsCheck();
+        window.__confirmAnswer = false;
+        $('skillsAvailability').querySelector('[data-skills-setup="google_accounts"]').click();
+        ok('a declined navigation keeps unsaved skill choices', $('skillsDlg').open && $('skillsChoices').querySelector('[data-skill="hatchabot-writing"]').checked);
+        v2SkillsSetup('https://example.com/untrusted');
+        ok('an arbitrary setup destination cannot navigate', $('skillsDlg').open && v2Tab === 'advanced');
+        eq('setup navigation neither saves nor rebuilds', [calls('PUT', /\/skills$/).length, calls('POST', /\/rebuild$/).length], [writes, rebuilds]);
+      } finally { window.__confirmAnswer = true; v2Close(); delete window.__override[path]; delete window.__override[statusPath]; }
+    },
+    skillsInstructionPreviewAndRollback: async () => {
+      const path = '/v1/agents/a1/skills', file = path + '/hatchabot-writing/file';
+      window.__override[path] = skillReply(); window.__override[file] = skillFileReply();
+      try {
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1');
+        const before = calls('GET', /\/skills\/[^/]+\/file$/).length;
+        eq('library does not automatically read private instructions', calls('GET', /\/skills\/[^/]+\/file$/).length, before);
+        await v2SkillOpen('hatchabot-writing');
+        const el = $('skillDetail');
+        ok('preview compares installed and catalog bytes as text', el.textContent.includes('My local <img src=x> notes') && el.textContent.includes('+ New catalog instructions') && !el.querySelector('img'));
+        ok('customized instructions cannot use the ordinary update action', el.querySelector('[data-skill-action="update"]').disabled);
+        const writes = calls('POST', /\/skills\/[^/]+\/file$/).length;
+        window.__confirmAnswer = false; await v2SkillChange('replace');
+        eq('declining replacement sends nothing', calls('POST', /\/skills\/[^/]+\/file$/).length, writes);
+        window.__confirmAnswer = true;
+        const updated = skillFileReply({ revision: 'd'.repeat(64), state: 'current', canUpdate: false, canReplace: false });
+        window.__answer = { ['POST ' + file]: [{ body: updated }, { body: skillFileReply() }] };
+        await v2SkillChange('replace');
+        const sent = calls('POST', /\/skills\/[^/]+\/file$/).at(-1);
+        ok('replacement compares exactly the previewed revision', sent.body.action === 'replace' && sent.body.expectedRevision === 'a'.repeat(64));
+        await v2SkillChange('rollback');
+        const rolled = calls('POST', /\/skills\/[^/]+\/file$/).at(-1).body;
+        ok('rollback compares the replacement revision', rolled.action === 'rollback' && rolled.expectedRevision === 'd'.repeat(64));
+        ok('restored custom instructions remain visible', el.textContent.includes('Customized instructions'));
+        window.__answer = { ['POST ' + file]: [{ status: 409, body: { error: 'Changed meanwhile. Refresh preview.' } }] };
+        await v2SkillChange('replace');
+        ok('a stale edit clears unsafe mutation controls', el.textContent.includes('Changed meanwhile') && !el.querySelector('[data-skill-action]'));
+      } finally { window.__confirmAnswer = true; window.__answer = {}; delete window.__override[path]; delete window.__override[file]; v2Close(); }
+    },
+    skillsPracticeTaskEvidence: async () => {
+      const path = '/v1/agents/a1/skills', file = path + '/hatchabot-writing/file', trial = path + '/hatchabot-writing/try';
+      const a = v2Find('a1'), was = { busy: a.busy, state: a.state };
+      window.__override[path] = skillReply(); window.__override[file] = skillFileReply();
+      try {
+        a.state = 'RUNNING'; openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); await v2SkillOpen('hatchabot-writing');
+        const before = calls('POST', /\/skills\/[^/]+\/try$/).length;
+        ok('practice describes its scope and spending limit accurately', $('skillDetail').textContent.includes('no guaranteed dollar cap') && $('skillDetail').textContent.includes('does not test external accounts'));
+        ok('the actual practice task is visible before spending', $('skillDetail').textContent.includes('Revise the made-up sample without sending it.'));
+        window.__answer = { ['POST ' + trial]: [{ body: { status: 'completed', message: 'Practice completed; external services were not tested.', output: '<img src=x> revised sample', evidence: { skillRead: true, fixtureRead: true, toolCalls: 2, codeMode: true }, usage: { total: 240, costUsd: 0.001 } } }] };
+        await v2SkillTry();
+        eq('practice is an explicit single POST', calls('POST', /\/skills\/[^/]+\/try$/).length, before + 1);
+        eq('practice binds the installed instruction revision', calls('POST', /\/skills\/[^/]+\/try$/).at(-1).body, { expectedRevision: 'a'.repeat(64) });
+        ok('observed reads and model output are presented safely', $('skillTrialResult').textContent.includes('Skill read: observed') && $('skillTrialResult').textContent.includes('240 tokens') && !$('skillTrialResult').querySelector('img'));
+        a.busy = true; v2SkillsSyncAvailability(skillsOpening);
+        ok('own temporary busy state does not erase the practice report', !$('skillDetail').hidden && $('skillTrialResult').textContent.includes('revised sample'));
+        a.busy = false;
+        window.__answer = { ['POST ' + trial]: [{ body: { status: 'not_observed', message: 'Skill use was not observed.', evidence: { skillRead: false, fixtureRead: false, toolCalls: 0, codeMode: null } } }] };
+        await v2SkillTry();
+        ok('missing evidence replaces the earlier success', $('skillTrialResult').textContent.includes('Skill use was not observed') && !$('skillTrialResult').textContent.includes('revised sample'));
+      } finally { Object.assign(a, was); window.__answer = {}; delete window.__override[path]; delete window.__override[file]; v2Close(); }
+    },
+    skillsWritesRecoverAfterReopen: async () => {
+      const realFetch = window.fetch, path = '/v1/agents/a1/skills', file = path + '/hatchabot-writing/file', pending = [], runs = [];
+      const a = v2Find('a1'), updatedAt = a.updatedAt;
+      window.__override[path] = skillReply(); window.__override[file] = skillFileReply();
+      window.fetch = (input, init = {}) => String(input) === file && init.method === 'POST'
+        ? new Promise(resolve => pending.push(resolve)) : realFetch(input, init);
+      try {
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); await v2SkillOpen('hatchabot-writing');
+        const old = v2SkillChange('replace'); runs.push(old); v2SkillsClose(); await v2SkillsOpen('a1');
+        ok('a reopened library waits for the existing file change', $('skillsRecheck').disabled);
+        pending[0](new Response(JSON.stringify(skillFileReply({ state: 'current', agentUpdatedAt: '2026-11-15T18:00:00Z' })))); await old;
+        ok('finishing the old change enables fresh Recheck without restoring old data', !$('skillsRecheck').disabled && $('skillDetail').hidden && $('skillsErr').textContent.includes('Recheck'));
+        await v2SkillsRead(); await v2SkillOpen('hatchabot-writing');
+        const next = v2SkillChange('replace'); runs.push(next);
+        a.updatedAt = '2026-11-15T18:02:00Z';
+        pending[1](new Response(JSON.stringify(skillFileReply({ state: 'current', agentUpdatedAt: '2026-11-15T18:01:00Z' })))); await next;
+        eq('a delayed reply cannot rewind a newer roster revision', a.updatedAt, '2026-11-15T18:02:00Z');
+        ok('a later change requires a fresh preview', $('skillDetail').textContent.includes('changed again') && !$('skillDetail').querySelector('[data-skill-action]'));
+      } finally { a.updatedAt = updatedAt; window.fetch = realFetch; for (const resolve of pending) resolve(new Response('{}')); await Promise.allSettled(runs); delete window.__override[path]; delete window.__override[file]; v2Close(); }
+    },
+    skillsPreviewDropsLateResults: async () => {
+      const realFetch = window.fetch, pending = [], runs = [];
+      window.__override['/v1/agents/a1/skills'] = skillReply(); window.__override['/v1/agents/a2/skills'] = skillReply();
+      window.fetch = (input, init) => /\/skills\/[^/]+\/file$/.test(String(input))
+        ? new Promise(resolve => pending.push(resolve)) : realFetch(input, init);
+      const answer = index => pending[index](new Response(JSON.stringify(skillFileReply())));
+      try {
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); const old = v2SkillOpen('hatchabot-writing'); runs.push(old);
+        openV2Agent('a2', 'advanced'); await v2SkillsOpen('a2'); answer(0); await old;
+        ok('another agent cannot receive old private instruction text', $('skillDetail').hidden && !$('skillDetail').textContent);
+        const prior = v2SkillOpen('hatchabot-writing'); runs.push(prior); v2SkillsClose(); await v2SkillsOpen('a2'); answer(1); await prior;
+        ok('close and reopen drops earlier instruction reads', $('skillDetail').hidden && !$('skillDetail').textContent);
+        const last = v2SkillOpen('hatchabot-writing'); runs.push(last); v2SkillsForget(); answer(2); await last;
+        ok('session invalidation clears private previews', !$('skillsDlg').open && !$('skillDetail').textContent);
+      } finally { window.fetch = realFetch; for (const resolve of pending) resolve(new Response('{}')); await Promise.allSettled(runs); delete window.__override['/v1/agents/a1/skills']; delete window.__override['/v1/agents/a2/skills']; v2Close(); }
+    },
+    skillsAvailabilityStaysWithItsRuntime: async () => {
+      const realFetch = window.fetch, pending = [], runs = [], a = v2Find('a1');
+      const was = { runtimeRef: a.runtimeRef, updatedAt: a.updatedAt, person: pagePerson, away: pagePersonAway, out: pageSignedOut, cleared: pageCleared, enrol: window.__sfEnrolShown, wanted: pageReloadWanted, reloads: window.__reloads };
+      const answer = (entry, response = skillAvailabilityReply()) => entry.resolve(new Response(JSON.stringify(response)));
+      window.__override['/v1/agents/a1/skills'] = skillReply(); window.__override['/v1/agents/a2/skills'] = skillReply();
+      window.fetch = (input, init) => /\/skills\/status$/.test(String(input))
+        ? new Promise(resolve => pending.push({ path: String(input), resolve })) : realFetch(input, init);
+      try {
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1');
+        const first = v2SkillsCheck(); runs.push(first); await v2SkillsCheck();
+        eq('a double press starts only one probe', pending.length, 1);
+        openV2Agent('a2', 'advanced'); await v2SkillsOpen('a2'); const second = v2SkillsCheck(); runs.push(second);
+        answer(pending[1], { status: 'not_running', skills: [] }); await second; answer(pending[0]); await first;
+        ok('another agent cannot replace the current status', $('skillsAgent').textContent === v2Find('a2').name && $('skillsAvailability').textContent.includes('Start the agent'));
+        const previous = v2SkillsCheck(); runs.push(previous); v2SkillsClose(); await v2SkillsOpen('a2');
+        answer(pending[2]); await previous;
+        ok('closing and reopening the same agent drops its old check', $('skillsAvailability').textContent.includes('Not checked'));
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); const beforeMove = v2SkillsCheck(); runs.push(beforeMove);
+        a.runtimeRef = 'synthetic-replacement-runtime'; v2RefreshSheet(); answer(pending[3]); await beforeMove;
+        ok('a runtime change drops an in-flight check', $('skillsAvailability').textContent.includes('Not checked'));
+        const current = v2SkillsCheck(); runs.push(current); answer(pending[4]); await current;
+        ok('a fresh check can report the new runtime', $('skillsAvailability').textContent.includes('Instructions available'));
+        a.updatedAt = '2026-11-15T15:45:00Z'; v2RefreshSheet();
+        ok('a later build or settings revision clears a cached check', $('skillsAvailability').textContent.includes('Not checked'));
+        const beforeSave = v2SkillsCheck(); runs.push(beforeSave);
+        $('skillsChoices').querySelector('[data-skill="hatchabot-writing"]').click();
+        window.__answer = { 'PUT /v1/agents/a1/skills': [{ body: skillReply(['gog', 'hatchabot-writing']) }] };
+        await v2SkillsSave(); answer(pending[5]); await beforeSave;
+        ok('a pre-save availability reply cannot restore old results', $('skillsAvailability').textContent.includes('Not checked'));
+        const ending = v2SkillsCheck(); runs.push(ending); pageSessionEnded(); answer(pending[6]); await ending;
+        ok('session end clears and cannot restore availability', !$('skillsDlg').open && !$('skillsAvailability').textContent);
+        pagePersonAway = false; pageSignedOut = false; pagePerson = 'availability-person-a';
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); const changing = v2SkillsCheck(); runs.push(changing);
+        pagePersonIs('availability-person-b'); answer(pending[7]); await changing;
+        ok('another account cannot inherit the earlier availability result', !$('skillsDlg').open && !$('skillsAvailability').textContent);
+      } finally {
+        v2SkillsClose(); pending.forEach(e => answer(e)); await Promise.allSettled(runs); window.fetch = realFetch; window.__answer = {};
+        a.runtimeRef = was.runtimeRef; a.updatedAt = was.updatedAt;
+        clearTimeout(pageReloadTimer); pageReloadTimer = 0; pageReloadWanted = was.wanted; window.__reloads = was.reloads;
+        pagePerson = was.person; pagePersonAway = was.away; pageSignedOut = was.out; pageCleared = was.cleared; window.__sfEnrolShown = was.enrol;
+        delete window.__override['/v1/agents/a1/skills']; delete window.__override['/v1/agents/a2/skills']; v2Close();
+      }
     },
     voiceCardReadiness: async () => {
       const a = v2Find('a1'), role = a.role, state = a.state, slug = a.slug;
@@ -11687,6 +12056,17 @@ const SCENARIOS = String.raw`(() => {
   });
   /** The phone runs (the page opened 360 and 390 px wide): what has to fit a phone screen. The desktop suite is skipped there. */
   const P = {
+    phoneSkillsManagement: async () => {
+      await T.skillsInstructionPreviewAndRollback();
+      await T.skillsPracticeTaskEvidence();
+      const path = '/v1/agents/a1/skills', file = path + '/hatchabot-writing/file';
+      window.__override[path] = skillReply(); window.__override[file] = skillFileReply();
+      try {
+        openV2Agent('a1', 'advanced'); await v2SkillsOpen('a1'); await v2SkillOpen('hatchabot-writing');
+        const outside = [...$('skillDetail').querySelectorAll('button,pre')].filter(el => { const r = el.getBoundingClientRect(); return r.width && (r.left < 0 || r.right > innerWidth); });
+        ok('skill instructions and all actions fit the phone', outside.length === 0);
+      } finally { delete window.__override[path]; delete window.__override[file]; v2Close(); }
+    },
     phoneSortButtonsReachable: async () => {
       // Five sort buttons (Cost, Age, Name, Activity, My order) ran past the edge of a phone screen and the
       // last were unreachable (Chris, 2026-10-23): they wrap now, every one inside the screen.

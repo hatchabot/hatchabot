@@ -2234,10 +2234,76 @@ can check — its container hostname is `<agent>.<host>` and
 `HATCHABOT_HOST_NAME` carries the host's name, both refreshed on every
 rebuild and Move.
 
+## Curated skills
+
+Open an agent's **Advanced → Skills** to choose reusable instructions for that
+agent. The library includes Google Workspace, web research, browser tasks,
+writing review, project planning, Jira, and image generation. Each card explains its purpose and what
+it needs. Only the agent's owner can change the selection; the management agent
+keeps its own fixed instructions.
+
+**Save selection**, then rebuild the agent, or leave the change for its next
+start. A stopped agent stays stopped. The library distinguishes saved choices
+from those applied at the last build. Start a new conversation after applying a
+change. Google Workspace needs an attached Google account; browser tasks need
+the agent's browser enabled separately; research uses the available web tools.
+
+**Check availability** explicitly reads the running agent's skill inventory.
+It shows whether instructions are available, disabled, blocked by policy,
+missing requirements, or absent. The check also reports whether Google has an
+account configured and whether the runtime's browser setting is enabled, with
+links to Connections and Browser settings. It never starts a stopped agent.
+Results are discarded when the agent, account, or relevant settings change.
+
+Availability is not a successful task test. Google sign-in and service scopes,
+browser operation and site logins, and external services are not exercised.
+Web-tool access depends on the conversation and is explicitly left unchecked.
+An unreadable result is unknown, not a claim that a skill is missing. The app
+does not return account identities, private requirement names, file paths, or
+raw runtime errors from this check.
+
+Rebuilds create skill files only when absent. Your edits survive rebuilds, and
+disabling a skill keeps its files. The switch also controls a customized skill
+with the same name. Disabling instructions **does not revoke tools, browser
+access, or connected accounts**: use their settings to remove access. An agent
+that has never saved library choices keeps its original Google Workspace seed
+and any manually configured OpenClaw skill switches.
+
+Selections travel through clones, shared templates, full downloads/imports,
+and host moves. Templates carry only the reviewed catalog choices, not your
+custom skill files or credentials. Full downloads retain workspace files as
+before. Selecting an entry does not install extra binaries or configure keys.
+
+**Preview, update and try** shows catalog instructions, the actual installed
+file, and a text comparison. Version metadata distinguishes an untouched older
+version from customized or untracked instructions. An ordinary update refuses
+customizations; **Replace with catalog** requires confirmation and retains the
+current file. **Restore previous instructions** rolls back the last change.
+Up to five previous copies remain on the agent's volume. A stale preview refuses
+the write. Start a new conversation after changing instructions. File changes
+do not change the saved skill selection.
+
+**Run practice task** makes one explicitly requested AI run using the installed
+instructions and invented sample material in a temporary workspace. Its tools
+can read that workspace only. It reports observed instruction/sample reads and
+the answer, with usage and cost when the runtime reports them. The model run has
+a 60-second deadline and a 512-output-token setting per response; those are not
+a guaranteed dollar cap. Metered AI charges apply, and each agent has a two-minute
+interval between attempts. Unsupported runtimes or model harnesses report that
+limitation. A practice result does not prove Google, Jira, browser or image-provider
+access. See [Skills setup and examples](skills.md).
+
+The managed Installing tools section of the agent's instructions now explains
+skill discovery and tool calls under Code Mode, including the difference
+between a command-line program and a catalog tool, and how to wait for a command
+that is still running. Normal instruction synchronization refreshes that section
+without rewriting customized skill files. Protocol tests use the pinned runtime
+with scripted calls; ordinary-model acceptance is a separate live test.
+
 ## Google connections (Gmail, Drive, Calendar, …)
 
 Advanced agents can connect to Google Workspace via the bundled `gog` CLI
-(seeded as a skill in every agent). Setup happens **in the Telegram chat**:
+(selected by default in the skills library). Setup happens **in the Telegram chat**:
 ask the agent to connect an account and it walks the owner through Google's
 consent flow (`--remote` paste-back — no browser needed on the server).
 **Multiple accounts per agent are supported**: auth each one in chat

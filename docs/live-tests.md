@@ -53,6 +53,7 @@ on a machine that can; it does not hold the gate here.
 | `console` | A real browser opens an agent's console at the public HTTPS address: a secure context and its app starts; with a sign-in key, also that its live connection opens and carries messages | `HATCHABOT_PUBLIC_URL`; room for 1 agent; a sign-in key for the live connection (it admits a signed-in browser only): `-- --signin-key <file>.key`, or `~/.config/hatchabot/signin-live-test.key` with its `.pub` as `HATCHABOT_SIGNIN_KEY_FILE` (docs/signin-links.md); without one the run is a SKIP | 2–5 min | none |
 | `browser` | An agent's own browser: off by default; switched on it opens and reads a real page; none of the agent's files in it; scripts and private addresses refused, and a page that sends itself to one later does not reach it (the agent itself still does); the sign-in panel signs it in to a public demo login page through the app's routes, and the agent's own tool then sees the signed-in page; with Keep its logins on, that sign-in outlives an agent restart, and is gone after Forget logins (its old profile deleted from the machine); it follows an agent restart; switched off it is gone, its kept profile too | Room for 1 agent; internet from the agents | 11–16 min | none |
 | `google-plain-request` | Under Code Mode, an agent told of an attached account runs `gog` for a plain request that names no command, and answers from the result. A stand-in `gog` over a made-up mailbox: it does not show that a real mailbox answers | Room for 1 agent; no Google account | 3–5 min | one |
+| `skills` | Selection reaches the runtime; customized instructions survive disable/re-enable and explicit replacement/rollback; a plain Code Mode request invokes its skill fixture; isolated practice observes skill and sample reads | Room for 1 web-only agent on the local machine and a configured AI source; no Google account or external browser service | 10–18 min | two |
 | `candidate-gate` | An agent on an image builds, answers, and keeps its memory search and tools | The image (default: this machine's default) | 5–10 min | one |
 | `regress-autonomous` | An agent made from the CLI answers, remembers, runs a task on demand and on its schedule, pauses, and keeps both across a restart | The live install | 10–15 min | about eight |
 | `restore-drill` | The newest complete nightly backup restores, every agent's archive into its own throwaway volume (no network, no secrets mounted), without touching the live system; writes its record under `<backups>/drills` | A backup set | 10–60 min | none |
@@ -77,6 +78,31 @@ in its own log file. The three clean installs make no agent on the live
 install, but they also run one at a time: a VM started alongside the others
 kept stopping by itself (HB-0381). Give them a source with
 `run-due --ai-source "<name>"`.
+
+**Curated skills acceptance:** after deploying the release, run
+`node scripts/live.mjs run skills` from a live-install session. It creates one
+uniquely named web-only agent, checks selection through rebuild and next start,
+and verifies that customizing, disabling and re-enabling Writing preserves the
+exact file contents. It also refuses an ordinary update of customized instructions,
+then explicitly replaces and rolls back the file to its exact original bytes.
+One ordinary-language request under forced Code Mode must
+invoke a local fixture described only in the skill and use the fresh receipt it
+returns. A second AI run exercises the isolated practice API and must report both
+skill and sample reads. The runner checks actual invocation evidence and removes only its own
+agent, including on failure. Requests, commands and cleanup have time limits.
+This proves a real model uses the fixture; it does not exercise Google, web
+research or browser services. Do not run it from a coding session.
+
+The separate isolated protocol check needs no model, install, credentials or
+network. Given the full official OpenClaw 2026.9.8 source tree, run
+`node --import tsx scripts/skills-contract.ts /path/to/openclaw-2026.9.8`.
+It verifies hashes of the pinned source modules before executing them with
+temporary workspace files, a temporary HOME and command shims. Nine scripted
+scenarios cover all seven skill reads, browser and research tool calls, Google
+and app commands, delayed peer-command polling, Jira browser reads, image-provider
+discovery and generation fixtures, and missing-tool boundaries.
+This validates the Code Mode protocol, not a model's skill choice or full
+workspace discovery. Ordinary-model acceptance still requires the live test.
 
 Not automated (check by hand before a release that touches them): Telegram
 end to end (only a person can message a bot), including a pool bot handed

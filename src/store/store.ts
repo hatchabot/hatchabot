@@ -1121,6 +1121,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN rich_messages INTEGER`,
       `ALTER TABLE agents ADD COLUMN files_max_mb INTEGER`,
       `ALTER TABLE agents ADD COLUMN cron_triggers INTEGER`,
+      `ALTER TABLE agents ADD COLUMN curated_skills TEXT`,
+      `ALTER TABLE agents ADD COLUMN applied_curated_skills TEXT`,
       // Its own browser (src/orchestrator/browser.ts): off unless switched on.
       `ALTER TABLE agents ADD COLUMN browser INTEGER`,
       // Memory search engine: baked (NULL) or the machine's shared service.
@@ -1924,10 +1926,10 @@ export class Store {
       .prepare(
         `INSERT INTO agents (id, owner_id, name, slug, state, state_reason, ai_profile_id,
                              host_id, runtime_ref, persona, shared_memory, model, pending_action,
-                             group_name, sort_order, icon, icon_color, web_only, ops, created_at, updated_at)
+                             group_name, sort_order, icon, icon_color, web_only, ops, curated_skills, created_at, updated_at)
          VALUES (@id, @ownerId, @name, @slug, @state, @stateReason, @aiProfileId,
                  @hostId, @runtimeRef, @persona, @sharedMemory, @model, @pendingAction,
-                 @group, @sortOrder, @icon, @iconColor, @webOnly, @ops, @createdAt, @updatedAt)`,
+                 @group, @sortOrder, @icon, @iconColor, @webOnly, @ops, @curatedSkills, @createdAt, @updatedAt)`,
       )
       .run({
         stateReason: null,
@@ -1945,6 +1947,7 @@ export class Store {
         sharedMemory: a.sharedMemory ? 1 : 0,
         webOnly: a.webOnly ? 1 : 0,
         ops: a.ops ? 1 : 0,
+        curatedSkills: a.curatedSkills === undefined ? null : JSON.stringify(a.curatedSkills),
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
       });
   }
@@ -5554,6 +5557,19 @@ export class Store {
   setAgentEmbedApplied(id: string, mode: 'baked' | 'shared'): void {
     this.db.prepare(`UPDATE agents SET applied_embed_mode = ? WHERE id = ?`).run(mode, id);
   }
+  setAgentCuratedSkills(id: string, ids: readonly string[]): void {
+    this.db.prepare(`UPDATE agents SET curated_skills = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(ids), new Date().toISOString(), id);
+  }
+
+  /** Invalidate displayed skill inspections after an explicit file change. */
+  touchAgentSkills(id: string): void {
+    this.db.prepare('UPDATE agents SET updated_at = ? WHERE id = ?').run(new Date().toISOString(), id);
+  }
+  /** Stamp the rendered selection only after the provider accepted its configuration. */
+  setAgentCuratedSkillsApplied(id: string, ids: readonly string[] | undefined): void {
+    this.db.prepare(`UPDATE agents SET applied_curated_skills = ? WHERE id = ?`).run(ids === undefined ? null : JSON.stringify(ids), id);
+  }
   setAgentEmbedIndex(id: string, indexedAt: string | null, error: string | null): void {
     this.db.prepare(`UPDATE agents SET embed_indexed_at = ?, embed_index_error = ? WHERE id = ?`).run(indexedAt, error, id);
   }
@@ -5764,11 +5780,13 @@ export class Store {
    * runtime it left (moveHost.ts). A rebuild owed since then stays owed: that
    * runtime does not have the change either.
    */
-  restoreAgentApplied(id: string, a: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared'; rebuildOnStart?: string }): void {
+  restoreAgentApplied(id: string, a: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared'; rebuildOnStart?: string; curatedSkills?: string[] }): void {
     this.db
       .prepare(`UPDATE agents SET applied_profile_id = @p, applied_model = @m, applied_profile_prev = @prev,
-         applied_profile_at = @at, applied_embed_mode = @embed, rebuild_on_start = COALESCE(@owed, rebuild_on_start) WHERE id = @id`)
-      .run({ p: a.profileId ?? null, m: a.model ?? null, prev: a.prevId ?? null, at: a.at ?? null, embed: a.embedMode ?? null, owed: a.rebuildOnStart ?? null, id });
+         applied_profile_at = @at, applied_embed_mode = @embed, applied_curated_skills = @skills,
+         rebuild_on_start = COALESCE(@owed, rebuild_on_start) WHERE id = @id`)
+      .run({ p: a.profileId ?? null, m: a.model ?? null, prev: a.prevId ?? null, at: a.at ?? null, embed: a.embedMode ?? null,
+        skills: a.curatedSkills === undefined ? null : JSON.stringify(a.curatedSkills), owed: a.rebuildOnStart ?? null, id });
   }
 
   /** Record the current peer grant as installed. ONLY a provision/rebuild may
@@ -6865,6 +6883,8 @@ function rowToAgent(r: any): Agent {
     richMessages: r.rich_messages === null || r.rich_messages === undefined ? undefined : !!r.rich_messages,
     filesMaxMb: r.files_max_mb ?? undefined,
     cronTriggers: !!r.cron_triggers,
+    curatedSkills: r.curated_skills ? safeJson(r.curated_skills, undefined) : undefined,
+    appliedCuratedSkills: r.applied_curated_skills ? safeJson(r.applied_curated_skills, undefined) : undefined,
     browser: !!r.browser,
     browserLogins: r.browser && r.browser_logins ? r.browser_logins : undefined,
     browserSites: r.browser && r.browser_logins && r.browser_sites ? safeJson(r.browser_sites, undefined) : undefined,

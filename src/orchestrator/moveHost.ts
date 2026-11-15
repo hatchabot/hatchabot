@@ -150,6 +150,7 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     appliedBefore: {
       profileId: agent.appliedProfileId, model: agent.appliedModel, prevId: agent.appliedProfilePrevId,
       at: agent.appliedProfileAt, embedMode: agent.appliedEmbedMode, rebuildOnStart: agent.rebuildOnStart,
+      curatedSkills: agent.appliedCuratedSkills,
     },
     ...(deps.dropPin && agent.image ? { droppedImage: agent.image } : {}),
   };
@@ -295,11 +296,11 @@ export interface MoveParams {
   keyBefore: ReturnType<Store['embedTokenRow']> | null;
   /**
    * What the record said the source runtime runs (its AI source and model,
-   * memory search engine). The target's build records its own; undone, the
+   * memory search engine and curated skills). The target's build records its own; undone, the
    * source runs on as before and the record says so again (audit #081).
    * Absent from a move recorded by an older release.
    */
-  appliedBefore?: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared'; rebuildOnStart?: string };
+  appliedBefore?: { profileId?: string; model?: string; prevId?: string; at?: string; embedMode?: 'baked' | 'shared'; rebuildOnStart?: string; curatedSkills?: string[] };
   /** The image pin dropped for this move (dropPin): put back if it is undone (audit #086). */
   droppedImage?: string;
 }

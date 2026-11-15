@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as opsServer from '../src/ops/opsServer.js';
 import { memoryBudgetSection } from '../src/orchestrator/memoryCap.js';
 import Database from 'better-sqlite3';
 import {
@@ -11,6 +12,7 @@ import {
   runProvisionSteps,
   SEARCH_KEY_REF,
   syncDataSourceDocs,
+  reapplyCurrentSettings,
 } from '../src/orchestrator/provision.js';
 import { eventLabel } from '../src/orchestrator/eventLabels.js';
 import { attributeBrave } from '../src/orchestrator/sourceUsage.js';
@@ -82,6 +84,58 @@ async function world(opts: { failOn?: 'provision' | 'start'; parkFirst?: boolean
 }
 
 const INPUT = { ownerId: 'o', name: 'Kitchen', aiProfileId: 'p1', hostId: 'h1' };
+
+describe('curated selections are applied only with the accepted runtime spec', () => {
+  it('leaves the legacy default unknown and ignores library choices for the manager', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const legacy = await buildRuntimeSpec(w.deps, agent.id);
+    expect(legacy.workspace.configPatch.curatedSkills).toBeUndefined();
+    expect(legacy.workspace.files['skills/gog/SKILL.md']).toBeDefined();
+    await reapplyCurrentSettings(w.deps, agent.id);
+    expect(w.store.getAgent(agent.id)?.appliedCuratedSkills).toBeUndefined();
+    w.store.setAgentOps(agent.id, true);
+    w.store.setAgentCuratedSkills(agent.id, ['hatchabot-research']);
+    const door = vi.spyOn(opsServer, 'ensureOpsServer').mockResolvedValue({ host: '127.0.0.1', port: 12345 });
+    try {
+      const ops = await buildRuntimeSpec(w.deps, agent.id);
+      expect(ops.workspace.configPatch.curatedSkills).toBeUndefined();
+      expect(ops.workspace.files['skills/hatchabot-research/SKILL.md']).toBeUndefined();
+      expect(ops.workspace.files['skills/gog/SKILL.md']).toBeDefined();
+    } finally { door.mockRestore(); }
+  });
+
+  it('seeds the selected files and records the rendered choice, even if desired state changes during provider work', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.setAgentCuratedSkills(agent.id, ['hatchabot-writing']);
+    const original = w.provider.provision.bind(w.provider);
+    w.provider.provision = async (spec) => {
+      expect(spec.workspace.configPatch.curatedSkills).toEqual(['hatchabot-writing']);
+      expect(spec.workspace.files['skills/hatchabot-writing/SKILL.md']).toBeDefined();
+      expect(spec.workspace.files['skills/gog/SKILL.md']).toBeUndefined();
+      expect(w.store.getAgent(agent.id)?.appliedCuratedSkills).toBeUndefined();
+      w.store.setAgentCuratedSkills(agent.id, []);
+      return original(spec);
+    };
+    await reapplyCurrentSettings(w.deps, agent.id);
+    expect(w.store.getAgent(agent.id)).toMatchObject({ curatedSkills: [], appliedCuratedSkills: ['hatchabot-writing'] });
+    w.provider.provision = original;
+    await reapplyCurrentSettings(w.deps, agent.id);
+    expect(w.store.getAgent(agent.id)?.appliedCuratedSkills).toEqual([]);
+  });
+
+  it('retains the previous applied selection when provider configuration fails', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.setAgentCuratedSkills(agent.id, ['gog']);
+    await reapplyCurrentSettings(w.deps, agent.id);
+    w.store.setAgentCuratedSkills(agent.id, []);
+    w.provider.provision = async () => { throw new Error('isolated provider failure'); };
+    await expect(reapplyCurrentSettings(w.deps, agent.id)).rejects.toThrow('isolated provider failure');
+    expect(w.store.getAgent(agent.id)).toMatchObject({ curatedSkills: [], appliedCuratedSkills: ['gog'] });
+  });
+});
 
 describe("whose Brave key a container has is recorded when it is built (HB-0578 review)", () => {
   it('a key saved or removed counts only from the build that puts it in', async () => {

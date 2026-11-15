@@ -4,6 +4,7 @@ import { validIcon, validIconColor } from './agentIcons.js';
 import { randomUUID } from 'node:crypto';
 import { constants as zlibConstants, gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
+import { CuratedSkillSelectionSchema } from '../openclaw/skills.js';
 import type { Agent, AIProfile, GroupAccess, MemberRole, TemplateParam } from '../domain/types.js';
 import {
   buildRuntimeSpec,
@@ -108,6 +109,7 @@ export interface ExportManifest {
     name: string;
     slug: string;
     persona: string;
+    curatedSkills?: string[];
     /** Always true, and read by nothing here: written only because Hatchabot
      *  before v2.170.0 refuses a copy without it (HB-0094). */
     sharedMemory?: true;
@@ -224,6 +226,7 @@ const ManifestSchema = z.object({
     name: z.string().min(1).max(64),
     slug: z.string().regex(SLUG_RE),
     persona: z.string().max(8000),
+    curatedSkills: CuratedSkillSelectionSchema.optional(),
     // `sharedMemory` is accepted and ignored: memory is always shared since
     // v2.107.0, so an old file's `false` means nothing (HB-0094).
     sharedMemory: z.boolean().optional(),
@@ -504,6 +507,7 @@ export async function exportAgent(
       name: agent.name,
       slug: agent.slug,
       persona: agent.persona,
+      ...(!agent.ops && agent.curatedSkills !== undefined ? { curatedSkills: agent.curatedSkills } : {}),
       sharedMemory: true,
       sharedPaths: agent.sharedPaths,
       ...(dataSources.length ? { dataSources } : {}),
@@ -911,6 +915,7 @@ async function importAgentInner(
   if (!store.getHost(host.id)) throw new TransferError('The machine it was going to was removed meanwhile. Import it again onto another.');
   // And its source, deleted meanwhile: refused, not an agent on nothing (HB-0570).
   store.insertAgentOnSource(agent);
+  if (manifest.agent.curatedSkills !== undefined) store.setAgentCuratedSkills(agent.id, manifest.agent.curatedSkills);
   if (image.pin) store.setAgentImage(agent.id, image.pin);
   // Before provisioning reads them: the container is made with these limits.
   const limits = importedLimits(manifest.agent, !!opts.mayBuild);

@@ -22,7 +22,7 @@ const TOKEN = process.env.HATCHABOT_TOKEN || '';
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
-export async function api(path, { method = 'GET', body, raw, headers: extra } = {}) {
+export async function api(path, { method = 'GET', body, raw, headers: extra, timeoutMs = 30 * 60_000, signal } = {}) {
   const headers = { authorization: `Bearer ${TOKEN}`, ...extra };
   let payload;
   if (raw) { headers['content-type'] = 'application/octet-stream'; payload = raw; }
@@ -30,7 +30,10 @@ export async function api(path, { method = 'GET', body, raw, headers: extra } = 
   // A read whose kept-alive connection the server closed as it was reused
   // ("other side closed") is asked once more: it changed nothing. A change is
   // never repeated (it may have been done).
-  const once = () => fetch(`${BASE}${path}`, { method, headers, body: payload, signal: AbortSignal.timeout(30 * 60_000) });
+  const once = () => {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    return fetch(`${BASE}${path}`, { method, headers, body: payload, signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+  };
   const res = await once().catch((e) => {
     if (method === 'GET' && /UND_ERR_SOCKET|other side closed|ECONNRESET/.test(`${e?.cause?.code} ${e?.cause?.message} ${e?.message}`)) return once();
     throw e;
@@ -68,10 +71,10 @@ export async function requireVersion(min) {
  * before anything is made. Without it a test ran into the limit half-way and
  * its later checks failed for that reason only (2026-10-09).
  */
-export async function requireRoom(n) {
-  const max = Number((await api('/v1/config')).json?.maxAgentsPerAccount || 0);
+export async function requireRoom(n, requestOptions) {
+  const max = Number((await api('/v1/config', requestOptions)).json?.maxAgentsPerAccount || 0);
   if (!max) return;
-  const mine = ((await api('/v1/agents')).json ?? []).filter((a) => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED' && a.state !== 'DELETED').length;
+  const mine = ((await api('/v1/agents', requestOptions)).json ?? []).filter((a) => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED' && a.state !== 'DELETED').length;
   if (max - mine < n) {
     throw new Error(`This test makes ${n} agent(s) at once; this account has ${mine} of its ${max} (HATCHABOT_MAX_AGENTS_PER_ACCOUNT). Archive or delete ${n - (max - mine)}, or raise the limit, then run it again.`);
   }
@@ -110,14 +113,23 @@ export async function createAgent(name, hostId) {
 }
 
 let hosts;
-async function connFor(hostId) {
+async function connFor(hostId, knownHost) {
+  if (knownHost) {
+    if (knownHost.id !== hostId) throw new Error('The agent moved away from the selected test machine');
+    return knownHost.kind !== 'local' && knownHost.settings?.dockerHost ? ['-H', knownHost.settings.dockerHost] : [];
+  }
   hosts ??= (await api('/v1/hosts')).json;
   const h = hosts.find((x) => x.id === hostId);
   return h && h.kind !== 'local' && h.settings?.dockerHost ? ['-H', h.settings.dockerHost] : [];
 }
-export async function inAgent(agent, argv, timeoutMs = 600_000) {
+export async function inAgent(agent, argv, timeoutMs = 600_000, { host, signal, deadline } = {}) {
+  signal?.throwIfAborted();
+  const connection = await connFor(agent.hostId, host);
+  signal?.throwIfAborted();
+  const remaining = deadline === undefined ? timeoutMs : Math.min(timeoutMs, deadline - Date.now());
+  if (remaining <= 0) throw new Error('The agent command deadline expired');
   const name = String(agent.runtimeRef || '').replace(/^docker:\/\//, '');
-  const r = spawnSync('docker', [...(await connFor(agent.hostId)), 'exec', name, ...argv], { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 });
+  const r = spawnSync('docker', [...connection, 'exec', name, ...argv], { encoding: 'utf8', timeout: remaining, maxBuffer: 32 * 1024 * 1024 });
   return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 export const workspaceOf = (agent) => `/home/node/.openclaw/agents/${agent.slug}/agent`;

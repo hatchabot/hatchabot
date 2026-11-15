@@ -110,6 +110,10 @@ import { browserSteerers, siteOf } from '../orchestrator/browserLogins.js';
 import { BrowserPanels, PANEL_IDLE_MS, panelAddress, panelCommands, panelSize, panelTransportOk, type PanelSink } from '../orchestrator/browserPanel.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { readVoiceStatus } from '../orchestrator/voice.js';
+import { readSkillsStatus, type SkillsStatus } from '../orchestrator/skillsStatus.js';
+import { readSkillFile, mutateSkillFile, SkillFileError } from '../orchestrator/skillFiles.js';
+import { describeSkillTrial, runSkillTrial } from '../orchestrator/skillTrials.js';
+import { CURATED_SKILLS, CuratedSkillSelectionSchema, selectedCuratedSkills } from '../openclaw/skills.js';
 import { CACHE_READ_DEFAULT, CACHE_WRITE_MULTIPLIER, estimateCost, priceList, pricesNothing, PRICES_CHECKED, PRICES_SOURCE } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
@@ -894,6 +898,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // sites are the owner's, from GET /v1/agents/:id/browser.
       browserLogins: undefined,
       browserSites: undefined,
+      // Saved/applied library choices are read only through the owner-scoped
+      // skills route, not the roster and detail views shared with members.
+      curatedSkills: undefined,
+      appliedCuratedSkills: undefined,
       keepsLogins: agent.browser && agent.browserLogins ? true : undefined,
       // An answered bot-token step is setup's to take up, not the owner's:
       // shown as setting up, so no app or CLI reads it as asked again.
@@ -4369,6 +4377,211 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       healthMs: Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000,
     });
   }
+  // Curated instructions only: saving never installs binaries, grants tools,
+  // or touches a workspace file. The normal build applies the saved choice.
+  const skillsEditable = (a: Agent) => !a.ops && !agentGone(a.id) &&
+    ['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) &&
+    !isBusy(a.id) && !archiving.has(a.id) && !operationRefusal(store, a.id);
+  const skillsView = (a: Agent) => {
+    const selected = selectedCuratedSkills(a.curatedSkills);
+    const applied = a.appliedCuratedSkills === undefined ? null : selectedCuratedSkills(a.appliedCuratedSkills);
+    const pending = a.curatedSkills !== undefined && (applied === null || JSON.stringify(selected) !== JSON.stringify(applied));
+    return {
+      skills: CURATED_SKILLS.map(({ content: _content, ...skill }) => ({
+        ...skill, trial: describeSkillTrial(skill.id), selected: selected.includes(skill.id), applied: applied === null ? null : applied.includes(skill.id),
+      })),
+      selected, applied, pending, managed: a.curatedSkills !== undefined, canEdit: skillsEditable(a),
+      message: a.curatedSkills === undefined
+        ? 'Google Workspace is the original default. Save your choices to manage this agent’s curated skills; its current runtime selection has not been checked.'
+        : pending
+          ? 'Saved. Rebuild the agent to apply these choices, or they will apply when it next starts. Then start a new conversation.'
+          : 'These choices were applied at the last build. Start a new conversation to use them. Check availability to inspect the running configuration; external tasks have not been tested.',
+    };
+  };
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/skills', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (agent.ops) return reply.code(400).send({ error: 'The manager uses Hatchabot’s own tools and instructions.' });
+    return skillsView(agent);
+  });
+  app.put<{ Params: { id: string } }>('/v1/agents/:id/skills', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (agent.ops) return reply.code(400).send({ error: 'The manager uses Hatchabot’s own tools and instructions.' });
+    const parsed = z.object({ selected: CuratedSkillSelectionSchema }).strict().safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    if (!skillsEditable(agent)) return reply.code(409).send({ error: 'Finish the current operation or restore the archived agent before changing its skills.' });
+    const selected = selectedCuratedSkills(parsed.data.selected);
+    // No await between ownership/lifecycle checks and the transaction. A
+    // repeated save is a no-op; an empty array is an intentional disable-all.
+    if (agent.curatedSkills === undefined || JSON.stringify(selectedCuratedSkills(agent.curatedSkills)) !== JSON.stringify(selected)) {
+      store.transact(() => {
+        store.setAgentCuratedSkills(agent.id, selected);
+        if (agent.runtimeRef) oweRebuild(agent.id, () => {});
+      });
+      trace(agent.id)('skills.selected', { selected });
+    }
+    return skillsView(store.getAgent(agent.id)!);
+  });
+
+  const skillFileContext = (a: Agent) => JSON.stringify([
+    a.ownerId, a.ops, a.runtimeRef, a.slug, a.hostId, a.state, a.updatedAt, a.image,
+    a.aiProfileId, a.appliedProfileAt, a.curatedSkills, a.appliedCuratedSkills,
+    store.getHost(a.hostId), store.getAIProfile(a.aiProfileId),
+  ]);
+  const skillFileBusy = (a: Agent) => isBusy(a.id) || archiving.has(a.id) || operationRefusal(store, a.id) ||
+    a.state === 'PROVISIONING' || a.state === 'REBUILDING';
+  const skillFileFailure = (reply: FastifyReply, error: unknown) => {
+    if (error instanceof TurnRefused) return reply.code(error.status).send({ error: error.message });
+    if (error instanceof AgentBusyError) return reply.code(409).send({ error: error.userMessage });
+    if (error instanceof SkillFileError) {
+      const status = error.code === 'invalid' ? 400 : error.code === 'too_large' ? 413
+        : ['conflict', 'customized', 'no_history', 'unsafe'].includes(error.code) ? 409 : 502;
+      return reply.code(status).send({ error: error.userMessage });
+    }
+    return reply.code(502).send({ error: 'Could not inspect or change this skill. Reopen its preview before trying again.' });
+  };
+  app.get<{ Params: { id: string; skill: string } }>('/v1/agents/:id/skills/:skill/file', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    const skill = CURATED_SKILLS.find((s) => s.id === req.params.skill);
+    if (!skill) return reply.code(404).send({ error: 'Skill not found' });
+    if (agent.ops) return reply.code(400).send({ error: 'The manager uses its own instructions.' });
+    if (skillFileBusy(agent)) return reply.code(409).send({ error: 'Wait for the current operation, then reopen the preview.' });
+    if (!agent.runtimeRef) return {
+      id: skill.id, catalog: { version: skill.version, content: skill.content }, revision: null,
+      installed: { content: null, hash: null, version: null }, state: 'unavailable',
+      canUpdate: false, canReplace: false, canRollback: false, history: [],
+    };
+    const session = watchConsoleHttp(req, reply, agent.ownerId), before = skillFileContext(agent);
+    try {
+      const provider = providerFor(agent.hostId);
+      const result = await readSkillFile(provider, { runtimeRef: agent.runtimeRef, slug: agent.slug,
+        onVolume: agent.state !== 'RUNNING', image: agent.image }, skill.id);
+      const fresh = ownedAgent(req, agent.id);
+      if (!session.valid() || !fresh || agentGone(agent.id)) throw new TurnRefused(404, 'Not found');
+      if (skillFileBusy(fresh) || skillFileContext(fresh) !== before || providerFor(fresh.hostId) !== provider)
+        throw new TurnRefused(409, 'The agent changed while reading. Reopen the preview.');
+      const editable = skillsEditable(fresh);
+      return { ...result, canUpdate: editable && result.canUpdate, canReplace: editable && result.canReplace, canRollback: editable && result.canRollback };
+    } catch (error) { return skillFileFailure(reply, error); }
+  });
+  app.post<{ Params: { id: string; skill: string } }>('/v1/agents/:id/skills/:skill/file', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (agent.ops) return reply.code(400).send({ error: 'The manager uses its own instructions.' });
+    const parsed = z.object({ action: z.enum(['update', 'replace', 'rollback']), expectedRevision: z.string().regex(/^[a-f0-9]{64}$/) }).strict().safeParse(req.body);
+    if (!parsed.success || !CURATED_SKILLS.some((s) => s.id === req.params.skill)) return reply.code(400).send({ error: 'Choose a library action from a fresh skill preview.' });
+    if (!agent.runtimeRef || !skillsEditable(agent)) return reply.code(409).send({ error: 'Finish the current operation or restore the agent before changing its skill files.' });
+    const session = watchConsoleHttp(req, reply, agent.ownerId), before = skillFileContext(agent);
+    try {
+      const provider = providerFor(agent.hostId);
+      const result = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+        const fresh = ownedAgent(req, agent.id);
+        if (!session.valid() || !fresh || agentGone(agent.id)) throw new TurnRefused(404, 'Not found');
+        if (!fresh.runtimeRef || fresh.ops || skillFileContext(fresh) !== before || providerFor(fresh.hostId) !== provider || archiving.has(fresh.id) || operationRefusal(store, fresh.id))
+          throw new TurnRefused(409, 'The agent changed meanwhile. Reopen the preview.');
+        const changed = await mutateSkillFile(provider, { runtimeRef: fresh.runtimeRef, slug: fresh.slug,
+          onVolume: fresh.state !== 'RUNNING', image: fresh.image }, req.params.skill, parsed.data);
+        const after = ownedAgent(req, fresh.id);
+        if (!session.valid() || !after || agentGone(fresh.id)) throw new TurnRefused(404, 'Not found');
+        if (after.ops || skillFileContext(after) !== before || providerFor(after.hostId) !== provider || archiving.has(after.id) || operationRefusal(store, after.id))
+          throw new TurnRefused(409, 'The agent changed during the operation. Reopen the preview to inspect its current instructions.');
+        store.touchAgentSkills(fresh.id);
+        trace(fresh.id)('skills.file_changed', { skill: req.params.skill, action: parsed.data.action });
+        return changed;
+      }));
+      if (!session.valid() || !ownedAgent(req, agent.id) || agentGone(agent.id)) throw new TurnRefused(404, 'Not found');
+      return { ...result, agentUpdatedAt: store.getAgent(agent.id)!.updatedAt };
+    } catch (error) { return skillFileFailure(reply, error); }
+  });
+
+  const skillTrialNext = new Map<string, number>();
+  app.post<{ Params: { id: string; skill: string } }>('/v1/agents/:id/skills/:skill/try', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (agent.ops) return reply.code(400).send({ error: 'The manager uses its own instructions.' });
+    const parsed = z.object({ expectedRevision: z.string().regex(/^[a-f0-9]{64}$/) }).strict().safeParse(req.body);
+    if (!parsed.success || !CURATED_SKILLS.some((s) => s.id === req.params.skill)) return reply.code(400).send({ error: 'Open a fresh skill preview before starting practice.' });
+    if (agent.state !== 'RUNNING' || !agent.runtimeRef || !skillsEditable(agent)) return reply.code(409).send({ error: 'Practice needs a running, idle agent. It does not start the agent for you.' });
+    const now = Date.now();
+    for (const [id, next] of skillTrialNext) if (next <= now) skillTrialNext.delete(id);
+    if (skillTrialNext.has(agent.id)) return reply.header('retry-after', String(Math.max(1, Math.ceil((skillTrialNext.get(agent.id)! - now) / 1000)))).code(429).send({ error: 'Wait two minutes between practice tasks on this agent.' });
+    const session = watchConsoleHttp(req, reply, agent.ownerId), before = skillFileContext(agent);
+    try {
+      const provider = providerFor(agent.hostId);
+      const freshForTrial = () => {
+        const fresh = ownedAgent(req, agent.id);
+        if (!session.valid() || !fresh || agentGone(agent.id)) throw new TurnRefused(404, 'Not found');
+        if (!fresh.runtimeRef || fresh.ops || fresh.state !== 'RUNNING' || skillFileContext(fresh) !== before || providerFor(fresh.hostId) !== provider || archiving.has(fresh.id) || operationRefusal(store, fresh.id))
+          throw new TurnRefused(409, 'The agent changed during practice. Reopen its skill preview.');
+        return fresh;
+      };
+      return await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+        const fresh = freshForTrial();
+        if ((skillTrialNext.get(agent.id) ?? 0) > Date.now()) throw new TurnRefused(429, 'Wait two minutes between practice tasks on this agent.');
+        const file = await readSkillFile(provider, { runtimeRef: fresh.runtimeRef!, slug: fresh.slug }, req.params.skill);
+        freshForTrial();
+        if (file.revision !== parsed.data.expectedRevision) throw new TurnRefused(409, 'The instructions changed. Refresh the preview before practice.');
+        if (file.installed.content === null) throw new TurnRefused(409, 'Install the instructions before practice.');
+        skillTrialNext.set(agent.id, Date.now() + 120_000);
+        const result = await runSkillTrial(provider, { runtimeRef: fresh.runtimeRef!, slug: fresh.slug }, { id: req.params.skill, content: file.installed.content });
+        freshForTrial();
+        trace(agent.id)('skills.practiced', { skill: req.params.skill, status: result.status });
+        return result;
+      }));
+    } catch (error) { return skillFileFailure(reply, error); }
+  });
+
+  // Explicit, read-only inspection; ordinary library reads never start a
+  // gateway process. Coalesce concurrent clicks only for the same context.
+  const skillStatusReads = new Map<string, { context: string; provider: RuntimeProvider; result: Promise<SkillsStatus> }>();
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/skills/status', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (agent.ops) return reply.code(400).send({ error: 'The manager uses Hatchabot’s own tools and instructions.' });
+    const unknown = (status: 'busy' | 'not_running' | 'unavailable') => ({ status, skills: [] });
+    const waiting = (a: Agent) => isBusy(a.id) || archiving.has(a.id) || operationRefusal(store, a.id) ||
+      a.state === 'PROVISIONING' || a.state === 'REBUILDING';
+    if (waiting(agent)) return unknown('busy');
+    if (agent.state !== 'RUNNING' || !agent.runtimeRef) return unknown('not_running');
+    const session = watchConsoleHttp(req, reply, agent.ownerId);
+    const context = (a: Agent) => JSON.stringify([
+      a.ownerId, a.runtimeRef, a.slug, a.hostId, a.state, a.updatedAt, a.gatewayToken,
+      a.aiProfileId, a.appliedModel, a.appliedProfileAt, a.curatedSkills, a.appliedCuratedSkills,
+      a.browser, a.image, a.rebuildOnStart, store.getHost(a.hostId), store.getAIProfile(a.aiProfileId),
+      store.listAgentEnv(a.id), store.listAgentConnections(a.id), store.connectionRemovalsSince(a.id),
+      store.listOperations([a.id], 1)[0],
+    ]);
+    const before = context(agent);
+    let provider: RuntimeProvider;
+    try { provider = providerFor(agent.hostId); }
+    catch { return unknown('unavailable'); }
+    let pending = skillStatusReads.get(agent.id);
+    if (!pending || pending.context !== before || pending.provider !== provider) {
+      pending = { context: before, provider, result: readSkillsStatus(provider, agent.runtimeRef, agent.slug) };
+      skillStatusReads.set(agent.id, pending);
+    }
+    let result: SkillsStatus;
+    try { result = await pending.result; }
+    finally { if (skillStatusReads.get(agent.id) === pending) skillStatusReads.delete(agent.id); }
+    const current = ownedAgent(req, agent.id);
+    if (!session.valid() || !current || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (current.ops) return unknown('unavailable');
+    if (waiting(current)) return unknown('busy');
+    if (current.state !== 'RUNNING' || !current.runtimeRef) return unknown('not_running');
+    if (context(current) !== before) return unknown('unavailable');
+    try { if (providerFor(current.hostId) !== provider) return unknown('unavailable'); }
+    catch { return unknown('unavailable'); }
+    return { ...result, ...(result.status === 'checked' ? { checkedAt: new Date().toISOString() } : {}) };
+  });
+
   // Read only: configuration readiness is not a microphone or provider test.
   // Talk requires operator.talk, which guests' console scopes do not grant.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/voice', async (req, reply) => {

@@ -68,6 +68,31 @@ async function seedSourceAgent(src: Awaited<ReturnType<typeof installation>>) {
   return runtimeRef;
 }
 
+describe('curated choices in full transfers', () => {
+  it.each([undefined, [], ['gog', 'hatchabot-research']])('retains %j and reapplies it in the new runtime', async (selection) => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    if (selection !== undefined) src.store.setAgentCuratedSkills('a1', selection);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const manifest = JSON.parse(gunzipSync(data).toString('utf8'));
+    expect(manifest.agent.curatedSkills).toEqual(selection);
+    const dst = await installation('importer');
+    const agent = await importAgent(dst.deps, data, { ownerId: 'importer' });
+    expect(dst.store.getAgent(agent.id)!.curatedSkills).toEqual(selection);
+    expect(dst.store.getAgent(agent.id)!.appliedCuratedSkills).toEqual(selection);
+  });
+
+  it('refuses unknown choices before creating an agent or restoring files', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const manifest = JSON.parse(gunzipSync((await exportAgent(src.deps, 'a1')).data).toString('utf8'));
+    manifest.agent.curatedSkills = ['not-curated'];
+    const dst = await installation('importer');
+    await expect(importAgent(dst.deps, gzipSync(JSON.stringify(manifest)), { ownerId: 'importer' })).rejects.toThrow();
+    expect(dst.store.listAllActiveAgents()).toEqual([]);
+  });
+});
+
 describe('an imported bot token is checked (2026-09-25)', () => {
   it('the app\'s verifier must accept it and name the same bot; a file naming someone else\'s bot is refused and nothing is left behind', async () => {
     const src = await installation();
