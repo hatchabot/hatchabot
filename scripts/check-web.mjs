@@ -57,6 +57,12 @@ function checkHandlers(file, html, js) {
 }
 
 try {
+  // External console enhancements ship as classic scripts alongside the app.
+  for (const file of readdirSync('web').filter(f => f.startsWith('control-ui-') && f.endsWith('.js'))) {
+    const res = spawnSync(process.execPath, ['--check', join('web', file)], { encoding: 'utf8' });
+    if (res.status !== 0) { failed = true; console.error(`✗ web/${file}:\n${res.stderr}`); }
+    else console.log(`✓ web/${file}`);
+  }
   for (const file of readdirSync('web').filter((f) => f.endsWith('.html'))) {
     const html = readFileSync(join('web', file), 'utf8');
     // Every script is a bare <script> (inline-scripts.mjs refuses anything else, so a module,

@@ -71,7 +71,7 @@ export const LIVE_TESTS = [
     name: 'console', cmd: ['node', 'scripts/console-scenarios.mjs'], against: 'install', minutes: '2–5', aiTurns: false,
     needs: 'HATCHABOT_PUBLIC_URL (the HTTPS address other devices use); room for 1 agent',
     proves: 'a real browser opens an agent\'s console at the public address: a secure context, its app starts, its live connection to the agent opens and carries messages',
-    area: ['src/api/consoleProxy.ts', 'src/api/controlUiRebase.ts', 'src/api/consoleSockets.ts', 'src/orchestrator/consoleAccess.ts', 'src/orchestrator/voice.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs', LIB,
+    area: ['src/api/consoleProxy.ts', 'src/api/controlUiRebase.ts', 'src/api/controlUiMath.ts', 'web/control-ui-math.js', 'web/control-ui-math-source.js', 'web/control-ui-math.css', 'src/api/consoleSockets.ts', 'src/orchestrator/consoleAccess.ts', 'src/orchestrator/voice.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs', LIB,
       { path: ROUTES, near: /\/voice|readVoiceStatus/ }, { path: 'web/index.html', near: /voice|Voice|openGateway|pageSessionEnded/ }],
   },
   {

@@ -40,6 +40,7 @@ import { loopbackIsRemote, noteFailure, throttled } from './auth.js';
 import { cookieFromHeader, readSessionCookie, requestIsHttps, SESSION_COOKIE_NAME, type RequestLike } from './sessionCookie.js';
 import { foreignRequest } from './requestOrigin.js';
 import { isControlUiDocument, rebaseControlUi, TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH, withTalkProxy } from './controlUiRebase.js';
+import { CONTROL_UI_MATH_PREFIX, readControlUiMathAsset, withControlUiMath } from './controlUiMath.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
 import { limitsDrift, wantedLimits, type LimitsCheckSummary } from '../orchestrator/swap.js';
 import { writeFile as writeFileAsync } from 'node:fs/promises';
@@ -9680,6 +9681,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const caller = consoleCaller(me, req.params.id);
     if (!caller) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
     const session = watchConsoleHttp(req, reply, me);
+    // Local renderer assets follow this console's access checks. Even unknown
+    // paths in this namespace stop here; no package path reaches the gateway.
+    const localPath = `/${req.params['*']}`;
+    if (localPath.startsWith(CONTROL_UI_MATH_PREFIX)) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return reply.code(404).send({ error: 'Not found' });
+      const asset = readControlUiMathAsset(localPath);
+      if (!asset) return reply.code(404).send({ error: 'Not found' });
+      return reply.header('cache-control', 'no-store').header('x-content-type-options', 'nosniff')
+        .header('content-length', String(asset.body.length)).type(asset.contentType).send(req.method === 'HEAD' ? undefined : asset.body);
+    }
     // An owner console's small compatibility shim keeps OpenAI's brokered
     // Talk offer under this agent's proxy. Never forwarded to the gateway.
     if (`/${req.params['*']}` === TALK_PROXY_SCRIPT_PATH) {
@@ -9810,7 +9821,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const ctype = String(upstream.headers['content-type'] ?? '');
     if (isDocument && /text\/html/i.test(ctype) && !upstream.headers['content-encoding']) {
       const prefix = `/v1/agents/${req.params.id}/ui`;
-      const page = rebaseControlUi(body.toString('utf8'), prefix);
+      const page = withControlUiMath(rebaseControlUi(body.toString('utf8'), prefix), prefix);
       // A guest's sidebar starts with only what a guest can open (consoleProxy.ts GUEST_VIEW_SCRIPT).
       body = Buffer.from(caller.role === 'guest' ? withGuestView(page, prefix) : withTalkProxy(page, prefix), 'utf8');
     }

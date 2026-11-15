@@ -17,7 +17,7 @@
  * <html>, read from Chrome's --dump-dom.
  */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -169,6 +169,31 @@ const SCENARIOS = String.raw`(() => {
   const tile = (name) => [...document.querySelectorAll('#v2groups .v2agent')].find((el) => el.textContent.includes(name));
   const centre = (el) => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; };
   const pointer = (type, target, x, y) => target.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, bubbles: true, cancelable: true }));
+  // The console is a separate document in production. Exercise its actual math adapter and
+  // KaTeX build in the same arrangement, with pinned OpenClaw message markup and no gateway.
+  const withConsoleMath = async (run) => {
+    const frame = document.createElement('iframe');
+    frame.style.cssText = 'position:fixed;inset:0;width:100%;height:650px;background:white;z-index:99999';
+    frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="math/katex.min.css"><link rel="stylesheet" href="math/control-ui-math.css"><style>body{margin:16px;font:16px sans-serif}.chat-bubble{max-width:100%;min-width:0}.chat-text{overflow-wrap:anywhere}</style><script src="math/katex.min.js"><\/script><script src="math/control-ui-math-source.js"><\/script><script src="math/control-ui-math.js"><\/script></head><body><openclaw-chat-pane></openclaw-chat-pane><script>document.body.dataset.mathReady="yes";<\/script></body></html>';
+    document.body.appendChild(frame);
+    try {
+      await until(() => frame.contentDocument?.body?.dataset.mathReady === 'yes');
+      const d = frame.contentDocument, pane = d.querySelector('openclaw-chat-pane');
+      ok('the fixture loaded the real renderer', typeof frame.contentWindow.katex?.render === 'function');
+      const add = ({ raw, html, role = 'assistant', streaming = false }) => {
+        const group = d.createElement('div'), bubble = d.createElement('div'), body = d.createElement('div'), action = d.createElement('button');
+        group.className = 'chat-group ' + role; bubble.className = 'chat-bubble' + (streaming ? ' streaming' : '');
+        bubble.dataset.messageText = raw; body.className = 'chat-text';
+        if (html === undefined) { const p = d.createElement('p'); p.textContent = raw; body.appendChild(p); }
+        else body.innerHTML = html;
+        action.className = 'chat-copy-btn'; action.textContent = 'Copy'; action.type = 'button';
+        let clicks = 0; action.onclick = () => { clicks++; };
+        bubble.append(body, action); group.appendChild(bubble); pane.appendChild(group);
+        return { group, bubble, body, action, clicks: () => clicks };
+      };
+      await run({ d, pane, add, frame });
+    } finally { frame.remove(); }
+  };
   const T = {
     classicMap: async () => {
       // v2.155.0: the classic look is gone. This page was opened with hb-ui=classic stored and
@@ -3834,6 +3859,153 @@ const SCENARIOS = String.raw`(() => {
       }
     },
     // Console tabs and the quick switcher (Chris, 2026-10-07): one frame per open agent, switching never reloads.
+    consoleMathStandardDeviation: async () => {
+      await withConsoleMath(async ({ add }) => {
+        const population = '\\sigma=\\sqrt{\\frac{1}{N}\\sum_{i=1}^{N}(x_i-\\mu)^2}';
+        const sample = 's=\\sqrt{\\frac{1}{n-1}\\sum_{i=1}^{n}(x_i-\\bar{x})^2}';
+        const raw = '**Standard deviation**\n\n$$' + population + '$$\n\nFor a sample:\n\n\\[' + sample + '\\]\n\nKeep this explanation.';
+        // Markdown consumes the escaped display brackets. The raw message attribute still
+        // retains them, just as the real OpenClaw bubble does.
+        const m = add({ raw, html: '<p><strong>Standard deviation</strong></p><p>$$' + population + '$$</p><p>For a sample:</p><p>[' + sample + ']</p><p>Keep this explanation.</p>' });
+        const heading = m.body.querySelector('strong'), explanation = m.body.lastElementChild;
+        await until(() => m.body.querySelectorAll('math').length === 2);
+        eq('both formulas retain their original TeX for accessibility', [...m.body.querySelectorAll('annotation[encoding="application/x-tex"]')].map(n => n.textContent), [population, sample]);
+        eq('both have real fractions', m.body.querySelectorAll('math mfrac').length, 2);
+        eq('both have real square roots', m.body.querySelectorAll('math msqrt').length, 2);
+        eq('both have summation operators', [...m.body.querySelectorAll('math mo')].filter(n => n.textContent === '∑').length, 2);
+        eq('both are display equations', m.body.querySelectorAll('math[display="block"]').length, 2);
+        eq('raw source remains available to upstream Copy', m.bubble.dataset.messageText, raw);
+        ok('markdown headings outside equations keep their nodes', m.body.querySelector('strong') === heading);
+        ok('explanation outside equations keeps its node', m.body.lastElementChild === explanation);
+        m.action.click(); eq('the existing message action remains wired', m.clicks(), 1);
+        ok('the message action keeps its node', m.bubble.querySelector('.chat-copy-btn') === m.action);
+      });
+    },
+    consoleMathMixedMarkdownAndStreaming: async () => {
+      await withConsoleMath(async ({ add, d }) => {
+        const raw = 'Inline $x^2$ and \\(y^2\\).\n\n**Result:** $$\\frac{1}{2}$$';
+        const m = add({ raw, streaming: true, html: '<p>Inline $x^2$ and (y^2).</p><p><strong>Result:</strong> $$\\frac{1}{2}$$</p>' });
+        const label = m.body.querySelector('strong');
+        await sleep(150);
+        eq('an active stream is not rewritten', m.body.querySelectorAll('math').length, 0);
+        m.bubble.classList.remove('streaming');
+        await until(() => m.body.querySelectorAll('math').length === 3);
+        eq('only the display delimiter creates a block', m.body.querySelectorAll('math[display="block"]').length, 1);
+        ok('mixed markdown keeps its original strong node', m.body.querySelector('strong') === label);
+        // A retained bubble is reused by the upstream renderer for a changed message.
+        m.bubble.dataset.messageText = 'Updated $z^3$.';
+        m.body.replaceChildren(Object.assign(d.createElement('p'), { textContent: 'Updated $z^3$.' }));
+        await until(() => m.body.querySelector('annotation')?.textContent === 'z^3');
+        eq('replacement content has no stale equations', m.body.querySelectorAll('math').length, 1);
+        m.group.hidden = true;
+        m.bubble.dataset.messageText = 'Reopened $q_2$.';
+        m.body.firstElementChild.textContent = 'Reopened $q_2$.';
+        await sleep(150);
+        m.group.hidden = false;
+        await until(() => m.body.querySelector('annotation')?.textContent === 'q_2');
+        // Unrelated mutations and a detached/reinserted retained pane must not render math twice.
+        m.group.dataset.fixtureRevision = '2';
+        const owner = m.group.parentNode; m.group.remove(); owner.appendChild(m.group);
+        await sleep(150);
+        eq('revealing and reattaching a retained message do not duplicate math', m.body.querySelectorAll('math').length, 1);
+        ok('the original message action survives upstream content changes', m.bubble.querySelector('.chat-copy-btn') === m.action);
+        m.action.click(); eq('the original action still works after updates', m.clicks(), 1);
+      });
+    },
+    consoleMathRetainedNodesAndDetachedEdits: async () => {
+      await withConsoleMath(async ({ add, d, pane }) => {
+        const m = add({ raw: '$x+1$' });
+        await until(() => m.body.querySelector('math'));
+        const rendered = m.body.querySelector('.hb-math'), math = m.body.querySelector('math');
+        m.bubble.classList.add('selected');
+        m.group.classList.add('chat-group--latest-assistant');
+        m.action.classList.add('copied'); m.action.disabled = true;
+        const sibling = d.createElement('p'); sibling.textContent = 'Unrelated activity'; pane.appendChild(sibling);
+        await sleep(150);
+        ok('unrelated bubble, group, action and sibling changes retain the math wrapper', m.body.querySelector('.hb-math') === rendered);
+        ok('unrelated changes retain the exact MathML node', m.body.querySelector('math') === math);
+        const settledMarkup = m.body.innerHTML;
+        m.bubble.classList.add('streaming');
+        await sleep(150);
+        eq('resuming a stream leaves its existing subtree untouched', m.body.innerHTML, settledMarkup);
+        ok('resuming a stream preserves existing equation ownership', m.body.querySelector('.hb-math') === rendered && m.body.querySelector('math') === math);
+        m.bubble.dataset.messageText = '$z+2$';
+        await sleep(150);
+        eq('a raw-source update during streaming does not restore old fragments', m.body.innerHTML, settledMarkup);
+        m.body.replaceChildren(Object.assign(d.createElement('p'), { textContent: '$z+2$' }));
+        await sleep(150);
+        eq('new streaming content stays under upstream ownership', m.body.querySelectorAll('math').length, 0);
+        m.bubble.classList.remove('streaming');
+        await until(() => m.body.querySelector('annotation')?.textContent === 'z+2');
+        eq('the new settled source renders once', m.body.querySelectorAll('math').length, 1);
+        const textRoot = m.body, owner = m.group.parentNode;
+        // A retained pane can change while detached, outside MutationObserver coverage.
+        // The same raw attribute and root element must not make that replacement look cached.
+        m.group.remove();
+        const replacement = Object.assign(d.createElement('p'), { textContent: '$z+2$' });
+        textRoot.replaceChildren(replacement);
+        owner.appendChild(m.group);
+        await until(() => replacement.querySelector('math'));
+        ok('detached edits keep the upstream text root', m.bubble.querySelector('.chat-text') === textRoot);
+        eq('a reattached replacement subtree is enhanced again', textRoot.querySelectorAll('math').length, 1);
+        eq('detached edits preserve the authoritative raw source', m.bubble.dataset.messageText, '$z+2$');
+      });
+    },
+    consoleMathCurrencyCodeAndRoles: async () => {
+      await withConsoleMath(async ({ add, d }) => {
+        const raw = 'Prices are $5 and $10; save $12.50. An escaped dollar: \\$20.\n\nInline code: \u0060$x^2$\u0060.\n\n\u0060\u0060\u0060tex\n$$\\frac{1}{2}$$\n\u0060\u0060\u0060\n\n[Keep $a+b$](https://example.invalid/notes).\n\nActual math: $x+1$.';
+        const html = '<p>Prices are $5 and $10; save $12.50. An escaped dollar: $20.</p><p>Inline code: <code>$x^2$</code>.</p><pre><code>$$\\frac{1}{2}$$\n</code></pre><p><a href="https://example.invalid/notes">Keep $a+b$</a>.</p><p>Actual math: $x+1$.</p>';
+        const m = add({ raw, html }), price = m.body.firstElementChild, code = m.body.querySelector('code'), pre = m.body.querySelector('pre'), link = m.body.querySelector('a');
+        const user = add({ role: 'user', raw: '$u^2$', html: '<p>$u^2$</p>' });
+        const tool = add({ role: 'tool', raw: '$t^2$', html: '<p>$t^2$</p>' });
+        const unrelated = d.createElement('div'); unrelated.className = 'chat-text'; unrelated.textContent = '$o^2$'; d.body.appendChild(unrelated);
+        await until(() => m.body.querySelector('math'));
+        eq('only the ordinary assistant formula is rendered', [...m.body.querySelectorAll('annotation')].map(n => n.textContent), ['x+1']);
+        eq('prices and escaped dollars stay plain', price.textContent, 'Prices are $5 and $10; save $12.50. An escaped dollar: $20.');
+        ok('the price paragraph retains its node', m.body.firstElementChild === price);
+        ok('inline code and fenced code retain their nodes', m.body.querySelector('code') === code && m.body.querySelector('pre') === pre);
+        ok('code is never rendered', !code.querySelector('math') && !pre.querySelector('math'));
+        ok('links retain their node and label', m.body.querySelector('a') === link && link.textContent === 'Keep $a+b$' && !link.querySelector('math'));
+        eq('user formulas stay under user ownership', user.body.textContent, '$u^2$');
+        eq('tool results stay under tool ownership', tool.body.textContent, '$t^2$');
+        eq('unrelated page text is not processed', unrelated.textContent, '$o^2$');
+        ok('no renderer nodes were inserted into user or tool messages', !user.body.querySelector('math') && !tool.body.querySelector('math'));
+      });
+    },
+    consoleMathRawTexAndLitOwnership: async () => {
+      await withConsoleMath(async ({ add, d }) => {
+        const subscripts = add({ raw: '$$x _1 + y_ 2$$', html: '<p>$$x <em>1 + y</em> 2$$</p>' });
+        const matrixTex = '\\begin{pmatrix}1 & 2 \\\\ 3 & 4\\end{pmatrix}';
+        const matrix = add({ raw: '$$' + matrixTex + '$$', html: '<p>$$\\begin{pmatrix}1 &amp; 2 \\ 3 &amp; 4\\end{pmatrix}$$</p>' });
+        const retained = add({ raw: '$x+1$', html: '<p>$x<!--?lit$fixture$-->+1$</p>' });
+        const paragraph = retained.body.firstElementChild, marker = paragraph.childNodes[1], before = paragraph.innerHTML;
+        await until(() => subscripts.body.querySelector('math') && matrix.body.querySelector('math'));
+        eq('Markdown emphasis does not erase TeX subscripts', subscripts.body.querySelector('annotation').textContent, 'x _1 + y_ 2');
+        eq('both original subscripts become MathML', subscripts.body.querySelectorAll('math msub').length, 2);
+        eq('matrix keeps the original double backslash row separator', matrix.body.querySelector('annotation').textContent, matrixTex);
+        eq('matrix has two rendered rows', matrix.body.querySelectorAll('math mtable mtr').length, 2);
+        eq('a formula crossing a Lit ownership marker is left readable', paragraph.innerHTML, before);
+        ok('the original Lit marker is never removed or recreated', paragraph.childNodes[1] === marker && marker.nodeType === d.COMMENT_NODE);
+        ok('the adapter does not cross the retained marker', !retained.body.querySelector('math'));
+        // A newly finalized subtree without that marker can be enhanced normally.
+        retained.body.replaceChildren(Object.assign(d.createElement('p'), { textContent: '$x+1$' }));
+        await until(() => retained.body.querySelector('math'));
+        eq('a later safe subtree renders once', retained.body.querySelectorAll('math').length, 1);
+      });
+    },
+    consoleMathUntrustedAndMalformedTex: async () => {
+      await withConsoleMath(async ({ add, frame }) => {
+        const raw = '$\\href{javascript:window.__unsafeMath=1}{click}$\n\n$\\htmlClass{math-injected}{x}$\n\n$\\includegraphics{https://example.invalid/image.png}$\n\nInvalid: $\\frac{1}{$\n\nUnfinished: $$x+1\n\nValid: $v^2$.';
+        const m = add({ raw });
+        await until(() => [...m.body.querySelectorAll('annotation')].some(n => n.textContent === 'v^2'));
+        ok('untrusted TeX cannot create a link or fetch an image', !m.body.querySelector('a, img, iframe, script'));
+        ok('untrusted TeX cannot create arbitrary HTML classes', !m.body.querySelector('.math-injected'));
+        eq('untrusted commands do not execute JavaScript', frame.contentWindow.__unsafeMath, undefined);
+        ok('malformed TeX stays readable', m.body.textContent.includes('\\frac{1}{'));
+        ok('an unfinished formula stays readable', m.body.textContent.includes('$$x+1'));
+        eq('the raw source stays intact even on parse failures', m.bubble.dataset.messageText, raw);
+      });
+    },
     consoleApprovalStaysWithItsOpening: async () => {
       const realFetch = window.fetch;
       let answer, scanning = false, pendingAnswer;
@@ -12056,6 +12228,17 @@ const SCENARIOS = String.raw`(() => {
   });
   /** The phone runs (the page opened 360 and 390 px wide): what has to fit a phone screen. The desktop suite is skipped there. */
   const P = {
+    phoneConsoleMath: async () => {
+      await withConsoleMath(async ({ add, d, frame }) => {
+        const formula = '\\sigma=\\sqrt{\\frac{1}{N}\\sum_{i=1}^{N}(x_i-\\mu)^2}=\\sqrt{\\frac{(2-4)^2+(4-4)^2+(4-4)^2+(4-4)^2+(5-4)^2+(5-4)^2+(7-4)^2+(9-4)^2}{8}}';
+        const m = add({ raw: '$$' + formula + '$$' });
+        await until(() => m.body.querySelector('math'));
+        ok('the full formula is rendered on a phone', m.body.querySelector('annotation')?.textContent === formula);
+        ok('a wide display formula stays within the phone document', d.documentElement.scrollWidth <= frame.contentWindow.innerWidth);
+        const display = m.body.querySelector('.hb-math-display');
+        ok('the formula remains reachable by horizontal scrolling', display && display.clientWidth > 0 && (display.scrollWidth <= display.clientWidth || ['auto', 'scroll'].includes(frame.contentWindow.getComputedStyle(display).overflowX)));
+      });
+    },
     phoneSkillsManagement: async () => {
       await T.skillsInstructionPreviewAndRollback();
       await T.skillsPracticeTaskEvidence();
@@ -12848,6 +13031,18 @@ try { new Function(SCENARIOS); } catch (err) {
 }
 const work = mkdtempSync(join(tmpdir(), 'hb-ui-'));
 try {
+  // Real renderer assets, served only from this throwaway fixture. Fonts remain local too.
+  const mathAssets = join(work, 'math'), katexAssets = join(root, 'node_modules', 'katex', 'dist');
+  mkdirSync(mathAssets, { mode: 0o755 });
+  for (const file of ['katex.min.js', 'katex.min.css']) {
+    cpSync(join(katexAssets, file), join(mathAssets, file));
+    chmodSync(join(mathAssets, file), 0o644);
+  }
+  cpSync(join(katexAssets, 'fonts'), join(mathAssets, 'fonts'), { recursive: true });
+  for (const file of ['control-ui-math-source.js', 'control-ui-math.js', 'control-ui-math.css']) {
+    cpSync(join(root, 'web', file), join(mathAssets, file));
+    chmodSync(join(mathAssets, file), 0o644);
+  }
   // hb-ui=classic and ?ui=classic (below): opened as a browser that had chosen the classic look (scenario classicMap).
   const head = `<head><script>localStorage.setItem('theme','light'); localStorage.setItem('hb-ui','classic')</script><script>${STUB.replace('__VERSION__', version)}</script><script>${RECORDER}</script><script>window.__joinPage = ${joinPage}</script>`;
   const tail = `<script>setTimeout(() => { ${SCENARIOS} }, 2500)</script></body>`;

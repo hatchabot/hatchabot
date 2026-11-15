@@ -11,6 +11,7 @@ import { FrameReader, GUEST_CONNECT_TIMEOUT_MS, GUEST_IDLE_TO_CLOSE_MS, GUEST_RO
 import { consoleIdentity, guestConsoleSessionKey, OWNER_ROLE } from '../src/openclaw/consoleIdentity.js';
 import { ConsoleAccess, consoleAllowUsers, consoleSyncBatch, parseConsoleState } from '../src/orchestrator/consoleAccess.js';
 import { TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH } from '../src/api/controlUiRebase.js';
+import { CONTROL_UI_MATH_PREFIX, CONTROL_UI_MATH_SCRIPT_PATH, CONTROL_UI_MATH_SOURCE_PATH, KATEX_SCRIPT_PATH, KATEX_STYLES_PATH } from '../src/api/controlUiMath.js';
 
 /**
  * The console with identities, end to end through the real routes: who may
@@ -1308,6 +1309,60 @@ describe("a guest's page over HTTP (2026-09-30)", () => {
     expect(g).toMatchObject({ communityInvite: false, terminalEnabled: true });
     const o = await (await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/control-ui-config.json`, { headers: { 'x-hatchabot-owner': OWNER } })).json() as { communityInvite?: boolean };
     expect(o.communityInvite).toBe(true);
+  });
+});
+
+describe('local math rendering through the agent console proxy', () => {
+  it('loads local math assets for owners and admitted guests without contacting the runtime', async () => {
+    const w = await world();
+    const exec = vi.spyOn(w.provider, 'exec');
+    for (const person of [OWNER, GUEST]) {
+      for (const path of [KATEX_SCRIPT_PATH, KATEX_STYLES_PATH, CONTROL_UI_MATH_SOURCE_PATH, CONTROL_UI_MATH_SCRIPT_PATH, `${CONTROL_UI_MATH_PREFIX}fonts/KaTeX_Main-Regular.woff2`]) {
+        const response = await w.app.inject({ method: 'GET', url: `/v1/agents/a1/ui${path}`, headers: { 'x-hatchabot-owner': person } });
+        expect(response.statusCode, path).toBe(200);
+        expect(response.headers['cache-control']).toBe('no-store');
+        expect(response.headers['x-content-type-options']).toBe('nosniff');
+        expect(response.rawPayload.length).toBeGreaterThan(100);
+      }
+    }
+    const head = await w.app.inject({ method: 'HEAD', url: `/v1/agents/a1/ui${KATEX_SCRIPT_PATH}`, headers: { 'x-hatchabot-owner': OWNER } });
+    expect(head.statusCode).toBe(200); expect(head.rawPayload.length).toBe(0);
+    expect(Number(head.headers['content-length'])).toBeGreaterThan(100);
+    expect(exec).not.toHaveBeenCalled();
+    expect(w.gw.http).toEqual([]);
+  });
+
+  it('refuses unknown assets, mutation methods, strangers and removed guests locally', async () => {
+    const w = await world();
+    for (const person of [OTHER, 'user-stranger']) {
+      const r = await w.app.inject({ method: 'GET', url: `/v1/agents/a1/ui${KATEX_SCRIPT_PATH}`, headers: { 'x-hatchabot-owner': person } });
+      expect(r.statusCode).toBe(404);
+    }
+    for (const path of ['package.json', 'katex.min.js.map', 'fonts/KaTeX_Unknown-Regular.woff2']) {
+      const r = await w.app.inject({ method: 'GET', url: `/v1/agents/a1/ui${CONTROL_UI_MATH_PREFIX}${path}`, headers: { 'x-hatchabot-owner': OWNER } });
+      expect(r.statusCode).toBe(404);
+    }
+    const post = await w.app.inject({ method: 'POST', url: `/v1/agents/a1/ui${KATEX_SCRIPT_PATH}`, headers: { 'x-hatchabot-owner': OWNER } });
+    expect(post.statusCode).toBe(404);
+    const off = await w.app.inject({ method: 'PUT', url: `/v1/agents/a1/members/${GUEST}/web-chat`, headers: { 'x-hatchabot-owner': OWNER }, payload: { on: false } });
+    expect(off.statusCode).toBe(200);
+    const removed = await w.app.inject({ method: 'GET', url: `/v1/agents/a1/ui${KATEX_SCRIPT_PATH}`, headers: { 'x-hatchabot-owner': GUEST } });
+    expect(removed.statusCode).toBe(404);
+    expect(w.gw.http).toEqual([]);
+  });
+
+  it('injects math into both console roles while retaining the original app and role shim', async () => {
+    const w = await world();
+    for (const person of [OWNER, GUEST]) {
+      const response = await w.app.inject({ method: 'GET', url: '/v1/agents/a1/ui/chat', headers: { 'x-hatchabot-owner': person } });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain(`/v1/agents/a1/ui${KATEX_STYLES_PATH}`);
+      expect(response.body).toContain(`/v1/agents/a1/ui${CONTROL_UI_MATH_SCRIPT_PATH}`);
+      expect(response.body).toContain('<script>theme()</script>');
+      expect(response.body).toContain('src="/v1/agents/a1/ui/assets/app.js"');
+      expect(response.body).toContain(person === OWNER ? TALK_PROXY_SCRIPT_PATH : '/__hatchabot/guest-view.js');
+      expect(response.headers.etag).toBeUndefined();
+    }
   });
 });
 

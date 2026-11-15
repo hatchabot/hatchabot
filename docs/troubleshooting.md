@@ -3737,6 +3737,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/orchestrator/snapshots.ts` — `snapshotsInUse`; `src/api/routes.ts` — `snapshotsInUse`
 ## Console and web chat
 
+### Equations show dollar signs and LaTeX commands instead of formatted math
+- **Check:** a completed assistant reply in Hatchabot's embedded console contains a valid formula such as `$$s=\sqrt{x}$$`, and its commands remain visible. A response still streaming, code example, user message, or direct OpenClaw page is outside this enhancement.
+- **Cause:** pinned OpenClaw 2026.9.8's Markdown pipeline does not typeset math. Markdown can also consume escapes and underscores, so rendering its visible text directly would change some formulas.
+- **Fix:** upgrade Hatchabot, then reload or close and reopen console tabs. The local renderer uses the original assistant message and runs after streaming ends; agents need no rebuild. Inline dollar/parenthesis and display double-dollar/bracket delimiters are supported. Invalid, ambiguous or unsupported formulas stay readable source. If every valid formula remains raw after reopening, check the console's local math JavaScript, CSS and font requests for load errors; they need the same signed-in console access as the page.
+- **Fixed in:** `v2.188.0`
+- **Code:** `src/api/controlUiMath.ts` — `withControlUiMath`, `readControlUiMathAsset`; `web/control-ui-math-source.js` — `mathExpressions`; `web/control-ui-math.js` — `enhance`, `textRuns`
+
 ### On a phone, the keyboard covers the box you are typing in (a panel, the web chat, the console)
 - **Check:** the page is open on a phone; tapping a text box in a panel, the web chat or the console brings up the keyboard over it, and the box cannot be scrolled into sight.
 - **Cause:** the keyboard covers the bottom of the screen without making the page shorter, and before v2.169.0 panels and dialogs kept their full height under it.

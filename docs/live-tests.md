@@ -114,6 +114,17 @@ Connections, then a plain request for mail in a fresh chat on an agent with an
 account attached), a runner going to sleep
 mid-move, an install on a Mac.
 
+For **console math**, also check the deployed console after reopening its tab:
+use a disposable conversation to request population and sample standard-deviation
+equations with LaTeX fractions, sums and square roots. Confirm the finished reply
+typesets both equations, copying the reply preserves its source, subsequent
+streaming messages still complete normally, and wide equations scroll inside the
+message on a phone. Check a shared-agent console too. Assets must load from that
+console's own authenticated path with no CDN request or CSP error. The automated
+browser fixtures cover the renderer and pinned message markup; this live check
+verifies the real runtime still presents that markup. Record it alongside the
+console run before promotion; do not claim it from a coding-session fixture.
+
 Each test's area (the files that make it due) is in `scripts/live.mjs`
 (`LIVE_TESTS`), with its command. The tests that make agents use names that
 say so and delete them at the end, pass or fail; the ones that make VMs say

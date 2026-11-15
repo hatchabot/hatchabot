@@ -367,6 +367,15 @@ again when you pick it).
   it and it can be bookmarked; the browser tab takes the agent's name.
 - A web-chat guest's chat stays a single console.
 
+**Math in replies** (v2.188.0): completed assistant replies render inline
+equations in `$…$` or `\(…\)` and display equations in `$$…$$` or `\[…\]`.
+KaTeX and its fonts are bundled locally. Equations keep their original LaTeX
+for the console's Copy action. A response still streaming shows its source
+until it finishes; code, links, user messages and ordinary prices retain their
+existing display. Invalid or ambiguous formulas remain source text. Reload
+existing console tabs after upgrading; agents need no rebuild. Direct OpenClaw
+pages and messaging apps use their own renderers.
+
 ### Resources
 
 In **Resources** (its own header button; or `hatchabot top [--sort cpu|mem|name]`): live

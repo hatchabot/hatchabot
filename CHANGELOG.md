@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.188.0] — 2026-11-15
+
+### Upgrading
+- Reload or close and reopen existing console tabs to load math rendering. Agents need no rebuild. Direct OpenClaw pages and messaging apps use their own renderers.
+
+### Added
+- Assistant equations in Hatchabot's embedded OpenClaw console render with locally bundled KaTeX after a response finishes. Inline and display math use the original message source, preserving LaTeX escapes, subscripts and matrix rows. Owner and shared-agent consoles receive the same rendering.
+- Code, ordinary currency and user messages keep their existing display. Invalid, ambiguous or unsupported formulas remain readable source. Math assets require console access; rendering grants no additional tools or external-resource access.
+
 ## [2.187.0] — 2026-11-15
 
 ### Added
