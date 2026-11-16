@@ -5,7 +5,23 @@ import type { Store } from '../store/store.js';
 import { ACCOUNT_SHAPE, ID_SHAPE } from './channelIds.js';
 import { approvePairing, listPairingRequests, PAIRING_DB, PAIRING_DB_JS, pairingStorePath } from './claim.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
-import { dmPolicyAsserted, forgetDmPolicy, forgetDmPolicyEntry, rememberDmPolicy } from './dmPolicyMemo.js';
+import { beginDmPolicyAssertion, dmPolicyAsserted, forgetDmPolicy, rememberDmPolicy } from './dmPolicyMemo.js';
+
+// Agent-writable directories can already contain a staging file or symlink.
+// Create our own file exclusively, then publish only that file atomically.
+const WRITE_JSON_ATOMIC_JS = `
+    const writeAtomic = (f, obj) => {
+      const tmp = f + "." + require("crypto").randomUUID() + ".tmp";
+      let fd = fs.openSync(tmp, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, JSON.stringify(obj, null, 2));
+        fs.closeSync(fd); fd = undefined;
+        fs.renameSync(tmp, f);
+      } finally {
+        if (fd !== undefined) fs.closeSync(fd);
+        try { fs.unlinkSync(tmp); } catch (e) { if (e.code !== "ENOENT") throw e; }
+      }
+    };`;
 
 /**
  * Revoke = flip status + drop the member from the bot's allowlist immediately
@@ -288,7 +304,9 @@ async function admitOtherChannel(deps: RevokeDeps, opts: AdmitOptions & { kind: 
   // Their rooms too, not just their DMs: OpenClaw's approval writes only the
   // DM allow store (2026-09-30).
   try {
-    await grantRoomAccess(deps, { agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, channelUserId: req.id });
+    if (!(await grantRoomAccess(deps, { agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, channelUserId: req.id }))) {
+      throw new AdmitError('Adding access to the rooms failed.');
+    }
   } catch {
     return refuseApprovedIdentity(deps, opts, req.id, 'Adding access to the rooms failed. Refresh and try again.');
   }
@@ -402,6 +420,7 @@ export async function denyPairing(
   const script = `node -e '
     const fs = require("fs");
     const f = ${JSON.stringify(pairingStorePath(opts.kind ?? 'telegram'))};
+    ${WRITE_JSON_ATOMIC_JS}
     let n = 0;
     // 2026.9: the request is a row in the state database. Both stores, as the
     // list reads both: a 2026.7 file left on a 2026.9 volume (HB-0033).
@@ -417,9 +436,7 @@ export async function denyPairing(
       d.requests = (Array.isArray(d.requests) ? d.requests : [])
         .filter((r) => String(r && r.code) !== ${JSON.stringify(opts.code)});
       if (d.requests.length !== before) {
-        const tmp = f + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(d, null, 2), { mode: 0o600 }); // credentials stay 0600
-        fs.renameSync(tmp, f);                                             // atomic swap
+        writeAtomic(f, d);
       }
       n += before - d.requests.length;
     }
@@ -460,11 +477,7 @@ export async function grantChannelAccess(
   };
   const script = `node -e '
     const fs = require("fs");
-    const writeAtomic = (f, obj) => {
-      const tmp = f + ".tmp";
-      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
-      fs.renameSync(tmp, f);   // atomic: the gateway re-reads per message
-    };
+    ${WRITE_JSON_ATOMIC_JS}
     const t = ${JSON.stringify(target)};
     const add = (arr) => {
       const a = Array.isArray(arr) ? arr.slice() : [];
@@ -545,12 +558,13 @@ export async function grantRoomAccess(
   const script = `node -e '
     const fs = require("fs");
     const t = ${JSON.stringify(t)};
+    ${WRITE_JSON_ATOMIC_JS}
     const cfgPath = "/home/node/.openclaw/openclaw.json";
     if (!fs.existsSync(cfgPath)) process.exit(0);
     const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
     let changed = false;
     ${ROOM_USERS_ADD_JS}
-    if (changed) { fs.writeFileSync(cfgPath + ".tmp", JSON.stringify(cfg, null, 2), { mode: 0o600 }); fs.renameSync(cfgPath + ".tmp", cfgPath); }
+    if (changed) writeAtomic(cfgPath, cfg);
     console.log(changed ? "added" : "unchanged");'`;
   const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script).catch(() => ({ code: 1, stdout: '', stderr: '' }));
   if (res.code !== 0) {
@@ -635,6 +649,7 @@ export async function setDmPolicy(
   const script = `node -e '
     const fs = require("fs");
     const t = ${JSON.stringify(target)};
+    ${WRITE_JSON_ATOMIC_JS}
     const cfgPath = "/home/node/.openclaw/openclaw.json";
     if (!fs.existsSync(cfgPath)) { console.log("no-config"); process.exit(0); }
     const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
@@ -648,18 +663,19 @@ export async function setDmPolicy(
     // The config must carry the list it is about to enforce: an allowlist with
     // nobody in it admits nobody, including the owner.
     if (t.admit.length) acc.allowFrom = [...have, ...missing];
-    const tmp = cfgPath + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 }); // the config holds bot tokens: stays 0600
-    fs.renameSync(tmp, cfgPath);   // atomic: the gateway re-reads per message
+    writeAtomic(cfgPath, cfg);
     console.log("set");'`;
-  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
-  const out = res.stdout.trim();
-  // A sweep re-asserts the policy every few minutes; "unchanged" is not news
-  // (it filled one agent's Setup log, 2026-09-24).
-  if (!(res.code === 0 && out === 'unchanged')) log('channel.dm_policy', { agentId: opts.agentId, policy: opts.policy, result: res.code === 0 ? out : `failed:${res.code}` });
-  const ok = res.code === 0 && (out === 'set' || out === 'unchanged');
-  if (ok) rememberDmPolicy(opts, opts.policy, admit); else forgetDmPolicyEntry(opts);
-  return ok;
+  const finish = beginDmPolicyAssertion(opts);
+  try {
+    const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
+    const out = res.stdout.trim();
+    // A sweep re-asserts the policy every few minutes; "unchanged" is not news
+    // (it filled one agent's Setup log, 2026-09-24).
+    if (!(res.code === 0 && out === 'unchanged')) log('channel.dm_policy', { agentId: opts.agentId, policy: opts.policy, result: res.code === 0 ? out : `failed:${res.code}` });
+    const ok = res.code === 0 && (out === 'set' || out === 'unchanged');
+    if (finish() && ok) rememberDmPolicy(opts, opts.policy, admit);
+    return ok;
+  } finally { finish(); }
 }
 
 export async function revokeMember(
@@ -821,6 +837,7 @@ export function keepOnlyTelegramAccountScript(accountId: string | undefined): st
   if (accountId !== undefined && !/^[A-Za-z0-9_]{1,64}$/.test(accountId)) throw new Error('unexpected account id');
   return `node -e '
     const fs = require("fs"); const f = "/home/node/.openclaw/openclaw.json";
+    ${WRITE_JSON_ATOMIC_JS}
     if (!fs.existsSync(f)) process.exit(0);
     const cfg = JSON.parse(fs.readFileSync(f, "utf8"));
     const tg = cfg.channels && cfg.channels.telegram;
@@ -828,7 +845,7 @@ export function keepOnlyTelegramAccountScript(accountId: string | undefined): st
     const keep = ${JSON.stringify(accountId ?? null)};
     for (const k of Object.keys(tg.accounts)) if (k !== keep) delete tg.accounts[k];
     if (!Object.keys(tg.accounts).length) tg.enabled = false;
-    fs.writeFileSync(f + ".tmp", JSON.stringify(cfg, null, 2), { mode: 0o600 }); fs.renameSync(f + ".tmp", f);'`;
+    writeAtomic(f, cfg);'`;
 }
 
 /**
@@ -841,6 +858,7 @@ export function keepOnlyTelegramAccountScript(accountId: string | undefined): st
  */
 export const DROP_CHAT_ACCOUNTS_SCRIPT = `node -e '
     const fs = require("fs"); const f = "/home/node/.openclaw/openclaw.json";
+    ${WRITE_JSON_ATOMIC_JS}
     if (!fs.existsSync(f)) process.exit(0);
     const cfg = JSON.parse(fs.readFileSync(f, "utf8"));
     let n = 0;
@@ -850,7 +868,7 @@ export const DROP_CHAT_ACCOUNTS_SCRIPT = `node -e '
       if (c.enabled !== false) { c.enabled = false; n++; }
       if (c.accounts && Object.keys(c.accounts).length) { c.accounts = {}; n++; }
     }
-    if (n) { fs.writeFileSync(f + ".tmp", JSON.stringify(cfg, null, 2), { mode: 0o600 }); fs.renameSync(f + ".tmp", f); }'`;
+    if (n) writeAtomic(f, cfg);'`;
 
 /**
  * The on-volume scrub of chat ids from an agent's allowlists: the approval
@@ -863,11 +881,7 @@ export const DROP_CHAT_ACCOUNTS_SCRIPT = `node -e '
 export function allowlistScrubScript(targets: Array<{ channel: string; acct: string; id: string; cred: string }>): string {
   return `node -e '
     const fs = require("fs");
-    const writeAtomic = (f, obj) => {
-      const tmp = f + ".tmp";
-      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 }); // the allowlist and config stay 0600
-      fs.renameSync(tmp, f);   // atomic: the gateway re-reads per message
-    };
+    ${WRITE_JSON_ATOMIC_JS}
     const targets = ${JSON.stringify(targets)};
     const cfgPath = "/home/node/.openclaw/openclaw.json";
     const cfg = fs.existsSync(cfgPath) ? JSON.parse(fs.readFileSync(cfgPath, "utf8")) : null;
@@ -884,7 +898,9 @@ export function allowlistScrubScript(targets: Array<{ channel: string; acct: str
         d.allowFrom = drop(d.allowFrom || []);
         writeAtomic(t.cred, d);
       }
-      if (db) db.prepare("delete from channel_pairing_allow_entries where channel_key = ? and lower(account_id) = lower(?) and entry = ?").run(t.channel, t.acct, t.id);
+      // Legacy migration can preserve a channel prefix when its adapter is
+      // unavailable. Match the same two forms in the database as in the files.
+      if (db) db.prepare("delete from channel_pairing_allow_entries where channel_key = ? and lower(account_id) = lower(?) and entry in (?, ?)").run(t.channel, t.acct, t.id, t.channel + ":" + t.id);
       const acc = cfg && cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
         && cfg.channels[t.channel].accounts[t.acct];
       if (acc && Array.isArray(acc.allowFrom)) { acc.allowFrom = drop(acc.allowFrom); cfgChanged = true; }

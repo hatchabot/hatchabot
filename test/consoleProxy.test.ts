@@ -275,6 +275,15 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
     expect(guestAgentsList('nope', scope)).toBe('nope');
   });
 
+  it('never exposes another agent when the scoped agent is absent from the gateway roster', async () => {
+    const { guestAgentsList } = await import('../src/api/consoleProxy.js');
+    const out = guestAgentsList({ defaultId: 'other-agent', mainKey: 'owner-main', agents: [
+      { id: 'other-agent', name: 'Private agent name', workspace: '/private/workspace', defaultPermissionMode: 'full' },
+    ] }, scope) as any;
+    expect(out).toEqual({ defaultId: scope.agentId, mainKey: 'guest:0123456789abcdef', agents: [] });
+    expect(JSON.stringify(out)).not.toMatch(/other-agent|Private|private|owner-main/);
+  });
+
   it("the hello's session defaults: their agent and their conversation", async () => {
     const { guestSessionDefaults } = await import('../src/api/consoleProxy.js');
     const d = { defaultAgentId: 'main', mainKey: 'main', mainSessionKey: 'agent:main:main', scope: 'per-sender' };
@@ -322,6 +331,11 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
     expect(out.indexOf(tag)).toBeGreaterThan(-1);
     expect(out.indexOf(tag)).toBeLessThan(out.indexOf('<script>theme()'));
     expect(withGuestView('<html><head></head></html>', '/p/ui')).toContain(`${tag}\n</head>`);
+    const inert = '<!-- example <script> -->\n<template><script>sample()</script></template>';
+    const active = '<script src="/bundle.js"></script>';
+    expect(withGuestView(`<!doctype html><head>${inert}${active}</head>`, '/p/ui'))
+      .toBe(`<!doctype html><head>${inert}${tag}\n${active}</head>`);
+    expect(withGuestView('<!doctype html><html><body>Ready</body></html>', '/p/ui').startsWith('<!doctype html>')).toBe(true);
   });
 
   it('the view script prunes the sidebar to what a guest can open — and keeps their pinned conversations', async () => {

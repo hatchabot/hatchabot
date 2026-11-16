@@ -173,6 +173,25 @@ async function world() {
 const H = (owner: string) => ({ 'x-hatchabot-owner': owner });
 
 describe('POST /v1/images', () => {
+  it('refuses replacing or rebuilding a derived image held by an import build', async () => {
+    const { store, f, builds } = await world();
+    try {
+      // Imports build through their provider, outside the routes' local Set.
+      store.upsertDerivedImage({ name: 'imported-tools', tag: deriveTag('imported-tools'), base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: OWNER });
+      const before = store.getDerivedImage('imported-tools');
+      for (const request of [
+        { method: 'POST' as const, url: '/v1/images', payload: { name: 'imported-tools', dockerfile: 'RUN false', replace: true } },
+        { method: 'POST' as const, url: '/v1/images/imported-tools/rebuild', payload: {} },
+      ]) {
+        const response = await f.inject({ ...request, headers: H(OWNER) });
+        expect(response.statusCode).toBe(409);
+        expect(response.json().error).toMatch(/already building/);
+        expect(store.getDerivedImage('imported-tools')).toEqual(before);
+      }
+      expect(builds).toEqual([]);
+    } finally { await f.close(); }
+  });
+
   it('host owner: creates a BUILDING row and kicks the build', async () => {
     const { store, f, builds } = await world();
     const res = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OWNER), payload: { name: 'media', dockerfile: 'RUN apt-get install -y ffmpeg' } });

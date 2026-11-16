@@ -1158,6 +1158,45 @@ describe("a guest's socket", () => {
 });
 
 describe('keeping the gateway in step', () => {
+  it.each(['removal', 'runtime', 'owner', 'provider', 'stopped'] as const)('does not write stale console access after %s changes during its state probe', async (change) => {
+    const w = await world({ allowUsers: 'missing-guest' });
+    let provider = w.provider, release!: () => void, entered!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const entering = new Promise<void>((resolve) => { entered = resolve; });
+    const original = w.provider.execShell.bind(w.provider);
+    vi.spyOn(w.provider, 'execShell').mockImplementationOnce(async (...args) => { entered(); await barrier; return original(...args); });
+    const access = new ConsoleAccess({ store: w.store, providerFor: () => provider, gatewayAddr: async () => ({ host: '127.0.0.1', port: w.gw.port }) });
+    const pending = access.ensureReady(w.store.getAgent('a1')!, 'grant');
+    await entering;
+    if (change === 'removal') w.store.setMembershipWebChat('a1', GUEST, false);
+    if (change === 'runtime') w.store.setAgentRuntimeRef('a1', 'mock://replacement');
+    if (change === 'owner') (w.store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('replacement-owner', 'a1');
+    if (change === 'provider') provider = new MockProvider();
+    if (change === 'stopped') w.store.setAgentState('a1', 'STOPPED');
+    release();
+    expect(await pending).toMatchObject({ mode: 'unavailable' });
+    expect([...w.provider.execLog, ...provider.execLog].filter((argv) => argv[0] === 'config' && argv[1] === 'set')).toEqual([]);
+  });
+
+  it.each(['owner', 'runtime'] as const)('does not assign an obsolete owner role after %s changes during profile lookup', async (change) => {
+    const w = await world({ ownerAdmin: false });
+    let release!: () => void, entered!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const entering = new Promise<void>((resolve) => { entered = resolve; });
+    const original = w.provider.exec.bind(w.provider);
+    vi.spyOn(w.provider, 'exec').mockImplementation(async (...args) => {
+      if (args[1].slice(0, 3).join(' ') === 'gateway call users.list') { entered(); await barrier; }
+      return original(...args);
+    });
+    const pending = w.access.ensureReady(w.store.getAgent('a1')!);
+    await entering;
+    if (change === 'owner') (w.store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('replacement-owner', 'a1');
+    else w.store.setAgentRuntimeRef('a1', 'mock://replacement');
+    release();
+    expect(await pending).toMatchObject({ mode: 'unavailable' });
+    expect(w.provider.execLog.filter((argv) => argv.slice(0, 3).join(' ') === 'gateway call users.setRole')).toEqual([]);
+  });
+
   it("adds a new guest's name before they connect", async () => {
     const { app, provider, guestId, ownerId } = await world({ allowUsers: 'missing-guest' });
     const res = await app.inject({ method: 'GET', url: '/v1/agents/a1/console/access', headers: { 'x-hatchabot-owner': GUEST } });
@@ -1181,6 +1220,25 @@ describe('keeping the gateway in step', () => {
     expect(res.json()).toEqual({ role: 'owner', console: 'identity' });
     const roles = w.provider.execLog.filter((a) => a.slice(0, 3).join(' ') === 'gateway call users.setRole').map((a) => JSON.parse(a[4]!));
     expect(roles).toEqual([{ profileId: 'p-old-owner', role: null }, { profileId: 'p-owner', role: OWNER_ROLE }]);
+  });
+
+  it('does not declare owner-role synchronization successful when an older owner could not be demoted', async () => {
+    const w = await world({ ownerAdmin: false });
+    const original = w.provider.exec.bind(w.provider);
+    w.provider.exec = async (ref, argv, options) => {
+      const result = await original(ref, argv, options);
+      if (argv.slice(0, 3).join(' ') === 'gateway call users.setRole') {
+        const change = JSON.parse(argv[4]!);
+        if (change.profileId === 'p-old-owner') return { code: 1, stdout: '', stderr: 'fixture role write failed' };
+        if (change.profileId === 'p-owner') w.grantOwnerRole();
+      }
+      return result;
+    };
+    const result = await w.access.ensureReady(w.store.getAgent('a1')!);
+    expect(result).toMatchObject({ mode: 'unavailable', identity: true });
+    const grants = w.provider.execLog.filter((argv) => argv.slice(0, 3).join(' ') === 'gateway call users.setRole')
+      .map((argv) => JSON.parse(argv[4]!));
+    expect(grants).toEqual([{ profileId: 'p-old-owner', role: null }]);
   });
 });
 

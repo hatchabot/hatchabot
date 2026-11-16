@@ -1,3 +1,5 @@
+import { controlUiHtmlAttributes, controlUiHtmlTags, controlUiScriptInsertionPoint } from './controlUiHtml.js';
+
 /**
  * The Control UI page, moved under the console proxy's prefix.
  *
@@ -19,11 +21,23 @@
  * so the page's CSP hashes still match.
  */
 export function rebaseControlUi(html: string, prefix: string): string {
-  const p = prefix.replace(/\/+$/, '');
-  return html
-    .replace(/(<html\b[^>]*?\sdata-openclaw-control-ui-base-path=)""/i, `$1"${p}"`)
-    // `="/x"` but not `="//host"` (protocol-relative) — those are not ours.
-    .replace(/\b(src|href)="\/(?!\/)/g, `$1="${p}/`);
+  const p = prefix.replace(/\/+$/, '').replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const edits: Array<{ at: number; text: string }> = [];
+  for (const tag of controlUiHtmlTags(html)) {
+    if (tag.closing || tag.name === '!doctype') continue;
+    for (const attr of controlUiHtmlAttributes(html, tag)) {
+      if ((tag.name === 'html' && attr.name === 'data-openclaw-control-ui-base-path' && attr.value === '') ||
+          ((attr.name === 'src' || attr.name === 'href') && attr.value?.startsWith('/') && !attr.value.startsWith('//'))) {
+        edits.push({ at: attr.start, text: p });
+      }
+    }
+  }
+  // Build once; no global replacement can enter JavaScript strings, data-src
+  // attributes, comments or another attribute's quoted value.
+  let cursor = 0, out = '';
+  for (const edit of edits) { out += html.slice(cursor, edit.at) + edit.text; cursor = edit.at; }
+  return out + html.slice(cursor);
 }
 
 /**
@@ -90,6 +104,6 @@ export function withTalkProxy(html: string, prefix: string): string {
   const src = `${prefix.replace(/\/+$/, '')}${TALK_PROXY_SCRIPT_PATH}`
     .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
   const tag = `<script src="${src}"></script>`;
-  if (/<script\b/i.test(html)) return html.replace(/<script\b/i, () => `${tag}\n<script`);
-  return /<\/head>/i.test(html) ? html.replace(/<\/head>/i, () => `${tag}\n</head>`) : `${tag}${html}`;
+  const { at } = controlUiScriptInsertionPoint(html);
+  return html.slice(0, at) + tag + (html[at] === '<' && !/^<body\b/i.test(html.slice(at)) ? '\n' : '') + html.slice(at);
 }

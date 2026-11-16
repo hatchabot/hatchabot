@@ -201,6 +201,7 @@ describe('derived images: rebuild and build log', () => {
   it('rebuild kicks a build (optionally onto a newer base) and the log reports the status', async () => {
     const w = await world();
     w.store.upsertDerivedImage(rec);
+    w.store.setDerivedImageStatus(rec.name, 'READY', null);
     const r = await w.f.inject({ method: 'POST', url: '/v1/images/tcpdump/rebuild', headers: as(), payload: { base: 'hatchabot-runtime:2026.9.7' } });
     expect(r.statusCode).toBe(202);
     expect(r.json()).toEqual({ building: true });

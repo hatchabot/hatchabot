@@ -40,8 +40,12 @@ if(mode==='delay'){setTimeout(()=>{},10000);return;}
 if(mode==='error'){process.stderr.write('private credential fixture must never return');process.exit(2);}
 if(mode==='runtime-timeout'){process.stdout.write(JSON.stringify({ok:false,status:'timeout'}));process.exit(2);}
 const skill=/\\[skill-check:([a-f0-9]+)\\]/.exec(content)[0], sample=/\\[sample-check:([a-f0-9]+)\\]/.exec(facts)[0];
-const final='The seed library opens Saturday at 10. Please bring envelopes.'+(mode==='missing'?'':' '+skill+' '+sample);
-process.stdout.write(JSON.stringify({ok:true,status:'ok',final,toolSummary:{calls:mode==='no-tools'?0:2,tools:['read']},codeModeEngaged:${String(codeMode)},usage:{input:100,output:40,total:140},costUsd:0.001}));
+const final=(mode==='unicode-chunks'?'A café announcement: grow 🌱.':'The seed library opens Saturday at 10. Please bring envelopes.')+(mode==='missing'?'':' '+skill+' '+sample);
+const output=JSON.stringify({ok:true,status:'ok',final,toolSummary:{calls:mode==='no-tools'?0:2,tools:['read']},codeModeEngaged:${String(codeMode)},usage:{input:100,output:40,total:140},costUsd:0.001});
+if(mode==='unicode-chunks'){
+  const bytes=Buffer.from(output),split=bytes.indexOf(Buffer.from('é'))+1;
+  process.stdout.write(bytes.subarray(0,split));setTimeout(()=>process.stdout.write(bytes.subarray(split)),20);
+}else process.stdout.write(output);
 `, { mode: 0o700 });
   const script = skillTrialScript(target, skill, expiresAt).replaceAll('/home/node/.openclaw', state);
   const run = () => {
@@ -98,6 +102,9 @@ describe('the generated runner against an isolated CLI shim', () => {
     const s = sandbox({ codeMode: false });
     expect(s.run().evidence.codeMode).toBe(false);
     expect(JSON.parse(readFileSync(s.capture, 'utf8')).config.tools.codeMode).toBe(false);
+  });
+  it('preserves Unicode when a model response splits a UTF-8 character across stdout chunks', () => {
+    expect(sandbox({ mode: 'unicode-chunks' }).run()).toMatchObject({ status: 'completed', output: 'A café announcement: grow 🌱.' });
   });
   it.each(['missing', 'no-tools'])('does not call %s evidence a successful practice', (mode) => {
     expect(sandbox({ mode }).run().status).toBe('not_observed');
@@ -157,6 +164,14 @@ describe('provider boundary and safe result projection', () => {
     const run = runSkillTrial({ execShell: async () => { throw Error('private'); } }, target, skill).then((r) => { settled = true; return r; });
     await vi.advanceTimersByTimeAsync(76_999); expect(settled).toBe(false);
     await vi.advanceTimersByTimeAsync(1); expect((await run).status).toBe('unavailable');
+  });
+  it.each([1, 125, 255])('holds exec transport exit %s through the remote deadline even without failure flags', async (code) => {
+    vi.useFakeTimers(); let settled = false;
+    const run = runSkillTrial({ execShell: async () => response({}, { code, stdout: '', stderr: 'exec transport closed' }) }, target, skill)
+      .then((result) => { settled = true; return result; });
+    await vi.advanceTimersByTimeAsync(76_999); expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1); expect((await run).status).toBe('unavailable');
+    expect(vi.getTimerCount()).toBe(0);
   });
   it('bounds an unresponsive provider and observes a reply that arrives after the deadline', async () => {
     vi.useFakeTimers(); let release!: (r: ExecResult) => void, settled = false;

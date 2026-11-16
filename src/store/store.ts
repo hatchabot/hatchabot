@@ -6345,10 +6345,12 @@ export class Store {
   reactivateMembership(agentId: string, userId: string, displayName: string, webChat = false): void {
     // web_chat is set from THIS invite: a web-chat right given before the
     // removal does not come back with a plain chat-app invite (2026-09-29).
+    // Every re-admission path grants a user seat. A previous admin/owner role
+    // was revoked with that seat and must not return through a fresh invite.
     this.db
       .prepare(
         `UPDATE memberships
-           SET status = 'active', display_name = ?, channel_user_id = NULL,
+           SET status = 'active', role = 'user', display_name = ?, channel_user_id = NULL,
                joined_at = ?, web_chat = ?
          WHERE agent_id = ? AND user_id = ?`,
       )

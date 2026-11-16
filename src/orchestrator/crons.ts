@@ -293,12 +293,14 @@ async function usableTarget(provider: RuntimeProvider, runtimeRef: string, targe
  * would adopt it anyway — same session id, history untouched (checked on
  * 2026.9.6). Best-effort: without it the task still works once they chat.
  */
-export async function ensureConversation(provider: RuntimeProvider, runtimeRef: string, slug: string, key: string): Promise<boolean> {
+export async function ensureConversation(provider: RuntimeProvider, runtimeRef: string, slug: string, key: string, stillCurrent: () => boolean = () => true): Promise<boolean> {
+  if (!stillCurrent()) return false;
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug) || !/^agent:[a-z0-9][a-z0-9_-]{0,63}:[A-Za-z0-9:_-]{1,128}$/.test(key)) return false;
   const db = `/home/node/.openclaw/agents/${slug}/agent/openclaw-agent.sqlite`;
   const probe = await provider.execShell(runtimeRef,
     `node -e 'const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync(${JSON.stringify(db)},{readOnly:true});process.stdout.write(db.prepare("select 1 as x from session_nodes where session_key = ?").get(${JSON.stringify(key)})?"yes":"no")' 2>/dev/null || true`,
   ).catch(() => undefined);
+  if (!stillCurrent()) return false;
   if (probe?.stdout.trim() === 'yes') return true;
   const res = await provider.exec(runtimeRef, ['gateway', 'call', 'sessions.create', '--params', JSON.stringify({ key, agentId: slug }), '--json']);
   return res.code === 0;
@@ -378,9 +380,12 @@ const namesRemovedApp = (j: Cron, attached: readonly string[] | undefined): bool
  */
 export async function retargetImplicitCrons(
   provider: RuntimeProvider, runtimeRef: string, slug: string, target: CronTarget | undefined,
-  held: readonly string[] = [], attached?: readonly string[],
+  held: readonly string[] = [], attached?: readonly string[], stillCurrent: () => boolean = () => true,
 ): Promise<{ changed: number; failed: number; held: string[] }> {
+  const cancelled = () => ({ changed: 0, failed: 0, held: [...held] });
+  if (!stillCurrent()) return cancelled();
   const jobs = await listCrons(provider, runtimeRef, slug);
+  if (!stillCurrent()) return cancelled();
   const wasHeld = new Set(held);
   // Still quiet: a held task someone has since given a recipient (or removed) is theirs again.
   const waiting = jobs.filter((j) => !j.system && wasHeld.has(j.id) && j.announce === false);
@@ -388,12 +393,14 @@ export async function retargetImplicitCrons(
   const todo = jobs.filter((j) => !j.system && (j.implicitDelivery || removed(j)));
   if (!todo.length && !waiting.length) return { changed: 0, failed: 0, held: [] };
   const to = await usableTarget(provider, runtimeRef, target);
+  if (!stillCurrent()) return cancelled();
   let changed = 0, failed = 0;
   const stillHeld = new Set<string>();
   // One that throws (a runner gone mid-pass) is a failure, not the end of the
   // pass: a throw lost the ids of the tasks already made quiet, which then
   // stayed quiet for good (HB-0289). Undefined = threw: it may have changed.
-  const point = (id: string, t: CronTarget | undefined, j?: Cron) => retargetCron(provider, runtimeRef, id, t, j).catch(() => undefined);
+  const point = (id: string, t: CronTarget | undefined, j?: Cron) => stillCurrent()
+    ? retargetCron(provider, runtimeRef, id, t, j).catch(() => undefined) : Promise.resolve(false);
   if (!to) {
     // Nowhere to post: quiet, and remembered so a later pass can undo it
     // (one that may have gone quiet too: still announcing, it is not held).
@@ -406,7 +413,7 @@ export async function retargetImplicitCrons(
     return { changed, failed, held: [...stillHeld] };
   }
   const change = isConversation(to) ? todo.filter((j) => !bound(j)) : todo;
-  if (isConversation(to) && (change.length || waiting.some((j) => !bound(j)))) await ensureConversation(provider, runtimeRef, slug, to.session);
+  if (isConversation(to) && (change.length || waiting.some((j) => !bound(j)))) await ensureConversation(provider, runtimeRef, slug, to.session, stillCurrent);
   for (const j of change) {
     if (await point(j.id, to, j)) changed++; else failed++;
   }
@@ -455,8 +462,12 @@ export function cronStoreReadShell(slug: string): string {
     'const st=db.prepare("pragma table_info(cron_jobs)").all().some((c)=>c.name==="state_json");',
     'for(const r of db.prepare("select job_id,declaration_key,job_json,updated_at"+(st?",state_json":"")+" from cron_jobs where agent_id is null or agent_id = ?").all(process.argv[1])){',
     'let j={};try{j=JSON.parse(r.job_json)}catch(e){}',
-    'let s;try{s=st&&r.state_json?JSON.parse(r.state_json):undefined}catch(e){}',
-    'jobs.push({...j,...(s&&typeof s==="object"&&!j.state?{state:s}:{}),id:r.job_id,declarationKey:j.declarationKey||r.declaration_key||undefined,updatedAtMs:r.updated_at})}',
+    // state_json owns run state on newer gateways, even when an imported
+    // job_json still contains an old state object. An unreadable authority
+    // is an unavailable read, never permission to report the stale copy.
+    'const s=st?JSON.parse(r.state_json):undefined;',
+    'if(st&&(!s||typeof s!=="object"||Array.isArray(s)))throw new Error("invalid cron state");',
+    'jobs.push({...j,...(st?{state:s}:{}),id:r.job_id,declarationKey:j.declarationKey||r.declaration_key||undefined,updatedAtMs:r.updated_at})}',
     'process.stdout.write(JSON.stringify({jobs}));',
   ].join('');
   // Single quotes inside the node script would end the shell quoting; there are none.

@@ -50,7 +50,9 @@ const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
  */
 function guard(rel: string): string {
   const p = q(absPath(rel));
-  return `P=$(realpath -e ${p} 2>/dev/null) || exit 2; case "$P" in ${AGENT_HOME}|${AGENT_HOME}/*) ;; *) exit 3;; esac;`;
+  // Command substitution strips trailing newlines, which are valid filename
+  // characters. Keep a sentinel, then remove it and realpath's one separator.
+  return `P=$(realpath -e ${p} 2>/dev/null && printf '.') || exit 2; P=\${P%.}; P=\${P%?}; case "$P" in ${AGENT_HOME}|${AGENT_HOME}/*) ;; *) exit 3;; esac;`;
 }
 
 /** Lists one directory, one entry per line: type\tsize\tmtime\tname. */
@@ -68,7 +70,9 @@ export function statShell(rel: string): string {
 
 /** Total bytes under a directory (what a folder download would carry). */
 export function duShell(rel: string): string {
-  return `${guard(rel)} du -sb "$P" | cut -f1`;
+  // A partial du result is not a usable total: a failed measurement must
+  // not pass the download's size check, nor may a file pass as a directory.
+  return `${guard(rel)} [ -d "$P" ] || exit 4; MEASURED=$(du -sb "$P") || exit 1; printf '%s\\n' "\${MEASURED%%\t*}"`;
 }
 
 export function parseListing(stdout: string): AgentFileEntry[] {
@@ -98,7 +102,7 @@ export function catArgv(rel: string, maxBytes?: number): string[] {
 
 /** The argv a read-only one-shot runs to stream a directory as tar.gz. */
 export function tarArgv(rel: string): string[] {
-  return ['sh', '-c', `${guard(rel)} [ -d "$P" ] || exit 4; cd "$(dirname "$P")" && exec tar cz -- "$(basename "$P")"`];
+  return ['sh', '-c', `${guard(rel)} [ -d "$P" ] || exit 4; cd "\${P%/*}" && exec tar cz -- "\${P##*/}"`];
 }
 
 /**

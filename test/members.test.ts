@@ -574,6 +574,28 @@ describe('revoking across channels', () => {
 });
 
 describe('admitting on Slack and Discord', () => {
+  it.each(['slack', 'discord'] as const)('refuses %s admission and removes the unbound DM approval when room access fails', async (kind) => {
+    const { store, provider, opts } = await setup();
+    const id = kind === 'slack' ? 'U0GUEST' : DISCORD_ID;
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id, code: 'ROOM1' }] }), stderr: '' });
+    const exec = provider.execShellOnVolume.bind(provider);
+    provider.execShellOnVolume = async (ref, script, options) => {
+      const result = await exec(ref, script, options);
+      return script.includes('const chRooms = cfg.channels')
+        ? { code: 1, stdout: '', stderr: 'config write failed' }
+        : result;
+    };
+    await expect(admitMember({ store, provider }, { ...opts, kind, accountId: 'hatchabot', code: 'ROOM1' }))
+      .rejects.toThrow('Adding access to the rooms failed');
+    expect(store.listMemberships('a1')).toHaveLength(1);
+    expect(store.getMemberByIdentity('a1', kind, id)).toBeUndefined();
+    const scripts = provider.execLog.filter((a) => a[0] === 'sh-volume').map((a) => a[1]!);
+    expect(scripts).toHaveLength(2);
+    expect(scripts[1]).toContain('const targets =');
+    expect(scripts[1]).toContain(id);
+    expect(provider.execLog.some((a) => a[0] === 'message')).toBe(false);
+  });
+
   it('removes an unbound approval when the owner seat changes during room access (HB-0718)', async () => {
     const { store, provider, opts } = await setup();
     provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: 'U0GRAN', code: 'SLK1' }] }), stderr: '' });

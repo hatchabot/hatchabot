@@ -57,17 +57,20 @@ const View = z.object({
 });
 
 // All file access is relative to O_NOFOLLOW directory descriptors. Apart from
-// rejecting symlinks at rest, this anchors operations if a parent is renamed
-// while they run. The runtime is Linux; /proc/self/fd is present in its image.
+// rejecting symlinks at rest, identity checks refuse parents renamed while an
+// operation runs. The runtime is Linux; /proc/self/fd is present in its image.
 // History is committed before the file, so a failed final rename cannot lose
 // the previous content. Interrupted operations can always be inspected and
 // rolled back; reads themselves never repair or change state.
 const PROGRAM = String.raw`
 const fs = require('node:fs'), crypto = require('node:crypto');
 const input = JSON.parse(Buffer.from(process.argv[2], 'base64').toString('utf8'));
-const MAX = 65536, KEEP = 5, META_MAX = MAX * 7;
+const MAX = 65536, KEEP = 5;
+// JSON can expand one UTF-8 byte into a six-byte escape (for example \u0001).
+// Leave bounded room for all valid backups plus their small metadata fields.
+const META_MAX = MAX * KEEP * 6 + 8192;
 const root = '/home/node';
-const descriptors = [], temporary = [];
+const descriptors = [], directories = [], temporary = [];
 let lockDir, lockHeld = false;
 const fail = code => { throw Object.assign(new Error(code), {skillCode:code}); };
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -82,7 +85,20 @@ function directory(parent, name, create = false, optional = false) {
   let fd;
   try { fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW); }
   catch (e) { if (optional && e.code === 'ENOENT') return null; throw e; }
-  descriptors.push(fd); return fd;
+  descriptors.push(fd);
+  if (parent !== null) {
+    const st = fs.fstatSync(fd, {bigint:true});
+    directories.push({parent,name,dev:st.dev,ino:st.ino});
+  }
+  return fd;
+}
+function assertDirectories() {
+  for (const entry of directories) {
+    let st;
+    try { st = fs.lstatSync(pathAt(entry.parent, entry.name), {bigint:true}); }
+    catch (error) { if (error.code === 'ENOENT') fail('conflict'); throw error; }
+    if (!st.isDirectory() || st.dev !== entry.dev || st.ino !== entry.ino) fail('conflict');
+  }
 }
 function file(fd, name, cap) {
   if (fd === null) return null;
@@ -115,10 +131,12 @@ function metadata(raw) {
   value.history.forEach(snapshot); return value;
 }
 function atomic(fd, name, value) {
+  assertDirectories();
   const temporaryName = '.' + name + '.tmp-' + crypto.randomBytes(12).toString('hex');
   const path = pathAt(fd, temporaryName); temporary.push(path);
   const handle = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
   try { fs.writeFileSync(handle, value, 'utf8'); fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
+  assertDirectories();
   fs.renameSync(path, pathAt(fd, name));
   fs.fsyncSync(fd);
 }
@@ -137,12 +155,16 @@ try {
   let history = directory(workspace, '.hatchabot-skills', false, true);
   const catalogHash = hash(input.catalog.content), name = input.id + '.json';
   const get = () => {
+    assertDirectories();
     const content = file(skill, 'SKILL.md', MAX);
     const raw = file(history, name, META_MAX);
+    assertDirectories();
     const meta = metadata(raw);
     const fileHash = hashOrNull(content);
+    // A rollback can establish a baseline for custom bytes with no known
+    // catalog version. That does not authorize a later ordinary update.
     const state = content === null ? 'missing' : fileHash === catalogHash ? 'current'
-      : meta === null ? 'untracked' : fileHash === meta.base.hash ? 'update_available' : 'customized';
+      : meta === null ? 'untracked' : fileHash === meta.base.hash && meta.base.version !== null ? 'update_available' : 'customized';
     const installedVersion = content === null ? null : fileHash === catalogHash ? input.catalog.version
       : fileHash === meta?.base.hash ? meta.base.version : null;
     const revision = hash(JSON.stringify([content, raw, input.catalog.version, catalogHash]));
@@ -174,13 +196,20 @@ try {
       const target = input.action === 'rollback' ? before.meta.history[0]
         : {content:input.catalog.content,hash:catalogHash,version:input.catalog.version};
       const old = before.meta?.history ?? [];
+      const tail = input.action === 'rollback' ? old.slice(1) : old;
+      // A failed final file write already saved these bytes. Retrying must not
+      // fill the bounded history with duplicates or discard their known version.
+      const recorded = tail[0];
+      const backups = recorded && recorded.hash === previous.hash && (recorded.version === previous.version || previous.version === null)
+        ? tail : [previous,...tail];
       const next = {format:1,id:input.id,base:{hash:target.hash,version:target.version},
-        history:[previous,...(input.action === 'rollback' ? old.slice(1) : old)].slice(0,KEEP)};
+        history:backups.slice(0,KEEP)};
       // Commit recovery evidence before touching current bytes. A crash at any
       // later instruction leaves both the previous version and its metadata.
       atomic(history, name, JSON.stringify(next));
       if (file(skill, 'SKILL.md', MAX) !== before.content) fail('conflict');
       if (target.content === null) {
+        assertDirectories();
         if (skill !== null && before.content !== null) fs.unlinkSync(pathAt(skill, 'SKILL.md'));
       } else {
         skills ??= directory(workspace, 'skills', true);

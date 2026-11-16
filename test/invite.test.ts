@@ -81,4 +81,13 @@ describe('invites (§12.3)', () => {
     expect(() => redeemInvite(store, createInvite(store, 'a1', 'owner').code, 'Bob', 'user-bob'))
       .toThrow(InviteInvalidError);
   });
+
+  it.each(['admin', 'owner'] as const)('a fresh user invite does not resurrect a revoked %s membership role', (role) => {
+    const store = makeStore();
+    store.insertMembership({ id: 'former-seat', agentId: 'a1', userId: 'returning-account', role, status: 'revoked', webChat: true });
+    const code = createInvite(store, 'a1', 'owner', undefined, { webChat: true }).code;
+    redeemInvite(store, code, 'Returning guest', 'returning-account');
+    expect(store.getMembership('a1', 'returning-account')).toMatchObject({ status: 'active', role: 'user', webChat: true });
+    expect(store.accessRole('a1', 'returning-account')).toBe('user');
+  });
 });

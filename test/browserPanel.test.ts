@@ -106,10 +106,13 @@ describe('what the page may send becomes commands from the fixed list', () => {
 
   it('addresses: http and https only, https when none was typed', () => {
     expect(panelAddress('example.org')).toBe('https://example.org/');
+    expect(panelAddress('example.org:8443/sign-in')).toBe('https://example.org:8443/sign-in');
+    expect(panelAddress('accounts.example.org:443/sign-in?step=2#code')).toBe('https://accounts.example.org/sign-in?step=2#code');
     expect(panelAddress(' http://example.org/x?y=1 ')).toBe('http://example.org/x?y=1');
     expect(panelAddress('ftp://example.org/')).toBeUndefined();
     expect(panelAddress(42)).toBeUndefined();
     expect(panelAddress(`https://example.org/${'a'.repeat(2050)}`)).toBeUndefined();
+    for (const address of ['javascript:123', 'data:text/plain,hello', 'example.org:99999', 'example.org:wrong']) expect(panelAddress(address)).toBeUndefined();
   });
 
   it('sizes are clamped to what a panel may be', () => {
@@ -423,6 +426,19 @@ describe('the routes', () => {
     const bad = await open(w, { url: 'javascript:alert(1)' });
     expect(bad.statusCode).toBe(400);
     expect(w.provider.panelRelays).toHaveLength(0);
+  });
+
+  it('opens and navigates to a hostname with an explicit port when no scheme was typed', async () => {
+    const { w, relay } = await ready();
+    try {
+      const opened = await open(w, { url: 'example.org:8443/sign-in' });
+      expect(opened.statusCode, opened.body).toBe(201);
+      expect(relay().sent.at(-1)).toMatchObject({ method: 'Page.navigate', params: { url: 'https://example.org:8443/sign-in' } });
+      const { panel } = opened.json();
+      const input = await w.f.inject({ method: 'POST', url: `/v1/agents/a1/browser/panel/${panel}/input`, headers: as(), payload: { ops: [{ k: 'go', url: 'accounts.example.org:8443/code' }] } });
+      expect(input.statusCode, input.body).toBe(204);
+      expect(relay().sent.at(-1)).toMatchObject({ method: 'Page.navigate', params: { url: 'https://accounts.example.org:8443/code' } });
+    } finally { await w.f.close(); }
   });
 
   it.each(['owner', 'stopped', 'browser off', 'runtime', 'profile'])('does not open a stale browser after a slow machine listing changes %s (HB-0700)', async (changed) => {

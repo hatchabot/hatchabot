@@ -55,7 +55,7 @@ describe('big files are written on stdin, not in one shell argument (night revie
     await writeCoreFile(provider, runtimeRef, 'kitchen', 'MEMORY.md', big);
     expect(provider.written).toHaveLength(1);
     expect(provider.written[0]!.bytes.toString('utf8')).toBe(big);
-    expect(provider.written[0]!.argv.at(-1)).toBe('/home/node/.openclaw/agents/kitchen/agent/MEMORY.md');
+    expect(provider.written[0]!.argv.at(-2)).toBe('/home/node/.openclaw/agents/kitchen/agent/MEMORY.md');
     const before = provider.written.length;
     await writeCoreFile(provider, runtimeRef, 'kitchen', 'SOUL.md', 'small');
     expect(provider.written.length).toBe(before);

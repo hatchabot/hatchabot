@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { RUNTIME_STATE_FILES, catArgv, cleanFileName, cleanRelPath, downloadName, inlineType, listShell, parseListing, putArgv, tarArgv, uploadAllowed } from '../src/orchestrator/agentFiles.js';
+import { RUNTIME_STATE_FILES, catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, tarArgv, uploadAllowed } from '../src/orchestrator/agentFiles.js';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -99,6 +99,57 @@ describe('GET /v1/agents/:id/fs', () => {
 });
 
 describe('downloads', () => {
+  it('preserves newlines in selected paths across file reads, uploads and folder archives', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-path-newline-'));
+    const bin = join(home, 'bin'); mkdirSync(bin);
+    try {
+      for (const tool of ['sh', 'realpath', 'cat', 'du', 'cut', 'dirname', 'basename', 'tar', 'gzip', 'od', 'tr', 'mv', 'rm']) symlinkSync('/usr/bin/' + tool, join(bin, tool));
+      const env = { HOME: home, PATH: bin, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+      const run = (argv: string[], input?: string) => spawnSync(join(bin, argv[0]!), argv.slice(1).map(arg => arg.replaceAll('/home/node', home)), { env, input });
+      writeFileSync(join(home, 'notes.txt'), 'other file');
+      writeFileSync(join(home, 'notes.txt\n'), 'selected file');
+      const read = run(catArgv('notes.txt\n'));
+      expect(read.status).toBe(0);
+      expect(read.stdout.toString()).toBe('selected file');
+      mkdirSync(join(home, 'out'));
+      mkdirSync(join(home, 'out\n'));
+      writeFileSync(join(home, 'out', 'notes.txt'), 'other folder');
+      writeFileSync(join(home, 'out\n', 'notes.txt'), 'selected folder');
+      const upload = run(putArgv('out\n', 'uploaded.txt', true, 'kitchen'), 'new upload');
+      expect(upload.status).toBe(0);
+      expect(readdirSync(join(home, 'out'))).toEqual(['notes.txt']);
+      expect(readFileSync(join(home, 'out\n', 'uploaded.txt'), 'utf8')).toBe('new upload');
+      const size = run(['sh', '-c', duShell('out\n')]);
+      expect(size.status).toBe(0);
+      expect(size.stdout.toString()).toMatch(/^\d+\n$/);
+      const archive = run(tarArgv('out\n'));
+      expect(archive.status).toBe(0);
+      const extracted = spawnSync(join(bin, 'tar'), ['xzOf', '-', 'out\n/notes.txt'], { env, input: archive.stdout });
+      expect(extracted.status).toBe(0);
+      expect(extracted.stdout.toString()).toBe('selected folder');
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('folder preflight rejects files and failed size measurements before offering a download', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-folder-check-'));
+    const bin = join(home, 'bin'); mkdirSync(bin);
+    try {
+      for (const tool of ['sh', 'realpath', 'cut', 'du']) symlinkSync('/usr/bin/' + tool, join(bin, tool));
+      mkdirSync(join(home, 'out'));
+      writeFileSync(join(home, 'notes.md'), 'a file, not a folder');
+      const run = (rel: string) => spawnSync(join(bin, 'sh'), ['-c', duShell(rel).replaceAll('/home/node', home)],
+        { encoding: 'utf8', env: { HOME: home, PATH: bin, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+      expect(run('out').status).toBe(0);
+      expect(run('notes.md').status).toBe(4);
+      // du can emit a partial total and fail when one child cannot be read.
+      rmSync(join(bin, 'du'));
+      writeFileSync(join(bin, 'du'), '#!/bin/sh\nprintf "12\\tpartial-folder\\n"\nexit 1\n', { mode: 0o755 });
+      const partial = run('out');
+      expect(partial.status).not.toBe(0);
+      expect(partial.stdout).toBe('');
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
   it('streams a file with its size, as an attachment', async () => {
     const { f, provider } = await world();
     provider.execResponses.set('sh-volume', { code: 0, stdout: 'regular file\t5\n', stderr: '' });

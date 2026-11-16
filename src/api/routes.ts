@@ -4986,10 +4986,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * recipients to tell what was already brought over, and would add it twice.
    */
   const attachedApps = (agentId: string) => (store.listAdoptPending().some((r) => r.agentId === agentId) ? undefined : store.listChannelsForAgent(agentId).map((c) => c.kind));
+  /** A slow schedule read may outlive an ownership, runtime or runner change. */
+  const cronReadContext = (a: Agent) => {
+    const provider = providerFor(a.hostId);
+    const hostKey = () => {
+      const h = store.getHost(a.hostId);
+      return JSON.stringify([h?.ownerId, h?.provider, h?.kind, h?.settings]);
+    };
+    const host = hostKey();
+    const current = () => {
+      try {
+        const now = store.getAgent(a.id);
+        return !!now && now.ownerId === a.ownerId && now.hostId === a.hostId && now.slug === a.slug
+          && now.runtimeRef === a.runtimeRef && now.state === 'RUNNING' && !isBusy(a.id)
+          && hostKey() === host && providerFor(a.hostId) === provider;
+      } catch { return false; }
+    };
+    return { provider, current };
+  };
   /** One agent's tasks with no recipient pointed where its results go (crons.ts retargetImplicitCrons). */
   const retargetAgentCrons = async (a: Agent & { runtimeRef: string }, why: 'sweep' | 'quick') => {
+    const context = cronReadContext(a);
+    if (!context.current()) return;
     const held = store.quietedCrons(a.id);
-    const r = await retargetImplicitCrons(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a), held, attachedApps(a.id));
+    const target = cronTargetFor(store, a), attached = attachedApps(a.id);
+    const destination = JSON.stringify([target, attached]);
+    const current = () => context.current() && JSON.stringify([cronTargetFor(store, a), attachedApps(a.id)]) === destination;
+    const r = await retargetImplicitCrons(context.provider, a.runtimeRef, a.slug, target, held, attached, current);
+    if (!current()) return;
     if (held.length || r.held.length) store.setQuietedCrons(a.id, r.held, new Date().toISOString(), held);
     if (r.changed || r.failed) trace(a.id)('cron.retargeted', { changed: r.changed, failed: r.failed, ...(r.held.length ? { waiting: r.held.length } : {}), ...(why === 'quick' ? { quick: true } : {}) });
   };
@@ -5009,29 +5033,37 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     catch (err) { app.log.warn({ err: String(err) }, 'cron.sweep_failed'); return; }
     for (const a of agents) {
       if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) continue;
+      let context: ReturnType<typeof cronReadContext>;
+      try { context = cronReadContext(a); } catch { continue; }
       try {
         await retargetAgentCrons(a as Agent & { runtimeRef: string }, 'sweep');
       } catch { /* its gateway is not answering: next time */ }
+      if (!context.current()) continue;
       // The owner is OpenClaw's command owner, live (hot-reloaded): an agent
       // built before this left the key empty, and the next person approved
       // would have become the owner (2026-09-29).
       try {
-        const want = JSON.stringify(commandOwnersFor(store, a));
-        const read = await providerFor(a.hostId).execShell(a.runtimeRef,
+        const read = await context.provider.execShell(a.runtimeRef,
           `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8"));process.stdout.write(JSON.stringify((c.commands&&c.commands.ownerAllowFrom)||[]))'`);
+        if (!context.current()) continue;
+        const want = JSON.stringify(commandOwnersFor(store, a));
         if (read.code === 0 && read.stdout.trim() !== want) {
-          const set = await providerFor(a.hostId).exec(a.runtimeRef, ['config', 'set', 'commands.ownerAllowFrom', want, '--strict-json']);
+          const set = await context.provider.exec(a.runtimeRef, ['config', 'set', 'commands.ownerAllowFrom', want, '--strict-json']);
+          if (!context.current()) continue;
           trace(a.id)('owner.command_owner_set', { ok: set.code === 0, had: (JSON.parse(read.stdout || '[]') as unknown[]).length });
         }
       } catch { /* next time */ }
       // Its time zone, live (timezone.ts): agents built before it, or after the
       // setting changed, ran on the container's UTC (2026-10-07).
       try {
-        const want = agentTimeZone();
-        const read = await providerFor(a.hostId).execShell(a.runtimeRef,
+        if (!context.current()) continue;
+        const read = await context.provider.execShell(a.runtimeRef,
           `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8"));process.stdout.write(String(((c.agents||{}).defaults||{}).userTimezone||""))'`);
+        if (!context.current()) continue;
+        const want = agentTimeZone();
         if (read.code === 0 && read.stdout.trim() !== want) {
-          const set = await providerFor(a.hostId).exec(a.runtimeRef, ['config', 'set', 'agents.defaults.userTimezone', want]);
+          const set = await context.provider.exec(a.runtimeRef, ['config', 'set', 'agents.defaults.userTimezone', want]);
+          if (!context.current()) continue;
           trace(a.id)('timezone.set', { ok: set.code === 0, was: read.stdout.trim() || null, now: want });
         }
       } catch { /* next time */ }
@@ -5040,13 +5072,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // (32 of 35 Telegram agents on the Spark, 2026-09-30). Set it on any app
       // whose config section lacks it — once: afterwards the key is there.
       try {
+        if (!context.current()) continue;
         const kinds = [...new Set(store.listChannelsForAgent(a.id).map((c) => c.kind))]
           .filter((k): k is ChannelKindForFiles => k === 'telegram' || k === 'discord' || k === 'slack');
         if (kinds.length) {
-          const read = await providerFor(a.hostId).execShell(a.runtimeRef,
+          const read = await context.provider.execShell(a.runtimeRef,
             `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8")).channels||{};process.stdout.write(JSON.stringify(process.argv.slice(1).filter(k=>c[k]&&typeof c[k]==="object"&&c[k].mediaMaxMb===undefined)))' ${kinds.join(' ')}`);
+          if (!context.current()) continue;
           const missing = read.code === 0 ? (JSON.parse(read.stdout || '[]') as ChannelKindForFiles[]).filter((k) => kinds.includes(k)) : [];
           for (const kind of missing) {
+            if (!context.current()) break;
             const { applied } = await applyFilesCap(a, kind);
             trace(a.id)('files.cap_backfilled', { kind, ok: applied > 0 });
           }
@@ -5182,19 +5217,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * Each run is marked told before the note goes, so a slow or failed send
    * never tells it twice; the notes have their own hourly budget.
    */
-  const noteFinishedTasks = async (a: Agent, jobs: Cron[]) => {
+  const noteFinishedTasks = async (a: Agent, jobs: Cron[], current: () => boolean) => {
+    if (!current()) return;
     const settings = store.cronNotes(a.id);
     if (!settings.length) return;
     const { due, seen, gone } = dueTaskNotes(settings, jobs);
     for (const id of gone) store.setCronNote(a.id, id, false, 0);
-    for (const s of seen) store.markCronNoted(a.id, s.jobId, s.runMs);
+    const dueIds = new Set(due.map((d) => d.jobId));
+    for (const s of seen) if (!dueIds.has(s.jobId)) store.markCronNoted(a.id, s.jobId, s.runMs);
     const base = appUrlFor();
     for (const d of due) {
+      if (!current()) return;
+      const setting = settings.find((s) => s.jobId === d.jobId)!;
+      let claimed = false;
+      const beforeSend = () => {
+        if (!current()) return false;
+        const now = store.cronNotes(a.id).find((s) => s.jobId === d.jobId);
+        if (!now || now.sinceMs !== setting.sinceMs || (!claimed && (now.seenRunMs ?? now.sinceMs) >= d.runAtMs)) return false;
+        if (!claimed) { store.markCronNoted(a.id, d.jobId, d.runAtMs); claimed = true; }
+        return true;
+      };
       const { headline, tail } = taskNoteText({
         agent: a.name, task: d.name, status: d.status, runAtMs: d.runAtMs, now: Date.now(),
         ...(base ? { link: `${base}/#console=${encodeURIComponent(a.slug)}` } : {}),
       });
-      const told = await taskNotePush.waiting(a.ownerId, headline, undefined, { note: true, tail }).catch(() => false);
+      const told = await taskNotePush.waiting(a.ownerId, headline, undefined, { note: true, tail, beforeSend }).catch(() => false);
+      if (!current()) return;
+      // No destination or budget: still consumed as before, but only if the
+      // same owner and setting remain after asynchronous delivery preparation.
+      if (!claimed && !beforeSend()) continue;
       trace(a.id)('cron.noted', { task: d.name, status: d.status, told });
     }
   };
@@ -5213,11 +5264,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) { quickTried.delete(a.id); continue; }
         try {
           // One read of its task store serves both: the runs to tell, and the tasks to re-point.
-          const read = await readCronStore(providerFor(a.hostId), a.runtimeRef, a.slug);
+          const context = cronReadContext(a);
+          const read = await readCronStore(context.provider, a.runtimeRef, a.slug);
+          if (!context.current()) { quickTried.delete(a.id); continue; }
           if (read && noting.has(a.id)) {
-            try { await noteFinishedTasks(a, read.jobs); }
+            try { await noteFinishedTasks(a, read.jobs, context.current); }
             catch (err) { app.log.warn({ agent: a.id, err: String(err) }, 'cron.note_failed'); }
           }
+          if (!context.current()) { quickTried.delete(a.id); continue; }
           const due = read && retargetDue(read, cronTargetFor(store, a), store.quietedCrons(a.id), attachedApps(a.id));
           if (!due?.ids.length) { quickTried.delete(a.id); continue; }
           if (quickTried.get(a.id) === due.sig) continue;
@@ -5737,7 +5791,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (nameErr) return reply.code(400).send({ error: nameErr });
       const baseErr = baseProblem(base);
       if (baseErr) return reply.code(400).send({ error: baseErr });
-      if (buildingImages.has(name)) {
+      if (buildingImages.has(name) || store.getDerivedImage(name)?.status === 'BUILDING') {
         return reply.code(409).send({ error: 'That image is already building.' });
       }
       // Creating is not editing: a name that exists was silently replaced,
@@ -5760,7 +5814,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
       const rec = store.getDerivedImage(req.params.name);
       if (!rec) return reply.code(404).send({ error: 'Not found' });
-      if (buildingImages.has(rec.name)) {
+      if (buildingImages.has(rec.name) || rec.status === 'BUILDING') {
         return reply.code(409).send({ error: 'That image is already building.' });
       }
       // Rebuild against the same base by default; allow moving it onto a newer
@@ -7294,14 +7348,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
     appUrl: () => appUrlFor(),
     // Discord: the manager's bot DMs the owner's linked Discord identity, from here.
-    sendDiscord: async (ownerId, text) => {
+    sendDiscord: async (ownerId, text, beforeSend) => {
       const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
       const row = ops && store.getChannelForAgent(ops.id, 'discord');
       const me = ops && store.memberIdentities(ops.id, ownerId).discord;
       const conn = connectorFor('discord');
       if (!row || !me || !conn?.dm) return false;
       const secret = await secrets.get(row.secretRef).catch(() => undefined);
-      return secret ? conn.dm(secret, me, text) : false;
+      return secret && (!beforeSend || beforeSend()) ? conn.dm(secret, me, text) : false;
     },
     discordLinked: (ownerId) => {
       const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);

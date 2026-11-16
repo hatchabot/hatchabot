@@ -1,6 +1,7 @@
 import type { Duplex } from 'node:stream';
 import { randomBytes } from 'node:crypto';
 import { CONSOLE_SCOPES_HEADER, CONSOLE_USER_HEADER, GUEST_SCOPES } from '../openclaw/consoleIdentity.js';
+import { controlUiScriptInsertionPoint } from './controlUiHtml.js';
 
 /**
  * The console proxy's half of the console with identities
@@ -179,9 +180,11 @@ export function guestAgentsList(payload: unknown, scope: GuestScope = {}): unkno
   const { agentId } = scope;
   const p = { ...(payload as Record<string, unknown>) };
   let agents = (p.agents as unknown[]).filter((a): a is Record<string, unknown> => !!a && typeof a === 'object' && !Array.isArray(a));
-  if (agentId && agents.some((a) => a.id === agentId)) agents = agents.filter((a) => a.id === agentId);
+  // A stale/mismatched roster must not turn a scoped guest into an unscoped
+  // reader. Absence of their agent means an empty list, never everyone else.
+  if (agentId) agents = agents.filter((a) => a.id === agentId);
   p.agents = agents.map(({ defaultPermissionMode: _mode, ...rest }) => rest);
-  if (agentId && agents.some((a) => a.id === agentId)) {
+  if (agentId) {
     p.defaultId = agentId;
     const mainKey = guestMainKey(scope);
     if (mainKey && typeof p.mainKey === 'string') p.mainKey = mainKey;
@@ -257,9 +260,11 @@ export const GUEST_VIEW_SCRIPT = `// Hatchabot: a web-chat guest's view of this 
 
 /** A guest's copy of the app's document: the script above runs first (same origin, so the page's CSP allows it). */
 export function withGuestView(html: string, prefix: string): string {
-  const tag = `<script src="${prefix.replace(/\/+$/, '')}${GUEST_VIEW_SCRIPT_PATH}"></script>`;
-  if (/<script\b/i.test(html)) return html.replace(/<script\b/i, `${tag}\n    <script`);
-  return /<\/head>/i.test(html) ? html.replace(/<\/head>/i, `${tag}\n</head>`) : `${tag}${html}`;
+  const src = `${prefix.replace(/\/+$/, '')}${GUEST_VIEW_SCRIPT_PATH}`
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const tag = `<script src="${src}"></script>`;
+  const { at } = controlUiScriptInsertionPoint(html);
+  return html.slice(0, at) + tag + '\n' + html.slice(at);
 }
 
 export interface GuestVerdict { allow: boolean; id?: string | number; method?: string; reason?: string }

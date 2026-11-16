@@ -48,6 +48,30 @@ async function world() {
 }
 
 describe('restore from a backup: the runtime is confirmed down first (issue #21)', () => {
+  it('holds a failed rollback when the runtime cannot be stopped, keeping its safety copy for recovery', async () => {
+    const r = await world();
+    const stop = r.w.provider.stop.bind(r.w.provider);
+    let stops = 0;
+    r.w.provider.stop = async ref => { if (++stops === 1) await stop(ref); };
+    r.w.provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'configuration write failed' });
+    const error = await restoreAgentFromBackup({
+      store: r.w.store, provider: r.w.provider,
+      reapply: async () => { await r.w.provider.start(r.ref); throw new Error('configuration failed after starting'); },
+    }, r.id, r.date).catch(error => error);
+    expect(await r.phase()).toBe('running');
+    expect(error.message).toMatch(/could not be confirmed stopped.*still running/);
+    expect(error.message).not.toMatch(/it is stopped/);
+    const op = r.w.store.listOperations([r.id])[0]!;
+    expect(op.status).toBe('held');
+    expect(existsSync(String(op.params.safetyFile))).toBe(true);
+    r.w.provider.stop = stop;
+    r.w.provider.execResponses.delete('sh-volume');
+    const recovered = await recoverOperation(r.ctx, op.id, 'put-back');
+    expect(recovered.status).toBe('rolled_back');
+    expect(r.volume()).toBe('current-memory');
+    expect(await r.phase()).toBe('running');
+  });
+
   it('a FAILED agent whose container is still running is stopped before the safety copy and the import, and not started after', async () => {
     const r = await world();
     r.w.store.setAgentState(r.id, 'FAILED', 'A rebuild failed.');
@@ -190,4 +214,50 @@ describe('a restore cut off by a restart: held stopped only when it is (B021), p
     expect(r.w.store.getOperation(op.id)!.status).toBe('held');
     expect(await r.phase()).toBe('stopped');
   });
+
+  for (const action of ['finish', 'put-back'] as const) {
+    it(action + ' waits for the post-failure stop before ending recovery', async () => {
+      const r = await world();
+      const op = await heldRestore(r);
+      r.w.provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'disk full' });
+      r.w.provider.provision = async () => { await r.w.provider.start(r.ref); throw new Error('configuration failed'); };
+      const stop = r.w.provider.stop.bind(r.w.provider);
+      let release!: () => void, entered!: () => void, stopped = 0;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const stopping = new Promise<void>(resolve => { entered = resolve; });
+      r.w.provider.stop = async ref => {
+        if (++stopped === 2) { entered(); await gate; }
+        return stop(ref);
+      };
+      let completed = false;
+      const recovery = recoverOperation(r.ctx, op.id, action).then(
+        () => { completed = true; return undefined; },
+        error => { completed = true; return error; },
+      );
+      try {
+        await stopping;
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(await r.phase()).toBe('running');
+        expect(completed).toBe(false);
+      } finally { release(); await recovery; }
+      expect(await recovery).toBeInstanceOf(Error);
+      expect(await r.phase()).toBe('stopped');
+      expect(r.w.store.getOperation(op.id)!.status).toBe('held');
+    });
+
+    it(action + ' reports when the post-failure stop cannot be confirmed', async () => {
+      const r = await world();
+      const op = await heldRestore(r);
+      r.w.provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'disk full' });
+      r.w.provider.provision = async () => { await r.w.provider.start(r.ref); throw new Error('configuration failed'); };
+      const stop = r.w.provider.stop.bind(r.w.provider);
+      let stops = 0;
+      r.w.provider.stop = async ref => { if (++stops === 1) await stop(ref); };
+      const error = await recoverOperation(r.ctx, op.id, action).catch(error => error);
+      expect(error.message).toMatch(/could not be confirmed stopped.*still running/);
+      expect(error.message).not.toMatch(/stays stopped/);
+      expect(await r.phase()).toBe('running');
+      expect(r.w.store.getOperation(op.id)!.status).toBe('held');
+    });
+  }
 });

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { runInNewContext } from 'node:vm';
+import { createHash } from 'node:crypto';
 import { isControlUiDocument, rebaseControlUi, TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH, withTalkProxy } from '../src/api/controlUiRebase.js';
+import { KATEX_SCRIPT_PATH, withControlUiMath } from '../src/api/controlUiMath.js';
 
 describe('rebaseControlUi', () => {
   const P = '/v1/agents/abc/ui';
@@ -23,6 +25,30 @@ describe('rebaseControlUi', () => {
   });
   it('tolerates a trailing slash on the prefix', () => {
     expect(rebaseControlUi('<a href="/x">', `${P}/`)).toBe('<a href="/v1/agents/abc/ui/x">');
+  });
+  it('preserves CSP-hashed inline scripts containing HTML and asset attribute literals', () => {
+    const script = `const fragment = '<a href="/chat"><img src="/avatar.svg"></a>';`;
+    const page = `<!doctype html><head><script>${script}</script><script src="/assets/app.js"></script></head>`;
+    const out = rebaseControlUi(page, P);
+    const contents = out.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+    const hash = (text: string) => createHash('sha256').update(text).digest('base64');
+    expect(hash(contents)).toBe(hash(script));
+    expect(contents).toBe(script);
+    expect(out).toContain(`src="${P}/assets/app.js"`);
+  });
+  it('rewrites actual attributes without changing comments, raw text, data attributes or quoted examples', () => {
+    const untouched = `<!-- <html data-openclaw-control-ui-base-path=""><a href="/comment"> -->`
+      + `<style>.sample::after { content: 'href="/style"'; }</style>`
+      + `<textarea><a href="/example"></textarea><title>src="/title"</title>`
+      + `<div data-src="/data" data-href="/metadata" title='href="/title"'></div>`;
+    const page = `${untouched}<img src="/avatar.svg">`;
+    expect(rebaseControlUi(page, P)).toBe(`${untouched}<img src="${P}/avatar.svg">`);
+  });
+  it('accepts ordinary HTML quoting, attribute case and spacing', () => {
+    const page = `<HTML data-openclaw-control-ui-base-path = ''><SCRIPT SRC = '/assets/app.js'></SCRIPT>`
+      + `<link HREF=/assets/app.css><a href='//other.example.test/path'>`;
+    expect(rebaseControlUi(page, P)).toBe(`<HTML data-openclaw-control-ui-base-path = '${P}'><SCRIPT SRC = '${P}/assets/app.js'></SCRIPT>`
+      + `<link HREF=${P}/assets/app.css><a href='//other.example.test/path'>`);
   });
 });
 
@@ -57,6 +83,17 @@ describe('owner Talk offer proxy', () => {
 
   it('escapes the script source as an HTML attribute', () => {
     expect(withTalkProxy('<head></head>', '/x"<&')).toContain('src="/x&quot;&lt;&amp;/__hatchabot/talk-offer.js"');
+  });
+
+  it('keeps the Talk shim outside comments and inert templates, including after math injection', () => {
+    const inert = '<!-- example <script> -->\n<template><script>sample()</script></template>';
+    const app = '<script src="/assets/app.js"></script>';
+    const out = withTalkProxy(`<!doctype html><head>${inert}${app}</head>`, prefix);
+    expect(out).toBe(`<!doctype html><head>${inert}<script src="${prefix}${TALK_PROXY_SCRIPT_PATH}"></script>\n${app}</head>`);
+    const combined = withTalkProxy(withControlUiMath(`<!doctype html><head>${inert}${app}</head>`, prefix), prefix);
+    expect(combined.indexOf(`src="${prefix}${TALK_PROXY_SCRIPT_PATH}"`)).toBeGreaterThan(combined.indexOf('</template>'));
+    expect(combined.indexOf(`src="${prefix}${TALK_PROXY_SCRIPT_PATH}"`)).toBeLessThan(combined.indexOf(`src="${prefix}${KATEX_SCRIPT_PATH}"`));
+    expect(withTalkProxy('<!doctype html><html><body>Ready</body></html>', prefix).startsWith('<!doctype html>')).toBe(true);
   });
 
   it('retires active and starting Talk synchronously using the pinned controller, without starting idle panes', async () => {

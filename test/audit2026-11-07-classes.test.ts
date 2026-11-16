@@ -560,7 +560,7 @@ describe('the class fixes, reviewed', () => {
       // A guarded write: staged to a file of its own, checked and renamed, in one shell (writeFileInAgent).
       const stage = /echo "([A-Za-z0-9+/=]+)" \| base64 -d > "([^"]*AGENTS\.md\.tmp-[0-9a-f]+)"/.exec(script);
       if (stage) { staged.set(stage[2]!, Buffer.from(stage[1]!, 'base64').toString()); book.staged.push(stage[2]!); }
-      const swap = /\[ "\$\(sha256sum < "[^"]*AGENTS\.md" \| cut -d' ' -f1\)" = "([0-9a-f]{64})" \] \|\| .*; mv -f "([^"]*)" "[^"]*AGENTS\.md"$/.exec(script);
+      const swap = /\[ "\$\(sha256sum < "[^"]*AGENTS\.md" \| cut -d' ' -f1\)" = "([0-9a-f]{64})" \] \|\| .*; mv -fT -- "([^"]*)" "[^"]*AGENTS\.md"$/.exec(script);
       if (stage && !swap) return { code: 0, stdout: '', stderr: '' };
       if (swap) {
         const next = staged.get(swap[2]!);
@@ -569,7 +569,7 @@ describe('the class fixes, reviewed', () => {
         book.text = next!;
         return { code: 0, stdout: '', stderr: '' };
       }
-      const b64 = /echo "([A-Za-z0-9+/=]+)" \| base64 -d > "[^"]*AGENTS\.md"\.tmp && mv/.exec(script)?.[1];
+      const b64 = /echo "([A-Za-z0-9+/=]+)" \| base64 -d > "[^"]*AGENTS\.md"\.tmp-[0-9a-f]+ && mv/.exec(script)?.[1];
       if (b64) { book.text = Buffer.from(b64, 'base64').toString(); return { code: 0, stdout: '', stderr: '' }; }
       return shell(ref, script, opts);
     };
@@ -910,7 +910,7 @@ describe('the class fixes, reviewed', () => {
       }
       const stage = /echo "([A-Za-z0-9+/=]+)" \| base64 -d > "([^"]*AGENTS\.md\.tmp-[0-9a-f]+)"/.exec(script);
       if (stage) staged.set(stage[2]!, Buffer.from(stage[1]!, 'base64'));
-      const swap = /= "([0-9a-f]{64})" \] \|\| .*; mv -f "([^"]*)" "[^"]*AGENTS\.md"$/.exec(script);
+      const swap = /= "([0-9a-f]{64})" \] \|\| .*; mv -fT -- "([^"]*)" "[^"]*AGENTS\.md"$/.exec(script);
       if (swap) {
         if (swap[1] !== createHash('sha256').update(bytes).digest('hex')) return { code: 3, stdout: '', stderr: 'it changed meanwhile' };
         bytes = staged.get(swap[2]!)!;
@@ -1758,7 +1758,7 @@ describe('the class fixes, reviewed', () => {
     const shell = w.provider.execShell.bind(w.provider);
     w.provider.execShell = async (r, script, opts) => {
       if (r === ref && /sha256sum[\s\S]*mv -f/.test(script)) { busyAtSwap = isBusy(id); order.push('budget'); reached.resolve(); await gate.promise; }
-      else if (r === ref && /AGENTS\.md"\.tmp && mv/.test(script)) order.push('save');
+      else if (r === ref && /AGENTS\.md"\.tmp-[0-9a-f]+ && mv/.test(script)) order.push('save');
       return shell(r, script, opts);
     };
     expect((await send(w, 'PUT', '/v1/agent-classes/c-tier', { memoryCap: '1g' })).statusCode).toBe(200);

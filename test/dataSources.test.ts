@@ -523,7 +523,7 @@ describe('a public repo added to a running agent (audit #096)', () => {
     const info = provider.info.bind(provider);
     provider.info = async (ref) => { enter(); await gate; return info(ref); };
     provider.execShell = async (_ref, script) => {
-      const write = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
+      const write = /echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
       if (write && write[2]!.endsWith('AGENTS.md')) {
         text = Buffer.from(write[1]!, 'base64').toString('utf8');
         if (text.includes('## Data sources')) synced();

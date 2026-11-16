@@ -667,16 +667,32 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
       const w = purgeWorld();
       dockerShim(w, VOLS);
       const shared = join(w.home, 'shared');   // not named as Hatchabot's own, so the folder stays
-      const copies = join(shared, 'move-copies');
+      const copies = join(shared, 'move-copies-' + createHash('sha256').update('hb.sqlite').digest('hex').slice(0, 16));
       mkdirSync(copies, { recursive: true }); writeFileSync(join(copies, 'copy.tgz.part'), 'made-up volume');
+      const otherCopies = join(shared, 'move-copies-' + createHash('sha256').update('another.sqlite').digest('hex').slice(0, 16));
+      mkdirSync(otherCopies); writeFileSync(join(otherCopies, 'copy.tgz'), 'another install is moving');
+      const legacy = join(shared, 'move-copies'); mkdirSync(legacy); writeFileSync(join(legacy, 'copy.tgz'), 'unmarked older copy');
       copyFileSync(join(w.repo, 'data', 'hatchabot.sqlite'), join(shared, 'hb.sqlite'));
       writeFileSync(join(shared, 'other.txt'), 'not hatchabot');
       writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_DB=${join(shared, 'hb.sqlite')}\n`);
       const r = run(w, args);
       expect(existsSync(copies), r.stdout + r.stderr).toBe(false);
+      expect(readFileSync(join(otherCopies, 'copy.tgz'), 'utf8')).toBe('another install is moving');
+      expect(readFileSync(join(legacy, 'copy.tgz'), 'utf8')).toBe('unmarked older copy');
       expect(existsSync(join(shared, 'other.txt'))).toBe(true);
       expect(r.stdout).toContain('removed the copy a move that was cut off left');
     }
+  });
+
+  it('--purge preserves unmarked move copies even inside the usual data folder', () => {
+    const w = purgeWorld(); dockerShim(w, VOLS);
+    const legacy = join(w.repo, 'data', 'move-copies'); mkdirSync(legacy);
+    writeFileSync(join(legacy, 'copy.tgz'), 'unmarked older copy');
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(join(w.repo, 'data', 'hatchabot.sqlite'))).toBe(false);
+    expect(readFileSync(join(legacy, 'copy.tgz'), 'utf8')).toBe('unmarked older copy');
+    expect(r.stdout).toMatch(/move copies cannot be attributed/);
   });
 
   it('a killed restore\'s copy goes only with --backups, and never another install\'s or an unmarked folder', () => {

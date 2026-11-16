@@ -137,7 +137,7 @@
   /* The OpenClaw console, embedded: most of the viewport, no page chrome. */
   .console-dlg { width:min(1200px, 96vw); height:min(900px, 92vh); max-width:none; padding:0; display:none; flex-direction:column; overflow:hidden }
   .console-dlg[open] { display:flex }
-  .console-bar { display:flex; align-items:center; gap:6px; padding:8px 10px 8px 14px; border-bottom:1px solid var(--line) }
+  .console-bar { display:flex; flex:none; align-items:center; gap:6px; padding:8px 10px 8px 14px; border-bottom:1px solid var(--line) }
   /* One line at every width: the title gives way, labels drop to icons on a phone. */
   #consoleTitle { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:15px }
   .cbtn { display:inline-flex; align-items:center; gap:6px; height:34px; padding:0 11px; white-space:nowrap; flex:none; border-radius:9px; font-size:13.5px }
@@ -191,9 +191,9 @@
   .cdot { width:7px; height:7px; border-radius:50%; background:var(--accent); flex:none }
   .ctabadd { padding:0 10px; font-size:16px }
   .ctabs:not([hidden]) ~ #consoleTitle, .console-bar:has(.ctabs:not([hidden])) #consoleTitle { display:none }
-  .cswitch { position:absolute; top:52px; left:12px; z-index:3; width:min(360px, calc(100% - 24px)); background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px; box-shadow:0 10px 30px rgba(0,0,0,.25) }
-  .cswitch input { width:100%; box-sizing:border-box }
-  #cswList { display:flex; flex-direction:column; margin-top:6px; max-height:50vh; overflow-y:auto }
+  .cswitch { position:absolute; top:52px; left:12px; z-index:3; width:min(360px, calc(100% - 24px)); max-height:calc(100% - 64px); display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px; box-shadow:0 10px 30px rgba(0,0,0,.25) }
+  .cswitch input { width:100%; box-sizing:border-box; flex:none }
+  #cswList { display:flex; flex-direction:column; margin-top:6px; min-height:0; max-height:50vh; overflow-y:auto }
   #cswList button { display:flex; justify-content:space-between; gap:8px; text-align:left; background:none; border:0; border-radius:8px; padding:7px 9px; color:var(--text); cursor:pointer; font-size:14px }
   #cswList button.sel { background:color-mix(in srgb, var(--accent) 17%, transparent) }
   #cswList .sub { font-size:12px }
@@ -351,7 +351,8 @@
   body.v2 .v2top { display:flex }
   /* The status bar's height on an iPhone home-screen app (black-translucent,
      viewport-fit=cover; 0 elsewhere). One variable, so test:ui can set it. */
-  :root { --safe-top:env(safe-area-inset-top, 0px) }
+  :root { --safe-top:env(safe-area-inset-top, 0px); --safe-bottom:env(safe-area-inset-bottom, 0px);
+          --safe-left:env(safe-area-inset-left, 0px); --safe-right:env(safe-area-inset-right, 0px) }
   /* Pinned at 0 with the status bar inside its padding: pinned at the inset
      instead, it sat over the first ~59px below it at the top of the page, and
      on an iPhone the View by chips could never be scrolled into view (HB-0096). */
@@ -879,6 +880,11 @@
      The bar stays put while the tab scrolls. The keyboard's fit (html.kbd, below)
      still takes the whole visible part. */
   @media (max-width:640px) {
+    /* Chat uses the same top gap as agent settings in the installed phone app.
+       Keep its own controls and the embedded composer outside the device insets. */
+    .console-dlg { width:calc(100% - max(8px, var(--safe-left)) - max(8px, var(--safe-right)));
+      height:calc(100% - var(--safe-top) - var(--safe-bottom) - 52px); max-height:none;
+      margin:calc(var(--safe-top) + 44px) max(8px, var(--safe-right)) 0 max(8px, var(--safe-left)); border-radius:16px }
     .v2sheet { width:100%; height:calc(100% - var(--safe-top) - 44px); margin:calc(var(--safe-top) + 44px) 0 0;
                border-left:0; border-top:1px solid var(--line); border-radius:16px 16px 0 0 }
     .v2sheet::backdrop { background:rgba(0,0,0,.45) }
@@ -889,6 +895,12 @@
     .v2sbar .v2bw { display:none }
   }
   .v2tabs { display:flex; gap:2px; padding:0 12px; border-bottom:1px solid var(--line); overflow-x:auto; flex:none }
+  @media (max-height:500px) {
+    /* A rotated phone needs room beside its notch and above its home indicator. */
+    .console-dlg { width:calc(100% - max(8px, var(--safe-left)) - max(8px, var(--safe-right)));
+      height:calc(100% - max(8px, var(--safe-top)) - max(8px, var(--safe-bottom))); max-height:none;
+      margin:max(8px, var(--safe-top)) max(8px, var(--safe-right)) 0 max(8px, var(--safe-left)) }
+  }
   .v2tabs button { background:none; border:0; border-bottom:2px solid transparent; border-radius:0; padding:10px 11px; cursor:pointer; color:var(--dim); white-space:nowrap; font:inherit; font-size:13.5px }
   .v2tabs button[aria-selected="true"] { color:var(--text); border-bottom-color:var(--accent); font-weight:600 }
   .v2pane { flex:1; overflow:auto; padding:16px 18px 40px; display:grid; gap:14px; align-content:start }
@@ -995,7 +1007,11 @@
      (fitVisualViewport; audit 2026-10-23, B20). */
   html.kbd dialog[open] { max-height: calc(var(--vvh) - 16px); margin-top: calc(var(--vvt) + 8px); margin-bottom: auto; }
   html.kbd body.v2 dialog.v2panel[open], html.kbd .v2sheet[open] { height: var(--vvh); max-height: var(--vvh); margin-top: var(--vvt); margin-bottom: auto; }
-  html.kbd .console-dlg { height: calc(var(--vvh) - 16px); }
+  html.kbd .console-dlg[open] {
+    height:calc(var(--vvh) - 16px - max(0px, var(--safe-top) - var(--vvt)));
+    max-height:calc(var(--vvh) - 16px - max(0px, var(--safe-top) - var(--vvt)));
+    margin-top:max(calc(var(--vvt) + 8px), calc(var(--safe-top) + 8px));
+  }
   html.kbd .wchat-log { max-height: max(96px, calc(var(--vvh) - 240px)); }
   .v2pbar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; margin:0 -22px 16px;
     padding:10px 16px 10px 12px; padding-top:calc(10px + var(--safe-top)); background:var(--panel); border-bottom:1px solid var(--line) }
@@ -11835,14 +11851,19 @@ const CONSOLE_TABS_KEY = 'hb-console-tabs', CONSOLE_LIVE = 5;
 let consoleTicket = 0, consoleOpening = 0, consoleHashTried = false;
 let consoleTabs = []; // { id, slug, frame?, url?, used }
 function consoleSaveTabs() { try { localStorage.setItem(CONSOLE_TABS_KEY, JSON.stringify(consoleTabs.map(t => t.id))); } catch {} }
+function consoleSavedTabIds() {
+  try {
+    const ids = JSON.parse(localStorage.getItem(CONSOLE_TABS_KEY) || '[]');
+    return Array.isArray(ids) ? [...new Set(ids.filter(id => typeof id === 'string'))] : [];
+  } catch { return []; }
+}
 const consoleOpenable = (a) => a && a.state !== 'ARCHIVED' && a.state !== 'DELETED' && a.state !== 'DELETING' && (a.role ? a.role === 'owner' : true);
 /** This agent's tab and frame, made if needed, and shown. The frame shown is the one with id consoleFrame. */
 function consoleTabFor(id, slug) {
   if (consoleGuest || !$('consoleDlg').open) consoleUnloadAll();
   if (!$('consoleDlg').open && !consoleTabs.length) {
     // Bring back the tabs this device had open (they load when picked).
-    let ids = []; try { ids = JSON.parse(localStorage.getItem(CONSOLE_TABS_KEY) || '[]'); } catch {}
-    consoleTabs = ids.map(x => (agents || []).find(a => a.id === x)).filter(consoleOpenable).map(a => ({ id: a.id, slug: a.slug, used: 0 }));
+    consoleTabs = consoleSavedTabIds().map(x => (agents || []).find(a => a.id === x)).filter(consoleOpenable).map(a => ({ id: a.id, slug: a.slug, used: 0 }));
   }
   let t = consoleTabs.find(x => x.id === id);
   if (!t) { t = { id, slug, used: 0 }; consoleTabs.push(t); }
@@ -12009,6 +12030,7 @@ function renderConsoleSwitcher() {
   $('cswList').innerHTML = items.length ? items.map((a, i) =>
     `<button type="button" role="option" data-id="${esc(a.id)}" class="${i === cswSel ? 'sel' : ''}"><span>${esc(a.name)}</span><span class="sub">${a.id === consoleAgentId ? 'open here' : open.has(a.id) ? 'in a tab' : a.hibernatedAt && a.state === 'STOPPED' ? 'asleep' : ''}</span></button>`).join('')
     : '<div class="sub" style="padding:6px 9px">No agent by that name.</div>';
+  $('cswList').querySelector('.sel')?.scrollIntoView({ block: 'nearest' });
 }
 function consoleSwitcherPick(id) {
   const a = (agents || []).find(x => x.id === id); if (!a) return;
@@ -12037,9 +12059,9 @@ function consoleKeys(e) {
  * switcher open to pick another.
  */
 async function openConsoleHome(withSwitcher = false) {
-  let last = null, ids = [];
-  try { last = localStorage.getItem('hb-console-last'); ids = JSON.parse(localStorage.getItem(CONSOLE_TABS_KEY) || '[]'); } catch {}
-  const known = [last, ...ids].map(id => (agents || []).find(a => a.id === id)).find(consoleOpenable);
+  let last = null;
+  try { last = localStorage.getItem('hb-console-last'); } catch {}
+  const known = [last, ...consoleSavedTabIds()].map(id => (agents || []).find(a => a.id === id)).find(consoleOpenable);
   const pick = known || (agents || []).find(a => a.ops && consoleOpenable(a)) || (agents || []).find(consoleOpenable);
   if (!pick) { toast('No agent to open yet — make one with ＋ New.'); return; }
   await openGateway(pick.id, pick.slug);
@@ -12817,6 +12839,7 @@ function pageClearLast(next = '') {
   recoveryCodeClosed(); // its code off the page, and what waits on it goes on, now (unless it is theirs, and open)
   aiRowsDrawn = {}; moveSourceState = null; applyModelState = null; migrateState = null;
   reportCur = null; reportGen++; reportLoading = null; // a draft still loading does not paint
+  $('reportDrafts').replaceChildren();
   for (const id of ['reportTitle', 'reportWhat', 'reportRTitle', 'reportBody']) $(id).value = '';
   // What the last person typed and did not save: every password box (keys, tokens, client secrets, current passwords),
   // every free-text box and form, back to what the page drew. Not the sign-in or the prompt, which are this person's (HB-0498, HB-0491).
@@ -13032,7 +13055,7 @@ async function confirmArchive() {
 
 // ---- archived-agent inspector (read-only, from the volume) -----------------
 
-let inspectId = null;
+let inspectId = null, inspectGen = 0;
 function showInspTab(which) {
   const chat = which === 'chat';
   $('inspPaneFiles').hidden = chat;
@@ -13044,6 +13067,8 @@ function showInspTab(which) {
 
 async function openInspect(id, name) {
   inspectId = id;
+  const gen = ++inspectGen;
+  const current = () => gen === inspectGen && inspectId === id && inspectDlg.open;
   $('inspectAgent').textContent = name;
   $('inspFileBody').textContent = 'Pick a file.';
   $('inspFileList').innerHTML = 'Loading…';
@@ -13053,7 +13078,7 @@ async function openInspect(id, name) {
   inspectDlg.showModal();
   try {
     const info = await api(`/v1/agents/${id}/inspect`);
-    if (inspectId !== id) return; // dialog moved to another agent while we fetched
+    if (!current()) return;
     const KB = b => b < 1024 ? `${b} B` : `${(b / 1024).toFixed(b < 10240 ? 1 : 0)} KB`;
     $('inspFileList').innerHTML = info.files.length
       ? info.files.map(f => `<button class="inspfile" data-name="${esc(f.name)}" onclick="loadInspectFile('${jsq(f.name)}')" style="text-align:left">${esc(f.name)} <span class="sub">${KB(f.bytes)}</span></button>`).join('')
@@ -13061,7 +13086,7 @@ async function openInspect(id, name) {
     $('inspTabChat').textContent = `💬 Chat history${info.transcriptTurns ? ` (${info.transcriptTurns})` : ''}`;
     // Auto-open MEMORY.md — the "what did we discuss" file.
     if (info.files.some(f => f.name === 'MEMORY.md')) loadInspectFile('MEMORY.md', false);
-  } catch (e) { $('inspFileList').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
+  } catch (e) { if (current()) $('inspFileList').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
 }
 
 // Late answers are dropped, as openInspect does: another agent (or file) may
@@ -13080,8 +13105,8 @@ async function loadInspectFile(name, picked = true) {
   const shown = Math.min(inspectDlg.getBoundingClientRect().bottom, innerHeight);
   const bring = picked && isPhone() && body.getBoundingClientRect().top > shown - 48;
   if (bring) body.scrollIntoView({ block: 'nearest' });
-  const id = inspectId; inspectFileWant = name;
-  const late = () => inspectId !== id || inspectFileWant !== name;
+  const id = inspectId, gen = inspectGen; inspectFileWant = name;
+  const late = () => gen !== inspectGen || !inspectDlg.open || inspectId !== id || inspectFileWant !== name;
   try {
     const f = await api(`/v1/agents/${id}/inspect/file/${encodeURIComponent(name)}`);
     if (late()) return;
@@ -13092,10 +13117,11 @@ async function loadInspectFile(name, picked = true) {
 
 async function loadInspectChat() {
   $('inspChatBody').innerHTML = '<span class="sub">Reading the transcript…</span>';
-  const id = inspectId;
+  const id = inspectId, gen = inspectGen;
+  const current = () => gen === inspectGen && inspectId === id && inspectDlg.open;
   try {
     const t = await api(`/v1/agents/${id}/inspect/transcript?maxTurns=400`);
-    if (inspectId !== id) return;
+    if (!current()) return;
     // A main conversation found but empty: a reset just before it was archived (HB-0307).
     // Records but nothing to show: its newest ones are all tool steps, which are not shown.
     $('inspChatMeta').textContent = t.turns.length
@@ -13107,7 +13133,7 @@ async function loadInspectChat() {
       const me = turn.role === 'user';
       return `<div style="align-self:${me ? 'flex-end' : 'flex-start'};max-width:80%;background:${me ? 'var(--accent)' : 'var(--panel-2)'};color:${me ? '#fff' : 'var(--text)'};border-radius:10px;padding:7px 11px;font-size:13px;white-space:pre-wrap;word-break:break-word">${esc(turn.text)}</div>`;
     }).join('');
-  } catch (e) { if (inspectId === id) $('inspChatBody').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
+  } catch (e) { if (current()) $('inspChatBody').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
 }
 
 async function restoreAgent(id, name) {
@@ -14236,7 +14262,7 @@ function v2IconHTML(a, st, opts = {}) {
 // How the home screen is grouped: by the groups you made, or by where and on
 // what the agents run. A per-device choice; "group" is the one you can rearrange.
 const V2_VIEWS = [['group', 'Groups'], ['attention', 'Alerts'], ['host', 'Machine'], ['source', 'Source'], ['model', 'Model'], ['cost', 'Cost'], ['image', 'Image'], ['pinned', 'Pinned'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
-/** The Activity view's first section: agents with replies waiting to be read. */
+/** Replies waiting to be read, following the most recently active section. */
 const V2_UNREAD = 'act:unread';
 /** Time-since bins, oldest last; the key's leading digit keeps them in order. */
 function v2AgeBin(iso, verb) {
@@ -14296,7 +14322,7 @@ function v2ViewKey(a, view = v2View) {
     case 'model': { const m = (a.model || a.profileDefaultModel || '').replace(/^.*\//, ''); return ['m:' + m, m || 'No model']; }
     case 'class': return ['c:' + (a.classId || ''), a.className || 'No class'];
     case 'activity': {
-      // Replies waiting to be read come first, in a section of their own (2026-10-03).
+      // Replies waiting to be read have a section of their own.
       if (v2Unread(a)) return [V2_UNREAD, 'Unread'];
       const [k, l] = v2AgeBin(a.lastActiveAt, 'Active'); return ['act:' + k, l];
     }
@@ -14557,7 +14583,8 @@ function renderV2() {
   // Sections in their keys' order: time bins, and Alerts most urgent first (n:0 held for a choice, n:1 failed…).
   // Alerts was ordered by its labels' emoji, which put "⚠ Alerts" above "❌ Failed" (2026-10-09).
   const timeView = v2View === 'activity' || v2View === 'rebuilt' || v2View === 'cost' || v2View === 'attention';
-  if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || (y.key === V2_UNREAD) - (x.key === V2_UNREAD) || (timeView ? x.key.localeCompare(y.key) : x.label.localeCompare(y.label)));
+  const activityRank = key => key === 'act:0' ? 0 : key === V2_UNREAD ? 1 : 2;
+  if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || (v2View === 'activity' ? activityRank(x.key) - activityRank(y.key) : 0) || (timeView ? x.key.localeCompare(y.key) : x.label.localeCompare(y.label)));
   // Unread: newest reply first, whatever the sort.
   const newestFirst = (x, y) => String(y.lastActiveAt || '').localeCompare(String(x.lastActiveAt || '')) || x.name.localeCompare(y.name);
   // My order: the order they were placed in above is the stored one, a child
@@ -16388,14 +16415,16 @@ async function chanFindRooms(id, btn) {
 }
 
 /** Each open of the channel dialog: an older open still fetching is dropped, not painted. */
-let chanOpenGen = 0;
+let chanOpenGen = 0, chanShownGen = 0;
 async function openChanSetup(id, kind) {
   const a = v2Find(id); if (!a) return;
   // Opening for one agent, then another before the first's fetches came back,
   // painted the first agent's form while Connect sent the tokens to the
   // second (B055). Only the newest open paints, and the dialog's target is
   // set together with what it shows, just before it opens.
-  const gen = ++chanOpenGen;
+  const gen = ++chanOpenGen, person = pagePerson;
+  const current = () => gen === chanOpenGen && person === pagePerson && !pagePersonAway && !pageSignedOut;
+  clearInterval(chanWatch); chanWatch = null;
   // Kept only once it came back: a failed fetch kept [] for good, so "try
   // again" could never work until the page was reloaded (#144).
   let connectors = chanFields;
@@ -16403,7 +16432,7 @@ async function openChanSetup(id, kind) {
     try { const got = await api('/v1/channels/connectors'); if (Array.isArray(got)) chanFields = connectors = got; } catch { /* said below */ }
     connectors = Array.isArray(connectors) ? connectors : [];
   }
-  if (gen !== chanOpenGen) return;
+  if (!current()) return;
   const fields = connectors.find(c => c.kind === kind)?.fields ?? [];
   const steps = kind === 'slack' ? `
     <ol class="v2steps">
@@ -16425,7 +16454,7 @@ async function openChanSetup(id, kind) {
   if (kind === 'discord' || kind === 'slack') {
     let pool = [];
     try { pool = (await api(POOL_UI[kind].path)).bots ?? []; } catch { pool = []; }
-    if (gen !== chanOpenGen) return;
+    if (!current()) return;
     if (kind === 'discord') discordPool = pool; else slackPool = pool;
     // Only what this person can take: their own and the shared ones (the
     // machine's owner also sees other people's in Settings, not here).
@@ -16450,6 +16479,7 @@ async function openChanSetup(id, kind) {
   $('chanGo').hidden = false; $('chanGo').disabled = false; $('chanGo').textContent = 'Connect';
   $('chanClose').textContent = 'Cancel';
   chanFor = id; chanKind = kind;
+  chanShownGen = gen;
   if (!chanDlg.open) chanDlg.showModal();
   chanDlg.querySelector('input')?.focus();
   if (kind === 'slack') void chanPrefillSlackLink(a.name, gen);
@@ -17019,7 +17049,7 @@ function bpSend(...ops) {
   for (const op of ops) {
     const last = bp.q.at(-1);
     if (op.k === 'mouse' && op.type === 'move' && last?.k === 'mouse' && last.type === 'move') bp.q[bp.q.length - 1] = op;
-    else if (op.k === 'wheel' && last?.k === 'wheel') { last.dx += op.dx; last.dy += op.dy; last.x = op.x; last.y = op.y; }
+    else if (op.k === 'wheel' && last?.k === 'wheel' && Math.abs(last.dx + op.dx) <= 10000 && Math.abs(last.dy + op.dy) <= 10000) { last.dx += op.dx; last.dy += op.dy; last.x = op.x; last.y = op.y; }
     else if (op.k === 'text' && last?.k === 'text' && last.text.length + op.text.length <= 4000) last.text += op.text;
     else bp.q.push({ ...op });
   }
@@ -17030,7 +17060,15 @@ async function bpFlush() {
   if (bp.busy || !bp.q.length || !bp.panel) return;
   const { gen, agent, panel } = bp;
   bp.busy = true;
-  const ops = bp.q.splice(0, 200);
+  // The API caps JSON by bytes as well as operations. Unicode and escaped
+  // text can exceed that cap even when every individual input is valid.
+  const ops = [], encoder = new TextEncoder();
+  let bytes = 16;
+  while (ops.length < 200 && bp.q.length) {
+    const next = encoder.encode(JSON.stringify(bp.q[0])).byteLength + 1;
+    if (ops.length && bytes + next > 512 * 1024) break;
+    bytes += next; ops.push(bp.q.shift());
+  }
   try { await api(`/v1/agents/${agent}/browser/panel/${panel}/input`, { method: 'POST', body: { ops } }); }
   catch (e) { if (gen === bp.gen && !bp.ended) (/has closed/.test(e.message) ? bpEnded(e.message) : bpState(e.message, true)); }
   finally { if (gen === bp.gen) { bp.busy = false; void bpFlush(); } }
@@ -17045,8 +17083,17 @@ function bpGo() {
 function bpTypeSend() {
   const box = $('bpType'), text = box.value;
   if (!text) return;
-  for (let i = 0; i < text.length; i += 4000) bpSend({ k: 'text', text: text.slice(i, i + 4000) });
+  bpText(text);
   box.value = '';
+}
+/** The server limits each piece by UTF-16 units; keep whole code points and all pasted text. */
+function bpText(text) {
+  for (let at = 0; at < text.length;) {
+    let end = Math.min(text.length, at + 4000);
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) end--;
+    bpSend({ k: 'text', text: text.slice(at, end) });
+    at = end;
+  }
 }
 function bpToggleShow() {
   const box = $('bpType'), on = !box.classList.contains('shown');
@@ -17125,12 +17172,12 @@ const bpMods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 
   scr.addEventListener('keydown', (e) => {
     if (!bp.panel || bp.ended || e.isComposing) return;
     if (BP_KEYS.has(e.key)) { e.preventDefault(); bpSend({ k: 'key', key: e.key, mods: bpMods(e) }); return; }
-    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); bpSend({ k: 'text', text: e.key }); }
+    if ([...e.key].length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); bpSend({ k: 'text', text: e.key }); }
   });
   bpDlg.addEventListener('paste', (e) => {
     if (document.activeElement !== scr) return;
     const text = e.clipboardData?.getData('text');
-    if (text) { e.preventDefault(); bpSend({ k: 'text', text: text.slice(0, 4000) }); }
+    if (text) { e.preventDefault(); bpText(text); }
   });
   // Escape can arrive before the opening request answers. Invalidate that request too;
   // a delayed close event from the previous panel must not close a new one.
@@ -17186,6 +17233,8 @@ async function chanCopyManifest(btn, fallbackName) {
   } catch (e) { toast(e.message); }
 }
 async function chanConnect(btn) {
+  const id = chanFor, kind = chanKind, gen = chanOpenGen, person = pagePerson;
+  const current = () => gen === chanOpenGen && chanDlg.open && chanFor === id && chanKind === kind && person === pagePerson && !pagePersonAway && !pageSignedOut;
   const body = {};
   const pooled = $('chanPooled')?.value;
   if (pooled) body.pooled = pooled;
@@ -17193,13 +17242,14 @@ async function chanConnect(btn) {
     for (const el of chanDlg.querySelectorAll('input[data-key]')) body[el.dataset.key] = el.value.trim();
     if (Object.values(body).some(v => !v)) { $('chanErr').textContent = 'Fill in every box first, or pick a parked bot.'; return; }
   }
-  if (!confirmRebuild(chanFor, `Connecting ${V2_CHAN_LABEL[chanKind] ?? chanKind}`)) return;
+  if (!confirmRebuild(id, `Connecting ${V2_CHAN_LABEL[kind] ?? kind}`)) return;
   btn.disabled = true; btn.textContent = 'Checking…'; $('chanErr').textContent = '';
   try {
-    const c = await api(`/v1/agents/${chanFor}/channels/${chanKind}`, { method: 'POST', body });
-    chanShowConnected(c);
+    const c = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'POST', body });
+    if (current()) chanShowConnected(c);
     await refresh(false);
   } catch (e) {
+    if (!current()) return;
     $('chanErr').textContent = e.message;
     btn.disabled = false; btn.textContent = 'Connect';
   }
@@ -17245,7 +17295,12 @@ function chanShowConnected(c) {
     } catch { /* keep waiting */ }
   }, 4000);
 }
-chanDlg.addEventListener('close', () => { clearInterval(chanWatch); chanDlg.querySelectorAll('input').forEach(i => { i.value = ''; }); });
+chanDlg.addEventListener('close', () => {
+  if (chanDlg.open) return; // a late close event belongs to the previous opening
+  clearInterval(chanWatch); chanWatch = null;
+  if (chanShownGen === chanOpenGen) chanOpenGen++;
+  chanDlg.querySelectorAll('input, textarea').forEach(i => { i.value = ''; });
+});
 
 async function chanRecheck(id, kind, btn) {
   btn.disabled = true; const was = btn.textContent; btn.textContent = 'Checking…';
@@ -17328,6 +17383,7 @@ async function v2MoveInGroup(id, delta, ev) {
     await refresh(false);
   } catch (e) { toast(e.message); return; }
   // The row, whether or not the sheet was redrawn; the keyboard stays on the button pressed.
+  if (!v2AgentDlg.open || v2AgentId !== id || v2Tab !== 'overview') return;
   const now = v2PlaceInGroup(v2Find(id));
   if (!now || !$('v2Place')) return;
   $('v2Place').textContent = $('v2Place').textContent.replace(/^\d+ of \d+/, `${now.i + 1} of ${now.order.length}`);
@@ -17488,6 +17544,7 @@ function openV2Icon(id) {
   v2IconIdeasShown = [];
   $('v2IconIdeas').innerHTML = ''; $('v2IconIdeasBox').hidden = true; $('v2IconNote').textContent = '';
   $('v2IconAutoBtn').textContent = '✨ Ideas from Hatchabot';
+  $('v2IconAutoBtn').disabled = false;
   $('v2EmojiRow').innerHTML = V2_EMOJI.map(e => `<button type="button" data-emoji="${e}" aria-label="${e}">${e}</button>`).join('');
   v2RenderSwatches();
   v2IconPreview();
@@ -17534,14 +17591,15 @@ async function v2IconSave(btn) {
 }
 /** The ✨ button: ideas to choose from, added to those already on show; nothing is saved until Save. */
 async function v2IconIdeas(btn) {
-  const id = v2IconFor;
+  const id = v2IconFor, gen = v2IconGen, person = pagePerson;
+  const here = () => gen === v2IconGen && v2IconFor === id && v2IconDlg.open && person === pagePerson && !pagePersonAway && !pageSignedOut;
   btn.disabled = true; btn.textContent = 'Thinking…';
   $('v2IconErr').textContent = '';
   try {
     const current = $('v2IconInput').value.trim();
     const want = $('v2IconWant').value.trim();
     const r = await api(`/v1/agents/${id}/icons/suggest`, { method: 'POST', body: { exclude: [...new Set([...v2IconIdeasShown, ...(current ? [current] : [])])], ...(want ? { want } : {}) } });
-    if (v2IconFor !== id || !v2IconDlg.open) return; // closed, or opened for another agent, while it thought
+    if (!here()) return;
     const ideas = r.ideas || [];
     v2IconIdeasShown.push(...ideas.map(i => i.icon));
     $('v2IconIdeas').insertAdjacentHTML('beforeend', ideas.map(i =>
@@ -17556,8 +17614,8 @@ async function v2IconIdeas(btn) {
       : ideas.length ? 'Pick one, then Save. Press ✨ again for different ones.'
       : 'No new ideas this time. Paste any emoji in the box above, or pick from the row below.';
     v2IconPreview();
-  } catch (e) { if (v2IconFor === id) $('v2IconErr').textContent = e.message; }
-  finally { btn.disabled = false; btn.textContent = v2IconIdeasShown.length ? '✨ More ideas' : '✨ Ideas from Hatchabot'; }
+  } catch (e) { if (here()) $('v2IconErr').textContent = e.message; }
+  finally { if (gen === v2IconGen) { btn.disabled = false; btn.textContent = v2IconIdeasShown.length ? '✨ More ideas' : '✨ Ideas from Hatchabot'; } }
 }
 
 // ---- the hub: the management bot at the centre --------------------------------------------
@@ -17630,21 +17688,26 @@ const V2_BACK_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden
 let reportCur = null;
 // Each draft load (and each new report) numbered: only the newest paints, so
 // a slow load of the draft clicked first cannot replace the one clicked last (#146).
-let reportGen = 0;
+let reportGen = 0, reportListRead = 0;
 /** The draft the newest load is for, while it loads: a discard of that draft stops it painting (reportDiscard). */
 let reportLoading = null;
 async function openReport(id) {
-  reportCur = null; reportGen++; reportLoading = null;
+  reportCur = null; const gen = ++reportGen; reportLoading = null;
   $('reportReview').hidden = true; $('reportForm').hidden = false;
+  $('reportDrafts').replaceChildren();
+  $('reportGatherBtn').disabled = false; $('reportGatherBtn').textContent = 'Gather the details';
   $('reportAgent').innerHTML = '<option value="">— none —</option>' + (agents ?? []).filter(a => a.state !== 'DELETED' && !a.ops)
     .map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
   if (!reportDlg.open) reportDlg.showModal();
   await reportLoadDrafts();
+  if (gen !== reportGen || !reportDlg.open) return;
   if (id) await reportShow(id);
 }
 async function reportLoadDrafts() {
+  const gen = reportGen, read = ++reportListRead, person = pagePerson;
   let list = [];
   try { list = await api('/v1/problem-reports'); } catch { /* none */ }
+  if (gen !== reportGen || read !== reportListRead || person !== pagePerson || pagePersonAway || pageSignedOut || !reportDlg.open) return;
   // Opened on GitHub is not filed: this page cannot see Submit pressed there. So
   // one opened stays listed, marked, until it is discarded here (HB-0437).
   const open = [...list.filter(r => !r.sentAt).slice(0, 5), ...list.filter(r => r.sentAt).slice(0, 5)];
@@ -17671,24 +17734,27 @@ function reportPaint(r) {
   $('reportLinkNote').textContent = r.trimmed ? `It is too long for a GitHub link: Open on GitHub also saves ${r.fileName} — drag that file into the issue to attach the rest.` : '';
 }
 async function reportShow(id) {
-  const gen = ++reportGen;
+  const gen = ++reportGen, person = pagePerson;
   reportLoading = id;
-  try { const r = await api(`/v1/problem-reports/${encodeURIComponent(id)}`); if (gen === reportGen) reportPaint(r); }
-  catch (e) { if (gen === reportGen) toast(e.message); }
+  const current = () => gen === reportGen && person === pagePerson && !pagePersonAway && !pageSignedOut;
+  try { const r = await api(`/v1/problem-reports/${encodeURIComponent(id)}`); if (current()) reportPaint(r); }
+  catch (e) { if (current()) toast(e.message); }
   finally { if (gen === reportGen) reportLoading = null; }
 }
 async function reportCreate() {
   const title = $('reportTitle').value.trim(), whatHappened = $('reportWhat').value.trim();
   if (!title || !whatHappened) { toast('Say what went wrong in a line, and what happened.'); return; }
   const btn = $('reportGatherBtn'); btn.disabled = true; btn.textContent = 'Gathering…';
-  const gen = ++reportGen; reportLoading = null;
+  const gen = ++reportGen, person = pagePerson; reportLoading = null;
+  const current = () => gen === reportGen && person === pagePerson && !pagePersonAway && !pageSignedOut;
   try {
     const r = await api('/v1/problem-reports', { method: 'POST', body: { title, whatHappened, ...($('reportAgent').value ? { agent: $('reportAgent').value } : {}) } });
-    if (gen === reportGen) reportPaint(r);
+    if (!current()) return;
+    reportPaint(r);
     $('reportTitle').value = ''; $('reportWhat').value = '';
     void reportLoadDrafts();
-  } catch (e) { toast(e.message); }
-  finally { btn.disabled = false; btn.textContent = 'Gather the details'; }
+  } catch (e) { if (current()) toast(e.message); }
+  finally { if (gen === reportGen) { btn.disabled = false; btn.textContent = 'Gather the details'; } }
 }
 /**
  * Keep the person's edits before anything leaves the page. Words typed while it saved are a
@@ -17697,6 +17763,7 @@ async function reportCreate() {
  * through that second save as well, it stops and says so (null: nothing goes out).
  */
 async function reportSaveEdits() {
+  const person = pagePerson;
   let masked = false;
   for (let round = 1; reportCur; round++) {
     const sentTitle = $('reportRTitle').value, sentBody = $('reportBody').value;
@@ -17708,6 +17775,7 @@ async function reportSaveEdits() {
     // one shown now and its text (review, 2026-10-22).
     const gen = reportGen;
     const saved = await api(`/v1/problem-reports/${encodeURIComponent(reportCur.id)}`, { method: 'PATCH', body: { title, body } });
+    if (person !== pagePerson || pagePersonAway || pageSignedOut) return null;
     if (gen !== reportGen) return saved;
     reportCur = saved;
     // The server masks the edits too (private names, keys): show what will go
@@ -17959,15 +18027,22 @@ function v2RenderHub() {
  * it proposes arrives as ordinary cards.
  */
 async function askOpsSuggest(el) {
+  const person = pagePerson, epoch = voiceEpoch;
+  const current = () => person === pagePerson && epoch === voiceEpoch && !pagePersonAway && !pageSignedOut;
   if (el) { el.dataset.busy = '1'; el.textContent = 'Asking…'; }
   // It is a real turn on a real model — half a minute is normal, and a silent
   // button for that long reads as broken.
   toast('Asking your Hatchabot agent — it reads your fleet first, so give it about half a minute.', 8000);
   try {
     const r = await api('/v1/ops-agent/suggest', { method: 'POST', body: {} });
+    if (!current()) return;
+    if (pageSecondFactorBusy()) {
+      toast('The suggestions are ready in your Hatchabot agent’s console. Finish signing in, then open it.', 8000);
+      return;
+    }
     v2Close();
     openGateway(r.agentId, r.slug);
-  } catch (e) { toast(e.message, 9000); }
+  } catch (e) { if (current()) toast(e.message, 9000); }
   finally { if (el) { delete el.dataset.busy; el.textContent = "Ask Hatchabot what you're missing"; } }
 }
 

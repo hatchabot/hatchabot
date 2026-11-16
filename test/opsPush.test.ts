@@ -64,6 +64,28 @@ describe('pushing "something is waiting" to the owner', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('checks the caller claim after asynchronous Telegram credentials are ready', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let current = true;
+    const push = createOpsPush({ botToken: async () => { current = false; return 'fixture-bot'; }, chatId: () => 'fixture-chat', fetchImpl: stubFetch(calls) });
+    expect(await push.waiting('owner', 'Private task name', undefined, { beforeSend: () => current })).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('passes a deferred claim to Discord so its credential lookup can recheck it before sending', async () => {
+    const sent: string[] = [];
+    let current = true;
+    const push = createOpsPush({ botToken: async () => undefined, chatId: () => undefined,
+      sendDiscord: async (_owner, text, beforeSend) => {
+        await Promise.resolve(); current = false;
+        if (beforeSend && !beforeSend()) return false;
+        sent.push(text); return true;
+      },
+    });
+    expect(await push.waiting('owner', 'Private task name', undefined, { beforeSend: () => current })).toBe(false);
+    expect(sent).toEqual([]);
+  });
+
   it('a refused or failed send is logged, never thrown', async () => {
     const events: Array<[string, Record<string, unknown>]> = [];
     const refused = createOpsPush({

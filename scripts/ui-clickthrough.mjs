@@ -541,14 +541,14 @@ const SCENARIOS = String.raw`(() => {
       const a1 = v2Find('a1'), tax = v2Find('a10');
       const was = { a1: a1.browser, tax: tax.browser };
       const realFetch = window.fetch, enc = new TextEncoder();
-      const posts = [], deletes = [];
+      const posts = [], deletes = [], inputBytes = [];
       let ctl, opened = 0;
       window.__override['/v1/agents/a1/browser'] = { on: true, running: true, chromium: '156.0.0.0' };
       window.fetch = async (input, init = {}) => {
         const url = String(typeof input === 'string' ? input : input.url), method = (init.method || 'GET').toUpperCase();
         if (/\/browser\/panel\/[^/]+\/stream$/.test(url)) return new Response(new ReadableStream({ start(c) { ctl = c; } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
         if (method === 'POST' && /\/browser\/panel$/.test(url)) { opened++; posts.push({ open: JSON.parse(init.body) }); return new Response(JSON.stringify({ panel: 'pn' + opened, idleMinutes: 10 }), { status: 201, headers: { 'content-type': 'application/json' } }); }
-        if (method === 'POST' && /\/input$/.test(url)) { posts.push(...JSON.parse(init.body).ops); return new Response(null, { status: 204 }); }
+        if (method === 'POST' && /\/input$/.test(url)) { inputBytes.push(enc.encode(init.body).byteLength); posts.push(...JSON.parse(init.body).ops); return new Response(null, { status: 204 }); }
         if (method === 'DELETE' && /\/browser\/panel\//.test(url)) { deletes.push(url); return new Response(null, { status: 204 }); }
         return realFetch(input, init);
       };
@@ -589,12 +589,12 @@ const SCENARIOS = String.raw`(() => {
         ok('a click where it was made: ' + JSON.stringify(down), Math.abs(down.x - 200) <= 1 && Math.abs(down.y - 131) <= 1 && down.button === 'left');
         ok('the picture took focus, for typing', document.activeElement === scr);
         // Typing on the picture: characters as text, a few keys as keys; Esc is not one of them.
-        for (const k of ['m', 'a', 'd', 'e']) scr.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+        for (const k of ['m', 'a', 'd', 'e', '😀']) scr.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
         scr.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
         scr.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
         scr.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true }));
         await until(() => ops('key').length >= 2);
-        eq('typed on the page, in order', posts.filter((o) => o.k === 'text' || o.k === 'key').map((o) => o.k === 'text' ? o.text : '[' + o.key + (o.mods ? '+' + o.mods : '') + ']').join(''), 'made[Backspace][Tab+8]');
+        eq('typed on the page, in order', posts.filter((o) => o.k === 'text' || o.k === 'key').map((o) => o.k === 'text' ? o.text : '[' + o.key + (o.mods ? '+' + o.mods : '') + ']').join(''), 'made😀[Backspace][Tab+8]');
         // The box: what is in it is sent, then it is emptied; hidden as it is typed until Show.
         const box = document.getElementById('bpType');
         ok('the box hides what is typed', getComputedStyle(box).getPropertyValue('-webkit-text-security') === 'disc');
@@ -603,6 +603,21 @@ const SCENARIOS = String.raw`(() => {
         byText('#bpDlg .bp-type button', 'Enter').click();
         await until(() => ops('key').some((o) => o.key === 'Enter'));
         ok('the box is sent, then emptied', ops('text').some((o) => o.text === 'made-up secret') && box.value === '');
+        const longText = 'a'.repeat(3999) + '😀' + 'b'.repeat(4001);
+        let textStart = posts.length;
+        box.value = longText; bpTypeSend();
+        await until(() => !bp.busy && !bp.q.length);
+        let parts = posts.slice(textStart).filter(o => o.k === 'text').map(o => o.text);
+        eq('long typed text is complete', parts.join(''), longText);
+        ok('each text piece keeps whole Unicode characters', parts.every(s => s.length <= 4000 && s.isWellFormed()));
+        textStart = posts.length;
+        scr.focus();
+        const clipboard = new DataTransfer(); clipboard.setData('text', longText);
+        scr.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }));
+        await until(() => !bp.busy && !bp.q.length);
+        parts = posts.slice(textStart).filter(o => o.k === 'text').map(o => o.text);
+        eq('a long clipboard paste is not silently truncated', parts.join(''), longText);
+        ok('pasted pieces keep whole Unicode characters', parts.every(s => s.length <= 4000 && s.isWellFormed()));
         document.getElementById('bpShow').click();
         ok('Show shows it', box.classList.contains('shown') && document.getElementById('bpShow').getAttribute('aria-pressed') === 'true');
         // An address, a scroll, back.
@@ -613,6 +628,26 @@ const SCENARIOS = String.raw`(() => {
         await until(() => ops('back').length);
         ok('Go sends the address as typed', ops('go').at(-1)?.url === 'example.org/login');
         ok('a scroll: ' + JSON.stringify(ops('wheel').at(-1)), ops('wheel').at(-1)?.dy === 120);
+        // Inputs queued behind a slow request must still fit the server's per-operation limits.
+        await until(() => !bp.busy && !bp.q.length);
+        const queuedStart = posts.length;
+        bp.busy = true;
+        for (let i = 0; i < 3; i++) scr.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: at.x, clientY: at.y, deltaY: 6000 }));
+        bpSend({ k: 'text', text: 'after scrolling' });
+        bp.busy = false; await bpFlush();
+        await until(() => !bp.busy && !bp.q.length);
+        const queued = posts.slice(queuedStart), wheels = queued.filter(o => o.k === 'wheel');
+        ok('merged scroll inputs stay within the server limit', wheels.every(o => Math.abs(o.dx) <= 10000 && Math.abs(o.dy) <= 10000));
+        eq('scrolling keeps its full distance', wheels.reduce((sum, o) => sum + o.dy, 0), 18000);
+        eq('text behind scrolling is retained', queued.filter(o => o.k === 'text').map(o => o.text).join(''), 'after scrolling');
+        const bulkStart = posts.length, bytesStart = inputBytes.length;
+        bp.busy = true;
+        const bulkText = 'é'.repeat(800000);
+        box.value = bulkText; bpTypeSend();
+        bp.busy = false; await bpFlush();
+        await until(() => !bp.busy && !bp.q.length);
+        ok('large typed input stays below the JSON request byte limit', inputBytes.slice(bytesStart).every(n => n < 1024 * 1024));
+        eq('splitting a large input preserves all text', posts.slice(bulkStart).filter(o => o.k === 'text').map(o => o.text).join(''), bulkText);
         // What the server says: a note, then its end.
         send({ t: 'note', text: 'It did not open (net::ERR_CONNECTION_REFUSED).' });
         await until(() => document.getElementById('bpState').textContent.includes('did not open'));
@@ -3975,11 +4010,22 @@ const SCENARIOS = String.raw`(() => {
     consoleMathRawTexAndLitOwnership: async () => {
       await withConsoleMath(async ({ add, d }) => {
         const subscripts = add({ raw: '$$x _1 + y_ 2$$', html: '<p>$$x <em>1 + y</em> 2$$</p>' });
+        const spacing = add({ raw: '~~Before~~ $$a~~b~~c$$ ~~After~~', html: '<p><s>Before</s> $$a<s>b</s>c$$ <s>After</s></p>' });
+        const quoted = add({ raw: '> $$\n> x_i > 0\n> $$', html: '<blockquote><p>$$\nx_i &gt; 0\n$$</p></blockquote>' });
+        const alignedTex = '\n\\begin{aligned}\n    x &= 1 \\\\\n    y &= 2\n\\end{aligned}\n';
+        const aligned = add({ raw: '$$' + alignedTex + '$$', html: '<p>$$<br>\\begin{aligned}<br>    x &amp;= 1 \\<br>    y &amp;= 2<br>\\end{aligned}<br>$$</p>' });
         const matrixTex = '\\begin{pmatrix}1 & 2 \\\\ 3 & 4\\end{pmatrix}';
         const matrix = add({ raw: '$$' + matrixTex + '$$', html: '<p>$$\\begin{pmatrix}1 &amp; 2 \\ 3 &amp; 4\\end{pmatrix}$$</p>' });
         const retained = add({ raw: '$x+1$', html: '<p>$x<!--?lit$fixture$-->+1$</p>' });
         const paragraph = retained.body.firstElementChild, marker = paragraph.childNodes[1], before = paragraph.innerHTML;
-        await until(() => subscripts.body.querySelector('math') && matrix.body.querySelector('math'));
+        await until(() => subscripts.body.querySelector('math') && matrix.body.querySelector('math') && spacing.body.querySelector('math'));
+        eq('Markdown strikethrough does not erase TeX spacing', spacing.body.querySelector('annotation').textContent, 'a~~b~~c');
+        eq('surrounding strikethrough is preserved', [...spacing.body.querySelectorAll('s')].map(n => n.textContent), ['Before', 'After']);
+        await until(() => quoted.body.querySelector('math'));
+        eq('quoted formulas omit only Markdown container markers', quoted.body.querySelector('annotation').textContent, '\nx_i > 0\n');
+        ok('the surrounding quote stays intact', !!quoted.body.querySelector('blockquote math'));
+        await until(() => aligned.body.querySelector('math'));
+        eq('paragraph indentation is preserved as TeX, not mistaken for a code block', aligned.body.querySelector('annotation').textContent, alignedTex);
         eq('Markdown emphasis does not erase TeX subscripts', subscripts.body.querySelector('annotation').textContent, 'x _1 + y_ 2');
         eq('both original subscripts become MathML', subscripts.body.querySelectorAll('math msub').length, 2);
         eq('matrix keeps the original double backslash row separator', matrix.body.querySelector('annotation').textContent, matrixTex);
@@ -4096,6 +4142,29 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
         for (const agent of [a, b]) for (const path of ['/console/access', '/console/pending']) delete window.__override['/v1/agents/' + agent.id + path];
+      }
+    },
+    consoleSavedTabsAreValidated: async () => {
+      const a = v2Find('a1');
+      const prior = localStorage.getItem('hb-console-tabs');
+      try {
+        for (const raw of ['null', '{}', 'true', '"a1"', '["a1","a1",null,{},"missing"]']) {
+          if (consoleDlg.open) closeConsole();
+          consoleUnloadAll(); consoleTabs = [];
+          localStorage.setItem('hb-console-tabs', raw);
+          await openGateway(a.id, a.slug);
+          ok('console opens with malformed remembered tabs: ' + raw, consoleDlg.open);
+          eq('only one valid tab is restored: ' + raw, consoleTabs.map(t => t.id), [a.id]);
+          eq('the remembered list is repaired', JSON.parse(localStorage.getItem('hb-console-tabs')), [a.id]);
+          closeConsole(); consoleTabs = [];
+          localStorage.setItem('hb-console-tabs', raw);
+          await openConsoleHome();
+          ok('the Consoles shortcut also recovers: ' + raw, consoleDlg.open);
+        }
+      } finally {
+        if (consoleDlg.open) closeConsole();
+        consoleUnloadAll(); consoleTabs = [];
+        if (prior === null) localStorage.removeItem('hb-console-tabs'); else localStorage.setItem('hb-console-tabs', prior);
       }
     },
     consoleTabs: async () => {
@@ -5374,18 +5443,19 @@ const SCENARIOS = String.raw`(() => {
   const tipOf = (name) => { const t = tile(name); if (!t) return null; v2ShowTip(t); const p = document.querySelector('#v2Tip .v2tipprev'); const txt = p ? p.textContent : null; document.getElementById('v2Tip').hidden = true; return txt; };
   const prevOf = (name) => { const t = tipOf(name); return t === null ? null : t.replace(/^[^·]*·\s*/, ''); };
   Object.assign(T, {
-    activityUnreadFirst: async () => {
+    activityRecentBeforeUnread: async () => {
       try {
         await recentFixture();
         v2SetView('activity');
         await until(() => v2Recent && v2Recent.size === 5);
         ok('asked for the whole week', calls('GET', /^\/v1\/recent$/).some((c) => c.url.includes('all=1')));
         const heads = [...document.querySelectorAll('#v2groups .v2ghead h3')].map((h) => h.textContent);
-        eq('Unread is the first section', heads[0], 'Unread');
-        const unread = document.querySelector('#v2groups .v2group');
+        eq('recently active agents come first', heads[0], 'Active in the last hour');
+        eq('Unread follows recent activity', heads[1], 'Unread');
+        const unread = [...document.querySelectorAll('#v2groups .v2group')].find(g => g.querySelector('h3')?.textContent === 'Unread');
         eq('newest reply first', [...unread.querySelectorAll('.v2agent .v2name')].map((n) => n.textContent), ['Homework Helper', 'Meal Planner']);
         for (const name of ['Homework Helper', 'Meal Planner']) eq(name + ' shown once', [...document.querySelectorAll('#v2groups .v2agent')].filter((t) => t.textContent.includes(name)).length, 1);
-        ok('the time bins follow', heads.slice(1).some((h) => /Active in the last hour/.test(h)));
+        ok('older activity follows Unread', heads.indexOf('Active today') > heads.indexOf('Unread'));
       } finally { await recentCleanup(); }
     },
     activityPreviews: async () => {
@@ -5440,7 +5510,8 @@ const SCENARIOS = String.raw`(() => {
         await until(() => v2Recent === null);
         ok('no preview in the tooltip', tipOf('Homework Helper') === null);
         eq('every tile still there', document.querySelectorAll('#v2groups .v2agent').length, 14);
-        ok('Unread still first (it comes from the list)', document.querySelector('#v2groups .v2ghead h3').textContent === 'Unread');
+        eq('recent activity still comes first without previews', document.querySelector('#v2groups .v2ghead h3').textContent, 'Active in the last hour');
+        eq('Unread still follows recent activity', document.querySelectorAll('#v2groups .v2ghead h3')[1].textContent, 'Unread');
       } finally { await recentCleanup(); }
     },
   });
@@ -6234,9 +6305,26 @@ const SCENARIOS = String.raw`(() => {
       }
     },
     // The icon dialog's ✨ (2026-10-25): ideas to choose from, more on each press, nothing saved until Save.
+    iconIdeasRespectReopening: async () => {
+      const h = auditHold();
+      let old;
+      try {
+        openV2Icon('a1');
+        window.__answer = { 'POST /v1/agents/a1/icons/suggest': [{ body: { ideas: [{ icon: '🌿', color: '#779977' }], via: 'ai' } }] };
+        h.once(/^\/v1\/agents\/a1\/icons\/suggest$/, 'POST');
+        old = v2IconIdeas($('v2IconAutoBtn')); await until(() => h.held.length === 1);
+        v2IconDlg.close(); openV2Icon('a1');
+        ok('a reopened picker can request its own ideas', !$('v2IconAutoBtn').disabled);
+        $('v2IconWant').value = 'Different new direction';
+        await h.free(); await old;
+        ok('ideas from the earlier opening do not appear', !$('v2IconIdeas').children.length && $('v2IconIdeasBox').hidden);
+        eq('the new direction is kept', $('v2IconWant').value, 'Different new direction');
+      } finally { await h.free(); await old; window.__answer = {}; if (v2IconDlg.open) v2IconDlg.close(); }
+    },
     iconIdeas: async () => {
       const ideaBtns = () => [...document.querySelectorAll('#v2IconIdeas [data-emoji]')];
-      const asks = () => calls('POST', /^\/v1\/agents\/a1\/icons\/suggest$/);
+      const askStart = calls('POST', /^\/v1\/agents\/a1\/icons\/suggest$/).length;
+      const asks = () => calls('POST', /^\/v1\/agents\/a1\/icons\/suggest$/).slice(askStart);
       const ready = () => !document.getElementById('v2IconAutoBtn').disabled;
       window.__answer = window.__answer || {};
       window.__answer['POST /v1/agents/a1/icons/suggest'] = [
@@ -6956,6 +7044,23 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agent-todos']; delete window.__override['/v1/agents'];
         v2SetView('group'); await loadTodos(); await refresh(false);
       }
+    },
+    agentMoveKeepsTheNewSheet: async () => {
+      const h = auditHold(), beforeSort = v2Sort;
+      try {
+        v2SetView('group'); v2SetSort('manual');
+        openV2Agent('a2', 'overview');
+        await until(() => $('v2MoveEarlier'));
+        h.once(/^\/v1\/agents\/a2\/move$/, 'POST');
+        const moving = v2MoveInGroup('a2', -1);
+        await until(() => h.held.length === 1);
+        openV2Agent('a1', 'overview');
+        await until(() => $('v2Place')?.textContent.includes('1 of 3'));
+        const before = $('v2Place').textContent;
+        await h.free(); await moving;
+        eq('a previous agent move keeps the displayed agent position', $('v2Place').textContent, before);
+        ok('the current first agent still cannot move earlier', $('v2MoveEarlier').disabled);
+      } finally { await h.free(); v2Close(); v2Sort = beforeSort; renderV2(); }
     },
     myOrder: async () => {
       const toastText = () => document.getElementById('toast').textContent;
@@ -7885,6 +7990,76 @@ const SCENARIOS = String.raw`(() => {
         ok('the count and the reason, after the redraw: ' + note.textContent, !note.hidden && note.textContent.includes('1 of 2 uploaded') && note.textContent.includes('huge.zip: Too big (300 MB'));
       } finally { window.fetch = realFetch; release?.(); window.__answer = {}; if (v2AgentDlg.open) v2Close(); v2FilesPath.delete('a1'); }
     },
+    suggestionsDoNotCoverSecondFactor: async () => {
+      const h = auditHold(), manager = agents.find(a => a.ops);
+      let asking;
+      window.__answer = { 'POST /v1/ops-agent/suggest': [{ body: { asked: true, agentId: manager.id, slug: manager.slug } }] };
+      try {
+        if (consoleDlg.open) closeConsole();
+        h.once(/^\/v1\/ops-agent\/suggest$/, 'POST');
+        asking = askOpsSuggest(); await until(() => h.held.length === 1);
+        sfDlg.showModal();
+        await h.free(); await asking;
+        ok('a completed suggestion does not cover an in-progress second factor', sfDlg.open && !consoleDlg.open);
+      } finally {
+        await h.free(); await asking; window.__answer = {};
+        if (sfDlg.open) sfDlg.close(); if (consoleDlg.open) closeConsole();
+      }
+    },
+    inspectorKeepsTheNewAgentAfterErrors: async () => {
+      const h = auditHold();
+      window.__answer = { 'GET /v1/agents/a1/inspect': [{ status: 500, body: { error: 'Old archive is unavailable' } }] };
+      window.__override['/v1/agents/a2/inspect'] = { files: [{ name: 'AGENTS.md', bytes: 12 }], transcriptTurns: 0 };
+      try {
+        h.once(/^\/v1\/agents\/a1\/inspect$/, 'GET');
+        const old = openInspect('a1', 'First archived agent'); await until(() => h.held.length === 1);
+        await openInspect('a2', 'Second archived agent');
+        await h.free(); await old;
+        ok('the new archive keeps its file list after an old error', $('inspFileList').textContent.includes('AGENTS.md'));
+        ok('the old error cannot replace a different archive', !$('inspFileList').textContent.includes('Old archive'));
+      } finally {
+        await h.free(); window.__answer = {}; delete window.__override['/v1/agents/a2/inspect'];
+        if (inspectDlg.open) inspectDlg.close();
+      }
+    },
+    reportOpeningAndCreationKeepNewerWork: async () => {
+      const h = auditHold();
+      const person = pagePerson;
+      const draft = (id, title) => ({ id, title, body: 'Synthetic report body', by: 'person', createdAt: new Date().toISOString() });
+      window.__override['/v1/problem-reports'] = [];
+      for (const id of ['report-old', 'report-new']) window.__override['/v1/problem-reports/' + id] = draft(id, id);
+      try {
+        h.once(/^\/v1\/problem-reports$/, 'GET');
+        const first = openReport('report-old'); await until(() => h.held.length === 1);
+        await openReport('report-new');
+        await h.free(); await first;
+        eq('an older opening cannot replace the newly chosen report', reportCur?.id, 'report-new');
+        await openReport();
+        $('reportTitle').value = 'First report'; $('reportWhat').value = 'First details';
+        window.__answer = { 'POST /v1/problem-reports': [{ body: draft('created-old', 'First report') }] };
+        h.once(/^\/v1\/problem-reports$/, 'POST');
+        const creating = reportCreate(); await until(() => h.held.length === 1);
+        await openReport();
+        $('reportTitle').value = 'New report'; $('reportWhat').value = 'New details';
+        await h.free(); await creating;
+        eq('an older creation cannot erase the new form', [$('reportTitle').value, $('reportWhat').value], ['New report', 'New details']);
+        ok('the new form stays open', !$('reportForm').hidden && $('reportReview').hidden);
+        reportPaint(draft('report-old', 'Old account report'));
+        $('reportBody').value = 'Edited before switching accounts';
+        window.__answer = { 'PATCH /v1/problem-reports/report-old': [{ body: draft('report-old', 'Old account report') }] };
+        h.once(/^\/v1\/problem-reports\/report-old$/, 'PATCH');
+        const saving = reportSaveEdits(); await until(() => h.held.length === 1);
+        pagePerson = 'another-fixture-account'; reportGen++; reportCur = null;
+        await h.free();
+        eq('a save from another account cannot continue to copy or export', await saving, null);
+      } finally {
+        await h.free(); window.__answer = {};
+        for (const path of ['/v1/problem-reports', '/v1/problem-reports/report-old', '/v1/problem-reports/report-new']) delete window.__override[path];
+        if (reportDlg.open) reportDlg.close();
+        reportCur = null; reportGen++; $('reportTitle').value = ''; $('reportWhat').value = '';
+        pagePerson = person;
+      }
+    },
     reportDraftRaceAndDiscard: async () => {
       // Report a problem (made-up drafts): the draft clicked last is the one shown, even when the
       // first one's load comes back later (#146); a discard that failed keeps the draft (#145).
@@ -7921,6 +8096,29 @@ const SCENARIOS = String.raw`(() => {
         window.fetch = realFetch; release?.(); window.__answer = {}; window.__confirmAnswer = true;
         for (const k of ['/v1/problem-reports', '/v1/problem-reports/' + A, '/v1/problem-reports/' + B]) delete window.__override[k];
         if (reportDlg.open) reportDlg.close();
+      }
+    },
+    channelSetupKeepsNewOpening: async () => {
+      const h = auditHold(), fields = chanFields;
+      chanFields = [{ kind: 'discord', label: 'Discord', fields: [{ key: 'botToken', label: 'Bot token', pattern: '^.+$', help: 'Fixture credential' }] }];
+      window.__override['/v1/discord-bots'] = { bots: [] };
+      window.__answer = { 'POST /v1/agents/a1/channels/discord': [{ body: { displayName: 'Fixture bot', atNextStart: true } }] };
+      try {
+        await openChanSetup('a1', 'discord'); $('chanF-botToken').value = 'made-up-first-credential';
+        h.once(/^\/v1\/agents\/a1\/channels\/discord$/, 'POST');
+        const connecting = chanConnect($('chanGo')); await until(() => h.held.length === 1);
+        chanDlg.close(); await openChanSetup('a2', 'discord');
+        $('chanF-botToken').value = 'made-up-second-credential';
+        chanDlg.dispatchEvent(new Event('close'));
+        eq('an old close event preserves new credentials', $('chanF-botToken').value, 'made-up-second-credential');
+        await h.free(); await connecting;
+        ok('the second agent setup title remains', $('chanTitle').textContent.includes(v2Find('a2').name));
+        eq('an old successful connection preserves the new form', $('chanF-botToken')?.value, 'made-up-second-credential');
+        ok('the new Connect action remains available', !$('chanGo').hidden && !$('chanGo').disabled);
+      } finally {
+        await h.free(); window.__answer = {}; chanFields = fields;
+        delete window.__override['/v1/discord-bots']; clearInterval(chanWatch); chanWatch = null;
+        if (chanDlg.open) chanDlg.close();
       }
     },
     chanConnectorsRetry: async () => {
@@ -12228,6 +12426,55 @@ const SCENARIOS = String.raw`(() => {
   });
   /** The phone runs (the page opened 360 and 390 px wide): what has to fit a phone screen. The desktop suite is skipped there. */
   const P = {
+    phoneConsoleSafeArea: async () => {
+      const root = document.documentElement, names = ['--safe-top', '--safe-bottom', '--safe-left', '--safe-right'];
+      const before = names.map(name => root.style.getPropertyValue(name));
+      try {
+        if (consoleDlg.open) closeConsole();
+        root.style.setProperty('--safe-top', '59px'); root.style.setProperty('--safe-bottom', '34px');
+        root.style.setProperty('--safe-left', '0px'); root.style.setProperty('--safe-right', '0px');
+        const a = v2Find('a1');
+        await openGateway(a.id, a.slug);
+        await until(() => consoleDlg.open && $('consoleFrame').getAttribute('src') !== 'about:blank');
+        const box = consoleDlg.getBoundingClientRect(), bar = consoleDlg.querySelector('.console-bar').getBoundingClientRect();
+        ok('the iPhone console starts below its status bar: ' + Math.round(box.top), box.top >= 59);
+        ok('the console avoids the home indicator: ' + Math.round(box.bottom), box.bottom <= innerHeight - 34 + 1);
+        for (const button of consoleDlg.querySelectorAll('.console-bar button')) {
+          if (!button.getBoundingClientRect().width || getComputedStyle(button).display === 'none') continue;
+          const r = button.getBoundingClientRect();
+          ok('console header control is reachable: ' + (button.title || button.textContent), r.top >= 59 && r.bottom <= box.bottom && r.left >= 0 && r.right <= innerWidth);
+        }
+        const frameBox = $('consoleFrame').getBoundingClientRect();
+        ok('chat begins below the entire header', frameBox.top >= bar.bottom - 1 && frameBox.height > 200);
+        $('consoleGearBtn').click();
+        await until(() => v2AgentDlg.open);
+        const sheetTop = v2AgentDlg.getBoundingClientRect().top;
+        ok('chat and agent settings share the same safe top gap: ' + Math.round(box.top) + '/' + Math.round(sheetTop), Math.abs(box.top - sheetTop) <= 1);
+        v2Close();
+        await openGateway(a.id, a.slug);
+        ok('returning to chat keeps its safe header', consoleDlg.querySelector('.console-bar').getBoundingClientRect().top >= 59);
+        fitVisualViewport({ scale: 1, height: 400, offsetTop: 0 });
+        const keyboard = consoleDlg.getBoundingClientRect();
+        ok('the keyboard does not push the console header into the status bar', keyboard.top >= 59);
+        ok('the chat stays above the keyboard', keyboard.bottom <= 400);
+        openConsoleSwitcher();
+        const switcher = $('consoleSwitcher').getBoundingClientRect();
+        ok('the agent switcher fits above the keyboard', switcher.bottom <= keyboard.bottom && switcher.top >= keyboard.top);
+        const choices = $('cswList');
+        choices.scrollTop = choices.scrollHeight;
+        const last = choices.lastElementChild.getBoundingClientRect();
+        ok('the final agent choice can be scrolled into view', last.bottom <= keyboard.bottom);
+        for (let i = 1; i < consoleSwitcherItems().length; i++) $('cswInput').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+        const selected = choices.querySelector('.sel').getBoundingClientRect(), choiceBox = choices.getBoundingClientRect();
+        ok('keyboard navigation keeps the selected agent visible', selected.top >= choiceBox.top && selected.bottom <= choiceBox.bottom + 1);
+        closeConsoleSwitcher();
+      } finally {
+        if (consoleDlg.open) closeConsole();
+        if (v2AgentDlg.open) v2Close();
+        names.forEach((name, i) => before[i] ? root.style.setProperty(name, before[i]) : root.style.removeProperty(name));
+        fitVisualViewport();
+      }
+    },
     phoneConsoleMath: async () => {
       await withConsoleMath(async ({ add, d, frame }) => {
         const formula = '\\sigma=\\sqrt{\\frac{1}{N}\\sum_{i=1}^{N}(x_i-\\mu)^2}=\\sqrt{\\frac{(2-4)^2+(4-4)^2+(4-4)^2+(4-4)^2+(5-4)^2+(5-4)^2+(7-4)^2+(9-4)^2}{8}}';
@@ -12998,11 +13245,33 @@ const SCENARIOS = String.raw`(() => {
       }
     },
   };
+  const L = {
+    phoneLandscapeConsoleInsets: async () => {
+      const root = document.documentElement, names = ['--safe-top', '--safe-bottom', '--safe-left', '--safe-right'];
+      const before = names.map(name => root.style.getPropertyValue(name));
+      try {
+        root.style.setProperty('--safe-top', '0px'); root.style.setProperty('--safe-bottom', '21px');
+        root.style.setProperty('--safe-left', '59px'); root.style.setProperty('--safe-right', '59px');
+        const a = v2Find('a1'); await openGateway(a.id, a.slug);
+        const box = consoleDlg.getBoundingClientRect();
+        ok('landscape console avoids the notch on both sides', box.left >= 59 && box.right <= innerWidth - 59);
+        ok('landscape console avoids the home indicator', box.bottom <= innerHeight - 21);
+        for (const el of consoleDlg.querySelectorAll('.console-bar button')) {
+          const r = el.getBoundingClientRect();
+          if (!r.width || !r.height) continue;
+          ok('landscape header control stays inside safe bounds', r.left >= 59 && r.right <= innerWidth - 59 && r.top >= 0);
+        }
+      } finally {
+        if (consoleDlg.open) closeConsole();
+        names.forEach((name, i) => before[i] ? root.style.setProperty(name, before[i]) : root.style.removeProperty(name));
+      }
+    },
+  };
   (async () => {
     // The results so far go on the page after every scenario, with the one running: a page
     // that runs out of virtual time (Chrome's dump comes with no answer) still says where.
     const report = () => document.documentElement.setAttribute('data-ui-results', JSON.stringify(results));
-    for (const [name, run] of Object.entries(innerWidth <= 500 ? P : T)) {
+    for (const [name, run] of Object.entries(innerWidth <= 500 ? P : innerHeight < 500 ? L : T)) {
       document.documentElement.setAttribute('data-ui-running', name);
       try { await run(); results.push({ name, ok: true }); }
       // A check that finds many things (the phone sweep) says them all in err.detail.
@@ -13053,13 +13322,13 @@ try {
   // "the page never reported" (2026-10-09). The page holds only test data.
   chmodSync(work, 0o755);
   chmodSync(join(work, 'page.html'), 0o644);
-  // The page is opened three times: a desktop window runs the suite, and two
+  // The page is opened four times: a desktop window runs the suite, and two
   // phone-wide ones run the checks of what has to fit a phone screen (the P
   // suite, picked by the window's width; Chris, 2026-10-23): 360 px, most
   // Android phones (the header with Inbox broke there only, HB-0605), and
-  // 390 px, an iPhone (HB-0615 asked for both).
+  // 390 px, an iPhone (HB-0615 asked for both). A rotated phone also checks its device insets.
   let failed = 0, total = 0;
-  for (const [label, size] of [['desktop', '1400,1000'], ['phone 360', '360,800'], ['phone 390', '390,844']]) {
+  for (const [label, size] of [['desktop', '1400,1000'], ['phone 360', '360,800'], ['phone 390', '390,844'], ['phone landscape', '844,390']]) {
     let dom = '';
     // The attribute, not the words: the page's own script names it too.
     for (let tries = 1; !/data-ui-done="/.test(dom) && tries <= 3; tries++) {

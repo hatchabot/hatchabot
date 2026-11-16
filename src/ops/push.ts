@@ -20,7 +20,7 @@ export interface OpsPushDeps {
   /** Where the owner opens Hatchabot (shown as a link). */
   appUrl?(): string | undefined;
   /** A DM through the manager's Discord bot to the owner, when it has one and the owner is linked there. */
-  sendDiscord?(ownerId: string, text: string): Promise<boolean>;
+  sendDiscord?(ownerId: string, text: string, beforeSend?: () => boolean): Promise<boolean>;
   /** Whether that Discord DM has anywhere to go (the manager has a Discord bot and the owner is linked there). */
   discordLinked?(ownerId: string): boolean;
   /** How many pushes an owner may get per hour (a flood of knocks must not become a flood of pushes). */
@@ -60,7 +60,8 @@ export function pushText(headline: string, detail: string | undefined, tail: str
 export interface OpsPush {
   /** Fire-and-forget; resolves false when there was nowhere to send. */
   /** `note`: something to know, with nothing to confirm. `tail`: the last line in place of the app's address (a link of its own). */
-  waiting(ownerId: string, headline: string, detail?: string, opts?: { note?: boolean; tail?: string }): Promise<boolean>;
+  /** `beforeSend`: revalidate/claim a notification after credential waits, immediately before handing it to the transport. */
+  waiting(ownerId: string, headline: string, detail?: string, opts?: { note?: boolean; tail?: string; beforeSend?: () => boolean }): Promise<boolean>;
 }
 
 /**
@@ -118,11 +119,12 @@ export function createOpsPush(deps: OpsPushDeps): OpsPush {
       ]);
       if (!token) {
         // No Telegram to carry it: the manager's Discord bot, when the owner is linked there.
-        const ok = await deps.sendDiscord!(ownerId, text).catch(() => false);
+        const ok = await deps.sendDiscord!(ownerId, text, opts?.beforeSend).catch(() => false);
         deps.log?.('ops.push', { ok, via: 'discord', ...(ok ? {} : { error: 'no Discord to carry it' }) });
         return ok;
       }
       try {
+        if (opts?.beforeSend && !opts.beforeSend()) return false;
         const send = deps.fetchImpl ?? fetch;
         const res = await send(`https://api.telegram.org/bot${token}/sendMessage`, {
           method: 'POST',

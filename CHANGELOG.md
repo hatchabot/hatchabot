@@ -2,6 +2,30 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.188.1] — 2026-11-16
+
+### Upgrading
+- Close and reopen the app and existing console tabs to load the layout and rendering fixes. Agents need no rebuild.
+- Temporary move archives now have a separate folder for each database. Legacy unmarked folders are preserved because their owner cannot be established; see the troubleshooting guide before removing a retained copy.
+
+### Fixed
+- The installed phone console keeps its header clear of the status bar, respects safe areas in portrait and landscape, and fits above the keyboard. The agent switcher scrolls to its selected entry, and malformed remembered tabs no longer prevent opening a console.
+- Activity grouping shows agents active in the last hour before agents with unread messages.
+- Browser input preserves complete pasted text and Unicode characters, bounds queued requests by encoded byte size, and avoids excessive merged scroll commands. Hostnames with explicit ports work, and stalled browser relay startup or shutdown has a deadline.
+- Delayed report, channel setup, icon suggestion, reorder and archive-inspector responses cannot overwrite newer views. Completed manager suggestions keep an in-progress second-factor dialog visible.
+- Skill history handles escaped instructions and repeated failed updates, preserves customized rollback status, and refuses detached directory writes. Practice output preserves UTF-8 and retains its lifecycle lock after abnormal execution exits.
+- Console math handles Markdown strikethrough, quoted formulas and indented equation rows. Compatibility assets are inserted outside inert HTML, and rebasing preserves inline script bytes and their CSP hashes.
+- Imports initialize their records atomically, clean up thrown image-build failures and exclude concurrent builds of the same image. Exports refuse missing configured deploy keys; restore failures keep recovery held until the runtime is confirmed stopped.
+- File operations preserve newline-containing names, reject failed folder measurements and directory destinations, and use exclusive staging. Backup pruning coordinates stale-lock takeover, and move-copy cleanup stays within its database namespace.
+
+### Security
+- Console synchronization rechecks current access, owner, runtime and provider. Guest roster fallbacks remain scoped to the shared agent, and failed demotions or malformed gateway messages cannot silently succeed or escape as unhandled rejections.
+- Fresh invitations do not restore revoked elevated roles. Channel admission checks room grants, revocation removes both supported approval identity spellings, and overlapping policy writes cannot suppress the next access-policy repair.
+- Scheduled-task reads, maintenance and notifications recheck ownership and runtime context after waits. Current task state takes precedence over stale embedded run state.
+
+### Validation
+- The audit reached 50 confirmed bugs, each with regression coverage and a troubleshooting entry. The Activity-order change is tracked separately. All 7,068 tests and 376 browser checks passed, along with type, web and kit checks. Physical iPhone and live-runtime acceptance remain deployment checks before channel promotion.
+
 ## [2.188.0] — 2026-11-15
 
 ### Upgrading

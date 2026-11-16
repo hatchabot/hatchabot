@@ -13,10 +13,31 @@
  */
 const MEMO_TTL_MS = 6 * 60 * 60_000;
 const memo = new Map<string, { value: string; at: number }>();
+const assertions = new Map<string, { pending: number; changed: boolean }>();
 
 const keyOf = (t: { agentId: string; runtimeRef: string; kind: string; accountId: string }): string =>
   [t.agentId, t.runtimeRef, t.kind, t.accountId].join('\u0000');
 const valueOf = (policy: string, admit: string[]): string => `${policy}|${[...admit].sort().join(',')}`;
+
+/** Only an uninterrupted write may populate the memo. Concurrent writes can
+ * finish on the volume in either order; after an overlap or invalidation the
+ * next sweep must inspect the actual policy again. */
+export function beginDmPolicyAssertion(t: { agentId: string; runtimeRef: string; kind: string; accountId: string }): () => boolean {
+  const key = keyOf(t);
+  let state = assertions.get(key);
+  if (state) state.changed = true;
+  else { state = { pending: 0, changed: false }; assertions.set(key, state); }
+  state.pending++;
+  memo.delete(key);
+  let finished = false;
+  return () => {
+    if (finished) return false;
+    finished = true;
+    state.pending--;
+    if (!state.pending) assertions.delete(key);
+    return !state.changed;
+  };
+}
 
 export function dmPolicyAsserted(
   t: { agentId: string; runtimeRef: string; kind: string; accountId: string },
@@ -34,11 +55,15 @@ export function rememberDmPolicy(
 }
 
 export function forgetDmPolicyEntry(t: { agentId: string; runtimeRef: string; kind: string; accountId: string }): void {
-  memo.delete(keyOf(t));
+  const key = keyOf(t);
+  memo.delete(key);
+  const state = assertions.get(key);
+  if (state) state.changed = true;
 }
 
 /** Something may have rewritten this agent's channel config: assert it afresh next time. */
 export function forgetDmPolicy(agentId: string): void {
   const prefix = `${agentId}\u0000`;
   for (const k of memo.keys()) if (k.startsWith(prefix)) memo.delete(k);
+  for (const [k, state] of assertions) if (k.startsWith(prefix)) state.changed = true;
 }

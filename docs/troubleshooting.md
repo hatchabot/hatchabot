@@ -36,6 +36,358 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** `v2.187.0`
 - **Code:** `src/orchestrator/skillTrials.ts` — `describeSkillTrial`, `runSkillTrial`, `skillTrialScript`; `src/api/routes.ts` — `skillTrialNext`; `web/index.html` — `v2SkillTry`
 
+## Audit fixes in v2.188.1
+
+### The installed iPhone app hides the console header, especially while typing
+- **Check:** open Chat from the installed iPhone app, then open agent settings using the gear. The older console starts above the settings sheet, under the status bar; showing the keyboard can move it back under the status bar.
+- **Cause:** the console used a centered viewport height without the device safe insets, and its keyboard rule used an eight-pixel top margin.
+- **Fix:** the console now shares the settings sheet's top gap on phones, leaves room for the home indicator, and keeps its header below the status bar while fitting above the keyboard. Browser regressions simulate both narrow phone widths and device insets; physical-device acceptance remains separate.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `fitVisualViewport`, `console-dlg`; `scripts/ui-clickthrough.mjs` — `phoneConsoleSafeArea`
+
+### The console will not open after its remembered tab list becomes malformed
+- **Check:** the browser error reports a map or iterable failure while opening a console or the Consoles shortcut; its saved tab value is valid JSON but is not a list of agent IDs.
+- **Cause:** both opening paths trusted the parsed value's shape. Duplicate IDs also produced duplicate tabs.
+- **Fix:** validate and deduplicate saved IDs before restoring tabs. Invalid values become an empty list; a successful open saves the repaired list.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `consoleSavedTabIds`, `consoleTabFor`, `openConsoleHome`
+
+### Skill history becomes unreadable after saving large escaped instructions
+- **Check:** a skill file remains within the 64 KiB limit, but repeated updates with many backslashes or control characters make Preview or Restore previous instructions report that its history is too large.
+- **Cause:** JSON escaping can expand each stored byte sixfold; the history reader's limit was smaller than five valid saved copies.
+- **Fix:** allow the bounded worst-case encoding size of all five backups and their metadata. File-size and retained-history limits remain enforced.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/skillFiles.ts` — `skillFileScript`, `META_MAX`
+
+### Restored custom skill instructions incorrectly offer an ordinary catalog update
+- **Check:** explicitly replace a customized skill with the catalog, then restore its previous instructions. The restored custom file must be marked customized and require an explicit replacement.
+- **Cause:** a rollback baseline with no known catalog version was treated as an old catalog version eligible for ordinary Update.
+- **Fix:** unknown-version baselines remain customized. An ordinary update cannot discard the restored custom instructions.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/skillFiles.ts` — `skillFileScript`, `mutateSkillFile`
+
+### Skill practice answers contain replacement characters instead of accented text or emoji
+- **Check:** a completed practice result contains replacement characters where the runtime emitted valid UTF-8; the bytes of a character arrived in separate stdout chunks.
+- **Cause:** the runner decoded each chunk separately, losing characters split at a chunk boundary.
+- **Fix:** retain bounded stdout byte chunks and decode the complete result once. The combined stdout and stderr limit still applies.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/skillTrials.ts` — `skillTrialScript`
+
+### A failed skill practice connection allows another operation while its remote task may still run
+- **Check:** the Docker or SSH execution client exits abnormally without a timeout flag while practice is running. The operation must remain busy until the remote task's bounded deadline.
+- **Cause:** nonzero client exits released the lifecycle lock immediately, unlike thrown connection failures or explicit timeout flags.
+- **Fix:** retain the lock through the same remote deadline for every abnormal execution exit, then report unavailable. This avoids treating a lost connection as proof that the remote task stopped.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/skillTrials.ts` — `runSkillTrial`
+
+### Backup recovery says the agent stays stopped before stopping has finished
+- **Check:** Finish or Put back a held restore reaches reconfiguration, which starts the runtime and then fails. A delayed or failed stop must not be reported as already stopped.
+- **Cause:** the recovery error handlers started a stop without awaiting it or confirming the runtime state.
+- **Fix:** keep recovery busy until the stop check settles. If stopping cannot be confirmed, keep the operation held and report the unresolved runtime state so the machine can be brought back before retrying.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/backups.ts` — `recoverBackupRestore`, `confirmStopped`
+
+### Saving a core file reports success but leaves a directory at the file path
+- **Check:** the intended core file path is a directory or a symlink to a directory, and saving leaves a temporary file inside it instead of replacing the requested file.
+- **Cause:** ordinary move semantics treated the target directory as a container for the temporary file.
+- **Fix:** atomic replacements explicitly treat the destination as a file. Actual directories are refused; a destination symlink is replaced rather than followed into its directory.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/snapshots.ts` — `writeFileInAgent`
+
+### A folder download passes its size check despite a failed measurement
+- **Check:** the requested folder is a regular file, or measuring it fails after printing a partial total. The preflight must fail instead of accepting that total.
+- **Cause:** the shell pipeline returned the output formatter's success, hiding the measurement failure, and did not check that the target was a directory.
+- **Fix:** require a directory and a successful complete measurement before returning a size.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/agentFiles.ts` — `duShell`
+
+### A valid formula with repeated tilde spacing stays as raw text
+- **Check:** the original assistant formula contains repeated tildes, while Markdown has converted part of the visible formula into strikethrough.
+- **Cause:** the formula matcher accounted for Markdown emphasis but did not account for strikethrough markers removed from the visible text.
+- **Fix:** normalize those markers only when matching the visible text. KaTeX still receives the original formula, and surrounding strikethrough remains unchanged.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/control-ui-math-source.js` — `visibleMathText`; `scripts/ui-clickthrough.mjs` — `consoleMathRawTexAndLitOwnership`
+
+### Math rendering does not load in an alternate runtime's console HTML
+- **Check:** the console HTML includes script-looking text in a comment, template or raw-text element before its real scripts, or only a commented math marker. The math asset elements must be active document elements.
+- **Cause:** regular-expression insertion could place the assets inside inert HTML or mistake a commented marker for an installed adapter.
+- **Fix:** locate actual document tags while preserving upstream bytes, quoted attributes and the initial doctype. This is covered with valid alternate HTML fixtures, not a failure observed in the pinned runtime page.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/api/controlUiMath.ts` — `withControlUiMath`; `src/api/controlUiHtml.ts` — `controlUiScriptInsertionPoint`
+
+### The console's agent switcher hides its last choices above the phone keyboard
+- **Check:** open the console switcher with the phone keyboard showing and enough agents to require scrolling. The last choice or arrow-key selection must remain reachable inside the console.
+- **Cause:** the menu used half the full viewport for its list even when the keyboard had reduced the console's height; changing the selected row also reset the list without revealing it.
+- **Fix:** constrain the menu to the console's available height and scroll the selected row into view.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `cswitch`, `renderConsoleSwitcher`
+
+### Saving one core file changes a different file through a leftover temporary link
+- **Check:** an old temporary path beside the destination is a symlink or hardlink to another core file. A save must leave that other file and the old link untouched.
+- **Cause:** unconditional saves reused a fixed temporary suffix or a container PID, and shell redirection followed an existing link before the final rename.
+- **Fix:** reserve an unpredictable staging path exclusively, then clean up only that owned path on failure. Small and streamed writes both preserve the destination until the replacement is ready.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/snapshots.ts` — `writeFileInAgent`
+
+### Repeated failed skill updates remove older rollback choices
+- **Check:** retry a replacement that fails before changing the current instructions. The retained history should not fill with identical copies of those unchanged instructions.
+- **Cause:** each attempt inserted another backup of the same current content, evicting a different older copy from the five-entry history.
+- **Fix:** reuse an identical latest snapshot and retain its known catalog version when an interrupted operation has made the current version uncertain.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/skillFiles.ts` — `skillFileScript`
+
+### An alternate console's inline script fails its content-security hash after proxying
+- **Check:** an inline script contains text resembling an absolute src or href attribute; compare its bytes before and after console proxy rebasing.
+- **Cause:** global attribute replacement also rewrote JavaScript string literals, comments and lookalike attribute names.
+- **Fix:** rebase only actual HTML attributes using their source offsets. Inline scripts remain byte-for-byte intact, including CSP-protected scripts.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/api/controlUiRebase.ts` — `rebaseControlUi`; `src/api/controlUiHtml.ts` — `controlUiHtmlTags`, `controlUiHtmlAttributes`
+
+### A skill update reports success after its directory was replaced during the operation
+- **Check:** the workspace or skill directory is renamed and replaced while a preview or update is running. A changed live path must cause a conflict instead of success for the detached old directory.
+- **Cause:** open directory descriptors remained valid after a rename, so an operation could read or write the old tree without noticing that the visible path now referred elsewhere.
+- **Fix:** verify each opened directory's parent binding before reads, writes and successful completion. Refresh the preview after a conflict.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/skillFiles.ts` — `skillFileScript`, `assertDirectories`
+
+### Browser sign-in text loses emoji or the end of a long paste
+- **Check:** send text containing an emoji at a 4,000-unit boundary, type a supplementary Unicode character directly, or paste more than 4,000 units with the browser picture focused.
+- **Cause:** text chunks could split a surrogate pair, direct typing assumed one UTF-16 unit per character, and clipboard input was sliced to its first chunk.
+- **Fix:** preserve complete code points and send every bounded piece in order for both the text box and clipboard.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `bpText`, `bpTypeSend`
+
+### The browser sign-in address box refuses a hostname with a port
+- **Check:** entering example.org:8443/sign-in is rejected while its explicit HTTPS form is accepted.
+- **Cause:** the address parser mistook a hostname followed by a port for a URL scheme.
+- **Fix:** recognize hostname-and-port addresses before checking schemes, then apply the normal HTTPS default and address validation.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/browserPanel.ts` — `panelAddress`
+
+### A full agent export silently loses its configured private-repository access
+- **Check:** the agent references a repository deploy key, but the referenced secret is missing or empty. A full export must refuse before stopping or copying the source.
+- **Cause:** the export treated an unavailable configured key as though no key were configured, producing an incomplete copy.
+- **Fix:** report the missing configured credential before exporting. Repair or remove that configuration explicitly, then retry.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/transfer.ts` — `exportAgent`
+
+### Rapid scrolling makes browser sign-in input fail on a slow connection
+- **Check:** queue several scroll events while an earlier browser input request is pending. Each transmitted scroll must remain within the server's allowed delta range, and text behind it must still be accepted.
+- **Cause:** merging consecutive scroll events could exceed the per-operation limit, causing rejection of the whole batch.
+- **Fix:** merge only while both deltas remain within the limit; otherwise retain another scroll operation in order.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `bpSend`, `bpFlush`
+
+### A secret-script execution corrupts otherwise valid Unicode output
+- **Check:** the execution's stdout or stderr contains valid UTF-8 whose character bytes arrive in different chunks, but the returned text contains replacement characters.
+- **Cause:** the Docker provider decoded each output chunk independently.
+- **Fix:** use the stream's incremental UTF-8 decoder on stdout and stderr while preserving the existing execution timeout.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/providers/localDockerProvider.ts` — `execStdin`
+
+### Checking console access overwrites a file through a predictable temporary link
+- **Check:** the runtime's old console-state probe path is a link to an agent file. Checking console access must not write through that path.
+- **Cause:** the read-only probe was first written with shell redirection to a predictable temporary filename.
+- **Fix:** pass the fixed probe program through stdin instead, avoiding temporary writes and collisions between concurrent checks.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/consoleAccess.ts` — `CONSOLE_STATE_SCRIPT`
+
+### A large browser text entry fails although every piece is within its character limit
+- **Check:** send a large Unicode or heavily escaped text entry through the browser panel while input is queued. A transmitted JSON request exceeds the server's one-MiB byte limit despite containing at most 200 valid operations.
+- **Cause:** the client bounded the operation count but not the encoded request size.
+- **Fix:** split queued requests by encoded JSON bytes as well as operation count, preserving every text piece and its order.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `bpFlush`
+
+### A guest sees other agents when its permitted agent is missing from the gateway roster
+- **Check:** the gateway returns a roster that does not contain the guest's allowed agent. The guest should receive an empty roster with its own scoped defaults, not other agents' entries.
+- **Cause:** roster filtering was conditional on first finding the permitted agent, so a mismatched or stale roster bypassed filtering.
+- **Fix:** always apply the guest's scope, even when no matching entry exists, and retain only the guest's own default session identifiers.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/api/consoleProxy.ts` — `guestAgentsList`
+
+### A filename ending in a newline opens or overwrites its differently named sibling
+- **Check:** Files contains distinct entries whose names differ only by trailing newlines. Reading, uploading or archiving the selected entry must use that exact path.
+- **Cause:** shell command substitution stripped trailing newlines from resolved paths and archive path components; a folder-size formatter could also misread newline-containing output.
+- **Fix:** preserve resolved path bytes with a sentinel, split archive paths without command substitution, and return only the size field from a successful folder measurement.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/agentFiles.ts` — `guard`, `duShell`, `tarArgv`
+
+### Closing browser sign-in leaves its relay waiting indefinitely for DevTools
+- **Check:** the DevTools create-tab request, WebSocket handshake or tab-close request stops answering. Closing the panel must still terminate the relay within its bounded cleanup deadline.
+- **Cause:** shutdown listeners and deadlines were installed after asynchronous startup or cleanup completed, so a stalled request could prevent cleanup indefinitely.
+- **Fix:** register shutdown before startup, bound and abort startup requests and handshakes, and arm the process-exit deadline before tab cleanup. Synthetic tests execute the generated relay program with stalled DevTools fixtures.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/browserPanel.ts` — `PANEL_RELAY_SOURCE`
+
+### Console readiness succeeds despite failing to remove an old owner's role
+- **Check:** owner-role synchronization receives an unsuccessful or incomplete result while demoting a previous owner. It must not grant another role or report the console ready.
+- **Cause:** the demotion result was ignored before granting or accepting the current owner's role.
+- **Fix:** require confirmed successful demotion before proceeding; otherwise readiness fails and can be retried after the gateway responds normally.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/consoleAccess.ts` — `ConsoleAccess`
+
+### A malformed gateway reply or failed WebSocket send causes an unhandled rejection
+- **Check:** a console gateway call receives a null, scalar or array frame, or its WebSocket send throws during the handshake. Only that operation should fail.
+- **Cause:** the asynchronous message handler neither validated the frame's shape nor contained its rejected promise.
+- **Fix:** reject malformed frames and contain handler failures by closing and rejecting the affected operation.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/consoleAccess.ts` — `gatewayCallAs`
+
+### A delayed problem-report request replaces a newer report or erases its text
+- **Check:** begin opening or creating a report, then open another before the first request finishes. The newer selection and typed form must remain, and a save started under another account must not continue to Copy or export.
+- **Cause:** only the draft-detail read had an opening guard; delayed list, opening and creation callbacks could still alter newer state, and a saved result could cross an account change.
+- **Fix:** guard each report opening and list read, preserve the newer form, clear old draft listings, and refuse to export a delayed save after the signed-in person changes.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `openReport`, `reportLoadDrafts`, `reportCreate`, `reportSaveEdits`
+
+### A failed imported-image build leaves a permanently building or falsely ready image record
+- **Check:** importing an agent requires building a derived image, and the provider throws while preparing the build, for example on a full disk. The failed attempt must clean up its new record or mark the existing record failed.
+- **Cause:** import cleanup handled an explicit unsuccessful build result but not an exception thrown by the provider.
+- **Fix:** apply the same image-record failure cleanup to ordinary thrown build errors while preserving deliberate crash-recovery behavior.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/transfer.ts` — `buildPinned`
+
+### A multiline formula inside a Markdown quote stays as raw text
+- **Check:** a quoted assistant reply contains a display formula spanning several lines, with Markdown quote markers on those lines. Comparison operators inside the formula must remain part of the TeX.
+- **Cause:** source matching included the quote-container markers that Markdown removed from the rendered message.
+- **Fix:** remove only the opener's quote-container prefixes from subsequent formula lines, preserving real comparison operators, source positions and the surrounding quote.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/control-ui-math-source.js` — `mathExpressions`; `web/control-ui-math.js` — `enhance`
+
+### Two imports build the same derived image concurrently and overwrite each other's result
+- **Check:** begin importing two agents that need the same absent derived image, or start an image replacement while an import owns that image's build. Only one build should be admitted.
+- **Cause:** import builds did not claim the shared BUILDING record used to coordinate image state, and image routes checked only their own in-process build set.
+- **Fix:** claim the shared image row before awaiting a build and honor that claim in import and image build routes. A later request can retry after the current build settles.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/transfer.ts` — `buildPinned`; `src/api/routes.ts` — `buildingImages`
+
+### An indented multiline equation is mistaken for an indented code block
+- **Check:** a display equation continues an existing Markdown paragraph with four-space-indented TeX lines. Actual fenced or standalone indented code must remain untouched.
+- **Cause:** source scanning classified every four-space line as code, even where Markdown treats it as paragraph continuation.
+- **Fix:** track paragraph boundaries when excluding indented code, retaining TeX indentation and row separators inside a continuing formula.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/control-ui-math-source.js` — `mathExpressions`
+
+### A slow console synchronization restores access that was revoked while it waited
+- **Check:** revoke a guest, change the owner or replace the agent's runtime while its console state or profile lookup is pending. The old synchronization must stop before another configuration or role write.
+- **Cause:** synchronization retained identities and runtime/provider context captured before asynchronous reads, and its cache did not fully distinguish host/provider changes.
+- **Fix:** revalidate lifecycle, owner, provider and removed identities across waits and before subsequent mutations. Additive changes may complete a safe older pass and queue the newer synchronization.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/consoleAccess.ts` — `ConsoleAccess`
+
+### Reordering an agent changes the position controls in another agent's settings
+- **Check:** move an agent earlier or later, then open a different agent's Overview before the move finishes. The second agent's position and enabled buttons must remain its own.
+- **Cause:** the completion handler updated shared element IDs without verifying which agent's sheet was now displayed.
+- **Fix:** refresh the fleet normally, but update and focus position controls only when the original agent's Overview is still open.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `v2MoveInGroup`
+
+### Reopening the icon picker leaves Ideas disabled or displays old suggestions
+- **Check:** ask for icon ideas, close and reopen the picker for the same agent, and change the requested direction before the earlier response arrives.
+- **Cause:** the request was scoped only to the agent ID, not the dialog opening, and opening the picker did not reset its Ideas button.
+- **Fix:** scope suggestions, errors and button cleanup to their opening and signed-in person; the reopened picker can make its own explicit request.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `openV2Icon`, `v2IconIdeas`
+
+### Connecting a chat app erases a newer agent's setup form
+- **Check:** start connecting an app, then close its dialog and open setup for another agent before the first request completes. A delayed close event or response must not clear the new credentials or replace its form.
+- **Cause:** connection completion and native close cleanup used shared dialog state without checking the opening that owned them.
+- **Fix:** capture the original target and opening, ignore stale completion for the new form, cancel older polling, and let late close events leave an already reopened dialog alone. Closed setup clears both inputs and paste text.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `openChanSetup`, `chanConnect`, `chanShownGen`
+
+### A failed restore offers ordinary Retry while its runtime may still be running
+- **Check:** restore reconfiguration starts the runtime and fails, rollback cannot stop it, and the final stop also cannot be confirmed. The operation must stay held with its safety copy rather than report FAILED and stopped.
+- **Cause:** the final failure path trusted the stop request and reopened ordinary retry despite an unresolved runtime state.
+- **Fix:** verify the final stop. If it remains unconfirmed, retain the safety copy and the Finish or Put back recovery choices; resume once stopping can be confirmed.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/backups.ts` — `restoreSteps`, `confirmStopped`
+
+### Rejoining through a new invitation revives a former administrator role
+- **Check:** revoke an administrator or owner membership, then admit that account through a new ordinary-user invitation. Its restored membership must have the role granted by that invitation.
+- **Cause:** reactivation retained the revoked membership's former role instead of applying ordinary member access.
+- **Fix:** explicitly restore re-admitted memberships as users, consistent with the invitation and other re-admission paths.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/store/store.ts` — `reactivateMembership`
+
+### Slack or Discord admission reports success after a room-access write fails
+- **Check:** the room-access helper returns an unsuccessful result while admitting a new member. The member must not be created or receive a successful admission message.
+- **Cause:** admission handled thrown errors but ignored the helper's explicit false result.
+- **Fix:** treat the unsuccessful result as a failed grant and remove newly unbound direct-message approval, while preserving an existing member's access.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/members.ts` — `grantRoomAccess`
+
+### A delayed scheduled-task notification goes to an earlier owner
+- **Check:** ownership, runtime or runner changes while the task-store read or notification credential lookup is waiting; the completed read belongs to the earlier context.
+- **Cause:** background task reads retained the old owner and runtime across asynchronous work, including later maintenance writes and notifications.
+- **Fix:** recheck owner, runtime and provider after reads, before each maintenance write, and immediately before handing a notification to its transport. Obsolete results are discarded.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/api/routes.ts` — `cronReadContext`, `noteFinishedTasks`; `src/ops/push.ts` — `createOpsPush`
+
+### Starting one install deletes another install's unfinished move copy
+- **Check:** two databases have different filenames in the same data folder; starting one removes a volume archive belonging to a move in the other.
+- **Cause:** both installs used the same unmarked move-copy folder and each startup swept all its contents.
+- **Fix:** each database uses a folder named with a hash of its database filename. Startup and uninstall clean only that namespace. Unmarked legacy folders are retained because their owner cannot be proved; remove one manually only after confirming its owner and that no move uses it.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/backups.ts` — `moveCopyDir`, `sweepMoveCopies`; `scripts/uninstall.sh` — `MOVE_COPY_ID`
+
+### A revoked channel member remains in the gateway's approval store
+- **Check:** the SQLite approval store contains a channel-prefixed identity while revocation removed only its plain identity. Check the affected account, not another account's approvals.
+- **Cause:** SQLite revocation did not handle the prefixed identity spelling accepted by older gateway stores.
+- **Fix:** remove both supported identity spellings in the affected account for Telegram, Slack and Discord, while preserving approvals for other accounts.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/members.ts` — `revokeMember`; `test/memberRevocationSafety.test.ts`
+
+### Changing channel access overwrites another workspace file through a staging link
+- **Check:** an old predictable configuration staging path is a symbolic or hard link to another file; changing membership or pairing policy alters that other file.
+- **Cause:** several membership writers reused a predictable staging filename without exclusive creation.
+- **Fix:** all those writers share random, exclusively created staging files with private permissions, atomic replacement and cleanup after failure.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/members.ts` — `WRITE_JSON_ATOMIC_JS`; `test/memberConfigWritesSafety.test.ts`
+
+### Pairing stays open after overlapping policy updates
+- **Check:** an older pairing-policy write finishes after a newer allowlist write, or after a rebuild invalidates the remembered policy; the next sweep incorrectly skips applying the allowlist.
+- **Cause:** the older completion repopulated the policy memo despite concurrent writes or invalidation, so the memo no longer described the file.
+- **Fix:** remember a policy only when its write had no overlap or invalidation. Otherwise the next sweep reasserts the policy on disk.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/dmPolicyMemo.ts` — `beginDmPolicyAssertion`, `forgetDmPolicy`; `src/orchestrator/members.ts` — `setDmPolicy`
+
+### Pruning a backup races a backup process taking over a stale lock
+- **Check:** the backup lock names a dead process and another backup starts taking it over while a prune request checks it; an active set can disappear.
+- **Cause:** pruning cleared the stale lock independently of the backup script's takeover protocol.
+- **Fix:** pruning acquires the same takeover mutex and rechecks the lock owner before removing a stale lock. A live owner or active takeover prevents pruning.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/backups.ts` — `pruneBackup`; `test/backupPruneRace.test.ts`
+
+### An earlier archived-agent read replaces the current inspector with an error
+- **Check:** open one archived agent, then another before the first metadata request fails. The first error appears over the second agent's contents.
+- **Cause:** the inspector guarded some successful reads but not late errors or a later opening of the same agent.
+- **Fix:** bind metadata, file and conversation reads to the inspector opening that requested them; ignore obsolete results and errors.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `inspectGen`, `openInspect`
+
+### A scheduled task shows an old run or sends a notification for an old result
+- **Check:** the gateway's task row has current run state in its separate state column but an older embedded state in its imported job definition.
+- **Cause:** the reader preferred embedded state over the authoritative state column.
+- **Fix:** use the separate state column when present. Invalid authoritative state remains unavailable instead of falling back to an old result.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/crons.ts` — `cronStoreReadShell`; `test/taskNotes.test.ts`
+
+### Completed manager suggestions cover an in-progress second-factor dialog
+- **Check:** ask the manager for suggestions, then begin a sign-in or recovery-code step before it answers. Its console opens over that dialog.
+- **Cause:** the delayed completion opened the console without rechecking the current account or authentication dialog.
+- **Fix:** keep the sign-in dialog visible and explain where the completed suggestions are available. Ignore completion UI belonging to an earlier account session.
+- **Fixed in:** `v2.188.1`
+- **Code:** `web/index.html` — `askOpsSuggest`, `pageSecondFactorBusy`; `scripts/ui-clickthrough.mjs` — `suggestionsDoNotCoverSecondFactor`
+
+### A failed import leaves a partial agent or an agent permanently marked busy
+- **Check:** writing the initial import settings or operation row fails before provisioning begins; a partial provisioning record remains or later actions report the agent busy indefinitely.
+- **Cause:** initial records and the in-memory busy flag were set before entering the protected import rollback path.
+- **Fix:** create the initial agent, settings and operation in one database transaction, acquire the busy flag only after it commits, and run operation callbacks inside the protected rollback path.
+- **Fixed in:** `v2.188.1`
+- **Code:** `src/orchestrator/transfer.ts` — `importAgent`, `rollbackImport`; `test/transfer.test.ts`
+
 ## Install and upgrade
 
 ### Linux: every agent fails with "Could not create the agent volume", while your terminal runs `docker` fine
@@ -6481,7 +6833,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### A restore or a move of a large agent was refused at about 1 GB compressed
 - **Check:** the restore said "Its current state could not be copied first", or the move "Couldn't read the agent's state", and the log shows `maxBuffer` for that agent.
 - **Cause:** the copy of its volume was held in one Buffer in the Hatchabot process, capped at 1 GB.
-- **Fix:** upgrade. The copy now goes to a private file (`restore-safety-<install's mark>/` beside the backups for a restore, `move-copies/` in the data folder for a move, so a backup folder on a NAS plays no part in a move) and needs that much free disk there; a full disk says so and nothing is changed, whether it is the copy or the backup being staged that does not fit. Download copy still has its own limit of about 190 MB. A copy past `HATCHABOT_DOCKER_IO_TIMEOUT_MS` (15 minutes) still fails, with nothing changed; raise it for a very large agent. A move also stays under `HATCHABOT_IMPORT_MAX_GB` on the machine it goes to.
+- **Fix:** upgrade. The copy now goes to a private file (`restore-safety-<install's mark>/` beside the backups for a restore, `move-copies-<database mark>/` in the data folder for a move, so a backup folder on a NAS plays no part in a move) and needs that much free disk there; a full disk says so and nothing is changed, whether it is the copy or the backup being staged that does not fit. Download copy still has its own limit of about 190 MB. A copy past `HATCHABOT_DOCKER_IO_TIMEOUT_MS` (15 minutes) still fails, with nothing changed; raise it for a very large agent. A move also stays under `HATCHABOT_IMPORT_MAX_GB` on the machine it goes to.
 - **Fixed in:** `v2.172.0`
 - **Code:** `src/providers/localDockerProvider.ts` — `exportStateToFile`, `importStateFromFile`; `src/orchestrator/backups.ts` — `restoreAgentFromBackup`, `newMoveCopy`, `sweepMoveCopies`; `src/orchestrator/moveHost.ts` — `moveAgentToHost`
 
@@ -6530,7 +6882,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### A move was cancelled with "Couldn't read the agent's state ... ENOENT ... .tgz.part"
 - **Check:** the message or the log names a `.tgz.part` under `move-copies` or `restore-safety`, and another move or restore ended around that time, or, for `restore-safety`, another Hatchabot install shares this backup folder and started then. The source agent is untouched; a retry works.
 - **Cause:** the private folder was removed when one operation's copy left it empty, while another had made it and not yet opened its file. Two installs sharing a backup folder also shared one such folder, and one owned by another user refused the operation altogether.
-- **Fix:** upgrade: the folder stays while a copy is on its way. A move's copy goes in this install's data folder (`move-copies/`), and each install has its own `restore-safety-<mark>` folder, with the mark its backup sets carry in `.backup-owner`.
+- **Fix:** upgrade: the folder stays while a copy is on its way. A move's copy goes in this install's data folder (`move-copies-<database mark>/`), and each install has its own `restore-safety-<mark>` folder, with the mark its backup sets carry in `.backup-owner`.
 - **Fixed in:** `v2.172.0`
 - **Code:** `src/orchestrator/backups.ts` — `newMoveCopy`, `dropMoveCopy`, `dropSafetyCopy`, `sweepMoveCopies`
 
@@ -6586,7 +6938,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### After `uninstall.sh --purge`, a `move-copies` folder is left behind, with an agent's whole volume in it
 - **Check:** `ls <data folder>` shows a `move-copies` folder holding a `.tgz` or `.tgz.part`, and the data folder stayed because it is not Hatchabot's own or is also the backup folder. The service was killed during a move (uninstall stopping it is one way).
 - **Cause:** that copy is unencrypted and holds the agent's tokens. The only cleanups were in the running process and at its next boot, and after a purge there is no next boot. A purge that kept the data folder removed only the database.
-- **Fix:** upgrade: any `--purge` removes that folder, with or without `--backups`. Otherwise delete it by hand, after checking no move is running, and rotate the tokens that agent held if the disk may have been read.
+- **Fix:** `v2.188.1` and later remove only this database's `move-copies-<database mark>` folder during `--purge`, with or without `--backups`. Legacy unmarked folders and other databases' copies are retained because their ownership is unknown. Delete a retained folder by hand only after confirming it is yours and no move is running; rotate the tokens that agent held if the disk may have been read. Earlier releases removed the unmarked folder automatically.
 - **Fixed in:** `v2.172.0`
 - **Code:** `scripts/uninstall.sh`; `src/orchestrator/backups.ts` — `newMoveCopy`, `sweepMoveCopies`
 

@@ -905,7 +905,7 @@ describe('a restore keeps its safety copy on disk', () => {
 
 describe('a move carries the volume in a private file', () => {
   const base = mkdtempSync(join(root, 'moves-'));
-  const copies = join(base, 'move-copies');
+  const copies = join(base, 'move-copies-' + createHash('sha256').update('hatchabot.sqlite').digest('hex').slice(0, 16));
   const before = { db: process.env.HATCHABOT_DB, backups: process.env.HATCHABOT_BACKUP_DIR };
   const backupsGone = join(base, 'unmounted', 'share');
   beforeEach(() => { process.env.HATCHABOT_DB = join(base, 'hatchabot.sqlite'); process.env.HATCHABOT_BACKUP_DIR = backupsGone; });
@@ -993,5 +993,29 @@ describe('a move carries the volume in a private file', () => {
     expect(existsSync(copies)).toBe(false);
     expect(sweepMoveCopies()).toBe(0);
     dropMoveCopy(file); // nothing left: quietly nothing
+  });
+
+  it('a second database in the same parent folder cannot sweep another install\'s move copy', () => {
+    const first = newMoveCopy();
+    let second: string | undefined;
+    try {
+      writeFileSync(first, 'the first install is still moving this state');
+      process.env.HATCHABOT_DB = join(base, 'other-install.sqlite');
+      second = newMoveCopy();
+      writeFileSync(second, 'the second install was interrupted');
+      expect(dirname(second)).not.toBe(dirname(first));
+      expect(sweepMoveCopies()).toBe(1);
+      expect(readFileSync(first, 'utf8')).toBe('the first install is still moving this state');
+    } finally { dropMoveCopy(second); dropMoveCopy(first); }
+  });
+
+  it('keeps legacy unmarked move copies when their owner cannot be known', () => {
+    const legacy = join(base, 'move-copies');
+    mkdirSync(legacy);
+    try {
+      writeFileSync(join(legacy, 'old-copy.tgz'), 'an earlier install may still need this');
+      expect(sweepMoveCopies()).toBe(0);
+      expect(readFileSync(join(legacy, 'old-copy.tgz'), 'utf8')).toBe('an earlier install may still need this');
+    } finally { rmSync(legacy, { recursive: true, force: true }); }
   });
 });

@@ -1255,6 +1255,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       let stdout = '', stderr = '', timedOut = false;
       const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs ?? Number(process.env.HATCHABOT_DOCKER_TIMEOUT_MS ?? 60_000));
       timer.unref();
+      // Preserve multibyte characters when Docker splits a UTF-8 sequence
+      // between chunks; coercing each Buffer separately loses those bytes.
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
       child.stdout.on('data', (c) => (stdout += c));
       child.stderr.on('data', (c) => (stderr += c));
       child.on('error', (err) => { clearTimeout(timer); resolve({ code: 1, stdout, stderr: stderr + String(err) }); });

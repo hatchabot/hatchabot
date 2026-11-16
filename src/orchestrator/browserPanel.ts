@@ -59,26 +59,26 @@ const CDP = 'http://127.0.0.1:9222';
 const ALLOW = new Set(${JSON.stringify(PANEL_CDP_METHODS)});
 const out = (o) => { try { process.stdout.write(JSON.stringify(o) + '\\n'); } catch {} };
 if (typeof WebSocket !== 'function') { out({ relay: 'error', message: 'this agent runs an image too old for the panel: rebuild it on a current one' }); process.exit(3); }
-let tab;
-try { tab = await (await fetch(CDP + '/json/new?about:blank', { method: 'PUT' })).json(); }
-catch (e) { out({ relay: 'error', message: 'its browser did not answer' }); process.exit(4); }
-const ws = new WebSocket(tab.webSocketDebuggerUrl);
+let tab, ws, connecting;
 let open = false, ended = false;
+const startup = new AbortController();
 const queue = [];
-const finish = async () => {
+const finish = async (code = 0) => {
   if (ended) return; ended = true;
-  try { ws.close(); } catch {}
-  try { await fetch(CDP + '/json/close/' + tab.id); } catch {}
+  startup.abort(); clearTimeout(connecting);
+  // Arm before contacting DevTools: an unresponsive browser must not leave
+  // this exec alive after the host's Docker CLI has been killed (3 seconds).
+  const deadline = setTimeout(() => process.exit(code), 2000);
+  try { ws?.close(); } catch {}
+  try { if (tab?.id) await fetch(CDP + '/json/close/' + tab.id, { signal: AbortSignal.timeout(1500) }); } catch {}
+  clearTimeout(deadline);
   out({ relay: 'closed' });
-  setTimeout(() => process.exit(0), 100);
+  setTimeout(() => process.exit(code), 100);
 };
-ws.onopen = () => { open = true; out({ relay: 'ready' }); for (const q of queue.splice(0)) ws.send(q); };
-ws.onmessage = (m) => { if (typeof m.data === 'string') { try { process.stdout.write(m.data + '\\n'); } catch {} } };
-ws.onclose = () => { void finish(); };
-ws.onerror = () => { out({ relay: 'error', message: 'it lost its browser' }); };
 let buf = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => {
+  if (ended) return;
   buf += d;
   let i;
   while ((i = buf.indexOf('\\n')) >= 0) {
@@ -92,6 +92,21 @@ process.stdin.on('data', (d) => {
 });
 process.stdin.on('end', () => { void finish(); });
 process.stdout.on('error', () => { void finish(); });
+// Watch shutdown before the first await: closing a panel while DevTools is
+// starting must abort its request instead of leaving a detached exec behind.
+try {
+  tab = await (await fetch(CDP + '/json/new?about:blank', { method: 'PUT', signal: AbortSignal.any([startup.signal, AbortSignal.timeout(5000)]) })).json();
+  if (!ended) {
+    ws = new WebSocket(tab.webSocketDebuggerUrl);
+    connecting = setTimeout(() => { out({ relay: 'error', message: 'its browser did not answer' }); void finish(4); }, 5000);
+    ws.onopen = () => { if (ended) return; clearTimeout(connecting); open = true; out({ relay: 'ready' }); for (const q of queue.splice(0)) ws.send(q); };
+    ws.onmessage = (m) => { if (!ended && typeof m.data === 'string') { try { process.stdout.write(m.data + '\\n'); } catch {} } };
+    ws.onclose = () => { void finish(); };
+    ws.onerror = () => { out({ relay: 'error', message: 'it lost its browser' }); void finish(4); };
+  }
+} catch (e) {
+  if (!ended) { out({ relay: 'error', message: 'its browser did not answer' }); void finish(4); }
+}
 `;
 
 /** The relay as a provider runs it: one per open panel, in the agent's container. */
@@ -178,7 +193,11 @@ export function panelAddress(typed: unknown): string | undefined {
   if (typeof typed !== 'string') return undefined;
   let t = typed.trim();
   if (!t || t.length > 2048 || /\s/.test(t)) return undefined;
-  if (!/^[a-z][a-z0-9+.-]*:/i.test(t)) t = `https://${t}`;
+  // A DNS name followed by a port looks like a URI scheme to the generic
+  // scheme grammar (which permits dots). Treat that ordinary address as an
+  // HTTPS authority; URL still validates the hostname and port below.
+  const hostAndPort = /^[^/?#:@]+\.[^/?#:@]+:\d+(?:[/?#]|$)/.test(t);
+  if (hostAndPort || !/^[a-z][a-z0-9+.-]*:/i.test(t)) t = `https://${t}`;
   let u: URL;
   try { u = new URL(t); } catch { return undefined; }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return undefined;

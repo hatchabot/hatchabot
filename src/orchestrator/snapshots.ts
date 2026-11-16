@@ -151,13 +151,20 @@ export async function writeFileInAgent(
   const small = b64.length <= ARGV_SAFE_B64;
   if (!small && !provider.writeToVolume) return { code: 1, stdout: '', stderr: 'this machine cannot write a file that large into the agent' };
   if (!ifUnchanged) {
-    // tmp + mv, so a failure never leaves the file truncated.
-    if (small) return exec(`set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`);
-    return provider.writeToVolume!(runtimeRef, ['sh', '-c', 'cat > "$1.part-$$" && mv -f "$1.part-$$" "$1"', 'sh', path], Buffer.from(b64, 'base64'));
+    // A fixed .tmp (or the one-shot's repeated PID) may be an old link to
+    // another core file. Reserve our own unpredictable name exclusively;
+    // install cleanup only after that succeeds, so a collision is untouched.
+    const suffix = `.tmp-${randomUUID().replaceAll('-', '')}`;
+    const qt = `${q}${suffix}`;
+    const prepare = `T=${qt}; (set -C; : > "$T") || exit 1; trap 'rm -f -- "$T"' EXIT; trap 'exit 1' HUP INT TERM; `;
+    if (small) return exec(`set -e; ${prepare}echo ${JSON.stringify(b64)} | base64 -d > ${qt} && mv -fT -- ${qt} ${q}`);
+    return provider.writeToVolume!(runtimeRef, ['sh', '-c',
+      'set -e; T="$2"; (set -C; : > "$T") || exit 1; trap \'rm -f -- "$T"\' EXIT; trap \'exit 1\' HUP INT TERM; cat > "$T" && mv -fT -- "$T" "$1"',
+      'sh', path, `${path}${suffix}`], Buffer.from(b64, 'base64'));
   }
   const tmp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
   const qt = JSON.stringify(tmp);
-  const swap = `[ "$(sha256sum < ${q} | cut -d' ' -f1)" = ${JSON.stringify(ifUnchanged.sha256)} ] || { echo 'it changed meanwhile' >&2; exit 3; }; mv -f ${qt} ${q}`;
+  const swap = `[ "$(sha256sum < ${q} | cut -d' ' -f1)" = ${JSON.stringify(ifUnchanged.sha256)} ] || { echo 'it changed meanwhile' >&2; exit 3; }; mv -fT -- ${qt} ${q}`;
   const write = async (): Promise<ExecResult> => {
     let renamed = false;
     try {

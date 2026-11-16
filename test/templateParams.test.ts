@@ -59,7 +59,7 @@ async function world() {
  */
 function fakeVolume(provider: MockProvider, files: Map<string, string>, opts: { unreadable?: Set<string>; failWrite?: Set<string>; throwWrite?: Set<string>; landThenThrow?: Set<string> } = {}) {
   provider.execShell = async (_ref: string, script: string) => {
-    const w = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
+    const w = /echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
     const name = /\/agent\/([A-Z]+\.md)/.exec(w ? w[2]! : script)?.[1];
     if (w && name) {
       if (opts.failWrite?.has(name)) return { code: 1, stdout: '', stderr: 'No space left on device' };
@@ -880,7 +880,7 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     const writes: Array<{ path: string; text: string }> = [];
     let failAgentsMd = true;
     provider.execShell = async (ref: string, script: string, opts?: any) => {
-      const w = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
+      const w = /echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
       if (w && w[2]!.includes(`/agents/${child.slug}/`)) {
         if (w[2]!.endsWith('AGENTS.md') && failAgentsMd) { failAgentsMd = false; return { code: 1, stdout: '', stderr: 'No space left on device' }; }
         writes.push({ path: w[2]!, text: Buffer.from(w[1]!, 'base64').toString('utf8') });
@@ -925,7 +925,7 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     const shell = provider.execShell.bind(provider);
     const writes: Array<{ path: string; text: string }> = [];
     provider.execShell = async (ref: string, script: string, opts?: any) => {
-      const w = /^set -e; echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
+      const w = /echo "([^"]*)" \| base64 -d > "([^"]*)"\.tmp/.exec(script);
       if (w) { writes.push({ path: w[2]!, text: Buffer.from(w[1]!, 'base64').toString('utf8') }); return { code: 0, stdout: '', stderr: '' }; }
       // The master's SOUL.md is there and empty; its AGENTS.md has text.
       if (script.startsWith('head -c') && script.includes('/agents/mine/agent/SOUL.md')) return { code: 0, stdout: '', stderr: 'hatchabot:empty-file\n' };

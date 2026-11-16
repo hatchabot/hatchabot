@@ -53,6 +53,19 @@ c_3 & d_4
     expect(tex('[value $x$] and > $y$\n- $z$')).toEqual(['x', 'y', 'z']);
   });
 
+  it('separates Markdown quote prefixes from multiline TeX while preserving comparison signs and source ranges', () => {
+    for (const quote of ['> ', '> > ', '  > ']) {
+      const source = `${quote}$$\n${quote}x_i > 0 \\\\\n${quote}y_i < 1\n${quote}$$`;
+      const found = mathExpressions(source);
+      expect(found).toHaveLength(1);
+      expect(found[0]!.tex).toBe('\nx_i > 0 \\\\\ny_i < 1\n');
+      expect(found[0]!.raw).toBe(source.slice(found[0]!.start, found[0]!.end));
+      expect(found[0]!.signature).toBe(visibleMathText('$$\nx_i > 0 \\\\\ny_i < 1\n$$'));
+    }
+    expect(tex('> \\[\n> a > b\n> \\]')).toEqual(['\na > b\n']);
+    expect(tex('$$\na > b\n> c\n$$')).toEqual(['\na > b\n> c\n']);
+  });
+
   it('treats angle signs and brackets inside a formula as original TeX', () => {
     expect(tex(String.raw`$$x<y>z$$ and $\text{[x](y)}$`)).toEqual(['x<y>z', String.raw`\text{[x](y)}`]);
     expect(tex('$2+2$ and $2-1=1$')).toEqual(['2+2', '2-1=1']);
@@ -79,6 +92,18 @@ c_3 & d_4
     expect(tex('$$x\n\ny$$')).toEqual(['x\n\ny']);
   });
 
+  it('keeps indented TeX in a display paragraph while excluding real indented code', () => {
+    const body = String.raw`\begin{aligned}
+    x &= 1 \\
+    y &= 2
+\end{aligned}`;
+    expect(tex(`$$\n${body}\n$$`)).toEqual([`\n${body}\n`]);
+    expect(tex('Intro\n    $x_i$\n\n    $code$\n\n$real$')).toEqual(['x_i', 'real']);
+    expect(tex('# Heading\n    $code$\n\n$real$')).toEqual(['real']);
+    expect(tex('Heading\n--\n    $code$\n\n$real$')).toEqual(['real']);
+    expect(tex('Paragraph\n\n    $code$\n    $still_code$\n\n$real$')).toEqual(['real']);
+  });
+
   it('keeps repeated expressions separate and preserves normalized ambiguities for the adapter', () => {
     const found = mathExpressions('$a_b$ $ab$ $a_b$');
     expect(found.map((entry) => entry.tex)).toEqual(['a_b', 'ab', 'a_b']);
@@ -89,6 +114,14 @@ c_3 & d_4
     const source = String.raw`\[ A_{β} * \\ Ω + 2 \]`;
     expect(visibleMathText(source)).toBe('[A{β}Ω+2]');
     expect(Array.from(source, (ch) => visibleMathText(ch)).join('')).toBe(visibleMathText(source));
+  });
+
+  it('matches TeX spacing that Markdown interprets as strikethrough without losing the TeX', () => {
+    const found = mathExpressions('$$a~~b~~c$$');
+    expect(found).toHaveLength(1);
+    expect(found[0]!.tex).toBe('a~~b~~c');
+    expect(found[0]!.signature).toBe(visibleMathText('$$abc$$'));
+    expect(Array.from(found[0]!.raw, (ch) => visibleMathText(ch)).join('')).toBe(found[0]!.signature);
   });
 
   it('bounds malformed, oversized and repeated source without executing authored content', () => {

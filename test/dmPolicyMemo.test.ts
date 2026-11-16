@@ -53,6 +53,62 @@ describe('the DM-policy memo', () => {
     expect(volumeRuns()).toBe(2);
   });
 
+  it('an older completion cannot replace a newer policy memo and leave pairing open', async () => {
+    const original = provider.execShellOnVolume.bind(provider);
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    let livePolicy = '';
+    provider.execShellOnVolume = async (runtimeRef, script, options) => {
+      const call = ++calls;
+      const result = await original(runtimeRef, script, options);
+      livePolicy = script.includes('"policy":"pairing"') ? 'pairing' : 'allowlist';
+      if (call === 1) await delayed;
+      return result;
+    };
+    const older = rest(['1001']);
+    await Promise.resolve();
+    await rest(['1001'], 'pairing');
+    expect(livePolicy).toBe('pairing');
+    release();
+    await older;
+    await rest(['1001']);
+    expect(calls).toBe(3);
+    expect(livePolicy).toBe('allowlist');
+  });
+
+  it('an in-flight assertion cannot repopulate the memo after a rebuild invalidated it', async () => {
+    const original = provider.execShellOnVolume.bind(provider);
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => { release = resolve; });
+    let first = true;
+    provider.execShellOnVolume = async (runtimeRef, script, options) => {
+      const result = await original(runtimeRef, script, options);
+      if (first) { first = false; await delayed; }
+      return result;
+    };
+    const pending = rest(['1001']);
+    await Promise.resolve();
+    forgetDmPolicy(AGENT);
+    release();
+    await pending;
+    await rest(['1001']);
+    expect(volumeRuns()).toBe(2);
+  });
+
+  it('a rejected transport releases its assertion so a later successful write can be remembered', async () => {
+    const original = provider.execShellOnVolume.bind(provider);
+    let first = true;
+    provider.execShellOnVolume = async (runtimeRef, script, options) => {
+      if (first) { first = false; throw new Error('fixture transport lost'); }
+      return original(runtimeRef, script, options);
+    };
+    await expect(rest(['1001'])).rejects.toThrow('fixture transport lost');
+    await rest(['1001']);
+    await rest(['1001']);
+    expect(volumeRuns()).toBe(1);
+  });
+
   it('granting someone access writes the config, so the next rest runs', async () => {
     await rest(['1001']);
     await grantChannelAccess(deps(), { agentId: AGENT, runtimeRef: ref, kind: 'telegram', accountId: 'bot1', channelUserId: '1001' });

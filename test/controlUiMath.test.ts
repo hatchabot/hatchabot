@@ -90,4 +90,39 @@ describe('Control UI math document injection', () => {
     expect(out).toContain('/x&quot;&lt;&amp;&gt;/__hatchabot/math/katex.min.js');
     expect(out).toContain('<script>window.literal = "keep me";</script>');
   });
+
+  it.each([
+    '<!-- example <script data-hatchabot-math>ignored</script> -->',
+    '<template><script data-hatchabot-math>inert</script></template>',
+    '<template><template><script>nested</script></template></template>',
+    '<style>body::before{content:"<script data-hatchabot-math>"}</style>',
+    '<textarea><script data-hatchabot-math>literal</script></textarea>',
+    '<title>How a <script> works</title>',
+  ])('injects outside inert markup without changing it: %s', (inert) => {
+    const app = '<script type="module" src="/app.js"></script>';
+    const page = `<!doctype html><html><head>${inert}${app}</head><body>Chat</body></html>`;
+    const out = withControlUiMath(page, prefix);
+    expect(out).toContain(inert);
+    expect(out.indexOf(KATEX_STYLES_PATH)).toBeGreaterThan(out.indexOf(inert) + inert.length);
+    expect(out.indexOf(CONTROL_UI_MATH_SCRIPT_PATH)).toBeLessThan(out.indexOf(app));
+    expect(out.startsWith('<!doctype html>')).toBe(true);
+    expect(withControlUiMath(out, prefix)).toBe(out);
+  });
+
+  it('does not read a quoted attribute value as an installed adapter marker', () => {
+    const app = '<script data-description="example > data-hatchabot-math" src="/app.js"></script>';
+    const out = withControlUiMath(`<head>${app}</head>`, prefix);
+    expect(out).toContain(app);
+    expect(out.indexOf(CONTROL_UI_MATH_SCRIPT_PATH)).toBeLessThan(out.indexOf(app));
+    expect(withControlUiMath(out, prefix)).toBe(out);
+  });
+
+  it('preserves the leading doctype without an explicit head or script', () => {
+    for (const page of ['<!doctype html><html><body>Chat</body></html>', '<!DOCTYPE html><html>Chat</html>']) {
+      const out = withControlUiMath(page, prefix);
+      expect(out.slice(0, 15).toLowerCase()).toBe('<!doctype html>');
+      expect(out).toContain(CONTROL_UI_MATH_SCRIPT_PATH);
+      expect(withControlUiMath(out, prefix)).toBe(out);
+    }
+  });
 });

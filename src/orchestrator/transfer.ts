@@ -21,7 +21,7 @@ import {
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
-import { beginOperation, handleFor, rethrowIfCrash } from './operations.js';
+import { beginOperation, forgetFilesReplacing, handleFor, rethrowIfCrash } from './operations.js';
 import { ENV_NAME_RE, envValueProblem, MAX_IMPORTED_ENV_VARS, reservedEnvProblem } from './envPolicy.js';
 import { buildRecipeOn, derivedByTag, recipeFor, recipeProblem, type ImageRecipe } from './imageRecipe.js';
 import { DERIVED_TAG_PREFIX } from './derivedImage.js';
@@ -491,7 +491,13 @@ export async function exportAgent(
       ...(d.repoUrl ? { repoUrl: d.repoUrl } : {}), ...(d.pubKey ? { pubKey: d.pubKey } : {}) };
     if (d.kind === 'git' && d.secretRef) {
       const key = await secrets.get(d.secretRef).catch(() => undefined);
-      if (key) row.deployKey = key;
+      if (!key) {
+        throw new TransferError(
+          `Repo "${d.mountName}" has no stored deploy key, so this copy could not reconnect it. ` +
+            'Fix its connection in Data, then export again.',
+        );
+      }
+      row.deployKey = key;
     }
     dataSources.push(row);
   }
@@ -718,13 +724,29 @@ async function buildPinned(deps: ProvisionDeps, recipe: ImageRecipe, ownerId: st
   const { store, provider } = deps;
   const name = recipe.tag.split(':')[1]!;
   const derivedName = name.startsWith(DERIVED_TAG_PREFIX) ? name.slice(DERIVED_TAG_PREFIX.length) : undefined;
-  const newRecord = !!derivedName && !store.getDerivedImage(derivedName);
+  const existing = derivedName ? store.getDerivedImage(derivedName) : undefined;
+  // Another import or the Images page may have taken this name since the
+  // preflight. Claim the shared BUILDING record before any provider await,
+  // so one failed build cannot delete another build's successful record.
+  if (existing?.status === 'BUILDING') throw new TransferError(`The image ${recipe.tag} is already building. Wait for it to finish, then import again.`);
+  if (existing && (existing.tag !== recipe.tag || existing.base !== recipe.base || existing.dockerfile.trim() !== (recipe.lines ?? '').trim())) {
+    throw new TransferError(`A different image already has the name ${derivedName}. Import using the default image instead.`);
+  }
+  const newRecord = !!derivedName && !existing;
   if (newRecord) {
     // So it shows among this machine's images, and travels again from here.
     store.upsertDerivedImage({ name: derivedName!, tag: recipe.tag, base: recipe.base, dockerfile: recipe.lines ?? '', createdBy: ownerId });
+  } else if (derivedName) {
+    store.setDerivedImageStatus(derivedName, 'BUILDING', null);
   }
   deps.log?.('import.image_build', { image: recipe.tag });
-  const got = await buildRecipeOn(provider, recipe);
+  // The provider can throw before it has a build result (for example, a
+  // full disk while creating the build context). Settle the image record
+  // through the same cleanup as a Docker build that returned a failure.
+  const got = await buildRecipeOn(provider, recipe).catch((err: unknown) => {
+    rethrowIfCrash(err);
+    return { ok: false as const, problem: String(err instanceof Error ? err.message : err).slice(0, 800) };
+  });
   if (!got.ok) {
     // The import rolls back completely; a record for an image that never
     // existed would not (found by the 26th audit).
@@ -914,41 +936,50 @@ async function importAgentInner(
   // meanwhile, and an agent placed on it was stranded (HB-0275).
   if (!store.getHost(host.id)) throw new TransferError('The machine it was going to was removed meanwhile. Import it again onto another.');
   // And its source, deleted meanwhile: refused, not an agent on nothing (HB-0570).
-  store.insertAgentOnSource(agent);
-  if (manifest.agent.curatedSkills !== undefined) store.setAgentCuratedSkills(agent.id, manifest.agent.curatedSkills);
-  if (image.pin) store.setAgentImage(agent.id, image.pin);
-  // Before provisioning reads them: the container is made with these limits.
-  const limits = importedLimits(manifest.agent, !!opts.mayBuild);
-  if (limits.memoryCap) store.setAgentMemoryCap(agent.id, limits.memoryCap);
-  if (limits.swapAllowance) store.setAgentSwapAllowance(agent.id, limits.swapAllowance);
-  // Before provisioning reads them too: the switches go into the runtime
-  // config it writes over the restored one (audit #007), and the setup layer
-  // keeps the copy re-configurable (audit #005).
-  const sw = manifest.agent.switches ?? {};
-  if (sw.browser) store.setAgentBrowser(agent.id, true);
-  if (sw.cronTriggers) store.setAgentCronTriggers(agent.id, true);
-  if (sw.richMessages !== undefined) store.setAgentRichMessages(agent.id, sw.richMessages);
-  if (sw.groupAccess) store.setAgentGroupAccess(agent.id, sw.groupAccess);
-  if (sw.filesMaxMb) store.setAgentFilesMaxMb(agent.id, sw.filesMaxMb);
-  const setup = manifest.agent.setup;
-  if (setup) {
-    store.setAgentParameters(agent.id, setup.parameters);
-    store.setAgentParamState(agent.id, setup.values ?? null, setup.files ?? null);
+  let op: ReturnType<typeof beginOperation>;
+  try {
+    // The agent, its settings and its recovery record are one database
+    // change. A disk-full failure here must leave neither a half-imported
+    // row nor a busy flag with no operation capable of clearing it.
+    op = store.transact(() => {
+      store.insertAgentOnSource(agent);
+      if (manifest.agent.curatedSkills !== undefined) store.setAgentCuratedSkills(agent.id, manifest.agent.curatedSkills);
+      if (image.pin) store.setAgentImage(agent.id, image.pin);
+      // Before provisioning reads them: the container is made with these limits.
+      const limits = importedLimits(manifest.agent, !!opts.mayBuild);
+      if (limits.memoryCap) store.setAgentMemoryCap(agent.id, limits.memoryCap);
+      if (limits.swapAllowance) store.setAgentSwapAllowance(agent.id, limits.swapAllowance);
+      // The switches go into the config written over the restored one; the
+      // setup layer keeps the imported copy re-configurable.
+      const sw = manifest.agent.switches ?? {};
+      if (sw.browser) store.setAgentBrowser(agent.id, true);
+      if (sw.cronTriggers) store.setAgentCronTriggers(agent.id, true);
+      if (sw.richMessages !== undefined) store.setAgentRichMessages(agent.id, sw.richMessages);
+      if (sw.groupAccess) store.setAgentGroupAccess(agent.id, sw.groupAccess);
+      if (sw.filesMaxMb) store.setAgentFilesMaxMb(agent.id, sw.filesMaxMb);
+      const setup = manifest.agent.setup;
+      if (setup) {
+        store.setAgentParameters(agent.id, setup.parameters);
+        store.setAgentParamState(agent.id, setup.values ?? null, setup.files ?? null);
+      }
+      // A restart before RUNNING undoes the whole import (resumeImport).
+      return beginOperation(store, 'import', agent.id, { slug: agent.slug, hostId: host.id, from: manifest.exportedAt }, { hostId: host.id, requestedBy: opts.requestedBy ?? opts.ownerId });
+    });
+  } catch (err) {
+    forgetFilesReplacing(agent.id);
+    throw err;
   }
-  const dropped = (['setup', 'switches', 'app'] as const).filter((k) => (raw as { agent?: Record<string, unknown> }).agent?.[k] !== undefined && manifest.agent[k] === undefined);
-  if (dropped.length) log('import.parts_dropped', { agentId: agent.id, parts: dropped });
   // From here the agent exists but is mid-build: reconcile must not judge it.
   markBusy(agent.id);
-  // On disk too: a restart before RUNNING undoes the whole import
-  // (resumeImport) — a half-imported volume must never start.
-  const op = beginOperation(store, 'import', agent.id, { slug: agent.slug, hostId: host.id, from: manifest.exportedAt }, { hostId: host.id, requestedBy: opts.requestedBy ?? opts.ownerId });
-  opts.onOperation?.(op.id);
 
   const secretRef = importSecretRef(agent.id);
   // Every secret this import makes (env values, deploy keys): rollback deletes them.
   const envSecretRefs: string[] = [];
   let runtimeRef: string | undefined;
   try {
+    opts.onOperation?.(op.id);
+    const dropped = (['setup', 'switches', 'app'] as const).filter((k) => (raw as { agent?: Record<string, unknown> }).agent?.[k] !== undefined && manifest.agent[k] === undefined);
+    if (dropped.length) log('import.parts_dropped', { agentId: agent.id, parts: dropped });
     // Its data sources come back before the spec is built (the repos are cloned
     // by the seed, the folders mounted). A folder only when the same path is here
     // and safe to share — a different machine's path is not quietly mounted. And only for the

@@ -3,7 +3,7 @@
   // Matching only: Markdown may consume escapes/emphasis before the DOM adapter
   // sees them. Never use this lossy signature as the expression sent to KaTeX.
   function visibleMathText(text) {
-    return typeof text === 'string' ? text.replace(/[\\_*\s]/g, '') : '';
+    return typeof text === 'string' ? text.replace(/[\\_*~\s]/g, '') : '';
   }
 
   function mathExpressions(source) {
@@ -18,7 +18,7 @@
     const references = new Set();
     const mark = (start, end) => excluded.fill(1, start, end);
     const reference = (text) => text.trim().replace(/\s+/g, ' ').toLowerCase();
-    let fence = null;
+    let fence = null, paragraph = false;
     for (let start = 0; start < source.length;) {
       const newline = source.indexOf('\n', start);
       const end = newline < 0 ? source.length : newline + 1;
@@ -29,17 +29,28 @@
       const opening = /^ {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/.exec(body);
       if (fence) {
         mark(start, end);
+        paragraph = false;
         if (opening && opening[1][0] === fence.char && opening[1].length >= fence.length && !opening[2].trim()) fence = null;
       } else if (opening && (opening[1][0] !== '`' || !opening[2].includes('`'))) {
         fence = { char: opening[1][0], length: opening[1].length };
         mark(start, end);
-      } else if (/^(?: {4}| {0,3}\t)/.test(body)) {
+        paragraph = false;
+      } else if (!body.trim()) {
+        paragraph = false;
+      } else if (!paragraph && /^(?: {4}| {0,3}\t)/.test(body)) {
         mark(start, end);
       } else {
         const definition = /^ {0,3}\[([^\]]+)\]:/.exec(body);
         if (definition) {
           references.add(reference(definition[1]));
           mark(start, end);
+          paragraph = false;
+        } else {
+          // Indented code cannot interrupt a paragraph (CommonMark 4.4).
+          // Display TeX commonly indents aligned/matrix rows inside one.
+          const heading = /^ {0,3}#{1,6}(?:[ \t]|$)/.test(body);
+          const separator = /^ {0,3}(?:(?:=+|-+)[ \t]*|(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(body);
+          paragraph = !heading && !separator;
         }
       }
       start = end;
@@ -81,13 +92,24 @@
         if (!display && source[end] === '\n') break;
       }
       if (end >= source.length || excluded[end] || end - contentStart > 8192 || !source.startsWith(close, end)) return null;
-      const tex = source.slice(contentStart, end);
+      let tex = source.slice(contentStart, end);
+      if (display && tex.includes('\n')) {
+        // Markdown removes its blockquote containers before displaying the
+        // formula. Remove exactly the opener's quote depth from later lines;
+        // comparison signs inside TeX (including an extra leading >) stay.
+        const lineStart = source.lastIndexOf('\n', start - 1) + 1;
+        const quote = /^(?: {0,3}>[ \t]?)+/.exec(source.slice(lineStart, start));
+        if (quote) {
+          const depth = (quote[0].match(/>/g) || []).length;
+          tex = tex.replace(new RegExp('\\n(?: {0,3}>[ \\t]?){' + depth + '}', 'g'), '\n');
+        }
+      }
       if (!tex.trim() || tex.includes('`')) return null;
       // Inline dollars follow common math delimiter rules. Pure monetary values
       // and price ranges remain prose even when another dollar appears nearby.
       if (open === '$' && (/\s/.test(tex.at(-1)) || /\d/.test(source[end + 1] || '') || /^[+-]?\d[\d,.]*(?:\s*[-−–—]\s*(?:\d[\d,.]*)?)?$/.test(tex))) return null;
       const raw = source.slice(start, end + close.length);
-      return { tex, raw, display, open, close, start, end: end + close.length, signature: visibleMathText(raw) };
+      return { tex, raw, display, open, close, start, end: end + close.length, signature: visibleMathText(open + tex + close) };
     }
 
     // Skip Markdown containers only outside formulas: brackets or angle signs

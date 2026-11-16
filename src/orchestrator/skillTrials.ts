@@ -64,14 +64,15 @@ function loadFile(file) {
 }
 function child(args,env,ms) {
   return new Promise(resolve=>{
-    let out='', bytes=0, timedOut=false, capped=false, done=false, force;
+    const chunks=[];
+    let bytes=0, timedOut=false, capped=false, done=false, force;
     const proc=cp.spawn('openclaw',args,{env,stdio:['ignore','pipe','pipe'],detached:true,cwd:root});
     const kill=signal=>{ if(proc.pid) {try {process.kill(-proc.pid,signal);} catch {try {proc.kill(signal);}catch{}}} };
     const stop=()=>{kill('SIGTERM');force=setTimeout(()=>kill('SIGKILL'),1500);};
     const timer=setTimeout(()=>{timedOut=true;stop();},ms);
-    const collect=(chunk,stdout)=>{ bytes+=chunk.length; if(bytes>512*1024){if(!capped){capped=true;stop();}return;} if(stdout)out+=chunk.toString('utf8'); };
+    const collect=(chunk,stdout)=>{ bytes+=chunk.length; if(bytes>512*1024){if(!capped){capped=true;stop();}return;} if(stdout)chunks.push(chunk); };
     proc.stdout.on('data',x=>collect(x,true)); proc.stderr.on('data',x=>collect(x,false));
-    const finish=code=>{if(done)return;done=true;clearTimeout(timer);clearTimeout(force);kill('SIGKILL');resolve({code,out,timedOut,capped});};
+    const finish=code=>{if(done)return;done=true;clearTimeout(timer);clearTimeout(force);kill('SIGKILL');resolve({code,out:Buffer.concat(chunks).toString('utf8'),timedOut,capped});};
     proc.on('error',()=>finish(-1));proc.on('close',code=>finish(code));
   });
 }
@@ -152,7 +153,10 @@ export async function runSkillTrial(provider: Pick<RuntimeProvider, 'execShell'>
     if (outcome.kind === 'deadline') return empty('timeout');
     if (outcome.kind === 'lost') { await deadline; return empty('unavailable'); }
     raw = outcome.raw;
-    if (raw.timedOut || raw.unreachable || raw.signalled) {
+    // A Docker/SSH exec client can exit nonzero without a timeout/signal flag
+    // while its remote command keeps running. Our script reports its handled
+    // failures as JSON with exit 0, so an abnormal exit is still uncertain.
+    if (raw.code !== 0 || raw.timedOut || raw.unreachable || raw.signalled) {
       await deadline;
       return empty(raw.timedOut ? 'timeout' : 'unavailable');
     }

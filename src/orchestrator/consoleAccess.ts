@@ -133,27 +133,37 @@ export async function gatewayCallAs(
     ws.onerror = () => done(() => reject(new Error('could not reach the gateway')));
     ws.onclose = (e: { code?: number; reason?: string }) => done(() => reject(new Error(`the gateway closed the connection (${e?.code ?? ''} ${e?.reason ?? ''})`)));
     ws.onmessage = async (ev: { data: unknown }) => {
-      let f: any; try { f = JSON.parse(String(ev.data)); } catch { return; }
-      if (f.type === 'event' && f.event === 'connect.challenge') {
-        const hello = await call('connect', {
-          minProtocol: 4, maxProtocol: 4,
-          client: { id: 'gateway-client', version: 'hatchabot', platform: process.platform, mode: 'backend', displayName: 'Hatchabot' },
-          role: 'operator', scopes: [], caps: [],
-        });
-        if (!hello.ok) { ws.onclose = null; done(() => reject(new Error(`refused: ${hello.error?.message ?? hello.error?.code ?? 'unknown'}`))); return; }
-        const scopes: string[] = Array.isArray(hello.payload?.auth?.scopes) ? hello.payload.auth.scopes : [];
-        const results: Array<{ ok: boolean; payload?: any; error?: any }> = [];
-        for (const [m, p] of calls) {
-          const r = await call(m, p);
-          results.push({ ok: !!r.ok, payload: r.payload, error: r.error });
+      try {
+        let f: any; try { f = JSON.parse(String(ev.data)); } catch { return; }
+        if (!f || typeof f !== 'object' || Array.isArray(f)) {
+          done(() => reject(new Error('the gateway sent an invalid response')));
+          return;
         }
-        ws.onclose = null;
-        done(() => resolve({ scopes, results }));
-        return;
-      }
-      if (f.type === 'res' && pending.has(f.id)) {
-        if (f.ok && f.payload?.status === 'accepted') return;
-        const r = pending.get(f.id)!; pending.delete(f.id); r(f);
+        if (f.type === 'event' && f.event === 'connect.challenge') {
+          const hello = await call('connect', {
+            minProtocol: 4, maxProtocol: 4,
+            client: { id: 'gateway-client', version: 'hatchabot', platform: process.platform, mode: 'backend', displayName: 'Hatchabot' },
+            role: 'operator', scopes: [], caps: [],
+          });
+          if (!hello.ok) { ws.onclose = null; done(() => reject(new Error(`refused: ${hello.error?.message ?? hello.error?.code ?? 'unknown'}`))); return; }
+          const scopes: string[] = Array.isArray(hello.payload?.auth?.scopes) ? hello.payload.auth.scopes : [];
+          const results: Array<{ ok: boolean; payload?: any; error?: any }> = [];
+          for (const [m, p] of calls) {
+            const r = await call(m, p);
+            results.push({ ok: !!r.ok, payload: r.payload, error: r.error });
+          }
+          ws.onclose = null;
+          done(() => resolve({ scopes, results }));
+          return;
+        }
+        if (f.type === 'res' && pending.has(f.id)) {
+          if (f.ok && f.payload?.status === 'accepted') return;
+          const r = pending.get(f.id)!; pending.delete(f.id); r(f);
+        }
+      } catch {
+        // WebSocket dispatch does not await async handlers. A send failure or
+        // malformed frame must reject this operation, never the whole process.
+        done(() => reject(new Error('the gateway could not complete the console handshake')));
       }
     };
   });
@@ -221,8 +231,8 @@ export interface RoomPromise {
  */
 export class ConsoleAccess {
   readonly #deps: ConsoleAccessDeps;
-  readonly #state = new Map<string, { key: string; at: number; state: ConsoleState | undefined }>();
-  readonly #ready = new Map<string, { key: string; at: number }>();
+  readonly #state = new Map<string, { key: string; provider: RuntimeProvider; at: number; state: ConsoleState | undefined }>();
+  readonly #ready = new Map<string, { key: string; provider: RuntimeProvider; at: number }>();
   /** One run per agent at a time, keyed by the list of people it was started for. */
   readonly #inflight = new Map<string, { key: string; p: Promise<ConsoleReady> }>();
   readonly #named = new Map<string, number>();
@@ -239,15 +249,17 @@ export class ConsoleAccess {
   /** What the agent's gateway was built with (cached briefly). */
   async state(agent: Agent): Promise<ConsoleState | undefined> {
     if (!agent.runtimeRef || agent.state !== 'RUNNING') return undefined;
-    const key = `${agent.runtimeRef}|${agent.updatedAt}`;
+    const key = `${agent.hostId}|${agent.runtimeRef}|${agent.updatedAt}`;
+    const provider = this.#deps.providerFor(agent.hostId);
     const c = this.#state.get(agent.id);
-    if (c && c.key === key && Date.now() - c.at < 15_000) return c.state;
-    const b64 = Buffer.from(CONSOLE_STATE_SCRIPT, 'utf8').toString('base64');
-    const res = await this.#deps.providerFor(agent.hostId)
-      .execShell(agent.runtimeRef, `echo ${b64} | base64 -d > /tmp/hb-console-state.cjs && node /tmp/hb-console-state.cjs; rc=$?; rm -f /tmp/hb-console-state.cjs; exit $rc`, { timeoutMs: 15_000 })
+    if (c && c.key === key && c.provider === provider && Date.now() - c.at < 15_000) return c.state;
+    const res = await provider
+      // Run the fixed probe over stdin: a shared temporary filename could
+      // follow an agent-created symlink or disappear under another reader.
+      .execShell(agent.runtimeRef, `node - <<'HB_CONSOLE_STATE_JS'\n${CONSOLE_STATE_SCRIPT}\nHB_CONSOLE_STATE_JS`, { timeoutMs: 15_000 })
       .catch(() => undefined);
     const state = res && res.code === 0 ? parseConsoleState(res.stdout) : undefined;
-    this.#state.set(agent.id, { key, at: Date.now(), state });
+    this.#state.set(agent.id, { key, provider, at: Date.now(), state });
     return state;
   }
 
@@ -321,26 +333,42 @@ export class ConsoleAccess {
 
   async #ensure(agent: Agent, why: ConsoleSyncReason): Promise<ConsoleReady> {
     if (!agent.gatewayToken) return { mode: 'unavailable', reason: 'no console' };
+    const provider = this.#deps.providerFor(agent.hostId);
     const want = consoleAllowUsers(this.#deps.store, agent, agent.gatewayToken);
+    // Access can be revoked while a Docker probe or gateway call is pending.
+    // Additions may finish this safe older pass and queue their own sync; a
+    // removal or lifecycle change must stop any subsequent privileged writes.
+    const current = () => {
+      const fresh = this.#deps.store.getAgent(agent.id);
+      if (!fresh || fresh.state !== 'RUNNING' || fresh.ownerId !== agent.ownerId || fresh.hostId !== agent.hostId ||
+          fresh.runtimeRef !== agent.runtimeRef || fresh.gatewayToken !== agent.gatewayToken || fresh.updatedAt !== agent.updatedAt) return false;
+      try { if (this.#deps.providerFor(fresh.hostId) !== provider) return false; } catch { return false; }
+      const allowed = new Set(consoleAllowUsers(this.#deps.store, fresh, fresh.gatewayToken!));
+      return want.every((identity) => allowed.has(identity));
+    };
+    const changed = (): ConsoleReady => ({ mode: 'unavailable', reason: 'its console access changed while preparing it; try again', identity: true });
+    if (!current()) return changed();
     const readyKey = `${agent.hostId}|${agent.runtimeRef}|${agent.updatedAt}|${createHash('sha256').update(want.join(',')).digest('hex')}`;
     const r = this.#ready.get(agent.id);
     // A minute at most: a rebuild by another release, or a hand edit, is noticed soon.
-    if (r && r.key === readyKey && Date.now() - r.at < 60_000) return { mode: 'identity' };
+    if (r && r.key === readyKey && r.provider === provider && Date.now() - r.at < 60_000) return { mode: 'identity' };
     const state = await this.state(agent);
+    if (!current()) return changed();
     if (!state) return { mode: 'unavailable', reason: 'its gateway settings could not be read' };
     if (state.mode === 'token') return { mode: 'token' };
-    const provider = this.#deps.providerFor(agent.hostId);
     const trace = this.#deps.trace?.(agent.id);
     const batch = consoleSyncBatch(state, want);
     // Names the gateway does not admit yet: the reload must have landed before they connect.
     const added = want.filter((u) => !state.allowUsers.includes(u));
     if (batch) {
       const res = await provider.exec(agent.runtimeRef!, ['config', 'set', '--batch-json', JSON.stringify(batch), '--replace'], { timeoutMs: 60_000 });
+      if (!current()) return changed();
       trace?.('console.names_synced', { ok: res.code === 0, names: want.length, paths: batch.map((b) => b.path), why });
       this.#state.delete(agent.id);
       if (res.code !== 0) return { mode: 'unavailable', reason: 'its gateway would not take the list of people', identity: true };
     }
     const gw = await this.#deps.gatewayAddr(agent);
+    if (!current()) return changed();
     if (!gw) return { mode: 'unavailable', reason: 'its gateway is not reachable', identity: true };
     const owner = consoleIdentity(agent.gatewayToken, 'owner', agent.ownerId);
     if (batch && added.length) {
@@ -348,7 +376,7 @@ export class ConsoleAccess {
       // name is still refused — the "unauthorized" a new guest's first open
       // met. Wait until the gateway admits one of them (a connection with no
       // device and no scopes: it reads nothing and changes nothing).
-      if (!(await this.#admitted(gw, added.find((u) => u !== owner) ?? added[0]!))) {
+      if (!(await this.#admitted(gw, added.find((u) => u !== owner) ?? added[0]!, current))) {
         trace?.('console.unavailable', { reason: 'the new list of people did not take effect in time' });
         return { mode: 'unavailable', reason: 'its gateway did not take the new list of people in time — try again in a moment', identity: true };
       }
@@ -359,8 +387,10 @@ export class ConsoleAccess {
     let lastErr = '';
     for (let i = 0; i < (batch ? 8 : 2) && !scopes; i++) {
       if (i) await new Promise((res) => setTimeout(res, 500));
+      if (!current()) return changed();
       try { scopes = (await gatewayCallAs(gw, owner, [])).scopes; } catch (e) { lastErr = (e as Error).message; }
     }
+    if (!current()) return changed();
     if (!scopes) {
       trace?.('console.unavailable', { reason: lastErr.slice(0, 200) });
       return { mode: 'unavailable', reason: `its gateway refused the console (${lastErr.slice(0, 120)})`, identity: true };
@@ -370,42 +400,46 @@ export class ConsoleAccess {
       // connection made it) and gets the owner role, from inside the
       // container where the CLI holds the gateway password. Anyone else
       // holding the owner role (a previous owner) loses it.
-      const ok = await this.#assignOwnerRole(provider, agent.runtimeRef!, owner);
+      const ok = await this.#assignOwnerRole(provider, agent.runtimeRef!, owner, current);
+      if (!current()) return changed();
       trace?.('console.owner_role', { ok });
       if (ok) {
         try { scopes = (await gatewayCallAs(gw, owner, [])).scopes; } catch { /* checked below */ }
       }
       if (!scopes?.includes('operator.admin')) return { mode: 'unavailable', reason: 'the owner role could not be set on its gateway', identity: true };
     }
-    this.#ready.set(agent.id, { key: readyKey, at: Date.now() });
+    if (!current()) return changed();
+    this.#ready.set(agent.id, { key: readyKey, provider, at: Date.now() });
     return { mode: 'identity' };
   }
 
   /** Does the gateway admit this name yet? Asked every 300 ms until it does, for up to `reloadWaitMs`. */
-  async #admitted(gw: Gateway, identity: string): Promise<boolean> {
+  async #admitted(gw: Gateway, identity: string, current: () => boolean): Promise<boolean> {
     const until = Date.now() + (this.#deps.reloadWaitMs ?? 20_000);
     for (;;) {
-      try { await gatewayCallAs(gw, identity, [], 5000); return true; } catch { /* not yet */ }
+      if (!current()) return false;
+      try { await gatewayCallAs(gw, identity, [], 5000); return current(); } catch { /* not yet */ }
       if (Date.now() >= until) return false;
       await new Promise((r) => setTimeout(r, 300));
     }
   }
 
-  async #assignOwnerRole(provider: RuntimeProvider, runtimeRef: string, owner: string): Promise<boolean> {
+  async #assignOwnerRole(provider: RuntimeProvider, runtimeRef: string, owner: string, current: () => boolean): Promise<boolean> {
     const list = await provider.exec(runtimeRef, ['gateway', 'call', 'users.list', '--params', '{}', '--json'], { timeoutMs: 30_000 });
-    if (list.code !== 0) return false;
+    if (!current() || list.code !== 0) return false;
     let profiles: Array<{ id?: string; emails?: string[]; role?: string | null }> = [];
     try { profiles = (JSON.parse(list.stdout) as { profiles?: typeof profiles }).profiles ?? []; } catch { return false; }
     const mine = profiles.find((p) => (p.emails ?? []).some((e) => e.toLowerCase() === owner.toLowerCase()));
     if (!mine?.id) return false;
     for (const p of profiles) {
       if (p.id && p.id !== mine.id && p.role === OWNER_ROLE) {
-        await provider.exec(runtimeRef, ['gateway', 'call', 'users.setRole', '--params', JSON.stringify({ profileId: p.id, role: null }), '--json'], { timeoutMs: 30_000 });
+        const removed = await provider.exec(runtimeRef, ['gateway', 'call', 'users.setRole', '--params', JSON.stringify({ profileId: p.id, role: null }), '--json'], { timeoutMs: 30_000 });
+        if (!current() || removed.code !== 0 || removed.timedOut || removed.unreachable || removed.signalled || removed.volumeMissing) return false;
       }
     }
     if (mine.role === OWNER_ROLE) return true;
     const set = await provider.exec(runtimeRef, ['gateway', 'call', 'users.setRole', '--params', JSON.stringify({ profileId: mine.id, role: OWNER_ROLE }), '--json'], { timeoutMs: 30_000 });
-    return set.code === 0;
+    return current() && set.code === 0;
   }
 
   /**

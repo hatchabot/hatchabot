@@ -74,7 +74,7 @@
     const runs = roots.flatMap(textRuns);
     const groups = new Map();
     for (const expression of expressions) {
-      const signature = source.visibleMathText(expression.raw);
+      const signature = expression.signature;
       const group = groups.get(signature) || [];
       group.push(expression);
       groups.set(signature, group);

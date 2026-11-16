@@ -11,6 +11,7 @@ import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 import { TelegramUnavailableError } from '../src/channels/telegramManual.js';
+import { clearBusy, isBusy } from '../src/orchestrator/busy.js';
 
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -215,6 +216,78 @@ describe('export failure handling', () => {
   });
 });
 
+describe('image-build failures during import', () => {
+  it('refuses a second import that would build the same derived image concurrently', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const manifest = JSON.parse(gunzipSync((await exportAgent(src.deps, 'a1')).data).toString('utf8'));
+    delete manifest.channel;
+    const name = 'fixture-tools', tag = 'hatchabot-runtime:derived-fixture-tools';
+    manifest.image = { tag, recipe: { base: 'hatchabot-runtime:latest', packages: [], lines: 'RUN true', channels: [] } };
+    const archive = (slug: string) => gzipSync(JSON.stringify({ ...manifest, agent: { ...manifest.agent, slug, name: slug } }));
+    const dst = await installation('importer');
+    let release!: () => void, entered!: () => void, builds = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const building = new Promise<void>(resolve => { entered = resolve; });
+    const build = dst.provider.buildImage.bind(dst.provider);
+    dst.provider.buildImage = async (...args) => { if (++builds === 1) { entered(); await gate; } return build(...args); };
+    const first = importAgent(dst.deps, archive('first-copy'), { ownerId: 'importer', mayBuild: true, image: 'build' });
+    try {
+      await building;
+      await expect(importAgent(dst.deps, archive('second-copy'), { ownerId: 'importer', mayBuild: true, image: 'build' }))
+        .rejects.toThrow(/already.*building/i);
+      expect(builds).toBe(1);
+    } finally { release(); await first; }
+    expect(dst.store.getDerivedImage(name)?.status).toBe('READY');
+    expect(dst.store.listAllActiveAgents().map(agent => agent.slug)).toEqual(['first-copy']);
+  });
+
+  it.each([false, true])('settles a thrown build failure with an existing image record = %s', async existing => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const manifest = JSON.parse(gunzipSync((await exportAgent(src.deps, 'a1')).data).toString('utf8'));
+    const name = 'fixture-tools', tag = 'hatchabot-runtime:derived-fixture-tools', base = 'hatchabot-runtime:latest';
+    manifest.image = { tag, recipe: { base, packages: [], lines: 'RUN true', channels: [] } };
+    const dst = await installation('importer');
+    if (existing) {
+      dst.store.upsertDerivedImage({ name, tag, base, dockerfile: 'RUN true', createdBy: 'importer' });
+      dst.store.setDerivedImageStatus(name, 'READY', null);
+    }
+    // buildImage can throw before Docker starts, e.g. mkdtemp on a full disk.
+    dst.provider.buildImage = async () => { throw new Error('ENOSPC: no space left for the build context'); };
+    await expect(importAgent(dst.deps, gzipSync(JSON.stringify(manifest)), { ownerId: 'importer', mayBuild: true, image: 'build' }))
+      .rejects.toThrow(/no space left for the build context/);
+    expect(dst.store.listAllActiveAgents()).toEqual([]);
+    if (existing) expect(dst.store.getDerivedImage(name)).toMatchObject({ status: 'FAILED', error: expect.stringMatching(/no space left/) });
+    else expect(dst.store.getDerivedImage(name)).toBeUndefined();
+  });
+});
+
+describe('an import whose initial database writes fail', () => {
+  it.each(['settings', 'operation'] as const)('leaves no partial agent or busy flag after a failed %s write', async stage => {
+    const src = await installation(); await seedSourceAgent(src);
+    src.store.setAgentCuratedSkills('a1', []);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    let made: string | undefined;
+    const insert = dst.store.insertAgentOnSource.bind(dst.store);
+    vi.spyOn(dst.store, 'insertAgentOnSource').mockImplementation(agent => { made = agent.id; return insert(agent); });
+    const fail = stage === 'settings'
+      ? vi.spyOn(dst.store, 'setAgentCuratedSkills').mockImplementation(() => { throw new Error('SQLITE_FULL: database is full'); })
+      : vi.spyOn(dst.store, 'insertOperation').mockImplementation(() => { throw new Error('SQLITE_FULL: database is full'); });
+    try {
+      await expect(importAgent(dst.deps, data, { ownerId: 'importer' })).rejects.toThrow(/database is full/);
+      expect(made).toBeDefined();
+      expect(isBusy(made!)).toBe(false);
+      expect(dst.store.listAllActiveAgents()).toEqual([]);
+      expect(dst.store.listOperations([made!])).toEqual([]);
+      expect(dst.provider.runtimes.size).toBe(0);
+      fail.mockRestore();
+      expect((await importAgent(dst.deps, data, { ownerId: 'importer' })).state).toBe('RUNNING');
+    } finally { if (made) clearBusy(made); fail.mockRestore(); }
+  });
+});
+
 describe('the state a manifest can carry (HB-0582)', () => {
   it('with next to no room left beside the settings and environment values: their size is named, never "about 0 MB" (eleventh review)', () => {
     const meta = MAX_STATE_BYTES - 1000; // values that alone come to the ceiling
@@ -269,6 +342,22 @@ describe('sharedMemory in a copy (HB-0094)', () => {
 });
 
 describe('env vars travel (audit backlog #1 → fixed)', () => {
+  it.each([undefined, ''])('a missing or empty repository key refuses export before stopping the source (%j)', async value => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    src.store.insertDataSource({
+      id: 'repo-key', agentId: 'a1', kind: 'git', access: 'ro', mountName: 'recipes',
+      repoUrl: 'git@git.example.org:example-owner/recipes.git', secretRef: 'data-source/missing', createdAt: 'now',
+    });
+    if (value !== undefined) await src.secrets.put('data-source/missing', value);
+    const stop = vi.spyOn(src.provider, 'stop');
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/recipes.*deploy key/i);
+    expect(stop).not.toHaveBeenCalled();
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+    expect(src.store.getAgent('a1')!.exportedAt).toBeUndefined();
+    expect(src.provider.stateStore.get(ref)!.toString()).toBe('the-agents-memory');
+  });
+
   it('export carries name+value; import recreates rows and secrets before provisioning', async () => {
     const src = await installation();
     await seedSourceAgent(src);

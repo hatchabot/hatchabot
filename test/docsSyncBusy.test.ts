@@ -103,14 +103,14 @@ describe('docs syncs run with the agent held (HB-0230)', () => {
       // Staged, checked and renamed in one shell (a guarded write).
       const stage = /echo "([A-Za-z0-9+/=]+)" \| base64 -d > "([^"]*AGENTS\.md\.tmp-[0-9a-f]+)"/.exec(script);
       if (stage) staged.set(stage[2]!, Buffer.from(stage[1]!, 'base64').toString());
-      const swap = /= "([0-9a-f]{64})" \] \|\| .*; mv -f "([^"]*)" "[^"]*AGENTS\.md"$/.exec(script);
+      const swap = /= "([0-9a-f]{64})" \] \|\| .*; mv -fT -- "([^"]*)" "[^"]*AGENTS\.md"$/.exec(script);
       if (stage && !swap) return { code: 0, stdout: '', stderr: '' };
       if (swap) {
         if (swap[1] !== createHash('sha256').update(text, 'utf8').digest('hex')) { refused++; return { code: 3, stdout: '', stderr: 'it changed meanwhile' }; }
         text = staged.get(swap[2]!)!;
         return { code: 0, stdout: '', stderr: '' };
       }
-      const b64 = /echo "([A-Za-z0-9+/=]+)" \| base64 -d > "[^"]*AGENTS\.md"\.tmp && mv/.exec(script)?.[1];
+      const b64 = /echo "([A-Za-z0-9+/=]+)" \| base64 -d > "[^"]*AGENTS\.md"\.tmp-[0-9a-f]+ && mv/.exec(script)?.[1];
       if (b64) { text = Buffer.from(b64, 'base64').toString(); return { code: 0, stdout: '', stderr: '' }; }
       return shell(ref, script, opts);
     };

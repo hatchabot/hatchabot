@@ -608,8 +608,11 @@ if [ "$PURGE" = 1 ]; then
   # A move killed part-way leaves its copy of the volume, tokens and all, in the
   # data folder. No later boot sweeps it now, and it is no backup, so it goes
   # with or without --backups, even when the data folder itself stays below.
-  if [ -d "$DATA_DIR/move-copies" ]; then
-    rm -rf "$DATA_DIR/move-copies" && echo "  removed the copy a move that was cut off left in $DATA_DIR"
+  # Match backups.ts: the database's basename separates installs sharing this
+  # directory and stays stable across a release's data/ symlink.
+  MOVE_COPY_ID="$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(require("node:path").basename(process.argv[1])).digest("hex").slice(0,16))' "$DB_PATH" 2>/dev/null)" || MOVE_COPY_ID=""
+  if [[ "$MOVE_COPY_ID" =~ ^[a-f0-9]{16}$ ]] && [ -d "$DATA_DIR/move-copies-$MOVE_COPY_ID" ]; then
+    rm -rf "$DATA_DIR/move-copies-$MOVE_COPY_ID" && echo "  removed the copy a move that was cut off left in $DATA_DIR"
   fi
   # The backups first, and only Hatchabot's own sets: the folder may be a NAS
   # mount other machines back up into (backup-volumes.sh prunes only its dated
@@ -681,12 +684,20 @@ if [ "$PURGE" = 1 ]; then
   done
   # A backup folder inside the data folder is not part of the data: removing
   # the data folder whole took the backups with it, --backups or not.
-  DB_ONLY=0; KEEP_TOP=""
+  DB_ONLY=0; KEEP_TOP=""; KEEP_DATA_WHY="it is the backup folder too, so the folder stays"
   if [ -d "$BACKUP_DIR" ] && [ -d "$DATA_DIR" ]; then
     B="$(cd "$BACKUP_DIR" && pwd -P)"; D="$(cd "$DATA_DIR" && pwd -P)"
     case "$D/" in "$B/"*) DB_ONLY=1 ;; esac                               # the data folder IS the backup folder, or inside it
     case "$B" in "$D/"*) KEEP_TOP="${B#"$D/"}"; KEEP_TOP="${KEEP_TOP%%/*}" ;; esac   # the backups are inside the data folder
   fi
+  # Neither an unmarked legacy copy nor another database's namespace is ours
+  # to remove. Keep them even when the parent has Hatchabot's usual name.
+  for d in "$DATA_DIR/move-copies" "$DATA_DIR"/move-copies-*; do
+    if [ -d "$d" ]; then
+      DB_ONLY=1; KEEP_DATA_WHY="it holds move copies from another install or an older version"
+      echo "  kept $d: its move copies cannot be attributed to this database. They hold agents' tokens, unencrypted: delete the folder if it is yours"
+    fi
+  done
   # The whole directory only when it is Hatchabot's own (the install's data/
   # or a folder named hatchabot-data, as docs/releasing.md sets one up); a
   # database placed elsewhere (a home directory, a NAS folder) loses only its
@@ -696,7 +707,7 @@ if [ "$PURGE" = 1 ]; then
   case "$DATA_DIR" in
     "$ENV_DIR/data"|*/hatchabot-data|*/agentclaw-data)
       if [ "$DB_ONLY" = 1 ]; then
-        rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" && echo "  removed the database in $DATA_DIR (it is the backup folder too, so the folder stays)"
+        rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" && echo "  removed the database in $DATA_DIR ($KEEP_DATA_WHY)"
       elif [ -n "$KEEP_TOP" ]; then
         for e in "$D"/* "$D"/.[!.]* "$D"/..?*; do
           { [ -e "$e" ] || [ -L "$e" ]; } && [ "$e" != "$D/$KEEP_TOP" ] && rm -rf "$e"

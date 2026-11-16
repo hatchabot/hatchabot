@@ -2,6 +2,7 @@ import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync }
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { controlUiScriptInsertionPoint } from './controlUiHtml.js';
 
 /** All URLs stay under the authenticated console that owns the document. */
 export const CONTROL_UI_MATH_PREFIX = '/__hatchabot/math/';
@@ -72,7 +73,8 @@ export function readControlUiMathAsset(path: string): ControlUiMathAsset | undef
 /** External styles and deferred scripts preserve upstream inline CSP hashes.
  * Deferred classic scripts execute in document order: KaTeX, parser, adapter. */
 export function withControlUiMath(html: string, prefix: string): string {
-  if (/<script\b[^>]*\bdata-hatchabot-math(?:\s|=|>)/i.test(html)) return html;
+  const insertion = controlUiScriptInsertionPoint(html, 'data-hatchabot-math');
+  if (insertion.installed) return html;
   const p = prefix.replace(/\/+$/, '');
   const url = (path: string) => `${p}${path}`.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const tags = `<link rel="stylesheet" href="${url(KATEX_STYLES_PATH)}">\n`
@@ -80,7 +82,5 @@ export function withControlUiMath(html: string, prefix: string): string {
     + `<script defer src="${url(KATEX_SCRIPT_PATH)}"></script>\n`
     + `<script defer src="${url(CONTROL_UI_MATH_SOURCE_PATH)}"></script>\n`
     + `<script defer data-hatchabot-math src="${url(CONTROL_UI_MATH_SCRIPT_PATH)}"></script>`;
-  if (/<script\b/i.test(html)) return html.replace(/<script\b/i, () => `${tags}\n<script`);
-  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, () => `${tags}\n</head>`);
-  return tags + html;
+  return html.slice(0, insertion.at) + tags + html.slice(insertion.at);
 }

@@ -302,11 +302,12 @@ left and right arrow keys (Home and End) move between them; the agent
 sheet's tabs work the same way, and the account menu's items follow the up
 and down arrow keys.
 
-### The Activity view: Unread first, and each agent's last line
+### The Activity view: recent activity, unread replies, and each agent's last line
 
-In View by → **Activity**, agents with replies you have not read (the blue dot)
-sit in an **Unread** section at the top, newest reply first, and are not
-repeated in the time bins below. Hovering a tile shows its last line in the
+In View by → **Activity**, **Active in the last hour** comes first, followed
+by **Unread**, then the older activity groups. Agents with replies you have
+not read (the blue dot) appear in Unread, newest reply first, and are not
+repeated in the time bins. Empty sections are omitted. Hovering a tile shows its last line in the
 tooltip, with how long ago: who spoke last and how it began ("You: thanks",
 "Robin: can we do tacos?", the agent's own words with no name), **⏰ Daily
 brief ran** when the last thing was a scheduled task, or **needs you: …** in

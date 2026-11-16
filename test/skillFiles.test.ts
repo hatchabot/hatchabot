@@ -94,6 +94,15 @@ describe('skill previews and guarded catalog updates on isolated real files', ()
     expect(readFileSync(w.path, 'utf8')).toBe(text);
   });
 
+  it('keeps restored custom instructions protected from an ordinary catalog update', async () => {
+    const original = '# Keep my local writing guidance\n', w = world(original);
+    const replaced = await w.change('replace');
+    const restored = await w.change('rollback', replaced.revision);
+    expect(restored).toMatchObject({ state: 'customized', installed: { content: original, version: null }, canUpdate: false, canReplace: true });
+    await expect(w.change('update', restored.revision)).rejects.toMatchObject({ code: 'customized' });
+    expect(readFileSync(w.path, 'utf8')).toBe(original);
+  });
+
   it('updates an unchanged tracked older release and retains its version on rollback', async () => {
     const old = '# Previous reviewed content\n', w = world(old);
     w.metadata({ hash: sha(old), version: '0.9.0' });
@@ -134,6 +143,20 @@ describe('skill previews and guarded catalog updates on isolated real files', ()
     expect(readdirSync(w.historyDir)).toEqual([`${ID}.json`]);
   });
 
+  it.each(['\\', '\u0001'])('keeps maximum-size escaped backups readable through the full history limit: %j', async (escaped) => {
+    const w = world();
+    for (let i = 0; i < 5; i++) {
+      const content = `${i}` + escaped.repeat(MAX_SKILL_FILE_BYTES - 1);
+      mkdirSync(w.skillDir, { recursive: true }); writeFileSync(w.path, content);
+      const updated = await w.change('replace');
+      expect(updated.state).toBe('current');
+      expect(updated.history).toHaveLength(i + 1);
+    }
+    const restored = await w.change('rollback');
+    expect(restored.installed.content).toBe('4' + escaped.repeat(MAX_SKILL_FILE_BYTES - 1));
+    expect((await w.read()).history).toHaveLength(5);
+  });
+
   it('preserves recovery evidence when the final file replacement fails', async () => {
     const w = world('local original');
     w.transform((script) => script.replace("atomic(skill, 'SKILL.md', target.content);", "throw new Error('injected disk failure');"));
@@ -144,6 +167,18 @@ describe('skill previews and guarded catalog updates on isolated real files', ()
     w.transform((script) => script);
     expect(await w.read()).toMatchObject({ canRollback: true, installed: { version: null } });
     expect((await w.change('rollback')).installed.content).toBe('local original');
+  });
+
+  it.each([null, '0.9.0'])('does not evict distinct backups when a failed replacement is retried with unchanged content/version %j', async (version) => {
+    const w = world('local original');
+    const older = Array.from({ length: 4 }, (_, i) => ({ content: `older ${i}`, hash: sha(`older ${i}`), version: null, at: '2026-11-01T00:00:00.000Z' }));
+    w.metadata({ hash: sha(version ? 'local original' : 'catalog baseline'), version: '0.9.0' }, older);
+    w.transform((script) => script.replace("atomic(skill, 'SKILL.md', target.content);", "throw new Error('injected replacement failure');"));
+    for (let i = 0; i < 6; i++) await expect(w.change('replace')).rejects.toMatchObject({ code: 'unavailable' });
+    const stored = JSON.parse(readFileSync(w.historyPath, 'utf8'));
+    expect(stored.history.map((entry: { content: string }) => entry.content)).toEqual(['local original', ...older.map((entry) => entry.content)]);
+    expect(stored.history[0].version).toBe(version);
+    expect(readFileSync(w.path, 'utf8')).toBe('local original');
   });
 
   it('does not overwrite an external edit made after recording the backup', async () => {
@@ -159,6 +194,28 @@ describe('skill previews and guarded catalog updates on isolated real files', ()
     w.transform((script) => script.replace("skill ??= directory(skills, input.id, true);", "skill ??= directory(skills, input.id, true); fs.writeFileSync(pathAt(skill, 'SKILL.md'), 'created concurrently');"));
     await expect(w.change('update')).rejects.toMatchObject({ code: 'conflict' });
     expect(readFileSync(w.path, 'utf8')).toBe('created concurrently');
+  });
+
+  it.each([
+    { where: 'skill', late: false }, { where: 'workspace', late: false },
+    { where: 'skill', late: true }, { where: 'workspace', late: true },
+  ])('refuses a renamed $where directory instead of writing detached files (late=$late)', async ({ where, late }) => {
+    const w = world('original instructions'), before = await w.read();
+    const swap = `
+      const originalDir = ${where === 'skill' ? "pathAt(skills, input.id)" : "root + '/.openclaw/agents/' + input.slug + '/agent'"};
+      fs.renameSync(originalDir, originalDir + '-moved');
+      fs.mkdirSync(originalDir, {recursive:true});
+      const replacementDir = ${where === 'skill' ? 'originalDir' : "originalDir + '/skills/' + input.id"};
+      fs.mkdirSync(replacementDir, {recursive:true});
+      fs.writeFileSync(replacementDir + '/SKILL.md', 'replacement instructions');
+    `;
+    const marker = late ? "atomic(skill, 'SKILL.md', target.content);" : 'let before = get();';
+    w.transform((script) => script.replace(marker, swap + marker));
+    await expect(w.change('replace', before.revision)).rejects.toMatchObject({ code: 'conflict' });
+    expect(readFileSync(w.path, 'utf8')).toBe('replacement instructions');
+    const moved = where === 'skill' ? `${w.skillDir}-moved/SKILL.md` : `${w.workspace}-moved/skills/${ID}/SKILL.md`;
+    expect(readFileSync(moved, 'utf8')).toBe('original instructions');
+    if (!late) expect(existsSync(w.historyPath)).toBe(false);
   });
 });
 

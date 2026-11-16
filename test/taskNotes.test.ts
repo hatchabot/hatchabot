@@ -126,6 +126,25 @@ describe('the task store read carries each task\'s run state (cronStoreReadShell
     expect(read!.jobs[0]).toMatchObject({ id: 'j1', lastRunAtMs: 5000, lastStatus: 'error', consecutiveErrors: 2 });
     expect(read!.stamp.get('j1')).toBe(4);
   });
+
+  it('uses authoritative state_json when a legacy job definition still contains stale state', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-cronstate-'));
+    try {
+      const path = join(dir, 'openclaw.sqlite');
+      const db = new Database(path);
+      db.exec('CREATE TABLE cron_jobs (job_id TEXT, declaration_key TEXT, agent_id TEXT, job_json TEXT, updated_at INTEGER, state_json TEXT)');
+      db.prepare('INSERT INTO cron_jobs VALUES (?, ?, ?, ?, ?, ?)').run('j1', null, 'kitchen',
+        JSON.stringify({ name: 'Market report', state: { lastRunAtMs: 1000, lastRunStatus: 'error' } }), 1,
+        JSON.stringify({ lastRunAtMs: 5000, lastRunStatus: 'ok' }));
+      const state = () => JSON.parse(runShell(path)).jobs[0].state;
+      expect(state()).toEqual({ lastRunAtMs: 5000, lastRunStatus: 'ok' });
+      db.prepare('UPDATE cron_jobs SET state_json = ?').run('{}');
+      expect(state()).toEqual({});
+      db.prepare('UPDATE cron_jobs SET state_json = ?').run('invalid');
+      expect(runShell(path)).toBe('');
+      db.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
 describe('Tell me on Telegram when it runs (HB-0537)', () => {
@@ -137,7 +156,7 @@ describe('Tell me on Telegram when it runs (HB-0537)', () => {
     ...(state ? { state } : {}), ...over,
   });
 
-  async function world(opts: { bot?: boolean } = {}) {
+  async function world(opts: { bot?: boolean; afterPush?: () => void } = {}) {
     const store = new Store(new Database(':memory:'));
     const secrets = new MemSecrets();
     const provider = new MockProvider();
@@ -156,6 +175,7 @@ describe('Tell me on Telegram when it runs (HB-0537)', () => {
     const sent: Array<{ url: string; body: Record<string, unknown> }> = [];
     const pushFetch = (async (url: unknown, init?: { body?: unknown }) => {
       sent.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) });
+      opts.afterPush?.();
       return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as unknown as typeof fetch;
     const f = Fastify();
@@ -164,8 +184,106 @@ describe('Tell me on Telegram when it runs (HB-0537)', () => {
       channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
     } as any);
     const quick = () => (f as unknown as { quickCronRetarget: () => Promise<void> }).quickCronRetarget();
-    return { store, provider, f, sent, quick };
+    return { store, provider, secrets, f, sent, quick };
   }
+
+  it.each(['owner', 'runtime', 'host settings', 'stopped', 'rename'])('rechecks %s after a delayed task-store read before sending or consuming notes', async (changed) => {
+    const { store, provider, f, sent, quick } = await world();
+    try {
+      store.setCronNote('a1', 'j1', true, 0);
+      provider.execResponses.set('sh', storeRead([stored({ lastRunAtMs: 5000, lastRunStatus: 'ok' })]));
+      const exec = provider.execShell.bind(provider);
+      provider.execShell = async (...args) => {
+        const result = await exec(...args);
+        const db = (store as unknown as { db: Database.Database }).db;
+        if (changed === 'owner') db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-new-owner', 'a1');
+        if (changed === 'runtime') store.setAgentRuntimeRef('a1', 'mock://replacement');
+        if (changed === 'host settings') db.prepare('UPDATE hosts SET settings_json = ? WHERE id = ?').run('{"endpoint":"replacement"}', 'h1');
+        if (changed === 'stopped') store.setAgentState('a1', 'STOPPED');
+        if (changed === 'rename') db.prepare('UPDATE agents SET name = ? WHERE id = ?').run('Garden', 'a1');
+        return result;
+      };
+      await quick();
+      expect(sent).toHaveLength(changed === 'rename' ? 1 : 0);
+      expect(store.cronNotes('a1')[0]!.seenRunMs).toBe(changed === 'rename' ? 5000 : undefined);
+    } finally { await f.close(); }
+  });
+
+  it('rechecks ownership after asynchronous bot-token lookup without consuming the stale note', async () => {
+    const { store, provider, secrets, f, sent, quick } = await world();
+    try {
+      store.setCronNote('a1', 'j1', true, 0);
+      provider.execResponses.set('sh', storeRead([stored({ lastRunAtMs: 5000, lastRunStatus: 'ok' })]));
+      const get = secrets.get.bind(secrets);
+      secrets.get = async (ref) => {
+        const value = await get(ref);
+        (store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-new-owner', 'a1');
+        return value;
+      };
+      await quick();
+      expect(sent).toHaveLength(0);
+      expect(store.cronNotes('a1')[0]!.seenRunMs).toBeUndefined();
+    } finally { await f.close(); }
+  });
+
+  it('does not send or consume later notes when ownership changes while the first send is pending', async () => {
+    let change: () => void = () => {};
+    const { store, provider, f, sent, quick } = await world({ afterPush: () => change() });
+    try {
+      change = () => { (store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-new-owner', 'a1'); };
+      store.setCronNote('a1', 'j1', true, 0); store.setCronNote('a1', 'j2', true, 0);
+      provider.execResponses.set('sh', storeRead([
+        stored({ lastRunAtMs: 5000, lastRunStatus: 'ok' }),
+        stored({ lastRunAtMs: 6000, lastRunStatus: 'ok' }, { id: 'j2', name: 'Second report' }),
+      ]));
+      await quick();
+      expect(sent).toHaveLength(1);
+      expect(store.cronNotes('a1')).toEqual([{ jobId: 'j1', sinceMs: 0, seenRunMs: 5000 }, { jobId: 'j2', sinceMs: 0 }]);
+    } finally { await f.close(); }
+  });
+
+  it('does not retarget tasks after ownership changes during the CLI list', async () => {
+    const { store, provider, f, quick } = await world();
+    try {
+      const implicit = stored(undefined, { sessionTarget: 'isolated', sessionKey: undefined });
+      provider.execResponses.set('sh', storeRead([implicit]));
+      provider.execResponses.set('cron list', storeRead([implicit]));
+      const exec = provider.exec.bind(provider);
+      provider.exec = async (...args) => {
+        const result = await exec(...args);
+        if (args[1][0] === 'cron' && args[1][1] === 'list') {
+          (store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-new-owner', 'a1');
+        }
+        return result;
+      };
+      await quick();
+      expect(provider.execLog.some((a) => a[0] === 'cron' && a[1] === 'edit')).toBe(false);
+      expect(provider.execLog.some((a) => a[0] === 'gateway' && a.includes('sessions.create'))).toBe(false);
+    } finally { await f.close(); }
+  });
+
+  it.each(['list', 'config read'])('stops the daily maintenance pass after ownership changes during %s', async (phase) => {
+    const { store, provider, f } = await world();
+    try {
+      provider.execResponses.set('cron list', storeRead([]));
+      const changed = () => { (store as unknown as { db: Database.Database }).db.prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run('user-new-owner', 'a1'); };
+      const exec = provider.exec.bind(provider), shell = provider.execShell.bind(provider);
+      provider.exec = async (...args) => {
+        const result = await exec(...args);
+        if (phase === 'list' && args[1][0] === 'cron' && args[1][1] === 'list') changed();
+        return result;
+      };
+      provider.execShell = async (...args) => {
+        const result = await shell(...args);
+        if (phase === 'config read' && args[1].includes('ownerAllowFrom')) changed();
+        return { ...result, stdout: '[]' };
+      };
+      await (f as unknown as { retargetCronSweep: () => Promise<void> }).retargetCronSweep();
+      expect(store.getAgent('a1')!.ownerId).toBe('user-new-owner');
+      expect(provider.execLog.some((a) => a[0] === 'config' && a[1] === 'set')).toBe(false);
+      expect(provider.execLog.some((a) => a[0] === 'cron' && a[1] === 'edit')).toBe(false);
+    } finally { await f.close(); }
+  });
 
   it('turned on for a task, each new run is told once on the owner\'s Telegram, with a link and not the result', async () => {
     const { store, provider, f, sent, quick } = await world();

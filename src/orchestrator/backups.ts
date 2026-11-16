@@ -9,7 +9,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { defaultBackupsDir, defaultDbPath } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
@@ -248,9 +248,33 @@ export function pruneBackup(date: string, base = backupsDir()): boolean {
   // on the same day (#139). The lock is taken here, as the script takes it,
   // so a run that starts while this deletes stops instead.
   const lock = join(target, BACKUP_LOCK);
+  const busy = () => new BackupBusyError(`The ${date} backup is still being written. Wait for the run to finish, then delete it.`);
   try { mkdirSync(lock); } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    if (lockHeld(lock)) throw new BackupBusyError(`The ${date} backup is still being written. Wait for the run to finish, then delete it.`);
+    if (lockHeld(lock)) throw busy();
+    // Share the script's takeover mutex and judge the PID again under it:
+    // a new run may have replaced the stale lock while it was being read.
+    const takeover = `${lock}.takeover`;
+    try { mkdirSync(takeover); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        // As the script does: only an old, empty takeover is cleared, and
+        // this attempt stops. A fresh retry must acquire it for itself.
+        try { if (Date.now() - statSync(takeover).mtimeMs > 60_000) rmdirSync(takeover); } catch { /* active or not empty */ }
+        throw busy();
+      }
+      throw err;
+    }
+    try {
+      if (lockHeld(lock)) throw busy();
+      rmSync(lock, { recursive: true, force: true });
+      // A run may have won the front door after the old lock went away.
+      try { mkdirSync(lock); } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw busy();
+        throw err;
+      }
+    } finally {
+      try { rmdirSync(takeover); } catch { /* the script can clear an old empty takeover */ }
+    }
   }
   writeFileSync(join(lock, 'pid'), String(process.pid));
   // Out of the way in one step, then removed: no moment where the set's
@@ -560,7 +584,11 @@ function dropSafetyCopy(file: string | undefined): void {
  * the copy crossed the network twice (HB-0388).
  */
 function moveCopyDir(): string {
-  return join(dirname(resolve(process.env.HATCHABOT_DB ?? defaultDbPath())), 'move-copies');
+  const db = resolve(process.env.HATCHABOT_DB ?? defaultDbPath());
+  // Separate databases may share their parent folder. The basename is
+  // stable when a release's data/ symlink changes its absolute spelling.
+  const identity = createHash('sha256').update(basename(db)).digest('hex').slice(0, 16);
+  return join(dirname(db), `move-copies-${identity}`);
 }
 
 /** A new path for one move's copy (made by exportStateToFile), in a private folder. */
@@ -586,7 +614,8 @@ export function dropMoveCopy(file: string | undefined): void {
  * Boot: copies a move held when the process ended (it holds an agent's
  * secrets, and a resumed move never reads it: the source's volume is still
  * there). No move of this install runs yet, and the folder is this install's
- * alone. Returns how many.
+ * alone. Legacy unmarked move-copies folders are left alone: their database
+ * cannot be identified safely. Returns how many.
  */
 export function sweepMoveCopies(): number {
   const dir = moveCopyDir();
@@ -807,9 +836,18 @@ async function restoreSteps(
       op.rolledBack(said);
       throw new RestoreError(said);
     }
-    // A re-apply may have started it again; whatever is in its volume now must not run.
-    try { await provider.stop(runtimeRef); } catch (e) { log('restore.stop_failed', { agentId, error: String(e) }); }
+    // A re-apply may have started it again; whatever is in its volume now
+    // must not run. Keep recovery held when a final stop cannot be proved,
+    // rather than ending the operation and opening Retry on uncertain state.
+    const notDown = await confirmStopped(deps, agentId, runtimeRef, { runtimeOnly: true });
     const where = `The copy of how it was before the restore is kept at ${safetyFile}.`;
+    if (notDown) {
+      const msg = `${what} (${short(cause)}), and putting it back as it was failed too (${short(rollbackErr)}). ` +
+        `Its runtime could not be confirmed stopped (${notDown}), so recovery stays held. ${where} ` +
+        'Bring its machine back, then finish the restore or put back the copy from before.';
+      op.hold(msg, RESTORE_CHOICES);
+      throw new RestoreError(msg);
+    }
     // A one-shot that may still be unpacking: a restore or Put back stops it
     // first, or does not begin; by hand, nothing does (HB-0385).
     const byHand = stillThere
@@ -888,7 +926,7 @@ async function restoreSteps(
  * or gone; otherwise why not. A stop that fails on a container already gone
  * is fine; one whose machine cannot be reached is not knowably down.
  */
-async function confirmStopped(deps: RestoreDeps, agentId: string, runtimeRef: string): Promise<string | undefined> {
+async function confirmStopped(deps: RestoreDeps, agentId: string, runtimeRef: string, opts: { runtimeOnly?: boolean } = {}): Promise<string | undefined> {
   const log = deps.log ?? (() => {});
   let stopErr: unknown;
   try {
@@ -906,6 +944,7 @@ async function confirmStopped(deps: RestoreDeps, agentId: string, runtimeRef: st
     const why = stopErr ? `: ${short(stopErr)}` : '';
     return st.phase === 'unknown' ? `its machine did not answer${why}` : `it is still ${st.phase}${why}`;
   }
+  if (opts.runtimeOnly) return undefined;
   // Nor anything else writing its volume: a copy a failed restore could not
   // remove, going on once a runner woke (HB-0385).
   const busy = await deps.provider.stopVolumeWriters?.(runtimeRef).catch((err: unknown) => {
@@ -1103,9 +1142,15 @@ export async function recoverBackupRestore(deps: RestoreDeps, opId: string, acti
     // The copy is how it was when the restore began, maybe days ago: who may
     // use it and its bot follow today's records, as a finished restore's do
     // (B022). A failure keeps it held and stopped; trying again is safe.
-    await applyCurrentSettingsOver(deps, agent.id, ref).catch((err: unknown) => {
-      deps.provider.stop(ref).catch(() => {});
-      throw new RestoreError(`The copy from before was put back, but its current settings could not be put over it: ${short(err)}. It stays stopped; try again.`);
+    await applyCurrentSettingsOver(deps, agent.id, ref).catch(async (err: unknown) => {
+      rethrowIfCrash(err);
+      // Configuration can start the runtime before failing. Keep this recovery
+      // busy until its stop settles, and do not claim it stopped on a lost host.
+      const notDown = await confirmStopped(deps, agent.id, ref);
+      const state = notDown
+        ? `Its runtime could not be confirmed stopped (${notDown}); it stays held. Bring its machine back, then try again.`
+        : 'It stays stopped; try again.';
+      throw new RestoreError(`The copy from before was put back, but its current settings could not be put over it: ${short(err)}. ${state}`);
     });
     await restartAfterRestore(deps, agent.id, ref, p.wasRunning === true);
     dropSafetyCopy(p.safetyFile);
@@ -1126,9 +1171,13 @@ export async function recoverBackupRestore(deps: RestoreDeps, opId: string, acti
   deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
   op.step('replaced');
   // A failure here leaves it held and stopped: the owner may still put the copy back.
-  const undone = await applyCurrentSettingsOver(deps, agent.id, ref).catch((err: unknown) => {
-    deps.provider.stop(ref).catch(() => {});
-    throw new RestoreError(`The restore could not be finished: ${short(err)}. It stays stopped; put back the copy from before, or try again.`);
+  const undone = await applyCurrentSettingsOver(deps, agent.id, ref).catch(async (err: unknown) => {
+    rethrowIfCrash(err);
+    const notDown = await confirmStopped(deps, agent.id, ref);
+    const state = notDown
+      ? `Its runtime could not be confirmed stopped (${notDown}); it stays held. Bring its machine back, then try again.`
+      : 'It stays stopped; put back the copy from before, or try again.';
+    throw new RestoreError(`The restore could not be finished: ${short(err)}. ${state}`);
   });
   op.step('reapplied');
   await completeRestore(deps, op, agent.id, ref, date, p.wasRunning === true, p.safetyFile, undone);
