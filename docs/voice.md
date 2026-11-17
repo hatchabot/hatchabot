@@ -1,23 +1,31 @@
 # Voice with an agent
 
 Open the agent's settings, choose **Advanced**, and find **Voice**. The
-**Browser Talk** card checks that agent's running OpenClaw and opens its own
-voice controls. This first version is for the agent's owner. It does not
-start recording when you open the card, recheck it, or open the console.
+**Browser Talk** card checks and sets up that agent's running OpenClaw. These
+controls are for the agent's owner. Opening the card, setting up Talk,
+rechecking, and opening the console do not start recording.
 
 ## Check, configure, then try
 
-1. Press **Recheck** to read the runtime's Talk provider catalog. A configured
-   result means OpenClaw found a usable configuration and credential source.
-   It is **not a tested call**: microphone permission, provider access, quota,
-   network connectivity and audio playback still need a real trial.
-2. If setup is needed, press **Configure voice**. This opens that agent's
-   existing console at OpenClaw's **Settings → Talk** (`/settings/talk`).
-   Choose the provider, model and speaker voice there, and save through
-   OpenClaw's settings. If the runtime has several internal agents, also
-   check **Talk Agent** as described below. Return to the Voice card and
-   press **Recheck**.
-3. Press **Try voice** to open that agent's existing console conversation.
+1. Press **Recheck** to read its saved Talk owner and provider catalog. A
+   configured result means OpenClaw found a usable configuration and credential
+   source. It is **not a tested call**: microphone permission, provider access,
+   quota, network connectivity and audio playback still need a real trial.
+2. If Talk is not linked to this agent, press **Set up Talk**. This saves its
+   Talk owner, preserves existing provider/model/voice choices and uses the
+   runtime's existing credential selection. It does not create credentials.
+   If settings change during setup, recheck before trying again.
+3. If credentials are missing, open **Voice key settings**. A machine owner
+   can save a shared Gemini key under Connections → Voice & media. Rebuild
+   each agent that needs the key, then recheck. A Google or OpenAI AI source
+   can instead supply its own supported credentials; an Anthropic text
+   subscription alone does not provide browser Talk credentials. A saved key
+   and a configured result still do not prove quota or call access.
+4. **Voice settings** opens OpenClaw's **Settings → Talk**
+   (`/settings/talk`) when you want to choose a provider, model or speaker
+   voice. Save there and return to Recheck. Runtime defaults choose the model
+   when you have not set one; Hatchabot does not guess a provider-specific model.
+5. Press **Try voice** to open that agent's existing console conversation.
    Check the agent and conversation, then explicitly press OpenClaw's
    microphone control and grant microphone access when the browser asks.
    Use OpenClaw's controls to interrupt or end the call.
@@ -27,45 +35,54 @@ supports microphone capture. Plain HTTP on another machine's address does
 not provide the secure browser context needed for the microphone. A secure
 page still needs your permission and a working input device.
 
-The card keeps different problems separate:
-
 | Result | What to do |
 | --- | --- |
 | Configured, not tested | Try a short call to check the complete audio path. |
-| Not configured | Open Configure voice and finish the upstream provider setup. |
+| Talk is not linked | Press Set up Talk to bind it to the agent shown on the card. |
+| Voice credentials needed | Add a shared key and Rebuild, or configure supported credentials in the agent's own provider settings. |
+| Provider needs attention | Open Voice settings and check the selected provider. Setup preserves existing custom settings. |
+| Manager needs network permission | Set up Talk authorizes its detected Google or OpenAI voice service; other providers are not added to its network access. |
 | Agent stopped, asleep or busy | Start or wake it, or let its current change finish, then recheck. |
-| Runtime unreachable or check unavailable | Check the runtime connection and its Talk Agent setting, then recheck. This does not mean its credentials are absent. |
-| Talk unsupported | Check the agent's runtime version. The integration targets OpenClaw 2026.9.8; an unavailable method is not evidence of missing keys. |
+| Runtime unreachable or check unavailable | Check the runtime connection and recheck. This does not mean its credentials are absent. |
+| Talk unsupported | Check the runtime version. The integration targets OpenClaw 2026.9.8; an unavailable method is not evidence of missing keys. |
 | HTTPS or microphone support needed | Open a secure address and use a browser with microphone support. |
 
-Rechecking is read-only. It asks OpenClaw for configuration readiness; it
-does not start a voice-provider session, send audio, or request an AI answer.
-The card does not mark a call as tested merely because the check succeeded.
+Rechecking is read-only. It does not start a voice-provider session, send
+audio, or request an AI answer. No configuration check marks a call tested.
 
 ## When the check cannot choose its Talk agent
 
 The pinned runtime's catalog does not accept a conversation key. It checks
-the configured `talk.agentId`, then the runtime's system-agent owner, then
-an unambiguous single agent. A volume can contain both Hatchabot's agent
-and an older internal `main` agent. With no designated owner, the catalog
-fails before checking providers; an inherited owner can instead select
-the old agent's credentials. The card cannot establish readiness for a
-particular conversation from this catalog alone.
+`talk.agentId`, then the runtime's system-agent owner, then an unambiguous
+single agent. A volume can contain both Hatchabot's agent and an older
+internal `main` agent. Without a designated owner the catalog can fail before
+checking providers, or select the old agent's credentials. Hatchabot verifies
+the binding before relying on the catalog and checks the configuration
+revision again before reporting readiness.
 
-Open **Configure voice**, find **Talk Agent** in the full settings editor
-below the provider pickers, and set it to the intended OpenClaw agent ID:
-the Hatchabot agent's slug, not its display name or Hatchabot record ID.
-Use the agent ID shown in that console's Agents settings. Save, return to
-Hatchabot and recheck. This setting remains upstream; Hatchabot does not
-change it automatically. The full editor remains available when the
-catalog cannot be read.
+**Set up Talk** binds the intended OpenClaw agent ID: the slug shown on the
+card. It uses a revision-guarded patch and rereads the result, including when
+the gateway's answer was lost. The advanced editor remains available in
+**Voice settings**. New or rebuilt agents on compatible OpenClaw 2026.9.8+
+runtimes receive this default only when no Talk owner was authored. Existing
+agents can use Set up Talk without rebuilding; a newly saved shared key still
+requires Rebuild to enter their environment.
 
-OpenClaw's own microphone control also waits for catalog readiness. Merely
-opening the conversation cannot bypass an ambiguous Talk owner. Once a
-call starts, its explicit `agent:<slug>:main` session key determines the
-agent it consults. These rules come from the pinned [owner resolver](https://github.com/openclaw/openclaw/blob/v2026.9.8/src/talk/agent-target.ts),
-[Talk settings page](https://github.com/openclaw/openclaw/blob/v2026.9.8/ui/src/pages/config/config-page.ts)
-and [microphone control](https://github.com/openclaw/openclaw/blob/v2026.9.8/ui/src/pages/chat/components/chat-composer.ts).
+OpenClaw's microphone control also waits for catalog readiness. Once a call
+starts, its explicit `agent:<slug>:main` session key determines the agent it
+consults. The pinned [owner resolver](https://github.com/openclaw/openclaw/blob/v2026.9.8/src/talk/agent-target.ts)
+and [microphone control](https://github.com/openclaw/openclaw/blob/v2026.9.8/ui/src/pages/chat/components/chat-composer.ts)
+define these rules.
+
+## The manager's voice network access
+
+The Hatchabot manager has a restricted network. Its text provider's access
+may not cover the detected voice provider. Pressing Set up Talk explicitly
+allows that provider's fixed voice hosts: Google's generative-language API,
+or OpenAI's API and ChatGPT OAuth broker. Provider labels cannot introduce
+arbitrary hosts. This access remains tied to the same owner, runtime, machine
+and AI source; after a rebuild or source change the card may request setup
+again. Recheck never grants access. No credential is copied into this grant.
 
 ## Where the voice settings live
 
@@ -127,7 +144,7 @@ use the provider's quota or billing.
 - Open and recheck the Voice card. Confirm no microphone prompt, recording,
   provider voice-session creation or AI-provider request occurs. Only the
   read-only runtime readiness query should be needed.
-- Configure voice, save, and reopen settings to confirm the selection
+- Set up Talk, then reopen Voice settings to confirm the selection
   persists, including the intended Talk Agent when several internal agents
   exist. Recheck the card and confirm it still says the call is untested.
 - Try voice and explicitly start the microphone. Speak the test phrase;

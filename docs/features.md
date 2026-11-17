@@ -243,7 +243,8 @@ The header holds:
 - **Check an agent's health on its Overview**: the result appears right
   there, not in another panel.
 - **Set up browser voice under Advanced → Voice** (agent owners): check the
-  running agent's Talk configuration, open its voice settings, then try its
+  running agent's Talk configuration, press Set up Talk to link it to this
+  agent and reuse its existing voice credentials, then try its
   existing console conversation. A configured result is not a tested call;
   start the microphone explicitly in the console. Browser voice needs HTTPS
   or localhost and microphone support. Telegram voice-note transcription has

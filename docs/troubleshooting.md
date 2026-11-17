@@ -7188,6 +7188,27 @@ Each entry says how to **confirm** it before acting: run that check first, since
 
 ## Browser voice and Telegram voice notes
 
+### Talk remains unconfigured across agents, or checks the wrong internal agent
+- **Check:** Advanced → Voice says Talk is not linked to the agent, or OpenClaw's Talk settings have no Talk Agent or name an older internal agent. Check whether Google/OpenAI voice credentials actually exist; an Anthropic text subscription alone does not provide them.
+- **Cause:** the earlier Voice card only checked readiness and linked to settings. It neither assigned the Talk owner nor explained missing credentials separately. A volume with an older internal main agent could make the catalog ambiguous or select that agent's credentials.
+- **Fix:** press Set up Talk. It binds the agent shown on the card with revision protection and preserves provider, model, voice and transport choices. If credentials are missing, use Voice key settings; rebuild existing agents after saving a shared Gemini key, then recheck. Compatible new/rebuilt agents receive an absent Talk owner by default. No setup action starts audio or proves a working call.
+- **Fixed in:** `v2.189.0` (HB-0797).
+- **Code:** `src/orchestrator/voice.ts` — `configureVoice`, `readVoiceStatus`; `src/openclaw/configWriter.ts` — `buildConfigCommands`; `web/index.html` — `v2SetupVoice`, `v2VoiceKeySettings`; `docs/voice.md`
+
+### The manager has voice credentials but its voice provider cannot connect
+- **Check:** the manager's voice provider differs from its text provider, or OpenAI browser OAuth needs its ChatGPT broker; its proxy refuses that destination. The updated Voice card requests network permission instead of calling this ready.
+- **Cause:** the manager's network allowed its text provider and attached chat apps only. Credential readiness did not account for voice-provider endpoints.
+- **Fix:** Set up Talk explicitly authorizes the detected Google or OpenAI provider's fixed voice destinations. No caller-supplied hostname is accepted. The grant is tied to owner, runtime, machine and source; recheck and set up again after those change. Other voice providers require their own supported network integration. Test a real call after setup.
+- **Fixed in:** `v2.189.0` (HB-0798).
+- **Code:** `src/orchestrator/voiceNetwork.ts` — `voiceNetworkReady`, `grantVoiceNetwork`, `voiceNetworkHosts`; `src/api/mgmtChat.ts` — `opsAllowedHosts`; `src/store/store.ts` — `getVoiceNetworkGrant`, `setVoiceNetworkGrant`
+
+### A voice readiness result belongs to an earlier configuration or account
+- **Check:** Talk settings, runtime, ownership or sign-in change during a delayed readiness check or setup request. An older result must not make the current card ready or authorize a different manager's network access.
+- **Cause:** the earlier catalog read did not verify a stable, applied Talk-owner configuration or watch the initiating browser session throughout the request.
+- **Fix:** reads verify the agent binding and configuration revision; setup uses guarded writes, lifecycle exclusion and session checks around every awaited operation. Obsolete results are discarded. A pending reload remains unavailable until it can be checked again.
+- **Fixed in:** `v2.189.0` (HB-0799).
+- **Code:** `src/orchestrator/voice.ts` — `readVoiceStatus`, `configureVoice`; `src/api/routes.ts` — `voiceContext`, `voiceWaiting`; `web/index.html` — `v2LoadVoice`, `v2SetupVoice`
+
 ### A saved Gemini key says voice is ready, but an agent cannot transcribe a voice note
 - **Check:** inspect Settings → Connections → Voice & media, then check whether the affected agent was rebuilt after the key was saved or removed. Check whether its Google AI source supplies its own key. A saved shared key alone is not a transcription test.
 - **Cause:** the shared key is injected when a runtime is built; existing containers retain their previous environment. A Google AI source's own key takes precedence. Earlier UI copy treated storage as proof of working voice.
@@ -7198,7 +7219,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### Browser Talk is configured, but no microphone input or spoken reply works
 - **Check:** open the agent's Advanced → Voice card as its owner and Recheck. Distinguish Configured from unavailable, unsupported, busy or not running. Use HTTPS or localhost, check microphone permission and input device, then explicitly start the microphone through Try voice. Follow the short real-device checks in docs/voice.md.
 - **Cause:** configuration readiness is a read-only runtime check, not a completed provider call. Browser permissions, network access, provider quota and audio output can still fail. An unavailable runtime is not proof of missing credentials, and guests do not receive Talk permission.
-- **Fix:** start the agent or wait for its operation, then recheck. Configure voice opens that agent's OpenClaw Talk settings. Set Talk Agent to the slug shown on the card, then save the provider settings, recheck and try the microphone from its conversation. An older internal main agent can otherwise make the runtime catalog ambiguous or select the wrong credential source. Use a supported runtime if Talk is unsupported. End the call before changing agents; closing a console tab releases its frame. A provider may answer directly, so the same agent session does not guarantee every spoken answer goes through the text model.
+- **Fix:** start the agent or wait for its operation, then recheck. Set up Talk binds the intended agent; Voice settings opens its OpenClaw provider controls. Resolve missing credentials or manager network permission, recheck and try the microphone from its conversation. Use a supported runtime if Talk is unsupported. End the call before changing agents; closing a console tab releases its frame. A provider may answer directly, so the same agent session does not guarantee every spoken answer goes through the text model.
 - **Fixed in:** `v2.186.0` for owner setup and readiness controls (HB-0716); real microphone, provider and playback acceptance is still required.
 - **Code:** `src/orchestrator/voice.ts` — `readVoiceStatus`; `src/api/routes.ts` — `'/v1/agents/:id/voice'`; `web/index.html` — `v2LoadVoice`, `v2VoiceOpen`, `voiceBrowserNote`, `openGateway`, `pageSessionEnded`; `docs/voice.md`
 
@@ -7366,3 +7387,17 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fix:** The affected subprocess integration groups now have a bounded 30-second allowance. Pure unit tests, behavior assertions and child-process limits retain their previous settings.
 - **Fixed in:** `v2.186.0` (HB-0741).
 - **Code:** `test/dockerNames.test.ts`; `test/releaseManifestInstall.test.ts`
+
+### The browser CI gate intermittently times out in accessPromises
+- **Check:** the failure waits for the invitation knock-window POST after clicking Copy Telegram invite, while the same commit passes other runs. The native clipboard promise precedes that request.
+- **Cause:** Chrome can advance the test's eight-second virtual deadline before native clipboard work finishes in real time. This does not establish a product invitation failure.
+- **Fix:** the scenario supplies a controlled clipboard response and restores the browser property afterward. It still clicks the real button, exercises the real copy helper and invitation guards, and checks the exact message and single request.
+- **Fixed in:** `v2.189.0` (HB-0480).
+- **Code:** `scripts/ui-clickthrough.mjs` — `accessPromises`; `web/index.html` — `copyText`, `copyInviteTg`, `openInviteKnockWindow`
+
+### The runner backup integration case exceeds five seconds in CI
+- **Check:** the backup-completeness suite reports only a five-second timeout in the runner archive/sleeping-runner case; the same case passes unchanged alone without a behavior assertion failure.
+- **Cause:** the run-status group executes complete sandboxed shell, SQLite and compression workflows, whose process startup and scheduling can exceed a unit-test deadline.
+- **Fix:** that integration group has a bounded 30-second allowance, matching related shell suites. Pure unit groups, backup assertions and child-process limits are unchanged.
+- **Fixed in:** `v2.189.0` (HB-0800).
+- **Code:** `test/backupCompleteness.test.ts` — `scriptWorld`

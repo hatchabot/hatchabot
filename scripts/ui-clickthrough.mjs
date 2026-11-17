@@ -3742,7 +3742,7 @@ const SCENARIOS = String.raw`(() => {
         Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
         window.__override['/v1/agents/a1/voice'] = { status: 'configured', provider: 'Example voice provider' };
         openV2Agent('a1', 'advanced');
-        ok('Talk Agent setup hint is visible during the check', $('v2Voice').textContent.includes('In voice settings, set Talk Agent to ' + slug + ' so the configuration check uses this agent.'));
+        ok('Talk Agent setup hint is visible during the check', $('v2Voice').textContent.includes('Set up Talk links voice to ' + slug + ' and uses voice credentials already available to this agent.'));
         await until(() => $('v2Voice')?.dataset.status === 'configured');
         eq('configured reports runtime evidence without claiming a tested call', $('v2Voice').querySelector('[role="status"]').textContent, 'Runtime reports voice configured; a call has not been tested.');
         ok('the provider and separate Telegram path are explained', $('v2Voice').textContent.includes('Example voice provider') && $('v2Voice').textContent.includes('Telegram voice-note transcription is separate'));
@@ -3753,9 +3753,9 @@ const SCENARIOS = String.raw`(() => {
           ok(status + ' does not offer a call', $('v2VoiceTry').disabled);
           eq(status + ' settings availability', $('v2VoiceConfigure').disabled, !['unconfigured', 'unavailable'].includes(status));
           ok(status + ' says more than a raw status', $('v2Voice').querySelector('[role="status"]').textContent.length > 25);
-          ok(status + ' keeps the Talk Agent setup hint', $('v2Voice').textContent.includes('set Talk Agent to ' + slug + ' so the configuration check uses this agent.'));
+          ok(status + ' keeps the Talk Agent setup hint', $('v2Voice').textContent.includes('Set up Talk links voice to ' + slug));
           if (status === 'unconfigured') ok('unconfigured describes runtime evidence', $('v2Voice').textContent.includes('Runtime does not report a configured Talk provider.'));
-          if (status === 'unavailable') ok('unavailable names Talk Agent and provider configuration', $('v2Voice').textContent.includes('Open voice settings and check Talk Agent and provider configuration, then Recheck.'));
+          if (status === 'unavailable') ok('unavailable names Talk Agent and provider configuration', $('v2Voice').textContent.includes('Set up Talk can repair its agent selection; use Voice settings for provider configuration, then Recheck.'));
         }
         a.slug = 'voice<em>check</em>&"test"'; await read('configured');
         eq('the setup hint preserves the exact slug as text', $('v2Voice').querySelector('code').textContent, a.slug);
@@ -3778,6 +3778,81 @@ const SCENARIOS = String.raw`(() => {
         if (secure) Object.defineProperty(window, 'isSecureContext', secure); else delete window.isSecureContext;
         if (media) Object.defineProperty(navigator, 'mediaDevices', media); else delete navigator.mediaDevices;
         delete window.__override['/v1/agents/a1/voice'];
+      }
+    },
+    voiceSetupSavesAndKeepsItsContext: async () => {
+      const realFetch = window.fetch, posted = [];
+      const secure = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+      const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+      const person = pagePerson;
+      let microphones = 0;
+      const path = (id) => '/v1/agents/' + id + '/voice';
+      const answer = (n, body, status = 200) => posted[n].resolve(new Response(JSON.stringify(body), { status }));
+      const show = async (id, body) => {
+        window.__override[path(id)] = body;
+        openV2Agent(id, 'advanced');
+        await until(() => $('v2Voice')?.dataset.agent === id && $('v2Voice').dataset.status === body.status);
+      };
+      window.fetch = async (input, init = {}) => {
+        const url = String(typeof input === 'string' ? input : input.url);
+        if (/\/voice$/.test(url) && init.method === 'POST') return new Promise(resolve => posted.push({ url, body: JSON.parse(init.body), resolve }));
+        return realFetch(input, init);
+      };
+      try {
+        Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+        Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia() { microphones++; throw new Error('No automatic microphone'); } } });
+        await show('a1', { status: 'unconfigured', reason: 'agent' });
+        eq('reading does not configure Talk', posted.length, 0);
+        ok('missing owner has an actionable setup control', !$('v2VoiceSetup').disabled && $('v2Voice').textContent.includes('not linked to this agent'));
+        const setting = v2SetupVoice('a1'); await until(() => posted.length === 1);
+        await v2SetupVoice('a1');
+        eq('duplicate setup is suppressed', posted.length, 1);
+        eq('setup sends no keys or arbitrary configuration', posted[0].body, {});
+        ok('controls wait for the setup result', [...$('v2Voice').querySelectorAll('button')].every(b => b.disabled));
+        window.__override[path('a1')] = { status: 'configured', provider: 'Google' };
+        answer(0, window.__override[path('a1')]); await setting;
+        ok('successful setup rechecks and offers an explicit call', $('v2Voice').dataset.status === 'configured' && !$('v2VoiceTry').disabled);
+        eq('setup does not request microphone access', microphones, 0);
+
+        await show('a1', { status: 'unconfigured', reason: 'credentials' });
+        ok('missing credentials explain the rebuild and expose key settings', $('v2Voice').textContent.includes('Rebuild the agent') && $('v2VoiceKeys'));
+        $('v2VoiceKeys').click();
+        await until(() => aiDlg.open && $('mediaKeyDrawer').open);
+        ok('key settings opens the actual Connections drawer', !v2AgentDlg.open && $('mediaKeyDrawer').open);
+        aiDlg.close();
+
+        await show('a1', { status: 'unconfigured', reason: 'agent' });
+        const stale = v2SetupVoice('a1'); await until(() => posted.length === 2);
+        await show('a2', { status: 'unconfigured', reason: 'credentials' });
+        answer(1, { status: 'configured', provider: 'Google' }); await stale;
+        ok('an earlier setup cannot replace another agent', $('v2Voice').dataset.agent === 'a2' && $('v2Voice').dataset.status === 'unconfigured' && $('v2VoiceTry').disabled);
+
+        await show('a1', { status: 'unconfigured', reason: 'agent' });
+        const reopened = v2SetupVoice('a1'); await until(() => posted.length === 3);
+        v2Close(); await show('a1', { status: 'unconfigured', reason: 'agent' });
+        ok('reopening cannot submit a concurrent setup', $('v2VoiceSetup').disabled);
+        window.__override[path('a1')] = { status: 'configured', provider: 'Google' };
+        answer(2, window.__override[path('a1')]); await reopened;
+        ok('a reopened card receives a fresh read after completion', $('v2Voice').dataset.status === 'configured' && !$('v2VoiceTry').disabled);
+
+        await show('a1', { status: 'unconfigured', reason: 'agent' });
+        const failed = v2SetupVoice('a1'); await until(() => posted.length === 4);
+        answer(3, { error: 'Setup could not be verified.' }, 502); await failed;
+        ok('a failed setup can be retried without claiming readiness', !$('v2VoiceSetup').disabled && $('v2VoiceTry').disabled);
+
+        const obsolete = v2SetupVoice('a1'); await until(() => posted.length === 5);
+        pagePerson = 'other-voice-owner';
+        answer(4, { status: 'configured', provider: 'Google' }); await obsolete;
+        eq('account change discards the old completion', $('v2Voice').dataset.status, 'saving');
+        ok('every completion releases the local request guard', !voiceWrites.has('a1'));
+        eq('none of the setup paths records audio', microphones, 0);
+      } finally {
+        window.fetch = realFetch; pagePerson = person;
+        for (const item of posted) item.resolve(new Response('{"status":"unavailable"}', { status: 200 }));
+        delete window.__override[path('a1')]; delete window.__override[path('a2')];
+        v2Close(); if (aiDlg.open) aiDlg.close();
+        if (secure) Object.defineProperty(window, 'isSecureContext', secure); else delete window.isSecureContext;
+        if (media) Object.defineProperty(navigator, 'mediaDevices', media); else delete navigator.mediaDevices;
       }
     },
     voiceConsoleDestinations: async () => {
@@ -4456,7 +4531,17 @@ const SCENARIOS = String.raw`(() => {
     accessPromises: async () => {
       const list = await (await fetch('/v1/agents')).json();
       const hb = list.find((a) => a.ops);
+      const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      const secure = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+      let copied;
       try {
+        // HB-0480: Chrome's virtual clock can exhaust until() while the native
+        // clipboard still waits on real time. Control only that OS boundary;
+        // the real button, copyText and invitation guards remain under test.
+        Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+          writeText: async (text) => { copied = text; },
+        } });
         window.__promptAnswer = '@maria_k';
         window.__answer = {
           'POST /v1/agents/a1/invites': [{ status: 201, body: { code: 'TGCODE', path: '/join/TGCODE' } }],
@@ -4468,8 +4553,10 @@ const SCENARIOS = String.raw`(() => {
         ok('the Telegram way promises a knock, never an automatic admit', dlg.includes('holds the door open for 30 minutes') && dlg.includes('Nobody is let in without that tap'));
         ok('names who it is for', dlg.includes("Only @maria_k's message is shown"));
         eq('no window until it is sent', calls('POST', /\/knock-window$/).length, 0);
+        const message = invShare.message;
         byText('#inviteDlg button', 'Copy Telegram invite').click();
         await until(() => calls('POST', /^\/v1\/agents\/a1\/invites\/TGCODE\/knock-window$/).length === 1);
+        eq('the real copy helper receives this invitation', copied, message);
         await until(() => document.getElementById('toast').textContent.includes('Alerts'));
         inviteDlg.close();
 
@@ -4513,6 +4600,8 @@ const SCENARIOS = String.raw`(() => {
         ok('but no "Let them in" for the manager', !byText('#v2JoinList button', 'Let them in'));
         ok('nor in its notices', !agentNotices(v2Find(hb.id)).includes('Let them in'));
       } finally {
+        if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard); else delete navigator.clipboard;
+        if (secure) Object.defineProperty(window, 'isSecureContext', secure); else delete window.isSecureContext;
         window.__promptAnswer = null; window.__answer = {}; window.__confirmAnswer = true;
         if (inviteDlg.open) inviteDlg.close();
         try { v2Close(); } catch {}

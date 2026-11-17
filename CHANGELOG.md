@@ -2,6 +2,22 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.189.0] — 2026-11-16
+
+### Upgrading
+- Existing agents can use Set up Talk without a rebuild unless they need a newly saved shared key. A configured result is not proof of a working call; microphone, provider and playback acceptance remain real-device checks before promotion.
+
+### Added
+- **Advanced → Voice → Set up Talk** configures the selected agent as its Talk owner and reuses the runtime's existing voice credentials. Provider, model, speaker and transport choices are preserved. Setup checks the configuration revision and rereads uncertain writes before reporting a result.
+- Missing voice credentials have a direct **Voice key settings** path. A shared Gemini key reaches existing agents after Rebuild; supported Google/OpenAI source credentials can also be used. Setup never starts recording or creates a provider voice session.
+- The manager can explicitly authorize its detected Google or OpenAI voice provider through its restricted network. Only fixed provider hosts are allowed, including OpenAI's browser OAuth broker; the grant is tied to its owner, runtime, machine and AI source.
+
+### Fixed
+- Backup run-status integration tests allow bounded time for real subprocess startup on busy runners, avoiding false release failures while retaining their backup assertions.
+- The invitation access browser test controls clipboard completion so accelerated test time cannot cause a false release failure; the real copy and access-request paths remain covered.
+- New and rebuilt agents on compatible OpenClaw 2026.9.8+ runtimes default an unset Talk owner to their own agent ID. Existing authored Talk settings are preserved; this optional setup change does not force rebuilds.
+- Voice readiness verifies the intended Talk agent and stable applied configuration. Read and setup results are discarded after session, ownership, runtime or source changes. Missing credentials remain distinct from an unavailable runtime or a pending configuration reload.
+
 ## [2.188.1] — 2026-11-16
 
 ### Upgrading

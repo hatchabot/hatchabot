@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import {
   batchConfigCommands,
   buildConfigCommands,
@@ -151,6 +152,52 @@ describe('the model allowlist (HB-0666)', () => {
     expect(models['anthropic/claude-sonnet-5']).toEqual({ agentRuntime: { id: 'claude-cli' } });
     expect(JSON.parse(cmds[1]!.argv[3]!)).toEqual(Object.keys(models));
     expect(switchableModelCommands({ provider: 'anthropic', claudeCliRuntime: false, openclawVersion: '2026.9.8' })).toEqual([]);
+  });
+});
+
+describe('the initial Talk owner', () => {
+  const build = (openclawVersion?: string, manager = false) => batchConfigCommands(buildConfigCommands({
+    agentId: 'recipe', authMode: 'api-key', openclawVersion,
+    ...(manager ? { ops: { mcpUrl: 'http://door.example.test/mcp', token: 'fixture' } } : {}),
+  }));
+  const talkCommand = (commands: ReturnType<typeof build>) => commands.find((c) => c.stdin?.includes('"talk"'));
+
+  it.each(['2026.9.8', '2026.9.8-1', '2026.9.9', '2026.10.0', '2027.1.0'])('initializes only Talk ownership after creating the agent on %s', (version) => {
+    for (const manager of [false, true]) {
+      const commands = build(version, manager), talk = talkCommand(commands)!;
+      expect(talk.argv).toEqual(['config', 'patch', '--stdin']);
+      expect(JSON.parse(talk.stdin!)).toEqual({ talk: { agentId: 'recipe' } });
+      expect(commands.indexOf(talk)).toBeGreaterThan(commands.findIndex((c) => c.argv[0] === 'agents' && c.argv[1] === 'add'));
+      expect(runInNewContext(talk.skipIf!, { c: {} })).toBe(false);
+      expect(runInNewContext(talk.skipIf!, { c: { talk: { realtime: { provider: 'google', speakerVoice: 'Aoede' } } } })).toBe(false);
+    }
+  });
+
+  it.each([undefined, '', 'mock', '2026.7.1-2', '2026.8.9', '2026.9.7', '2026.9.8-rc.1', '2026.9.8garbage'])('leaves unsupported or unknown schema %s untouched', (version) => {
+    expect(talkCommand(build(version))).toBeUndefined();
+  });
+
+  it.each(['recipe', 'other-agent', '', null])('preserves an authored Talk owner %j after batching', (agentId) => {
+    const talk = talkCommand(build('2026.9.8'))!;
+    const c = { talk: { agentId, realtime: { provider: 'google', model: 'custom-model', speakerVoice: 'Aoede' } } };
+    expect(runInNewContext(talk.skipIf!, { c })).toBe(true);
+  });
+
+  it('delivers the narrow patch through stdin without replacing the Talk object', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-talk-seed-'));
+    try {
+      const bin = join(home, 'bin'); mkdirSync(bin);
+      symlinkSync(process.execPath, join(bin, 'node'));
+      const capture = join(home, 'capture.json');
+      writeFileSync(join(bin, 'openclaw'), '#!/usr/bin/env node\n' +
+        'const fs = require("node:fs"); fs.writeFileSync(process.env.HB_TEST_CAPTURE, JSON.stringify({argv:process.argv.slice(2), input:JSON.parse(fs.readFileSync(0,"utf8"))}));\n', { mode: 0o755 });
+      const result = spawnSync('/bin/bash', ['-c', `set -euo pipefail\n${seedInvocation(talkCommand(build('2026.9.8'))!)}`], {
+        encoding: 'utf8', env: { HOME: home, PATH: bin, HB_TEST_CAPTURE: capture,
+          GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null' },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(capture, 'utf8'))).toEqual({ argv: ['config', 'patch', '--stdin'], input: { talk: { agentId: 'recipe' } } });
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 });
 

@@ -35,6 +35,7 @@ export const COVERAGE: Record<string, string> = {
   'PUT /v1/agents/:id/skills': 'app: later — choose curated instructions in Agent → Advanced → Skills; applies on rebuild',
   'POST /v1/agents/:id/skills/:skill/file': 'app: browser — preview instruction changes and explicitly update, replace or roll back a skill',
   'POST /v1/agents/:id/skills/:skill/try': 'app: browser — explicitly run one metered AI practice task from an instruction preview',
+  'POST /v1/agents/:id/voice': 'app: browser — the owner binds Talk to this agent and permits its fixed manager voice-provider hosts, without starting a call',
   'POST /v1/agents/:id/class': 'set_class',
   'POST /v1/agents/:id/move': 'set_group (the group); the order within a group: app: browser — drag or the order arrows on the home screen',
   'POST /v1/agents/icons/auto': 'app: internal — the home screen fills in icons',

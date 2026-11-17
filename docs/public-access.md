@@ -313,6 +313,7 @@ reads inside the agent (docs/access-overview-design.md).
 | signed-in | An agent's OpenClaw console (the owner, or a web-chat guest in their own conversation) |
 | signed-in | Web chat |
 | signed-in | An agent's voice configuration status (owner only; no audio or credentials) |
+| signed-in | Set up Talk and fixed manager voice-provider network access (owner only; no audio or credentials granted) |
 | signed-in | Curated skill choices (owner only; no tools or credentials granted) |
 | signed-in | Skill availability checks (owner only; no AI tasks or credentials returned) |
 | signed-in | Report a problem: your drafts, the diagnostics, the installed source and docs |

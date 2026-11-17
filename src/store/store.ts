@@ -1552,6 +1552,7 @@ export class Store {
    * the migration above, so pre-fix deletes get cleaned too.
    */
   scrubAgentResidue(agentId: string): void {
+    this.db.prepare(`DELETE FROM owner_prefs WHERE key = ?`).run(`voice-network:${agentId}`);
     this.db
       .prepare(`UPDATE agents SET gateway_token = NULL, gateway_port = NULL WHERE id = ?`)
       .run(agentId);
@@ -6456,6 +6457,25 @@ export class Store {
   /** Every preference of a person, as the app's typed shape (defaults filled in). */
   ownerPrefs(ownerId: string): OwnerPrefs {
     return { ownBotsOnly: this.getOwnerPref(ownerId, 'ownBotsOnly') === '1' };
+  }
+
+  /** Internal manager-network approval, never part of public preferences.
+   * The current owner scopes storage; the helper validates the full context. */
+  getVoiceNetworkGrant(agentId: string): string | undefined {
+    const agent = this.getAgent(agentId);
+    if (!agent || agent.state === 'DELETED') return undefined;
+    const row = this.db.prepare(`SELECT value FROM owner_prefs WHERE owner_id = ? AND key = ?`)
+      .get(agent.ownerId, `voice-network:${agentId}`) as { value: string } | undefined;
+    return row?.value;
+  }
+  setVoiceNetworkGrant(agentId: string, raw: string | null): void {
+    const key = `voice-network:${agentId}`;
+    if (raw === null) { this.db.prepare(`DELETE FROM owner_prefs WHERE key = ?`).run(key); return; }
+    const agent = this.getAgent(agentId);
+    if (!agent?.ops || agent.state !== 'RUNNING') return;
+    this.db.prepare(`INSERT INTO owner_prefs (owner_id, key, value, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(owner_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+      .run(agent.ownerId, key, raw, new Date().toISOString());
   }
 
   /** The account's linked Telegram id, if the explicit link has been made. */

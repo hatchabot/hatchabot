@@ -170,6 +170,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r('*', /^\/v1\/agents\/:id\/ui(\/.*)?$/, 'signed-in', 'An agent\'s OpenClaw console (the owner, or a web-chat guest in their own conversation)'),
   r('*', /^\/v1\/agents\/:id\/chat$/, 'signed-in', 'Web chat'),
   r(READ, /^\/v1\/agents\/:id\/voice$/, 'signed-in', 'An agent\'s voice configuration status (owner only; no audio or credentials)'),
+  r(['POST'], /^\/v1\/agents\/:id\/voice$/, 'signed-in', 'Set up Talk and fixed manager voice-provider network access (owner only; no audio or credentials granted)'),
   r([...READ, 'PUT'], /^\/v1\/agents\/:id\/skills$/, 'signed-in', 'Curated skill choices (owner only; no tools or credentials granted)'),
   r(READ, /^\/v1\/agents\/:id\/skills\/status$/, 'signed-in', 'Skill availability checks (owner only; no AI tasks or credentials returned)'),
   r('*', /^\/v1\/(problem-reports(\/:id(\/sent)?)?|diagnostics|known-problems|source(\/search)?)$/, 'signed-in', 'Report a problem: your drafts, the diagnostics, the installed source and docs'),

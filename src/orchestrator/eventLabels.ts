@@ -22,6 +22,9 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'skills.selected': 'curated skill selection saved — applies on rebuild or next start',
   'skills.file_changed': 'skill instructions changed — start a new conversation',
   'skills.practiced': 'skill practice task finished — external services were not tested',
+  'voice.setup': (d) => d.status === 'configured'
+    ? 'Talk is configured — a call has not been tested'
+    : 'Talk is linked to this agent — recheck its voice settings',
   'browser.rebuild_pending': 'its browser switch is saved — a rebuild already under way may not apply it; rebuild once it is done',
   'browser.started': 'its browser started',
   'browser.removed': 'its browser removed',

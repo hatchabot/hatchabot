@@ -191,7 +191,9 @@ esac
   return { run, start, bin, root, setDir, fillVolume, repo, onRunners, localLog, remoteLog, oldSet, record, setState, backups, today };
 }
 
-describe('scripts/backup-volumes.sh records how the run ended', () => {
+// Complete sandboxed shell/SQLite/archive workflows, not unit-speed work:
+// process startup on a busy CI runner can exceed five seconds (HB-0800).
+describe('scripts/backup-volumes.sh records how the run ended', { timeout: 30_000 }, () => {
   it('a run stopped by a signal (the service restarting, a shutdown) is incomplete, never complete (HB-0368)', async () => {
     const w = scriptWorld(['hatchabot-kitchen-1-vol', 'hatchabot-notes-2-vol'], ['docker://hatchabot-kitchen-1', 'docker://hatchabot-notes-2']);
     // Held inside its first volume until the signal is sent: no timed sleep to race (HB-0622).

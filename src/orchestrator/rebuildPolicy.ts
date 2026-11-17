@@ -43,6 +43,7 @@ export interface SetupChange {
  */
 export const SETUP_CHANGES: SetupChange[] = [
   { gen: 1, version: '2.158.2', level: 'optional', why: 'mixed disk and zram swap no longer qualifies for a compressed allowance' },
+  { gen: 2, version: '2.189.0', level: 'optional', why: 'an unset Talk owner defaults to this agent on compatible runtimes' },
 ];
 
 export const CONTAINER_GEN = SETUP_CHANGES.reduce((n, c) => Math.max(n, c.gen), 0);

@@ -1910,7 +1910,9 @@
         Get a key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>.
         Saving does not test the key or change running agents. Existing agents receive it on their next
         <b>Rebuild</b>, unless their Gemini AI source supplies its own key.
-        <b>Browser Talk</b> needs separate voice settings. <b>Shared credential:</b>
+        <b>Browser Talk</b> uses separate voice settings. After Rebuild, the agent's
+        Advanced → Voice → <b>Set up Talk</b> can use this key for Google voice.
+        Setting it up does not start a call. <b>Shared credential:</b>
         available to agents across this server, so anyone who owns an agent here
         can use it (and a technical user could read it). Use a key scoped to this
         purpose, not a personal all-services one.
@@ -16832,6 +16834,7 @@ async function v2SkillsSave() {
 
 // A voice check belongs to its card and signed-in person; it never requests microphone access.
 let voiceEpoch = 0;
+const voiceWrites = new Set();
 function v2VoiceForget() {
   voiceEpoch++;
   const el = $('v2Voice');
@@ -16846,7 +16849,7 @@ async function v2LoadVoice(id) {
   const el = $('v2Voice'), a = v2Find(id);
   if (!el || el.dataset.agent !== id || !a || !v2Mine(a) || pagePersonAway || pageSignedOut) return;
   const epoch = voiceEpoch, person = pagePerson, read = String(Number(el.dataset.read || 0) + 1);
-  const setupHint = `<p class="sub">In voice settings, set Talk Agent to <code>${esc(a.slug)}</code> so the configuration check uses this agent.</p>`;
+  const setupHint = `<p class="sub">Set up Talk links voice to <code>${esc(a.slug)}</code> and uses voice credentials already available to this agent. Your provider, model and voice choices are kept.</p>`;
   el.dataset.read = read; el.dataset.status = 'checking';
   el.innerHTML = '<b>Browser Talk</b><p class="sub" role="status">Checking voice configuration…</p>' + setupHint + '<button disabled>Recheck</button>';
   const current = () => epoch === voiceEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut
@@ -16857,9 +16860,15 @@ async function v2LoadVoice(id) {
   if (!current()) return;
   const words = {
     configured: 'Runtime reports voice configured; a call has not been tested.',
-    unconfigured: 'Runtime does not report a configured Talk provider. Choose one in voice settings.',
+    unconfigured: r?.reason === 'agent'
+      ? 'Talk is not linked to this agent yet. Press Set up Talk to configure it.'
+      : r?.reason === 'network'
+        ? 'The manager’s voice provider needs network permission. Set up Talk can authorize Google or OpenAI; choose one of those in Voice settings.'
+      : r?.reason === 'credentials'
+        ? 'Talk needs Google or OpenAI voice credentials. A text-model subscription alone may not provide them.'
+        : 'Runtime does not report a configured Talk provider. Set up Talk, or review the provider in Voice settings.',
     unsupported: 'This runtime does not report browser Talk support. Check its OpenClaw version.',
-    unavailable: 'Could not check browser Talk. Open voice settings and check Talk Agent and provider configuration, then Recheck.',
+    unavailable: 'Could not check browser Talk. Set up Talk can repair its agent selection; use Voice settings for provider configuration, then Recheck.',
     not_running: 'Not running. Start this agent, then recheck browser Talk.',
     busy: 'Busy with another operation. Recheck when it finishes.',
   };
@@ -16867,25 +16876,70 @@ async function v2LoadVoice(id) {
   el.dataset.status = status;
   const provider = typeof r?.provider === 'string' ? r.provider.slice(0, 100) : '';
   const browserNote = voiceBrowserNote(), running = v2Find(id)?.state === 'RUNNING';
+  const saving = voiceWrites.has(id);
   const configure = running && window.isSecureContext && ['configured', 'unconfigured', 'unavailable'].includes(status);
   const tryVoice = running && status === 'configured' && !browserNote;
   el.innerHTML = `<b>Browser Talk${provider ? ' · ' + esc(provider) : ''}</b>
     <p class="sub" role="status">${words[status]}</p>
     ${setupHint}
+    ${a.ops ? '<p class="sub">For the manager, Set up Talk also allows its detected Google or OpenAI voice provider through its network restrictions.</p>' : ''}
     ${browserNote ? `<p class="sub">${esc(browserNote)}</p>` : ''}
     <div class="actions" style="justify-content:flex-start;flex-wrap:wrap">
-      <button id="v2VoiceRecheck" onclick="v2LoadVoice('${jsq(id)}')">Recheck</button>
-      <button id="v2VoiceConfigure" onclick="v2VoiceOpen('${jsq(id)}','voice-settings')"${configure ? '' : ' disabled'}>Configure voice</button>
-      <button id="v2VoiceTry" onclick="v2VoiceOpen('${jsq(id)}','chat')"${tryVoice ? '' : ' disabled'}>Try voice</button>
+      ${status !== 'configured' ? `<button id="v2VoiceSetup" class="primary" onclick="v2SetupVoice('${jsq(id)}')"${configure && !saving ? '' : ' disabled'}>${saving ? 'Setting up Talk…' : 'Set up Talk'}</button>` : ''}
+      <button id="v2VoiceRecheck" onclick="v2LoadVoice('${jsq(id)}')"${saving ? ' disabled' : ''}>Recheck</button>
+      <button id="v2VoiceConfigure" onclick="v2VoiceOpen('${jsq(id)}','voice-settings')"${configure && !saving ? '' : ' disabled'}>Voice settings</button>
+      <button id="v2VoiceTry" onclick="v2VoiceOpen('${jsq(id)}','chat')"${tryVoice && !saving ? '' : ' disabled'}>Try voice</button>
+      ${r?.reason === 'credentials' ? `<button id="v2VoiceKeys" onclick="v2VoiceKeySettings('${jsq(id)}')"${saving ? ' disabled' : ''}>Voice key settings</button>` : ''}
     </div>
     <p class="sub">Try voice opens this agent's conversation. Press the microphone there to start; opening this card does not record audio.</p>
     <p class="sub">Switching agents ends the voice call. Text chat tabs stay open.</p>
+    ${r?.reason === 'credentials' ? '<p class="sub">For a shared Gemini key, open Settings → Connections → Voice &amp; media, save the key, then Rebuild the agent so it receives it. Google and OpenAI AI sources can supply their own credentials. Recheck afterward.</p>' : ''}
     <p class="sub">Telegram voice-note transcription is separate. Its shared Gemini key is under Settings → Connections.</p>`;
+}
+function v2VoiceKeySettings(id) {
+  const a = v2Find(id);
+  if (!a || !v2Mine(a) || !v2AgentDlg.open || v2AgentId !== id || $('v2Voice')?.dataset.agent !== id
+    || voiceWrites.has(id) || pagePersonAway || pageSignedOut) return;
+  v2Close();
+  void openAiDlg('conn').catch(() => toast('Could not load Connections. Open Settings and try again.', 8000));
+  $('mediaKeyDrawer').open = true;
+  $('mediaKey').focus();
+}
+async function v2SetupVoice(id) {
+  const a = v2Find(id), el = $('v2Voice');
+  if (!a || !v2Mine(a) || a.state !== 'RUNNING' || !window.isSecureContext || !v2AgentDlg.open || v2AgentId !== id
+    || el?.dataset.agent !== id || !['unconfigured', 'unavailable'].includes(el.dataset.status)
+    || voiceWrites.has(id) || pagePersonAway || pageSignedOut) return;
+  const epoch = voiceEpoch, person = pagePerson;
+  const read = String(Number(el.dataset.read || 0) + 1);
+  el.dataset.read = read; el.dataset.status = 'saving';
+  voiceWrites.add(id);
+  for (const btn of el.querySelectorAll('button')) btn.disabled = true;
+  el.querySelector('[role="status"]').textContent = 'Setting up Talk for this agent…';
+  const here = () => epoch === voiceEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut
+    && v2AgentDlg.open && v2AgentId === id && !!v2Find(id) && v2Mine(v2Find(id));
+  const current = () => here() && $('v2Voice') === el && el.dataset.read === read;
+  try {
+    const r = await api(`/v1/agents/${id}/voice`, { method: 'POST', body: {} });
+    if (!current()) return;
+    toast(r.status === 'configured'
+      ? 'Talk is configured. Use Try voice and press the microphone to test a call.'
+      : r.reason === 'credentials'
+        ? 'Talk is linked to this agent. Add voice credentials, rebuild if needed, then Recheck.'
+        : r.reason === 'network'
+          ? 'Choose a Google or OpenAI voice provider in Voice settings, then Set up Talk again.'
+        : 'Talk is linked to this agent. Recheck its provider or open Voice settings.', 10000);
+  } catch (e) { if (current()) toast(e.message || 'Could not set up Talk. Recheck and try again.', 10000); }
+  finally {
+    voiceWrites.delete(id);
+    // A newly opened card gets a fresh read, never the earlier card's result.
+    if (here() && $('v2Voice')?.dataset.agent === id) await v2LoadVoice(id);
+  }
 }
 async function v2VoiceOpen(id, view) {
   const a = v2Find(id), el = $('v2Voice');
   if (!a || !v2Mine(a) || !v2AgentDlg.open || v2AgentId !== id || el?.dataset.agent !== id || pagePersonAway || pageSignedOut) return;
-  if (view !== 'voice-settings' && view !== 'chat') return;
+  if ((view !== 'voice-settings' && view !== 'chat') || voiceWrites.has(id)) return;
   const allowed = a.state === 'RUNNING' && window.isSecureContext && (view === 'chat'
     ? el.dataset.status === 'configured' && !voiceBrowserNote()
     : ['configured', 'unconfigured', 'unavailable'].includes(el.dataset.status));

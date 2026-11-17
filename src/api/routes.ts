@@ -110,7 +110,8 @@ import { browserImage, browserSweep, containerOf, browserRefreshDate, browserLog
 import { browserSteerers, siteOf } from '../orchestrator/browserLogins.js';
 import { BrowserPanels, PANEL_IDLE_MS, panelAddress, panelCommands, panelSize, panelTransportOk, type PanelSink } from '../orchestrator/browserPanel.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
-import { readVoiceStatus } from '../orchestrator/voice.js';
+import { configureVoice, readVoiceStatus, VoiceSetupError } from '../orchestrator/voice.js';
+import { grantVoiceNetwork, voiceNetworkReady } from '../orchestrator/voiceNetwork.js';
 import { readSkillsStatus, type SkillsStatus } from '../orchestrator/skillsStatus.js';
 import { readSkillFile, mutateSkillFile, SkillFileError } from '../orchestrator/skillFiles.js';
 import { describeSkillTrial, runSkillTrial } from '../orchestrator/skillTrials.js';
@@ -4585,34 +4586,79 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // Read only: configuration readiness is not a microphone or provider test.
   // Talk requires operator.talk, which guests' console scopes do not grant.
+  const voiceWaiting = (a: Agent, locked = false) => (!locked && isBusy(a.id)) || archiving.has(a.id) || operationRefusal(store, a.id) ||
+    a.state === 'PROVISIONING' || a.state === 'REBUILDING';
+  // These snapshots stay internal, never in the reply. The applied source
+  // can differ from the desired source while a rebuild is pending.
+  const voiceContext = (a: Agent) => JSON.stringify([
+    a.ownerId, a.ops, a.runtimeRef, a.slug, a.hostId, a.state, a.updatedAt, a.gatewayToken,
+    a.aiProfileId, a.model, a.appliedProfileId, a.appliedModel, a.appliedProfileAt, a.image, a.rebuildOnStart,
+    store.getHost(a.hostId), store.getAIProfile(a.aiProfileId),
+    a.appliedProfileId ? store.getAIProfile(a.appliedProfileId) : undefined,
+  ]);
   app.get<{ Params: { id: string } }>('/v1/agents/:id/voice', async (req, reply) => {
     reply.header('cache-control', 'no-store');
     const agent = ownedAgent(req, req.params.id);
     if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
-    const waiting = (a: Agent) => isBusy(a.id) || operationRefusal(store, a.id) ||
-      a.state === 'PROVISIONING' || a.state === 'REBUILDING';
-    if (waiting(agent)) return { status: 'busy' };
+    if (voiceWaiting(agent)) return { status: 'busy' };
     if (agent.state !== 'RUNNING' || !agent.runtimeRef) return { status: 'not_running' };
-    // Discard a reading if its runtime, runner or AI source changed while the
-    // gateway was answering. These snapshots stay internal, never in the reply.
-    const context = (a: Agent) => JSON.stringify([
-      a.runtimeRef, a.hostId, a.aiProfileId, a.appliedProfileAt,
-      store.getHost(a.hostId), store.getAIProfile(a.aiProfileId),
-    ]);
-    const before = context(agent);
+    const session = watchConsoleHttp(req, reply, agent.ownerId), before = voiceContext(agent);
     let provider: RuntimeProvider;
     try { provider = providerFor(agent.hostId); }
     catch { return { status: 'unavailable' }; }
-    const result = await readVoiceStatus(provider, agent.runtimeRef);
+    const result = await readVoiceStatus(provider, agent.runtimeRef, agent.slug);
     const current = ownedAgent(req, agent.id);
-    if (!current || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
-    if (waiting(current)) return { status: 'busy' };
+    if (!session.valid() || !current || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (voiceWaiting(current)) return { status: 'busy' };
     if (current.state !== 'RUNNING' || !current.runtimeRef) return { status: 'not_running' };
-    if (context(current) !== before) return { status: 'unavailable' };
+    if (voiceContext(current) !== before) return { status: 'unavailable' };
     try {
       if (providerFor(current.hostId) !== provider) return { status: 'unavailable' };
     } catch { return { status: 'unavailable' }; }
+    if (result.status === 'configured' && !voiceNetworkReady(store, current, result.provider)) return { status: 'unconfigured', reason: 'network' };
     return result;
+  });
+
+  // Bind Talk to this agent using only the provider already configured in
+  // its runtime. This neither grants credentials nor starts microphone/audio.
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/voice', async (req, reply) => {
+    reply.header('cache-control', 'no-store');
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agentGone(agent.id)) return reply.code(404).send({ error: 'Not found' });
+    if (!z.object({}).strict().safeParse(req.body).success) return reply.code(400).send({ error: 'Voice setup accepts an empty object only.' });
+    if (voiceWaiting(agent)) return reply.code(409).send({ error: 'Wait for the current operation before setting up Talk.' });
+    if (agent.state !== 'RUNNING' || !agent.runtimeRef) return reply.code(409).send({ error: 'Start the agent before setting up Talk.' });
+    const session = watchConsoleHttp(req, reply, agent.ownerId), before = voiceContext(agent);
+    try {
+      const provider = providerFor(agent.hostId);
+      const stillCurrent = (locked = true) => {
+        const fresh = ownedAgent(req, agent.id);
+        if (!session.valid() || !fresh || agentGone(agent.id)) throw new TurnRefused(404, 'Not found');
+        let sameProvider = false;
+        try { sameProvider = providerFor(fresh.hostId) === provider; } catch { /* a removed runner is a changed context */ }
+        if (voiceWaiting(fresh, locked) || fresh.state !== 'RUNNING' || !fresh.runtimeRef || voiceContext(fresh) !== before || !sameProvider)
+          throw new TurnRefused(409, 'The agent changed while setting up Talk. Reopen voice settings and try again.');
+      };
+      const result = await whileBusy(agent.id, async () => {
+        stillCurrent();
+        const configured = await configureVoice(provider, agent.runtimeRef!, agent.slug, stillCurrent);
+        stillCurrent();
+        return configured;
+      });
+      stillCurrent(false);
+      if (result.status === 'configured') {
+        const current = ownedAgent(req, agent.id)!;
+        grantVoiceNetwork(store, current, result.provider);
+        if (!voiceNetworkReady(store, current, result.provider)) return { status: 'unconfigured', reason: 'network' };
+      }
+      trace(agent.id)('voice.setup', { status: result.status });
+      return result;
+    } catch (error) {
+      if (error instanceof TurnRefused) return reply.code(error.status).send({ error: error.message });
+      if (error instanceof AgentBusyError) return reply.code(409).send({ error: error.userMessage });
+      if (error instanceof VoiceSetupError) return reply.code(error.code === 'unavailable' ? 502 : 409).send({ error: error.userMessage });
+      return reply.code(502).send({ error: 'Could not set up Talk. Reopen voice settings and try again.' });
+    }
   });
 
   // ---- each agent's own browser (src/orchestrator/browser.ts) -----------------

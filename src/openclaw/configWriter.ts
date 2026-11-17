@@ -157,6 +157,14 @@ export function hasModelPolicy(version: string | undefined): boolean {
   const m = /^(\d{4})\.(\d+)/.exec(version ?? '');
   return !!m && (Number(m[1]) > 2026 || (Number(m[1]) === 2026 && Number(m[2]) >= 9));
 }
+
+/** Talk ownership is verified on 2026.9.8. Unknown and prerelease schemas
+ * are left alone; a numeric packaging suffix has the same runtime schema. */
+function hasTalkAgentDefault(version: string | undefined): boolean {
+  const m = /^(\d{4})\.(\d+)\.(\d+)(?:-\d+)?$/.exec(version ?? '');
+  return !!m && (Number(m[1]) > 2026 || (Number(m[1]) === 2026 &&
+    (Number(m[2]) > 9 || (Number(m[2]) === 9 && Number(m[3]) >= 8))));
+}
 /**
  * An agent's switchable models, as the build writes them and a live change
  * writes them again (HB-0666, HB-0668): `agents.defaults.models`, which the
@@ -867,6 +875,18 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (patch.telegram) add.push('--bind', `telegram:${patch.telegram.accountId}`);
 
   cmds.push({ argv: add });
+  // Talk's catalog has no session key: an old internal "main" alongside
+  // this agent otherwise leaves its owner ambiguous. Set only an absent
+  // owner, after the agent exists. Preserve authored ownership and every
+  // provider/voice setting; credentials remain an explicit setup choice.
+  // A stdin patch stays outside batching, which must retain this skipIf.
+  if (hasTalkAgentDefault(patch.openclawVersion)) {
+    cmds.push({
+      argv: ['config', 'patch', '--stdin'],
+      stdin: JSON.stringify({ talk: { agentId: patch.agentId } }),
+      skipIf: '!!(c.talk && Object.hasOwn(c.talk, "agentId"))',
+    });
+  }
   // Telegram too: a bot changed or added after the first build had no route
   // (only `agents add` carried --bind), so its chats went to OpenClaw's
   // default "main" agent (night review, 2026-09-28). Optional: a verb that

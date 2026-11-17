@@ -14,6 +14,7 @@ import { OpsAuthError, setOpsHandlers } from '../ops/opsServer.js';
 import { makeOpsWeb, type OpsWebDeps } from '../ops/opsWeb.js';
 import { opsDoorTools } from '../ops/opsTools.js';
 import { SEARCH_KEY_REF } from '../orchestrator/provision.js';
+import { voiceNetworkHosts } from '../orchestrator/voiceNetwork.js';
 
 /**
  * Where a management agent reaches Hatchabot, and where the cards it files are
@@ -292,8 +293,8 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     }
   };
 
-  /** Where this agent's container may connect: its AI provider, and Telegram
-   *  if it has a bot. Nothing else leaves the jail. */
+  /** Its text provider, explicitly approved voice provider, and attached chat
+   * apps. Voice grants are fixed hosts tied to the current runtime context. */
   const opsAllowedHosts = (token: string): string[] | undefined => {
     const agent = store.opsAgentForToken(token);
     if (!agent) return undefined;
@@ -304,7 +305,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       : [];
     if (store.getChannelForAgent(agent.id)) hosts.push('api.telegram.org');
     if (store.getChannelForAgent(agent.id, 'discord')) hosts.push('discord.com', 'gateway.discord.gg', 'cdn.discordapp.com', 'media.discordapp.net');
-    return hosts;
+    return [...new Set([...hosts, ...voiceNetworkHosts(store, agent)])];
   };
   // A doorman's key, compared in constant time against every live doorman's.
   const doormanKeyOk = (key: string): boolean => {

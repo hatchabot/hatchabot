@@ -330,16 +330,18 @@ own sessions. A simpler chat route runs one turn inside the container.
 
 ## Browser voice
 
-The owner's Advanced → Voice card reads the running agent's Talk catalog,
-then opens its existing console for configuration or an explicit microphone
-trial. Configuration readiness does not prove a successful audio call. The
+The owner's Advanced → Voice card verifies the running agent's Talk owner and
+catalog, provides explicit setup, and opens its console for advanced settings
+or a microphone trial. Configuration readiness does not prove a successful audio call. The
 setup guide and manual audio acceptance checks are in docs/voice.md.
 
-- `src/orchestrator/voice.ts` — `readVoiceStatus`, `VoiceStatus`: the bounded read-only Talk catalog query, strict readiness parsing and fixed provider labels; no raw credentials or runtime errors are exposed.
-- `src/api/routes.ts` — `'/v1/agents/:id/voice'`: owner-only readiness; lifecycle checks and ownership/runtime/source revalidation after the read.
-- `web/index.html` — `v2LoadVoice`, `v2VoiceOpen`, `v2VoiceForget`, `voiceBrowserNote`, `openGateway`: the Voice card, stale-read guards, browser prerequisites and explicit console destinations.
+- `src/orchestrator/voice.ts` — `readVoiceStatus`, `configureVoice`, `VoiceSetupError`, `VoiceStatus`: bounded configuration/catalog reads, revision-guarded Talk owner patches, verification of uncertain writes, strict readiness parsing and fixed provider labels; no raw credentials or runtime errors are exposed.
+- `src/api/routes.ts` — `'/v1/agents/:id/voice'`: owner-only GET readiness and POST setup; lifecycle exclusion and session/ownership/runtime/source revalidation around each setup call.
+- `web/index.html` — `v2LoadVoice`, `v2SetupVoice`, `v2VoiceKeySettings`, `v2VoiceOpen`, `v2VoiceForget`, `voiceBrowserNote`, `openGateway`: the Voice card, setup and missing-key path, stale-response guards, browser prerequisites and explicit console destinations.
 - `web/index.html` — `consoleStopTalk`: retires active or starting Talk before a cached console is hidden; unloads that frame if retirement fails. `src/api/controlUiRebase.ts` — `__hatchabotStopTalk`: the pinned runtime controller hook, which never toggles an idle conversation into recording.
-- `test/voice.test.ts`, `test/voiceRoutes.test.ts`: catalog parsing, error redaction, ownership and delayed-read regression tests.
+- `src/orchestrator/voiceNetwork.ts` — `voiceNetworkReady`, `grantVoiceNetwork`, `voiceNetworkHosts`: explicit manager voice-provider grants with fixed destinations and context binding. `src/api/mgmtChat.ts` — `opsAllowedHosts`: applies valid grants to the manager proxy. `src/store/store.ts` — `getVoiceNetworkGrant`, `setVoiceNetworkGrant`, `scrubAgentResidue`: private owner-scoped grant storage and cleanup.
+- `src/openclaw/configWriter.ts` — `hasTalkAgentDefault`, `buildConfigCommands`: compatible runtimes receive an absent Talk owner without replacing authored choices. `src/orchestrator/rebuildPolicy.ts` — `SETUP_CHANGES`: optional setup generation.
+- `test/voice.test.ts`, `test/voiceRoutes.test.ts`, `test/voiceNetwork.test.ts`: catalog parsing, error redaction, ownership and delayed-read regression tests.
 - `scripts/ui-clickthrough.mjs`: Voice card, console navigation and shared Gemini key wording scenarios.
 - `scripts/live.mjs` — `LIVE_TESTS`: console smoke-test triggers. Real audio acceptance is described separately in docs/voice.md.
 
