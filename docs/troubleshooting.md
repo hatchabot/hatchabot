@@ -7399,5 +7399,5 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Check:** the backup-completeness suite reports only a five-second timeout in the runner archive/sleeping-runner case; the same case passes unchanged alone without a behavior assertion failure.
 - **Cause:** the run-status group executes complete sandboxed shell, SQLite and compression workflows, whose process startup and scheduling can exceed a unit-test deadline.
 - **Fix:** that integration group has a bounded 30-second allowance, matching related shell suites. Pure unit groups, backup assertions and child-process limits are unchanged.
-- **Fixed in:** `v2.189.0` (HB-0800).
+- **Fixed in:** `v2.189.0` (HB-0800); `v2.190.0` gives the whole file, and `test/privacyCheck.test.ts`, the same allowance after two more cases timed out (HB-0801).
 - **Code:** `test/backupCompleteness.test.ts` — `scriptWorld`

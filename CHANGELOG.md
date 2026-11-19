@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.190.0] — 2026-11-19
+
+### Upgrading
+- Close and reopen the app to load the new console. Agents need no rebuild.
+
+### Added
+- **The console can be resized.** On a computer, drag its left or right side, its bottom, or a bottom corner; it stays centred and grows up to the window. The size is remembered in that browser, and a double-click on an edge returns to the usual size. Phones keep their fitted layout.
+
+### Changed
+- The console's top bar shows the agent's settings and its Telegram, Slack and Discord links as icons alone, leaving more room for the agent's name and tabs. Each keeps its name for hover and for screen readers.
+
+### Fixed
+- The backup and privacy-check test suites, which run real scripts in a sandbox, allow bounded time on busy runners instead of failing a release check on a five-second limit. Their assertions are unchanged.
+
 ## [2.189.0] — 2026-11-16
 
 ### Upgrading

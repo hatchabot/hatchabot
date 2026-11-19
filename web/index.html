@@ -147,10 +147,29 @@
   .cbtn[hidden], .v2btn[hidden], .v2tabs[hidden], .tabs[hidden] { display:none !important }
   @media (max-width:560px) {
     .cbtn { padding:0 9px }
-    .cbtn .lbl, .cbtn .lbl-long { display:none }
+    .cbtn .lbl-long { display:none }
     .cbtn .lbl-short { display:inline }
   }
   .console-dlg iframe { flex:1; width:100%; border:0; background:var(--bg) }
+  /* The console's own size (2026-11-19): drag a side, the bottom or a bottom
+     corner. It stays centred, so it grows both ways about its middle and the
+     edge stays under the pointer. Kept per browser; a double-click on an edge
+     goes back to the usual size. Not on a phone, where the console has its
+     fitted place, nor while the keyboard is up. */
+  .cgrip { position:absolute; z-index:6; touch-action:none }
+  .cgrip[data-edge="l"] { left:0; top:0; bottom:0; width:5px; cursor:ew-resize }
+  .cgrip[data-edge="r"] { right:0; top:0; bottom:0; width:5px; cursor:ew-resize }
+  .cgrip[data-edge="b"] { left:0; right:0; bottom:0; height:5px; cursor:ns-resize }
+  .cgrip[data-edge="bl"] { left:0; bottom:0; width:14px; height:14px; cursor:nesw-resize }
+  .cgrip[data-edge="br"] { right:0; bottom:0; width:14px; height:14px; cursor:nwse-resize;
+    background:linear-gradient(135deg, transparent 0 55%, var(--dim) 55% 62%, transparent 62% 74%, var(--dim) 74% 81%, transparent 81%); opacity:.55 }
+  .console-dlg.resizing iframe { pointer-events:none }
+  .console-dlg.resizing { user-select:none; -webkit-user-select:none }
+  @media (min-width:641px) and (min-height:501px) {
+    html:not(.kbd) #consoleDlg.sized { width:min(var(--cw), 100vw - 16px); height:min(var(--ch), 100vh - 16px); max-height:none }
+  }
+  @media (max-width:640px), (max-height:500px) { .cgrip { display:none } }
+  html.kbd .cgrip { display:none }
   /* "Sign in to a site" (HB-0680): the agent's browser, live, on the console's frame. */
   .bp-bar { flex-wrap:nowrap }
   #bpTitle { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:15px; font-weight:700 }
@@ -1257,7 +1276,7 @@
     <button id="consoleTitle" type="button" onclick="openConsoleSwitcher()" title="Switch to another agent (⌘K / Ctrl+K)">Agent</button>
     <div id="consoleTabs" class="ctabs" role="tablist" aria-label="Open consoles" hidden></div>
     <button id="consoleAddTab" class="cbtn ctabadd" type="button" onclick="openConsoleSwitcher()" title="Open another agent (⌘K / Ctrl+K)" aria-label="Open another agent">＋</button>
-    <button id="consoleGearBtn" class="cbtn" hidden title="This agent's settings"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">Settings</span></button>
+    <button id="consoleGearBtn" class="cbtn" hidden title="This agent's settings" aria-label="This agent's settings"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
     <button id="consoleApproveBtn" class="cbtn primary" hidden onclick="approveConsoleBrowser(this)"
             title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner."><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span class="lbl-long">Approve this browser</span><span class="lbl-short">Approve</span></button>
     <span id="consoleChans" style="display:contents"></span>
@@ -1270,6 +1289,8 @@
     <div id="cswList" role="listbox"></div>
   </div>
   <div id="consoleFrames" class="cframes"><iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe></div>
+  <div class="cgrip" data-edge="l"></div><div class="cgrip" data-edge="r"></div><div class="cgrip" data-edge="b"></div>
+  <div class="cgrip" data-edge="bl"></div><div class="cgrip" data-edge="br" title="Drag to resize; double-click for the usual size"></div>
 </dialog>
 <dialog id="bpDlg" class="console-dlg" aria-labelledby="bpTitle">
   <div class="console-bar bp-bar">
@@ -12173,6 +12194,58 @@ async function approveConsoleBrowser(btn) {
   finally { if (current()) btn.disabled = false; }
 }
 
+/**
+ * The console's size, by dragging (2026-11-19). The dialog is centred, so a
+ * drag sets the size about its middle: twice the pointer's distance from the
+ * centre, which keeps the dragged edge under the pointer. The size is kept in
+ * this browser; the stylesheet caps it to the window and ignores it on a phone.
+ */
+const CONSOLE_SIZE_KEY = 'hb-console-size', CONSOLE_MIN_W = 480, CONSOLE_MIN_H = 360;
+function consoleApplySize(w, h) {
+  const d = $('consoleDlg');
+  if (!(Number.isFinite(w) && Number.isFinite(h))) { d.classList.remove('sized'); d.style.removeProperty('--cw'); d.style.removeProperty('--ch'); return; }
+  d.style.setProperty('--cw', `${Math.round(Math.max(CONSOLE_MIN_W, w))}px`);
+  d.style.setProperty('--ch', `${Math.round(Math.max(CONSOLE_MIN_H, h))}px`);
+  d.classList.add('sized');
+}
+function consoleResizeRestore() {
+  try {
+    const s = JSON.parse(localStorage.getItem(CONSOLE_SIZE_KEY) || 'null');
+    if (Array.isArray(s) && s.length === 2) consoleApplySize(Number(s[0]), Number(s[1]));
+  } catch { /* a private window, or a value that is not a size: the usual size */ }
+}
+function consoleResizeInit() {
+  const d = $('consoleDlg');
+  consoleResizeRestore();
+  for (const g of d.querySelectorAll('.cgrip')) {
+    g.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const edge = g.dataset.edge, r0 = d.getBoundingClientRect();
+      const cx = r0.left + r0.width / 2, cy = r0.top + r0.height / 2;
+      let w = r0.width, h = r0.height;
+      try { g.setPointerCapture(e.pointerId); } catch { /* the pointer is gone already */ }
+      d.classList.add('resizing');
+      const move = (ev) => {
+        if (/[lr]/.test(edge)) w = Math.min(innerWidth - 16, Math.max(CONSOLE_MIN_W, 2 * Math.abs(ev.clientX - cx)));
+        if (edge.includes('b')) h = Math.min(innerHeight - 16, Math.max(CONSOLE_MIN_H, 2 * Math.abs(ev.clientY - cy)));
+        consoleApplySize(w, h);
+      };
+      const done = () => {
+        g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', done); g.removeEventListener('pointercancel', done);
+        d.classList.remove('resizing');
+        try { localStorage.setItem(CONSOLE_SIZE_KEY, JSON.stringify([Math.round(w), Math.round(h)])); } catch { /* a private window */ }
+      };
+      g.addEventListener('pointermove', move); g.addEventListener('pointerup', done); g.addEventListener('pointercancel', done);
+    });
+    g.addEventListener('dblclick', () => {
+      consoleApplySize(NaN, NaN);
+      try { localStorage.removeItem(CONSOLE_SIZE_KEY); } catch { /* a private window */ }
+    });
+  }
+}
+consoleResizeInit();
+
 function closeConsole() {
   consoleTicket++;
   // Drop the frames so their WebSockets close and the tokens leave the DOM.
@@ -14211,7 +14284,7 @@ function renderConsoleChannels(a) {
   const box = $('consoleChans');
   if (!box) return;
   box.innerHTML = agentChannelLinks(a).map((l) =>
-    `<button class="cbtn" title="Open this agent in ${V2_CHAN_LABEL[l.kind]}" onclick="window.open('${jsq(l.url)}','_blank','noopener')">${chanIcon(l.kind)}<span class="lbl">${V2_CHAN_LABEL[l.kind]}</span></button>`).join('');
+    `<button class="cbtn" title="Open this agent in ${V2_CHAN_LABEL[l.kind]}" aria-label="Open this agent in ${V2_CHAN_LABEL[l.kind]}" onclick="window.open('${jsq(l.url)}','_blank','noopener')">${chanIcon(l.kind)}</button>`).join('');
 }
 /** Every chat app that reaches this agent, Telegram first. */
 function v2ChannelKinds(a) {

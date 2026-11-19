@@ -4411,6 +4411,72 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/gateway'];
       }
     },
+    // 2026-11-19: the console's bar keeps its gear and chat-app links as icons, each still named; the console is resized by dragging an edge, and the size is kept.
+    consoleIconsAndResize: async () => {
+      const KEY = 'hb-console-size';
+      try {
+        localStorage.removeItem(KEY); consoleApplySize(NaN, NaN);
+        const list = await (await fetch('/v1/agents')).json();
+        window.__override['/v1/agents'] = list.map((x) => x.id === 'a1' ? { ...x, botUsername: 'test_helper_bot', deepLink: 'https://t.me/test_helper_bot', otherChannels: [{ kind: 'discord', deepLink: 'https://discord.com/users/1' }] } : x);
+        window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+        await refresh(false);
+        const a = v2Find('a1'); await openGateway(a.id, a.slug);
+        await until(() => consoleDlg.open && $('consoleChans').children.length === 2);
+        const gear = $('consoleGearBtn');
+        eq('the gear is an icon alone', gear.textContent.trim(), '');
+        eq('the gear keeps its name', gear.getAttribute('aria-label'), "This agent's settings");
+        const chans = [...$('consoleChans').querySelectorAll('button')];
+        eq('the chat-app links are icons alone', chans.map((b) => b.textContent.trim()), ['', '']);
+        eq('each chat-app link keeps its name', chans.map((b) => b.getAttribute('aria-label')), ['Open this agent in Telegram', 'Open this agent in Discord']);
+        ok('each chat-app link draws its mark', chans.every((b) => b.querySelector('svg')));
+        const grip = (edge) => consoleDlg.querySelector('.cgrip[data-edge="' + edge + '"]');
+        const fire = (el, type, x, y) => el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 1, clientX: x, clientY: y }));
+        if (innerWidth > 700 && innerHeight > 560) {
+          const r0 = consoleDlg.getBoundingClientRect();
+          const cx = r0.left + r0.width / 2, cy = r0.top + r0.height / 2;
+          const w = Math.max(480, Math.round(r0.width) - 120), h = Math.max(360, Math.round(r0.height) - 80);
+          fire(grip('br'), 'pointerdown', r0.right, r0.bottom);
+          ok('the consoles let the pointer through while dragging', consoleDlg.classList.contains('resizing') && getComputedStyle($('consoleFrame')).pointerEvents === 'none');
+          fire(grip('br'), 'pointermove', cx + w / 2, cy + h / 2);
+          fire(grip('br'), 'pointerup', cx + w / 2, cy + h / 2);
+          const r1 = consoleDlg.getBoundingClientRect();
+          ok('a corner drag sets both sides: ' + Math.round(r1.width) + 'x' + Math.round(r1.height), Math.abs(r1.width - w) <= 1 && Math.abs(r1.height - h) <= 1);
+          ok('it stays centred, the edge under the pointer', Math.abs(r1.right - (cx + w / 2)) <= 1 && Math.abs(r1.bottom - (cy + h / 2)) <= 1);
+          ok('the drag is over', !consoleDlg.classList.contains('resizing') && getComputedStyle($('consoleFrame')).pointerEvents !== 'none');
+          eq('the size is kept in this browser', JSON.parse(localStorage.getItem(KEY)), [w, h]);
+          fire(grip('r'), 'pointerdown', r1.right, cy);
+          fire(grip('r'), 'pointermove', innerWidth + 500, cy);
+          fire(grip('r'), 'pointerup', innerWidth + 500, cy);
+          const r2 = consoleDlg.getBoundingClientRect();
+          ok('a side drag stops at the window: ' + Math.round(r2.width), r2.left >= 0 && r2.right <= innerWidth && Math.abs(r2.width - (innerWidth - 16)) <= 1);
+          ok('a side drag leaves the height alone', Math.abs(r2.height - h) <= 1);
+          fire(grip('b'), 'pointerdown', cx, r2.bottom);
+          fire(grip('b'), 'pointermove', cx, cy + 10);
+          fire(grip('b'), 'pointerup', cx, cy + 10);
+          ok('it never gets too small to use', Math.abs(consoleDlg.getBoundingClientRect().height - 360) <= 1);
+          closeConsole();
+          consoleApplySize(NaN, NaN); consoleResizeRestore();
+          await openGateway(a.id, a.slug);
+          await until(() => consoleDlg.open);
+          ok('the kept size comes back', Math.abs(consoleDlg.getBoundingClientRect().height - 360) <= 1);
+          grip('br').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+          const r3 = consoleDlg.getBoundingClientRect();
+          ok('a double-click gives the usual size back', Math.abs(r3.width - r0.width) <= 1 && Math.abs(r3.height - r0.height) <= 1 && localStorage.getItem(KEY) === null);
+        } else {
+          ok('no resize handles on a phone', getComputedStyle(grip('br')).display === 'none');
+          localStorage.setItem(KEY, '[900,700]'); consoleResizeRestore();
+          const r = consoleDlg.getBoundingClientRect();
+          ok('a kept size never applies on a phone', r.width <= innerWidth && r.height <= innerHeight && r.width !== 900);
+        }
+      } finally {
+        if (consoleDlg.open) closeConsole();
+        try { localStorage.removeItem(KEY); } catch {}
+        consoleApplySize(NaN, NaN);
+        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/a1/console/access'];
+        consoleTabs = []; try { localStorage.removeItem('hb-console-tabs'); localStorage.removeItem('hb-console-last'); history.replaceState(null, '', location.pathname + location.search); } catch {}
+        await refresh(false);
+      }
+    },
     // 2026-11-10: Sharing → someone on this Hatchabot, no link. Google and password accounts told apart;
     // one who has it already is not offered; the share goes by id and the members list follows.
     webChatSharePerson: async () => {

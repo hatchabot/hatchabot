@@ -367,6 +367,13 @@ again when you pick it).
   Hatchabot on that agent's console, signing in first when needed. The
   address bar shows it while the console is open, so a reload comes back to
   it and it can be bookmarked; the browser tab takes the agent's name.
+- **Resize it** (v2.190.0): on a computer, drag the console's left or right
+  side, its bottom, or a bottom corner. It stays centred and grows about its
+  middle, up to the window. The size is remembered in that browser;
+  double-click an edge for the usual size. A phone keeps its fitted layout.
+- **The top bar's buttons are icons** (v2.190.0): the gear opens the agent's
+  settings, and each chat app's mark opens the agent in Telegram, Slack or
+  Discord. Hover for the name.
 - A web-chat guest's chat stays a single console.
 
 **Math in replies** (v2.188.0): completed assistant replies render inline

@@ -1,9 +1,15 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
+
+// Most of this file runs real scripts in a sandbox (shell, git, SQLite,
+// archives): on a busy CI runner process startup alone can pass the five-second
+// unit default, as two unrelated cases did on one run (HB-0801). Longer
+// allowances given to single tests still apply.
+vi.setConfig({ testTimeout: 30_000 });
 
 /**
  * scripts/privacy-check.mjs against a made-up household: a database with its
