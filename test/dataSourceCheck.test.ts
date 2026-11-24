@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -8,7 +8,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
-import { probeGitSource, type GitProbeRunner } from '../src/orchestrator/gitSource.js';
+import { probeGitSource, type GitProbeRunner } from '../src/orchestrator/apps/gitSource.js';
 
 /**
  * The Test button on a data source (Settings → Data, 2026-10-23): a folder is
@@ -79,7 +79,7 @@ describe('POST /v1/agents/:id/data-sources/:dsId/check — folders', () => {
 describe('probeGitSource', () => {
   const calls: Array<{ cmd: string; args: string[]; env: Record<string, string> }> = [];
   const runner = (answer: { code: number | null; stdout?: string; stderr?: string; error?: NodeJS.ErrnoException }): GitProbeRunner =>
-    async (cmd, args, opts) => { calls.push({ cmd, args, env: opts.env }); return { code: answer.code, stdout: answer.stdout ?? '', stderr: answer.stderr ?? '', error: answer.error }; };
+    async (cmd, args, opts) => { calls.push({ cmd, args, env: opts.env }); opts.onStdout(answer.stdout ?? ''); return { code: answer.code, stderr: answer.stderr ?? '', error: answer.error }; };
   // Not shaped like a real key on purpose: the machine's PII scan refuses anything that looks like one.
   const KEY = 'made-up-key-text-for-the-test\nsecond line of made-up key text\n';
 
@@ -107,7 +107,7 @@ describe('probeGitSource', () => {
         const { readFileSync, statSync } = await import('node:fs');
         expect(readFileSync(keyFile, 'utf8')).toBe(KEY);
         expect(statSync(keyFile).mode & 0o777).toBe(0o600);
-        return { code: 0, stdout: '', stderr: '' };
+        return { code: 0, stderr: '' };
       },
     });
     expect(r.ok).toBe(true);
@@ -139,6 +139,74 @@ describe('probeGitSource', () => {
       expect(r.message, stderr).not.toContain('fatal');
     }
   });
+
+  /**
+   * The real runner, with `git` a shim in a PATH of its own and a temp HOME:
+   * nothing reaches a git host. Each test's processes are killed by their
+   * PID afterwards, whatever the test found.
+   */
+  const strays: number[] = [];
+  afterEach(() => { for (const pid of strays.splice(0)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } } });
+  const gone = async (pid: number) => {
+    for (let i = 0; i < 200; i++) {
+      try { process.kill(pid, 0); } catch { return true; }
+      // A process killed but not yet reaped by its new parent is gone too.
+      try { if (/^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, 'utf8'))) return true; } catch { return true; }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return false;
+  };
+  async function withShimGit<T>(script: string, fn: (home: string) => Promise<T>): Promise<T> {
+    const home = tmp();
+    const bin = join(home, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+    const was = { PATH: process.env.PATH, HOME: process.env.HOME };
+    process.env.PATH = bin;
+    process.env.HOME = home;
+    try { return await fn(home); } finally { process.env.PATH = was.PATH; process.env.HOME = was.HOME; }
+  }
+
+  it('a timeout ends git and the ssh it started, answers at once, and removes the key (HB-0930)', async () => {
+    await withShimGit(
+      // An ssh that hangs after it connected, keeping git's output open.
+      '/bin/sleep 30 &\necho $! > "$HOME/ssh.pid"\nprintf "%s" "$GIT_SSH_COMMAND" > "$HOME/ssh-command"\nwait',
+      async (home) => {
+        const started = Date.now();
+        const probe = probeGitSource({ repoUrl: 'git@github.com:example-owner/thing.git', privateKey: KEY }, { timeoutMs: 1000 });
+        const answer = await Promise.race([probe, new Promise((r) => setTimeout(() => r('still waiting'), 8000))]);
+        const ssh = Number(readFileSync(join(home, 'ssh.pid'), 'utf8'));
+        strays.push(ssh);
+        expect(answer).toMatchObject({ ok: false, reason: 'timeout' });
+        expect(Date.now() - started).toBeLessThan(8000);
+        expect(await gone(ssh)).toBe(true);
+        const keyFile = /-i '([^']+)'/.exec(readFileSync(join(home, 'ssh-command'), 'utf8'))?.[1] ?? '';
+        expect(keyFile).toMatch(/hb-git-probe-/);
+        expect(existsSync(keyFile)).toBe(false);
+      },
+    );
+  }, 20_000);
+
+  it('a host that lists without end is counted as it comes, and the test stops reading at its limit (HB-0971)', async () => {
+    const line = `${'0'.repeat(40)}\trefs/heads/made-up-branch-name`;
+    const LIMIT = 64 * 1024 * 1024;
+    const big = LIMIT + 6 * 1024 * 1024;
+    // More than the limit on stdout, then a clean exit: listed, but not all of it read.
+    const listed = await withShimGit(`/usr/bin/yes '${line}' | /usr/bin/head -c ${big}`,
+      () => probeGitSource({ repoUrl: 'https://github.com/example-owner/pub.git' }, { timeoutMs: 60_000 }));
+    expect(listed).toMatchObject({ ok: true });
+    expect(listed.message).toMatch(/^Reachable: more than \d+ branches and tags listed \(the test stopped reading after 64 MB\)/);
+    expect(listed.refs).toBeGreaterThan((LIMIT - 1024 * 1024) / (line.length + 1));
+    expect(listed.refs).toBeLessThanOrEqual(Math.ceil(LIMIT / (line.length + 1)));
+    // As much on stderr, with no listing: said, not kept.
+    const noisy = await withShimGit(`/usr/bin/yes 'debug1: made-up ssh chatter' | /usr/bin/head -c ${big} >&2; exit 128`,
+      () => probeGitSource({ repoUrl: 'https://github.com/example-owner/pub.git' }, { timeoutMs: 60_000 }));
+    expect(noisy).toMatchObject({ ok: false, reason: 'error', message: expect.stringMatching(/stopped reading it/) });
+    // A listing under the limit is counted whole, a ref split across reads once.
+    const whole = await withShimGit(`/usr/bin/yes '${line}' | /usr/bin/head -n 300000`,
+      () => probeGitSource({ repoUrl: 'https://github.com/example-owner/pub.git' }, { timeoutMs: 60_000 }));
+    expect(whole).toMatchObject({ ok: true, refs: 300000 });
+  }, 60_000);
 
   it('no git on this machine, and a host that never answers, are said plainly', async () => {
     const enoent = Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' }) as NodeJS.ErrnoException;

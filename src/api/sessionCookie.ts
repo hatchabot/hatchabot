@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { isPublic } from './trust.js';
+import { publicUrlWritten } from '../orchestrator/reach/appAddress.js';
 
 /**
  * The browser session cookie, in every sign-in mode (auth.ts, accountsAuth.ts).
@@ -57,15 +58,18 @@ export function requestIsHttps(req: RequestLike, env: NodeJS.ProcessEnv = proces
   const proto = first(req.headers['x-forwarded-proto']);
   if (proto) return proto.toLowerCase() === 'https';
   if (req.protocol === 'https' || (req.socket as { encrypted?: boolean } | null | undefined)?.encrypted) return true;
-  const pub = env.HATCHABOT_PUBLIC_URL?.trim();
-  if (!pub) return false;
-  try {
-    const u = new URL(pub);
-    const host = (first(req.headers['x-forwarded-host']) ?? first(req.headers.host) ?? '').toLowerCase();
-    return u.protocol === 'https:' && !!host && host === u.host.toLowerCase();
-  } catch {
-    return false;
+  const host = (first(req.headers['x-forwarded-host']) ?? first(req.headers.host) ?? '').toLowerCase();
+  if (!host) return false;
+  // …and the address written for links since the start, which is the
+  // setting from the next restart on (HB-1314; only for the process's own env).
+  for (const pub of [env.HATCHABOT_PUBLIC_URL?.trim(), env === process.env ? publicUrlWritten() : undefined]) {
+    if (!pub) continue;
+    try {
+      const u = new URL(pub);
+      if (u.protocol === 'https:' && host === u.host.toLowerCase()) return true;
+    } catch { /* unparsable: not ours */ }
   }
+  return false;
 }
 
 const managed = (env: NodeJS.ProcessEnv) => !!env.HATCHABOT_MANAGED_BY?.trim();
@@ -130,14 +134,24 @@ export function upgradeSessionCookie(req: FastifyRequest, reply: FastifyReply, m
   reply.clearCookie(SESSION_COOKIE, { path: '/' });
 }
 
-/** Sign this browser out: every name a session cookie has had. */
-export function clearSessionCookies(reply: FastifyReply, req: FastifyRequest): void {
+/** What a sign-out at the public address that could not be saved answers (503). */
+export const SIGN_OUT_NOT_SAVED = 'Hatchabot could not save the sign-out, so a copy of this sign-in could still be used. Try again in a moment.';
+
+/**
+ * Sign this browser out: every name a session cookie has had. At the public
+ * address its sign-in ends for every copy first; false, and nothing cleared,
+ * when that could not be saved (HB-0957). `anyway`: cleared all the same
+ * (sign out everywhere, which has ended every session already).
+ */
+export function clearSessionCookies(reply: FastifyReply, req: FastifyRequest, anyway = false): boolean {
+  const saved = req.server.publicAccess?.sessionCleared(req, reply, anyway) ?? true;
+  if (!saved && !anyway) return false;
   reply.clearCookie(SESSION_COOKIE, { path: '/' });
   reply.clearCookie(LEGACY_RENAME_COOKIE, { path: '/' });
   // A __Host- cookie can only be overwritten by one with the same attributes (Secure, Path=/).
   if (requestIsHttps(req)) reply.clearCookie(HOST_SESSION_COOKIE, { path: '/', secure: true, httpOnly: true, sameSite: 'strict' });
-  req.server.publicAccess?.sessionCleared(req, reply);
+  return saved;
 }
 
 /** Any of our session cookies (the public pass and the device cookie included), for stripping from what is forwarded to an agent's gateway. */
-export const SESSION_COOKIE_NAME = /^(__Host-)?(hatchabot|agentclaw)_(session|pub|device)$/;
+export const SESSION_COOKIE_NAME = /^(__Host-)?(hatchabot|agentclaw)_(session|pub|factor|device)$/;

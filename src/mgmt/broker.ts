@@ -1,8 +1,8 @@
 import { REST_BY_NAME, type RestCtx, type RestTool } from './restTools.js';
 import { z } from 'zod';
 import { toolDef } from './tools.js';
-import { TemplateParamSchema } from '../orchestrator/template.js';
-import { derivedNameProblem } from '../orchestrator/derivedImage.js';
+import { TemplateParamSchema } from '../domain/templateParams.js';
+import { derivedNameProblem } from '../domain/derivedImageName.js';
 import { PendingStore, type AuthorSpec, type PendingConfirm, type Resolved } from './pendingStore.js';
 
 /**
@@ -152,6 +152,8 @@ export type ErrCode =
   | 'READ_ONLY_MODE'
   | 'FORBIDDEN_ROLE'
   | 'RATE_LIMITED'
+  /** The owner's list of cards is full (BrokerOptions `admit`): its message is the whole answer. */
+  | 'TOO_MANY_OPEN'
   | 'FORBIDDEN_TOOL'
   | 'UPSTREAM_ERROR';
 
@@ -184,6 +186,13 @@ export interface BrokerOptions {
    *  its files; injectable for tests. */
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
+  /**
+   * Asked as a card is filed, with nothing awaited between it and the filing:
+   * why this one may not be (a refusal, said to the proposer), or undefined.
+   * A check made before the card's references were resolved let two calls
+   * that each saw room both file one (HB-0942).
+   */
+  admit?: (who: Proposer) => string | undefined;
 }
 
 /** Tools whose confirmation carries a full spec: longer TTL (the owner is
@@ -209,6 +218,7 @@ export class Broker {
   #mutateHits: number[] = [];
   #pollIntervalMs: number;
   #pollTimeoutMs: number;
+  #admit?: (who: Proposer) => string | undefined;
 
   constructor(
     private readonly api: ApiClient,
@@ -221,6 +231,7 @@ export class Broker {
     this.#mutateWindowMs = opts.mutateWindowMs ?? 60_000;
     this.#pollIntervalMs = opts.pollIntervalMs ?? 3000;
     this.#pollTimeoutMs = opts.pollTimeoutMs ?? 150_000;
+    this.#admit = opts.admit;
   }
 
   get readWrite(): boolean {
@@ -260,9 +271,14 @@ export class Broker {
       if (!this.#readWrite) {
         throw new BrokerError('READ_ONLY_MODE', 'Read-only. Send /mode readwrite to arm mutations.');
       }
-      this.#rateGate();
+      const slot = this.#rateGate();
       const resolved = await this.#resolveMutate(name, args);
       const summary = summarize(name, resolved);
+      const refused = this.#admit?.(who);
+      if (refused) {
+        this.#freeSlot(slot); // nothing was filed: it is no change in the window
+        throw new BrokerError('TOO_MANY_OPEN', refused);
+      }
       const rec = this.pending.create(
         { ownerId: who.ownerId, chatId: who.chatId, fromUserId: who.fromUserId, tool: name, resolved, summary,
           source: who.source, note: who.note?.trim().slice(0, 400) || undefined, risk: riskOf(name) },
@@ -354,21 +370,39 @@ export class Broker {
 
   // ---- internals ----
 
-  #rateGate(): void {
+  /** Take one of the window's change slots (taken before any await, so a burst cannot pass together); answers when it was taken. */
+  #rateGate(): number {
     const now = this.#now();
     this.#mutateHits = this.#mutateHits.filter((t) => now - t < this.#mutateWindowMs);
     if (this.#mutateHits.length >= this.#mutateLimit) {
       throw new BrokerError('RATE_LIMITED', 'Too many changes in a short window — slow down.');
     }
     this.#mutateHits.push(now);
+    return now;
+  }
+  /** Give back a slot #rateGate took, for a filing turned away before anything was filed (HB-0942). */
+  #freeSlot(at: number): void {
+    const i = this.#mutateHits.indexOf(at);
+    if (i >= 0) this.#mutateHits.splice(i, 1);
+  }
+
+  /**
+   * The owner's fleet, read once however many references one proposal
+   * resolves: each read is a whole /v1/agents (authorized, rendered and
+   * serialized), and set_peers read it once per peer and once per peer allowed
+   * to act, 65 times for 32 of each (HB-0939).
+   */
+  #fleetOnce(): () => Promise<AgentSummary[]> {
+    let fleet: Promise<AgentSummary[]> | undefined;
+    return () => (fleet ??= this.api.listAgents());
   }
 
   /** id → slug → unique name, against the OWNER'S fleet only. */
-  async #resolve(ref: unknown): Promise<AgentSummary> {
+  async #resolve(ref: unknown, fleet: () => Promise<AgentSummary[]> = () => this.api.listAgents()): Promise<AgentSummary> {
     if (typeof ref !== 'string' || !ref.trim()) {
       throw new BrokerError('INVALID_INPUT', 'Missing agent reference.');
     }
-    const agents = await this.api.listAgents();
+    const agents = await fleet();
     const byId = agents.find((a) => a.id === ref);
     if (byId) return byId;
     const bySlug = agents.find((a) => a.slug === ref);
@@ -396,14 +430,15 @@ export class Broker {
   /** Context for a one-call tool: its agent resolved, lookups, other refs. */
   async #restCtx(rt: RestTool, args: Record<string, unknown>): Promise<RestCtx> {
     const raw = this.#need(this.api.raw);
-    const agent = rt.agentArg ? await this.#resolve(args.agent) : undefined;
+    const fleet = this.#fleetOnce();
+    const agent = rt.agentArg ? await this.#resolve(args.agent, fleet) : undefined;
     return {
       agent: agent && { id: agent.id, name: agent.name },
       // The model's own `__` keys are dropped: those are the tools' scratch
       // (names resolved at propose time for the card), and a model that set
       // __className got a card promising a class the call never assigns.
       input: Object.fromEntries(Object.entries(args).filter(([k]) => !k.startsWith('__'))),
-      resolve: async (ref) => { const a = await this.#resolve(ref); return { id: a.id, name: a.name }; },
+      resolve: async (ref) => { const a = await this.#resolve(ref, fleet); return { id: a.id, name: a.name }; },
       get: (path) => raw.call(this.api, 'GET', path),
     };
   }

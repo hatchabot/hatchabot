@@ -15,24 +15,27 @@ import type {
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
-import { type ImagesInUse, isDiskFull, OneShotNotGoneError, ProviderError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
-import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
-import { LOOP_LINE } from '../orchestrator/loopLines.js';
-import { dockerMemorySwap, parseCgroupLimit, parseSwapProbe, procCgroupPath, SWAP_PROBE_SCRIPT, type CompressedSwap } from '../orchestrator/swap.js';
+import { EmbedderUntouchedError, IMAGE_FACTS_FORMAT, type ImageFacts, type ImagesInUse, type ImageTagInfo, isDiskFull, parseImageFacts, OneShotNotGoneError, ProviderError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
+import { CONTAINER_GEN } from '../domain/rebuildPolicy.js';
+import { LOOP_LINE } from '../domain/loopLines.js';
+import { CALL_RE, logKey, stampKey } from '../domain/modelCallLines.js';
+import { dockerMemorySwap, parseCgroupLimit, parseSwapProbe, procCgroupPath, SWAP_PROBE_SCRIPT, type CompressedSwap } from '../domain/swap.js';
 
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
 const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB) || 8) * 2 ** 30);
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
 import { batchConfigCommands, buildConfigCommands, describeConfigCommands, seedInvocation, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
-import { publishedRuntimeImage, type PublishedImage } from '../orchestrator/releaseManifest.js';
-import { BROWSER_CHROMIUM_ARGV, BROWSER_CLOSE_SOURCE, BROWSER_FENCE_VERSION, BROWSER_LOGINS_RE, BROWSER_LOGINS_ROLE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_READY_FILE, BROWSER_START_SCRIPT, BROWSER_UID, browserLoginsVolume } from '../orchestrator/browser.js';
-import { channelFromChild, PANEL_RELAY_SOURCE, type BrowserPanelChannel } from '../orchestrator/browserPanel.js';
+import { publishedRuntimeImage, type PublishedImage } from './releaseManifest.js';
+import { BROWSER_CHROMIUM_ARGV, BROWSER_CLOSE_SOURCE, BROWSER_FENCE_VERSION, BROWSER_LOGINS_RE, BROWSER_LOGINS_ROLE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_READY_FILE, BROWSER_START_SCRIPT, BROWSER_UID, browserLoginsVolume } from './browserContainer.js';
+import { channelFromChild, PANEL_RELAY_SOURCE, type BrowserPanelChannel } from './browserPanelRelay.js';
 
 const execFileP = promisify(execFile);
 
 export interface LocalDockerOptions {
-  /** A remote machine's quick connect test (tests); default a TCP connect to its ssh or tcp port. */
+  /** A remote machine's quick connect test (tests); default a TCP connect to its tcp port, or to where its ssh connects (sshReachProbe). */
   reachProbe?: (host: string, port: number, timeoutMs: number) => Promise<boolean>;
+  /** The ssh client the default connect test asks where a runner's ssh connects (`ssh -G`; tests); default `ssh`. */
+  ssh?: string;
   /** The HTTP client the health probe uses (tests). */
   fetchImpl?: typeof fetch;
   /** Image built by scripts/build-runtime-image.sh. */
@@ -70,6 +73,8 @@ const REAP_RETRY_MS = 3_000;
 const LIST_RETRY_MS = 5 * 60_000;
 /** Docker's words for a container that is not there, from `rm -f` or `container inspect`. */
 const NO_SUCH_CONTAINER = /no such (container|object)/i;
+/** Docker's and Podman's words for a network that is not there, from `create`, `run` or `network inspect`. */
+const NO_SUCH_NETWORK = /network \S+ not found|no such network|network not found/i;
 
 /**
  * §5.2 made concrete on a single always-on box: one container per agent, one
@@ -89,11 +94,14 @@ import { DEFAULT_PREFIX, dockerNames, LEGACY_PREFIXES } from './dockerNames.js';
 import { dockerConnArgs } from './runnerEndpoint.js';
 import { STATE_CACHE_EXCLUDES } from './volumeCopy.js';
 import { processAlive } from '../domain/processAlive.js';
+import { imageRepository } from '../domain/imageRepository.js';
 export { DEFAULT_PREFIX, LEGACY_PREFIXES };
 /** Docker image reference: repo[:tag] — no leading dash, so it can't parse as a flag. */
 /** basename() for a model path — the container sees the file under /models. */
 const EMBED_MODEL_BASENAME = (p: string): string => p.split('/').pop() ?? p;
-const IMAGE_REF_RE = /^[a-z0-9][a-z0-9._\/-]*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
+// A registry's host and port may begin it (`registry.example:5000/runtime:x`):
+// refused, a fleet whose default is in such a registry could run no agent (HB-1357).
+const IMAGE_REF_RE = /^(?:[a-z0-9][a-z0-9.-]*:[0-9]{1,5}\/)?[a-z0-9][a-z0-9._\/-]*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
 /** The port the gateway listens on inside every agent container (published per agent on the host). */
 const GATEWAY_PORT = 18789;
 /**
@@ -151,6 +159,14 @@ const NOT_WRITING = new Set(['created', 'exited', 'dead']);
  * is noted (HB-0509, fourth and fifth reviews).
  */
 const IN_FLIGHT = new Set<string>();
+
+/**
+ * The containers this process's model copies are reading from (copyFromImage,
+ * HB-1027). One is made and never started, so it stays 'created' for the
+ * whole copy, and a runner's copy of the model over its link can take past
+ * ONESHOT_STALE_MS: the sweep would take it from under the copy.
+ */
+const COPYING = new Set<string>();
 
 /**
  * Each volume's lock in this process, by #volumeKey (HB-0509, sixth review).
@@ -319,6 +335,33 @@ async function syncFolder(dir: string): Promise<void> {
   } finally { await handle.close(); }
 }
 
+/**
+ * The end of one `image inspect` line in listImageTags: `|<layers as JSON>|<labels
+ * as JSON>`. JSON keeps a label's own new lines out of the listing; a line
+ * whose end is not that (a label with a `|` of its own before it, a daemon that
+ * printed something else) says nothing, so its image is matched by nothing.
+ */
+function builtFrom(line: string): { buildInputs?: string; derived?: string; recipe?: string; layers?: string[] } {
+  const m = /\|(\[[^\]|]*\]|null)\|(\{.*\}|null)$/.exec(line);
+  if (!m) return {};
+  try {
+    const layers: unknown = JSON.parse(m[1]!);
+    const labels: unknown = JSON.parse(m[2]!);
+    const label = (k: string) => {
+      const v = labels && typeof labels === 'object' ? (labels as Record<string, unknown>)[k] : undefined;
+      return typeof v === 'string' && v ? v : undefined;
+    };
+    return {
+      buildInputs: label('org.hatchabot.build-inputs'),
+      derived: label('org.hatchabot.derived'),
+      recipe: label('org.hatchabot.recipe'),
+      layers: Array.isArray(layers) && layers.length && layers.every((x) => typeof x === 'string' && /^sha256:[a-f0-9]{64}$/.test(x)) ? layers as string[] : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export class LocalDockerProvider implements RuntimeProvider {
   readonly key: string;
   readonly image: string;
@@ -348,7 +391,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     this.remote = !!opts.host;
     this.#conn = opts.host ? dockerConnArgs(opts.host) : [];
     this.#target = opts.host ? remoteTarget(opts.host) : undefined;
-    this.#reachProbe = opts.reachProbe ?? tcpReachable;
+    this.#reachProbe = opts.reachProbe ?? (opts.host && sshTarget(opts.host) ? sshReachProbe(opts.host, opts.ssh) : tcpReachable);
     this.key = this.remote ? 'remote-docker' : 'local-docker';
   }
 
@@ -391,10 +434,20 @@ export class LocalDockerProvider implements RuntimeProvider {
     return new ProviderError('remote docker host unreachable', "Its machine isn't answering — it may be asleep or offline.");
   }
 
-  /** See GIVEN_UP and VOLUME_LOCKS. */
+  /**
+   * See GIVEN_UP and VOLUME_LOCKS: by install, daemon and volume. A runner's
+   * daemon is its machine and port, and for ssh the user it is reached as:
+   * two users on one machine each have their own rootless Docker, and one
+   * volume name on both is two volumes. Keyed by machine and port only, a
+   * restore on one refused writes on the other, and one's look for writers
+   * spared the other's first look, so a writer left there was missed
+   * (HB-1058). The user is the one the address names; one that names none
+   * is keyed without one, as before.
+   */
   #volumeKey(volume: string): string {
     const t = this.#target;
-    return `${this.prefix}|${t ? `${t.host}:${t.port}` : 'local'}|${volume}`;
+    const user = t ? /^ssh:\/\/([^@/\s]+)@/i.exec((this.#conn[1] ?? '').trim())?.[1] : undefined;
+    return `${this.prefix}|${t ? `${user ? `${user}@` : ''}${t.host}:${t.port}` : 'local'}|${volume}`;
   }
   /**
    * What this process knows of a volume's writers, forgotten: its volume
@@ -443,7 +496,7 @@ export class LocalDockerProvider implements RuntimeProvider {
    * 2026-09-29). Named, a timeout removes it; labelled, the boot sweep and
    * destroy() find the rest.
    */
-  #oneShot(kind: 'vx' | 'io' | 'ex' | 'fs' | 'ro' = 'vx'): { name: string; flags: string[] } {
+  #oneShot(kind: 'vx' | 'io' | 'ex' | 'fs' | 'ro' | 'cp' = 'vx'): { name: string; flags: string[] } {
     const name = `${this.prefix}-${kind}-${randomBytes(6).toString('hex')}`;
     return { name, flags: ['--name', name, '--label', `${ONESHOT_PROCESS_LABEL}=${THIS_PROCESS}`, '--label', `${ONESHOT_LABEL}=${this.prefix}`] };
   }
@@ -695,6 +748,8 @@ export class LocalDockerProvider implements RuntimeProvider {
         // while that run is still going: it removes its own.
         const backupPid = name.startsWith(`${this.prefix}-bk-`) ? Number(name.slice(this.prefix.length + 4).split('-')[0]) : 0;
         if (!maker && backupPid > 0 && processAlive(backupPid)) continue;
+        // A model copy of this process's, still copying: its own finally removes it.
+        if (maker === THIS_PROCESS && COPYING.has(name)) continue;
         waitOld.push(id);
       }
       if (waitOld.length) ids.push(...await this.#idleLongAgo(waitOld));
@@ -797,8 +852,21 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Reshape an older volume BEFORE anything writes to it: the seed below
     // mounts it as $HOME and writes .openclaw paths, which would collide with
     // the pre-migration content still sitting at the volume root.
-    await this.#migrateToHomeLayout(volume);
-    await this.#seed(volume, spec);
+    // Both as an everyday write (HB-0509): a seed a lost link or a restart
+    // left running on this volume is removed first, or this one is refused,
+    // and a restore of it holds them off. A retry or a rebuild used to seed
+    // beside it, and the late old seed could write its config last (HB-1071).
+    const refused = (busy: string): never => {
+      throw new ProviderError(`provision: ${busy}`, busy === RESTORE_RUNNING
+        ? "Couldn't set up the agent: a restore is running on its files. Try again when it ends."
+        : busy === UNSURE_WRITER
+          ? "Couldn't set up the agent: what else is writing to its files could not be checked. Try again."
+          : "Couldn't set up the agent: an earlier setup is still writing to its files. Try again in a few minutes.");
+    };
+    await this.#everydayWrite(volume, runtimeRef, refused, async () => {
+      await this.#migrateToHomeLayout(volume);
+      await this.#seed(volume, spec);
+    });
 
     // Replace any existing container so a re-provision picks up new env/mounts.
     // Safe because all durable state lives on the volume. A browser that keeps
@@ -848,7 +916,8 @@ export class LocalDockerProvider implements RuntimeProvider {
       // equal to the cap means no swap at all; the cap plus the agent's swap
       // allowance only where this host compresses swap (swap.ts) — never
       // plain disk swap, which is slow and puts the agent's memory on disk.
-      ...(await this.#memoryArgs(spec.memory ?? process.env.HATCHABOT_AGENT_MEMORY ?? '3g', spec.memorySwap)),
+      // An empty setting is the default, as everywhere else (HB-1401).
+      ...(await this.#memoryArgs(spec.memory ?? orDefault(process.env.HATCHABOT_AGENT_MEMORY, '3g'), spec.memorySwap)),
       '--pids-limit', process.env.HATCHABOT_AGENT_PIDS ?? '512',
       // `hostname` inside the container answers "<agent>.<host>" — the moving
       // agent's compass (see provision.ts, which derives it per host).
@@ -883,7 +952,17 @@ export class LocalDockerProvider implements RuntimeProvider {
     // keys) goes in a 0600 file the docker client reads, never on its command
     // line: /proc/<pid>/cmdline is readable by every user on the machine, and
     // on a shared host those are other tenants (night review, 2026-09-28).
-    await this.#withEnvFile(spec.env, (flag, childEnv) => this.#must([...args, ...flag, image, 'openclaw', 'gateway'], 'The agent runtime could not be created.', childEnv));
+    const create = () => this.#withEnvFile(spec.env, (flag, childEnv) => this.#must([...args, ...flag, image, 'openclaw', 'gateway'], 'The agent runtime could not be created.', childEnv));
+    try { await create(); }
+    catch (err) {
+      // The agents network, made once by this process, can be gone since: a
+      // `docker network prune` after the last container on it was deleted.
+      // Known made, it was never looked for again, and every create failed
+      // until a restart (HB-1029). Made again, and the create tried once more.
+      if (spec.isolated || !(await this.#agentNetworkGone(err))) throw err;
+      await this.#docker(['rm', '-f', container]);
+      await create();
+    }
     this.#infoCache.delete(container);
     this.#listing = undefined;
 
@@ -1094,12 +1173,98 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async start(runtimeRef: string): Promise<void> {
     const { container } = this.#names(runtimeRef);
-    try { await this.#must(['start', container], 'The agent could not start. Try again?'); }
-    finally { this.#infoCache.delete(container); this.#listing = undefined; }
+    try {
+      await this.#onSomeNetwork(container);
+      const res = await this.#docker(['start', container]);
+      if (res.code === 0) return;
+      if (!(await this.#rejoinAgentNetwork(container, res.stderr))) {
+        throw new ProviderError(`docker start failed: ${res.stderr.slice(-2000)}`, 'The agent could not start. Try again?');
+      }
+      await this.#must(['start', container], 'The agent could not start. Try again?');
+    } finally { this.#infoCache.delete(container); this.#listing = undefined; }
+  }
+
+  /**
+   * A stopped agent's container holds the id of the agents network it was
+   * made on. Stopped, it holds no endpoint there, so `docker network prune`
+   * takes the network once no running container is on it, and its start then
+   * fails ("network <id> not found"); the network made again by name has
+   * another id, which does not help it (HB-1400). Once, for a container on
+   * the agents network whose start named that network or the id it holds:
+   * the network is made again (shared with a create that met it gone at
+   * once, HB-1029), and the container is taken off the old one and put on it.
+   * True when it is, and the start is worth one more try.
+   */
+  async #rejoinAgentNetwork(container: string, said: string): Promise<boolean> {
+    if (!NO_SUCH_NETWORK.test(said)) return false;
+    const name = (process.env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
+    if (!name || name === 'bridge' || name === 'default') return false;
+    const on = await this.#docker(['container', 'inspect', '--format', '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}={{$v.NetworkID}} {{end}}', container]);
+    if (on.code !== 0) return false;
+    const held = on.stdout.trim().split(/\s+/).map((x) => x.split('=')).find(([k]) => k === name)?.[1];
+    if (held === undefined || !(said.includes(`network ${name} `) || (held.length >= 12 && said.includes(held)))) return false;
+    const made = this.#networkReady || this.#networkRemake
+      ? await this.#agentNetworkGone(said)
+      : await this.#agentNetworkArgs().then((a) => a.length > 0, () => false);
+    if (!made) return false;
+    if ((await this.#docker(['network', 'disconnect', '--force', name, container])).code !== 0) return false;
+    const back = await this.#docker(['network', 'connect', name, container]);
+    if (back.code !== 0) {
+      // Off the old network and not on the new one, a start would give it no network at all.
+      throw new ProviderError(
+        `docker network connect failed: ${back.stderr.slice(-500)}`,
+        "The agent's network was removed (a docker network prune?), and it could not be put on the new one. Rebuild it.",
+      );
+    }
+    return true;
+  }
+
+  /**
+   * A container on no network at all starts with none: no messaging app, no
+   * model, no console (HB-1400 review: a rejoin whose connect failed left it
+   * off the old network and on no new one, and the next start ran it so). It
+   * is put on the agents network first, made again if it is gone, or the
+   * start is refused. A management agent goes back only on its own
+   * `--internal` network, the one it was made on (its jail: the agents
+   * network reaches the internet), or is refused with Rebuild, which makes
+   * the jail again (round-2 review). One that could not be read is left to
+   * its start.
+   */
+  async #onSomeNetwork(container: string): Promise<void> {
+    const on = await this.#docker(['container', 'inspect', '--format', '{{len .NetworkSettings.Networks}}|{{.HostConfig.NetworkMode}}|{{index .Config.Labels "hatchabot.console-port"}}', container]);
+    if (on.code !== 0) return;
+    const [count, madeOn = '', consolePort = ''] = on.stdout.trim().split('|');
+    if (count !== '0') return;
+    const jailOf = `${this.prefix}-ops-`;
+    const jail = madeOn.startsWith(jailOf) && /^[A-Za-z0-9]{1,12}$/.test(madeOn.slice(jailOf.length));
+    if (jail || /^\d+$/.test(consolePort)) {
+      const internal = jail ? await this.#docker(['network', 'inspect', '--format', '{{.Internal}}', madeOn]) : undefined;
+      const back = internal?.code === 0 && internal.stdout.trim() === 'true' ? await this.#docker(['network', 'connect', madeOn, container]) : undefined;
+      if (!back || back.code !== 0) {
+        throw new ProviderError(
+          `docker network connect failed: ${(back?.stderr || 'its own network is gone, or is not internal').slice(-500)}`,
+          'The management agent is on no network (its network was removed, a docker network prune?), and it could not be put back on its own. Rebuild it.',
+        );
+      }
+      return;
+    }
+    const name = (process.env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
+    if (!name || name === 'bridge' || name === 'default') return;
+    const connect = () => this.#docker(['network', 'connect', name, container]);
+    let back = (await this.#agentNetworkArgs().then((a) => a.length > 0, () => false)) ? await connect() : undefined;
+    if (back && back.code !== 0 && (await this.#agentNetworkGone(back.stderr))) back = await connect();
+    if (!back || back.code !== 0) {
+      throw new ProviderError(
+        `docker network connect failed: ${(back?.stderr ?? 'the agents network could not be made').slice(-500)}`,
+        'The agent is on no network (its network was removed, a docker network prune?), and it could not be put back on one. Rebuild it.',
+      );
+    }
   }
 
   async stop(runtimeRef: string): Promise<void> {
     const { container } = this.#names(runtimeRef);
+    // Its console's tunnel goes with its gateway (Stop, archive, sleep): one is opened again on use (HB-1030 review).
+    this.#closeTunnels((t) => t.container === container);
     // Its browser first, while the agent's network (where its port is) is still there.
     await this.#closeKeptBrowser(container);
     try { await this.#must(['stop', '-t', '10', container], 'The agent could not be stopped.'); }
@@ -1110,6 +1275,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     const { container, volume } = this.#names(runtimeRef);
     this.#infoCache.delete(container);
     this.#listing = undefined;
+    // Its console's tunnel goes with it: the ssh held an authenticated
+    // connection and a local port until the process ended (HB-1030).
+    this.#closeTunnels((t) => t.container === container);
     // #docker turns every non-zero exit (including an unreachable daemon) into
     // a RESULT, so ignoring it made destroy() unable to fail — and callers that
     // branch on failure (moveHost's orphan check, delete's "runtime may have
@@ -1132,8 +1300,22 @@ export class LocalDockerProvider implements RuntimeProvider {
       this.#forgetVolume(volume);
       // Its browser and the logins it kept go with it (deleted, moved away):
       // the sweep would, a minute later; a delete should not leave sign-ins behind.
-      await this.#docker(['rm', '-f', this.#browserName(container)]);
-      for (const v of await this.listBrowserLogins()) if (v.agentContainer === container) await this.removeBrowserLogins(v.name);
+      // Each is tried, and what is left fails the purge: a delete said it was
+      // done with the browser and its sign-ins still there (HB-1078). Tried
+      // again, the rest is already gone.
+      const left: string[] = [];
+      const browser = await this.#docker(['rm', '-f', this.#browserName(container)]);
+      if (browser.code !== 0 && !gone.test(browser.stderr)) left.push(`its browser (${browser.stderr.trim().slice(-200)})`);
+      const kept = await this.#browserLoginsListed();
+      if (!kept) left.push('its kept logins (they could not be listed)');
+      for (const v of kept ?? []) {
+        if (v.agentContainer !== container) continue;
+        const r = await this.#removeBrowserProfile(v.name);
+        if (r.failed !== undefined) left.push(`${v.name} (${r.failed.trim().slice(-200)})`);
+      }
+      if (left.length) {
+        throw new ProviderError(`docker could not remove ${left.join('; ')}`, "Couldn't remove the agent's browser and the logins it kept. Try again in a moment.");
+      }
     }
   }
 
@@ -1353,8 +1535,15 @@ export class LocalDockerProvider implements RuntimeProvider {
     // good, truncated download (#178). The copy ends only on exit 0.
     child.stdout.pipe(out, { end: false });
     child.on('error', (e) => out.destroy(e));
+    // Removed by name once, whichever end comes first.
+    let reaped = false;
     child.on('close', (code, signal) => {
       clearInterval(stall); // docker has had its say: the reader takes what is left at its own pace
+      // A client cut off (a dropped SSH link: 255; docker's own failure: 125;
+      // a signal) says nothing of its one-shot: on a runner its cat or tar
+      // may read on, holding the volume, and the sweep takes no running one
+      // (HB-1114). Removed by name, as a reader gone away has it removed.
+      if (!reaped && cutOff({ code, signalled: !!signal })) { reaped = true; void this.#reapOneShot(name); }
       if (out.destroyed) return;
       if (code === 0) out.end();
       else out.destroy(new Error(`exit ${code ?? signal}: ${err.trim().slice(-300)}`));
@@ -1376,7 +1565,8 @@ export class LocalDockerProvider implements RuntimeProvider {
     out.on('close', () => {
       clearInterval(stall);
       child.stdout.unpipe(out);
-      if (child.exitCode !== null || child.signalCode !== null) return;
+      if (child.exitCode !== null || child.signalCode !== null || reaped) return;
+      reaped = true;
       child.kill('SIGKILL');
       void this.#docker(['rm', '-f', name]).catch(() => {});
     });
@@ -1500,10 +1690,14 @@ export class LocalDockerProvider implements RuntimeProvider {
     return nets.includes(want);
   }
 
-  #daemonId?: string;
   async daemonId(): Promise<string> {
-    // The daemon's own ID is stable for the life of the daemon — cache it.
-    if (this.#daemonId) return this.#daemonId;
+    // Asked every time, never remembered. A daemon's ID lasts as long as the
+    // daemon, but the daemon an address reaches does not: a runner's name
+    // pointed at another machine (a VM made again, a new address) kept the
+    // old one's ID for the life of the process, and a move or a removal took
+    // two rows on one daemon for two and purged what the other used
+    // (HB-0977). Every caller is about to do something that cannot be undone,
+    // or is asking whether the machine answers at all, and asks seldom.
     const res = await this.#docker(['info', '--format', '{{.ID}}']);
     const id = res.stdout.trim();
     if (res.code !== 0 || !id) {
@@ -1512,7 +1706,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         "Couldn't reach that host's Docker daemon.",
       );
     }
-    return (this.#daemonId = id);
+    return id;
   }
 
   async currentImageInfo(image?: string): Promise<RuntimeInfo> {
@@ -1528,23 +1722,33 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { imageId, openclawVersion: openclawVersion || undefined, channels: parseChannelsLabel(channels), embedEngine: parseEmbedEngineLabel(engine), plugins: parsePluginsLabel(plugins), pluginInstall: parsePluginInstallLabel(install) };
   }
 
-  async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine; plugins?: string[] }[]> {
-    const repo = this.image.replace(/:[^:]*$/, '');
+  async listImageTags(): Promise<ImageTagInfo[]> {
+    // Its repository, a default pinned by digest too (review of HB-1182).
+    const repo = imageRepository(this.image);
     const res = await this.#docker(['images', '--format', '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedAt}}|{{.Size}}', repo]);
-    if (res.code !== 0) return [];
-    const tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine; plugins?: string[] }[] = res.stdout.split('\n').filter(Boolean).map((l) => {
+    // Unread is not "none" or "nothing extra": a move rebuilt a derived image
+    // from a listing that failed without the packages and plugins its base
+    // has (HB-0973). Callers that can do without catch this.
+    if (res.code !== 0) throw new ProviderError(`images failed: ${res.stderr.slice(0, 300)}`, "Couldn't ask Docker for its images.");
+    const tags: ImageTagInfo[] = res.stdout.split('\n').filter(Boolean).map((l) => {
       const [tag, imageId, createdAt, size] = l.split('|');
       return { tag: tag!, imageId: imageId!, createdAt: createdAt?.slice(0, 19), size };
     }).filter((t) => !t.tag.endsWith(':<none>'));
     // What's inside: the OpenClaw version label, one inspect for all distinct ids.
     const ids = [...new Set(tags.map((t) => t.imageId))];
     if (ids.length) {
-      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "org.hatchabot.extra-packages" }}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}', ...ids]);
+      // Its layers and all its labels last, as JSON (HB-0986): what it was
+      // built from, and whether it is the same image as another by its files.
+      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "org.hatchabot.extra-packages" }}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{json .RootFS.Layers}}|{{json .Config.Labels}}', ...ids]);
+      // Labels that could not be read are not "no labels" either. One image
+      // removed since the listing is only gone: the others still print.
+      if (ins.code !== 0 && !/no such image/i.test(ins.stderr)) throw new ProviderError(`image inspect failed: ${ins.stderr.slice(0, 300)}`, "Couldn't ask Docker for its images.");
       const ver = new Map<string, string>();
       const chans = new Map<string, string[]>();
       const extras = new Map<string, string[]>();
       const engines = new Map<string, EmbedEngine>();
       const plugs = new Map<string, string[]>();
+      const built = new Map<string, { buildInputs?: string; derived?: string; recipe?: string; layers?: string[] }>();
       for (const l of ins.stdout.split('\n')) {
         const [id, v, c, x, e, pl] = l.split('|');
         if (!id) continue;
@@ -1554,8 +1758,9 @@ export class LocalDockerProvider implements RuntimeProvider {
         extras.set(key, String(x ?? '').split(/[\s,]+/).filter((p) => /^[a-z0-9][a-z0-9+.-]*$/.test(p)));
         engines.set(key, parseEmbedEngineLabel(e));
         plugs.set(key, parsePluginsLabel(pl));
+        built.set(key, builtFrom(l));
       }
-      for (const t of tags) { t.openclawVersion = ver.get(t.imageId); t.channels = chans.get(t.imageId); t.extraPackages = extras.get(t.imageId); t.embedEngine = engines.get(t.imageId); t.plugins = plugs.get(t.imageId); }
+      for (const t of tags) { t.openclawVersion = ver.get(t.imageId); t.channels = chans.get(t.imageId); t.extraPackages = extras.get(t.imageId); t.embedEngine = engines.get(t.imageId); t.plugins = plugs.get(t.imageId); Object.assign(t, built.get(t.imageId)); }
     }
     return tags;
   }
@@ -1563,6 +1768,15 @@ export class LocalDockerProvider implements RuntimeProvider {
   async tagImage(from: string, to: string): Promise<void> {
     for (const ref of [from, to]) if (!IMAGE_REF_RE.test(ref)) throw new ProviderError(`bad image ref ${ref}`, 'That image name is not valid.');
     await this.#must(['tag', from, to], `Couldn't tag ${from} as ${to}.`);
+  }
+
+  async inspectImage(ref: string): Promise<ImageFacts> {
+    if (!IMAGE_REF_RE.test(ref)) throw new ProviderError(`bad image ref ${ref}`, 'That image name is not valid.');
+    const res = await this.#docker(['image', 'inspect', '--format', IMAGE_FACTS_FORMAT, ref]);
+    if (res.code !== 0) throw new ProviderError(`image inspect failed: ${res.stderr.slice(0, 300)}`, `Docker could not say what ${ref} is: ${res.stderr.trim().slice(0, 200) || `it exited ${res.code}`}`);
+    const facts = parseImageFacts(res.stdout);
+    if (!facts) throw new ProviderError(`image inspect answered ${res.stdout.slice(0, 200)}`, `Docker's answer about ${ref} could not be read.`);
+    return facts;
   }
 
   async imageHistory(ref: string): Promise<{ step: string; size: string }[]> {
@@ -1614,11 +1828,13 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Stream and filter: an agent that polls an inbox logs thousands of lines a
     // day, so never buffer the whole log — keep only the model-call results.
     const { container } = this.#names(runtimeRef);
+    // `--since` gives back the line the cursor sits on: a call already counted.
+    const sinceKey = logKey(sinceIso);
     if (!(await this.reachable())) throw this.#unreachableError();
     return new Promise<string>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(['logs', '--since', sinceIso, '--timestamps', container]));
       const keep: string[] = [];
-      let loops = 0;
+      let loops = 0, fresh = 0;
       // One line buffer per stream: docker writes the container's stdout and
       // stderr to ours separately, and a shared buffer spliced a half line of
       // one onto a half line of the other — a model call that never parsed (HB-0006).
@@ -1629,7 +1845,11 @@ export class LocalDockerProvider implements RuntimeProvider {
           let nl;
           while ((nl = buf.indexOf('\n')) >= 0) {
             const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-            if (line.includes('[model-fetch] response') && keep.length < 200_000) keep.push(line);
+            if (line.includes('[model-fetch] response') && keep.length < 200_000) {
+              keep.push(line);
+              const call = CALL_RE.exec(line);
+              if (call && stampKey(call[1]!) > sinceKey) fresh++;
+            }
             // …and the loop lines token health counts (a channel message stalled
             // and retried, a compaction that failed): tokenHealth.ts LOOP_LINE.
             else if (LOOP_LINE.test(line) && loops++ < 20_000) keep.push(line);
@@ -1644,11 +1864,17 @@ export class LocalDockerProvider implements RuntimeProvider {
       // A failure must REJECT. Resolving with "" made a dead docker daemon
       // indistinguishable from an idle agent: the sampler logged nothing and
       // advanced its cursor, so every call made during the outage was lost
-      // for good (audit 2026-09-16).
+      // for good (audit 2026-09-16). A read cut short with new model calls
+      // in it still counts them: the cursor moves only as far as the last.
+      // Anything else is not that: loop lines, the call the cursor sits on
+      // (given back by --since), a marker quoted in another line. With no new
+      // call the sampler moved an old cursor to five minutes ago, past the
+      // calls never read (HB-1064). New is as the sampler counts it
+      // (src/domain/modelCallLines.ts).
       child.on('error', (err) => { clearTimeout(timer); reject(err); });
       child.on('close', (code, signal) => {
         clearTimeout(timer);
-        if (keep.length === 0 && (signal || (code ?? 0) !== 0)) {
+        if (fresh === 0 && (signal || (code ?? 0) !== 0)) {
           reject(new Error(`docker logs exited ${signal ?? code} for ${container}`));
           return;
         }
@@ -1743,12 +1969,22 @@ export class LocalDockerProvider implements RuntimeProvider {
     return ['--memory', memory, '--memory-swap', dockerMemorySwap(memory, swap, compressed)];
   }
 
-  async memoryLimitsLive(runtimeRefs: string[]): Promise<Map<string, LiveMemoryLimits>> {
+  async memoryLimitsLive(runtimeRefs: string[], opts: { missing?: Set<string> } = {}): Promise<Map<string, LiveMemoryLimits>> {
     const out = new Map<string, LiveMemoryLimits>();
     if (!runtimeRefs.length) return out;
     const names = runtimeRefs.map((r) => this.#names(r).container);
     // One inspect for all of them; a missing container makes it exit non-zero, the others still print.
     const res = await this.#docker(['inspect', '-f', '{{.Name}}|{{.Id}}|{{.State.Running}}|{{.State.Pid}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}', ...names], 60_000);
+    if (opts.missing) {
+      // Only docker's own "No such object: <name>" says a container is not
+      // there. A failed inspect (dockerd stopped, the time limit) printed
+      // nothing for anyone, and is not "no containers" (HB-1106).
+      const gone = new Set([...res.stderr.matchAll(/no such (?:object|container): *"?([^"\s]+)"?/gi)].map((m) => m[1]!));
+      if (res.timedOut || res.unreachable || (res.code !== 0 && !gone.size && !res.stdout.trim())) {
+        throw new ProviderError(`docker inspect failed: ${res.stderr.slice(-300)}`, "Couldn't read the containers' memory limits.");
+      }
+      names.forEach((nm, i) => { if (gone.has(nm)) opts.missing!.add(runtimeRefs[i]!); });
+    }
     const local = !this.remote && process.platform === 'linux' && !(await this.desktop());
     for (const line of res.stdout.split('\n')) {
       const [nm, id, running, pid, mem, msw] = line.trim().split('|');
@@ -1820,9 +2056,11 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async logs(runtimeRef: string, lines: number): Promise<string> {
     const { container } = this.#names(runtimeRef);
-    const res = await this.#docker(['logs', '--tail', String(lines), container]);
-    // docker logs writes container stdout to stdout and stderr to stderr —
-    // interleave both, the reader wants the story not the streams.
+    // Both of docker's streams into one pipe: it writes the container's
+    // stdout and stderr each to its own, line by line in the order the
+    // container wrote them, and read apart every stderr line came after all
+    // of stdout: an early error after the recovery that followed it (HB-1107).
+    const res = await this.#docker(['logs', '--tail', String(lines), container], undefined, undefined, { merged: true });
     return (res.stdout + res.stderr).trim();
   }
 
@@ -1843,8 +2081,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       );
       return stdout as Buffer;
     } catch (err) {
-      // A killed client (the timeout, an archive past maxBuffer) leaves the one-shot behind.
-      if ((err as { killed?: boolean })?.killed || /maxBuffer/i.test(String(err))) await this.#reapOneShot(one.name);
+      // A killed client (the timeout, an archive past maxBuffer) leaves the
+      // one-shot behind; so does one cut off (a dropped SSH link: 255,
+      // docker's own failure: 125, a signal), whose tar may read on there (HB-1114).
+      const e = err as { killed?: boolean; code?: unknown; signal?: unknown };
+      if (e?.killed || /maxBuffer/i.test(String(err)) || !!e?.signal || (typeof e?.code === 'number' && cutOff({ code: e.code }))) await this.#reapOneShot(one.name);
       throw new ProviderError(
         `volume export failed: ${String(err).slice(0, 500)}`,
         EXPORT_FAILED,
@@ -2367,30 +2608,75 @@ export class LocalDockerProvider implements RuntimeProvider {
    * (2026-09-23). Over the SSH the docker connection already uses, forward a
    * local port to it: one tunnel per port, reused while it lives, reopened when
    * it dies. The console stays closed to the network on the runner.
+   *
+   * Each tunnel is its agent's (`container`, from the runtimeRef the console
+   * names): closed when that container is stopped (Stop, archive, sleep) or
+   * destroyed (deleted, moved away), and every one when the runner is removed
+   * (`dispose`). They lived until ssh or Hatchabot ended, a connection and a
+   * port for every console opened before (HB-1030).
    */
-  readonly #tunnels = new Map<number, { local: number; child: ChildProcess }>();
-  /** Opening, so a second caller waits for the same tunnel instead of spawning another (26th audit). */
-  readonly #tunnelOpening = new Map<number, Promise<{ host: string; port: number } | undefined>>();
-  async gatewayEndpoint(port: number): Promise<{ host: string; port: number } | undefined> {
+  readonly #tunnels = new Map<number, { local: number; child: ChildProcess; container?: string }>();
+  /**
+   * Opening, so a second caller waits for the same tunnel instead of spawning
+   * another (26th audit). Its agent's too: one whose container goes while it
+   * opens is `cancelled`, and starts no ssh (HB-1030 review).
+   */
+  readonly #tunnelOpening = new Map<number, { container?: string; cancelled: boolean; tunnel: Promise<{ host: string; port: number } | undefined> }>();
+  /** Its host is gone (dispose): no tunnel is opened or kept. */
+  #disposed = false;
+  async gatewayEndpoint(port: number, runtimeRef?: string): Promise<{ host: string; port: number } | undefined> {
     if (!this.remote) return { host: '127.0.0.1', port };
+    if (this.#disposed) return undefined;
     const target = sshTarget(this.#conn[1] ?? '');
     if (!target) return undefined; // tcp:// — no tunnel to be had
+    const container = runtimeRef ? this.#names(runtimeRef).container : undefined;
     const open = this.#tunnels.get(port);
-    if (open && open.child.exitCode === null && !open.child.killed) return { host: '127.0.0.1', port: open.local };
+    if (open && open.child.exitCode === null && !open.child.killed) {
+      if (container) open.container = container;
+      return { host: '127.0.0.1', port: open.local };
+    }
     const opening = this.#tunnelOpening.get(port);
-    if (opening) return opening;
-    const p = this.#openTunnel(target, port).finally(() => this.#tunnelOpening.delete(port));
-    this.#tunnelOpening.set(port, p);
-    return p;
+    if (opening) {
+      if (container) opening.container = container;
+      return opening.tunnel;
+    }
+    const entry = { container, cancelled: false } as { container?: string; cancelled: boolean; tunnel: Promise<{ host: string; port: number } | undefined> };
+    entry.tunnel = this.#openTunnel(target, port, entry).finally(() => { if (this.#tunnelOpening.get(port) === entry) this.#tunnelOpening.delete(port); });
+    this.#tunnelOpening.set(port, entry);
+    return entry.tunnel;
   }
-  async #openTunnel(target: { dest: string; port?: string }, port: number): Promise<{ host: string; port: number } | undefined> {
+  /**
+   * End the tunnels `which` picks: each ssh is stopped and forgotten (its exit
+   * listener goes as it exits), and each one still opening is cancelled and
+   * forgotten, so the next console opens afresh.
+   */
+  #closeTunnels(which: (t: { container?: string }) => boolean): void {
+    for (const [port, t] of [...this.#tunnels]) {
+      if (!which(t)) continue;
+      this.#tunnels.delete(port);
+      try { t.child.kill(); } catch { /* gone */ }
+    }
+    for (const [port, o] of [...this.#tunnelOpening]) {
+      if (!which(o)) continue;
+      o.cancelled = true;
+      this.#tunnelOpening.delete(port);
+    }
+  }
+  /** The runner is removed: its console tunnels end now, and none opens again. */
+  dispose(): void {
+    this.#disposed = true;
+    this.#closeTunnels(() => true);
+  }
+  async #openTunnel(target: { dest: string; port?: string }, port: number, opening: { container?: string; cancelled: boolean }): Promise<{ host: string; port: number } | undefined> {
     if (!(await this.reachable())) return undefined;
     const local = await freePort();
+    // Its agent or its runner went while this was being asked: no ssh.
+    if (this.#disposed || opening.cancelled) return undefined;
     const child = spawn('ssh', sshTunnelArgs(target, local, port), { stdio: 'ignore' });
     child.unref(); // never keeps the process alive…
     const stop = () => { try { child.kill(); } catch { /* gone */ } };
     process.once('exit', stop); // …and never outlives it, holding a loopback port forever
-    this.#tunnels.set(port, { local, child });
+    this.#tunnels.set(port, { local, child, container: opening.container });
     const forget = () => {
       process.removeListener('exit', stop);
       if (this.#tunnels.get(port)?.child === child) this.#tunnels.delete(port);
@@ -2403,9 +2689,13 @@ export class LocalDockerProvider implements RuntimeProvider {
     let failed = false;
     child.once('error', () => { failed = true; forget(); });
     // Wait for the forward to accept (ExitOnForwardFailure ends ssh otherwise).
+    // One closed meanwhile (its agent destroyed, its runner removed) is not handed out.
     for (let i = 0; i < 40; i++) {
-      if (failed || child.exitCode !== null) break;
-      if (await canConnect(local)) return { host: '127.0.0.1', port: local };
+      if (failed || child.exitCode !== null || this.#tunnels.get(port)?.child !== child) break;
+      if (await canConnect(local)) {
+        if (this.#tunnels.get(port)?.child === child) return { host: '127.0.0.1', port: local };
+        break;
+      }
       await new Promise((r) => setTimeout(r, 150));
     }
     if (!failed) child.kill();
@@ -2414,18 +2704,25 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async copyFromImage(image: string, srcPath: string, destPath: string): Promise<boolean> {
     if (!IMAGE_REF_RE.test(image)) return false;
-    const made = await this.#docker(['create', image]);
-    if (made.code !== 0) return false;
-    const id = made.stdout.trim();
+    // Named and labelled as every one-shot is (#oneShot): one this process
+    // left (it ended after the create, or the removal below failed) was a
+    // 'created' container nothing could find, pinning an old runtime image
+    // for good (HB-1027). The sweep takes it now, as it takes the others.
+    const { name, flags } = this.#oneShot('cp');
+    COPYING.add(name);
     try {
-      const cp = await this.#docker(['cp', `${id}:${srcPath}`, destPath], IO_TIMEOUT_MS);
-      return cp.code === 0;
-    } finally {
-      await this.#docker(['rm', '-f', id]);
-    }
+      const made = await this.#docker(['create', ...flags, image]);
+      if (made.code !== 0) return false;
+      try {
+        const cp = await this.#docker(['cp', `${name}:${srcPath}`, destPath], IO_TIMEOUT_MS);
+        return cp.code === 0;
+      } finally {
+        await this.#docker(['rm', '-f', name]);
+      }
+    } finally { COPYING.delete(name); }
   }
 
-  // ---- an agent's own browser (src/orchestrator/browser.ts) ----------------
+  // ---- an agent's own browser (src/orchestrator/console/browser.ts) ----------------
   // One Chromium per agent that has the browser on, in the agent's network
   // namespace: the agent reaches it at 127.0.0.1:9222 and nothing else can.
   // Its own container: none of the agent's files, its own memory limit, its
@@ -2501,15 +2798,25 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (!this.#ownsBrowserProfile(seen.stdout, vol, { agent, agentId, logins })) {
       throw new ProviderError(`volume ${vol} is not a browser profile of this install`, failed);
     }
-    if (created) {
+    // Made here: removed again when its prep fails. One that was there and
+    // never prepared (HB-0975) is prepared now, and kept either way.
+    const prepare = async (made: boolean) => {
       const prep = await oneShot('0:0', ['--cap-add', 'CHOWN'], BROWSER_PROFILE_PREP);
       if (prep.code !== 0 || !/^READY$/m.test(prep.stdout)) {
-        await this.removeBrowserLogins(vol);
+        if (made) await this.removeBrowserLogins(vol);
         throw new ProviderError(`browser logins prep failed: ${`${prep.stderr} ${prep.stdout}`.trim().slice(-300)}`, failed);
       }
-    }
+    };
+    if (created) await prepare(true);
     current();
-    const unlock = await oneShot(`${BROWSER_UID}:${BROWSER_UID}`, [], BROWSER_PROFILE_UNLOCK);
+    const unlockIt = () => oneShot(`${BROWSER_UID}:${BROWSER_UID}`, [], BROWSER_PROFILE_UNLOCK);
+    let unlock = await unlockIt();
+    if (unlock.code === 0 && /^UNPREPARED$/m.test(unlock.stdout)) {
+      current();
+      await prepare(false);
+      current();
+      unlock = await unlockIt();
+    }
     if (unlock.code !== 0 || !/^UNLOCKED$/m.test(unlock.stdout)) throw new ProviderError(`browser logins unlock failed: ${`${unlock.stderr} ${unlock.stdout}`.trim().slice(-300)}`, failed);
     return vol;
   }
@@ -2544,7 +2851,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     const r = await this.#docker(['exec', '--user', `${BROWSER_UID}:${BROWSER_UID}`, this.#browserName(agentContainer), 'chromium', '--version']);
     return r.code === 0 ? /(\d+\.\d+\.\d+\.\d+)/.exec(r.stdout)?.[1] : undefined;
   }
-  async ensureBrowser(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'> {
+  async ensureBrowser(spec: import('./browserContainer.js').BrowserSpec): Promise<'running' | 'started'> {
     const current = () => {
       if (spec.stillWanted && !spec.stillWanted()) throw new ProviderError('browser settings changed during startup', 'The browser settings changed. Its next check will use the current settings.');
     };
@@ -2650,9 +2957,13 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
   /** This install's kept browser profiles, by their labels (every one carries the prefix label). */
   async listBrowserLogins(): Promise<Array<{ name: string; agentContainer: string; agentId?: string; logins?: string }>> {
+    return (await this.#browserLoginsListed()) ?? [];
+  }
+  /** See listBrowserLogins; undefined when Docker could not list them. */
+  async #browserLoginsListed(): Promise<Array<{ name: string; agentContainer: string; agentId?: string; logins?: string }> | undefined> {
     const r = await this.#docker(['volume', 'ls', '--filter', `label=hatchabot.role=${BROWSER_LOGINS_ROLE}`, '--filter', `label=hatchabot.browser-prefix=${this.prefix}`,
       '--format', '{{.Name}}|{{ .Label "hatchabot.browser-of" }}|{{ .Label "hatchabot.agent" }}|{{ .Label "hatchabot.browser-logins" }}']);
-    if (r.code !== 0) return [];
+    if (r.code !== 0) return undefined;
     return r.stdout.trim().split('\n').filter(Boolean).flatMap((l) => {
       const [name = '', agentContainer = '', agentId = '', logins = ''] = l.split('|').map((x) => x.trim());
       if (!name || !agentContainer) return [];
@@ -2660,12 +2971,16 @@ export class LocalDockerProvider implements RuntimeProvider {
     });
   }
   async removeBrowserLogins(volume: string): Promise<boolean> {
-    if (!/-browser-logins-[0-9a-f]{12}$/.test(volume)) return false;
+    return (await this.#removeBrowserProfile(volume)).removed;
+  }
+  /** See removeBrowserLogins; `failed`: what Docker said when it would not (not when the volume is not one). */
+  async #removeBrowserProfile(volume: string): Promise<{ removed: boolean; failed?: string }> {
+    if (!/-browser-logins-[0-9a-f]{12}$/.test(volume)) return { removed: false };
     const seen = await this.#docker(['volume', 'inspect', '--format', '{{json .Labels}}', volume]);
-    if (seen.code !== 0) return /no such volume/i.test(seen.stderr);
-    if (!this.#ownsBrowserProfile(seen.stdout, volume)) return false;
+    if (seen.code !== 0) return /no such volume/i.test(seen.stderr) ? { removed: true } : { removed: false, failed: seen.stderr || 'no answer' };
+    if (!this.#ownsBrowserProfile(seen.stdout, volume)) return { removed: false };
     const r = await this.#docker(['volume', 'rm', volume]);
-    return r.code === 0 || /no such volume/i.test(r.stderr);
+    return r.code === 0 || /no such volume/i.test(r.stderr) ? { removed: true } : { removed: false, failed: r.stderr || 'no answer' };
   }
   async browserProfileBytes(agentContainer: string): Promise<number | undefined> {
     const r = await this.#docker(['exec', '--user', `${BROWSER_UID}:${BROWSER_UID}`, this.#browserName(agentContainer), 'du', '-sk', '/profile'], 30_000);
@@ -2737,17 +3052,30 @@ export class LocalDockerProvider implements RuntimeProvider {
     return r.stdout.trim() === 'true' ? 'running' : 'stopped';
   }
   async embedderStatus(): Promise<import('../embedder/embedder.js').EmbedderStatus> {
-    const [embedder, door] = await Promise.all([this.#containerState(this.#embedderName()), this.#containerState(this.#embedDoorName())]);
+    // The engine's state and the limit it runs on in the one look the health
+    // loop already takes: a runner's engine, which no boot start visits, took
+    // a new limit only when it fell over (HB-1021).
+    const [engine, door] = await Promise.all([
+      this.#docker(['inspect', '--format', '{{.State.Running}}|{{ index .Config.Labels "hatchabot.embed-memory" }}|{{.HostConfig.Memory}}', this.#embedderName()]),
+      this.#containerState(this.#embedDoorName()),
+    ]);
+    const [running = '', asked = '', held = ''] = engine.stdout.trim().split('|');
+    const embedder = engine.code !== 0 ? 'absent' : running === 'true' ? 'running' : 'stopped';
     let doorAddress: string | undefined;
     if (door === 'running') {
       const p = await this.#docker(['port', this.#embedDoorName()]);
       const m = /-> ([\d.]+:\d+)/.exec(p.stdout);
       if (m) doorAddress = m[1];
     }
-    return { embedder, door, doorAddress };
+    return { embedder, door, doorAddress, ...(embedder !== 'absent' && engineOffLimit(asked, held) ? { engineMemoryOff: true } : {}) };
   }
   async ensureEmbedder(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<import('../embedder/embedder.js').EmbedderStatus> {
-    if (this.remote) await this.#embedFilesToRunner(spec);
+    // Until the old engine is removed, nothing here has changed what serves:
+    // a failure so far says so (EmbedderUntouchedError), and the health
+    // loop's limit restart leaves the service up on its old limit (HB-1021).
+    const untouched = (err: unknown) => err instanceof EmbedderUntouchedError ? err
+      : new EmbedderUntouchedError(String((err as Error)?.message ?? err), err instanceof ProviderError ? err.userMessage : 'Could not start the embedding service.', { cause: err });
+    if (this.remote) await this.#embedFilesToRunner(spec).catch((err) => { throw untouched(err); });
     const modelMount = this.remote ? `${this.#embedModelVolume()}:/models:ro` : `${spec.modelPath}:/models/${EMBED_MODEL_BASENAME(spec.modelPath)}:ro`;
     const keysMount = this.remote ? `${this.#embedKeysVolume()}:/keys:ro` : `${dirname(spec.serverKeyFile)}:/keys:ro`;
     const net = this.#embedNetwork();
@@ -2755,7 +3083,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // Internal: neither container has a way out; the door is published by port below.
       const made = await this.#docker(['network', 'create', '--driver', 'bridge', '--internal', '--label', 'hatchabot.role=embed', net]);
       if (made.code !== 0 && (await this.#docker(['network', 'inspect', net])).code !== 0) {
-        throw new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, "Could not create the embedding service's network.");
+        throw untouched(new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, "Could not create the embedding service's network."));
       }
     }
     // The server: the model read-only, no ports, nothing writable but /tmp.
@@ -2770,20 +3098,38 @@ export class LocalDockerProvider implements RuntimeProvider {
     // a running engine otherwise (night review, 2026-09-28).
     const keyOnly = (() => { try { return createHash('sha256').update(readFileSync(spec.serverKeyFile)).digest('hex').slice(0, 16); } catch { return ''; } })();
     const keyHash = keyOnly && `${keyOnly}.${createHash('sha256').update(JSON.stringify([spec.image, spec.modelPath, spec.modelAlias])).digest('hex').slice(0, 12)}`;
-    if ((await this.#containerState(embedder)) !== 'absent' && keyHash) {
-      const worn = await this.#docker(['inspect', embedder, '--format', '{{ index .Config.Labels "hatchabot.embed-key" }}']);
-      if (worn.code === 0 && worn.stdout.trim() !== keyHash) await this.#docker(['rm', '-f', embedder]);
+    // And at the memory limit asked for now: a changed HATCHABOT_EMBEDDER_MEMORY
+    // reached only an engine made after it, so a raised limit never ended the
+    // kills it was raised for (HB-1021; engineOffLimit). Not in the key's
+    // hash: every engine would be replaced on upgrade.
+    const memory = embedderMemory();
+    let replaced = false;
+    if ((await this.#containerState(embedder)) !== 'absent') {
+      const worn = await this.#docker(['inspect', embedder, '--format', '{{ index .Config.Labels "hatchabot.embed-key" }}|{{ index .Config.Labels "hatchabot.embed-memory" }}|{{.HostConfig.Memory}}']);
+      const [wornKey = '', asked = '', held = ''] = worn.stdout.trim().split('|');
+      if (worn.code === 0 && ((keyHash && wornKey !== keyHash) || engineOffLimit(asked, held))) {
+        // A removal Docker refused (a slow daemon's timeout) kept the old
+        // engine, on its old key or limit, and the start went on and said it
+        // was up: a Restart for a new limit "worked" on the old one. The start
+        // fails instead, as a browser's replacement does (ensureBrowser).
+        const removed = await this.#docker(['rm', '-f', embedder]);
+        if (removed.code !== 0 && !NO_SUCH_CONTAINER.test(removed.stderr)) {
+          throw untouched(new ProviderError(`embedder removal failed: ${removed.stderr.slice(-300)}`, "Couldn't replace the memory search engine to start it on its new settings. Try again in a moment."));
+        }
+        replaced = true;
+      }
     }
     if ((await this.#containerState(embedder)) === 'absent') {
       if (!IMAGE_REF_RE.test(spec.image.replace(/@sha256:[0-9a-f]{64}$/, ''))) throw new ProviderError(`bad embedder image ${spec.image}`, 'The embedding service image name is not valid.');
       const run = await this.#docker([
         'run', '-d', '--name', embedder, '--network', net, '--network-alias', 'embedder',
         '--restart', 'unless-stopped', '--label', 'hatchabot.role=embedder', '--label', `hatchabot.embed-key=${keyHash}`,
+        '--label', `hatchabot.embed-memory=${memory}`,
         '--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
         '-e', 'MALLOC_ARENA_MAX=2',
         // 2 GiB: indexing several agents at once pushed the server past 1 GiB
         // and it was killed mid-index (2026-09-23, five agents switched together).
-        '--memory', process.env.HATCHABOT_EMBEDDER_MEMORY ?? '2g', '--pids-limit', '64',
+        '--memory', memory, '--pids-limit', '64',
         // As this user, so it can read the 0600 key file; the key is a FILE,
         // never an argument — argv is world-readable in /proc (27th audit).
         '--user', await this.containerUserFor(spec.uid, spec.gid),
@@ -2872,7 +3218,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       const ok = this.remote
         ? (await this.#docker(['exec', door, 'node', '-e', 'let k="";try{k=require("fs").readFileSync(process.env.EMBED_SERVER_KEY_FILE,"utf8").trim()}catch{}fetch("http://127.0.0.1:8093/health",{headers:{authorization:"Bearer "+k}}).then((r)=>process.exit(r.ok?0:1),()=>process.exit(1))'])).code === 0
         : await this.#fetch(`http://${spec.doorBind}:${spec.doorPort}/health`, { headers: { authorization: `Bearer ${serverKey()}` }, signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
-      if (ok) return this.embedderStatus();
+      if (ok) return replaced ? { ...await this.embedderStatus(), engineReplaced: true } : this.embedderStatus();
       await new Promise((r) => setTimeout(r, 1500));
     }
     throw new ProviderError('embedder did not become healthy', 'The embedding service started but did not answer its health check.');
@@ -2918,7 +3264,8 @@ export class LocalDockerProvider implements RuntimeProvider {
     if ((await this.#docker(['image', 'inspect', '--format', '{{.Id}}', tag])).code === 0) return true;
     // Only a plain version tag has a published twin (release builds push
     // <registry>:<openclaw version>, multi-arch). Anything else is local-only.
-    const m = /^[^:]+:(\d{4}\.\d+\.\d+(?:-\d+)?)$/.exec(tag);
+    // The version is the tag after the repository, which may name a registry with a port (HB-1357 review).
+    const m = /^(\d{4}\.\d+\.\d+(?:-\d+)?)$/.exec(tag.slice(imageRepository(tag).length + 1));
     if (!m) return false;
     // The image this release vouches for (#47, 2026-10-10): by the digest in
     // its manifest, and only for the OpenClaw it names; a release made before
@@ -2967,12 +3314,35 @@ export class LocalDockerProvider implements RuntimeProvider {
     const name = (process.env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
     const net = !name || name === 'default' ? 'bridge' : name;
     if (net !== 'bridge') await this.#agentNetworkArgs().catch(() => []);
-    const res = await this.#docker(['network', 'inspect', net, '--format', '{{range .IPAM.Config}}{{.Gateway}} {{end}}']);
+    const ask = () => this.#docker(['network', 'inspect', net, '--format', '{{range .IPAM.Config}}{{.Gateway}} {{end}}']);
+    let res = await ask();
+    // Gone since it was made (HB-1029): made again, as the create below would, and asked once more.
+    if (res.code !== 0 && net !== 'bridge' && (await this.#agentNetworkGone(res.stderr))) res = await ask();
     const ip = res.code === 0 ? res.stdout.trim().split(/\s+/).find((x) => /^\d{1,3}(\.\d{1,3}){3}$/.test(x)) : undefined;
     return ip;
   }
 
   #networkReady = false;
+  /** The agents network being made again, which every use that finds it gone meanwhile waits on (HB-1029). */
+  #networkRemake: Promise<boolean> | undefined;
+  /**
+   * Whether a failure was the agents network missing, though this process
+   * made it (HB-1029); if so it is made again here. Asked only after a use of
+   * it failed, never before each: the network is otherwise known made. Two
+   * creates that met the pruned network at once share the one re-make: the
+   * second used to find it not yet known made, and failed, its old container
+   * already removed by a rebuild.
+   */
+  async #agentNetworkGone(err: unknown): Promise<boolean> {
+    const said = typeof err === 'string' ? err : String((err as Error)?.message ?? err);
+    if (!NO_SUCH_NETWORK.test(said)) return false;
+    if (this.#networkRemake) return this.#networkRemake;
+    if (!this.#networkReady) return false;
+    this.#networkReady = false;
+    const remake = this.#agentNetworkArgs().then((a) => a.length > 0);
+    this.#networkRemake = remake;
+    try { return await remake; } finally { if (this.#networkRemake === remake) this.#networkRemake = undefined; }
+  }
   /** `--network <name>`, creating the isolated agent network on first use. */
   async #agentNetworkArgs(): Promise<string[]> {
     const name = (process.env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
@@ -3057,6 +3427,12 @@ export class LocalDockerProvider implements RuntimeProvider {
     return new Promise<ExecResult>((resolve, reject) => {
       if (oneShot && volume) this.#track(oneShot);
       const letGo = () => { if (oneShot) IN_FLIGHT.delete(oneShot); };
+      // A file sent as the input is closed however the call ends: a client
+      // that exits before reading it all (a daemon or a disk that failed)
+      // leaves a piped stream paused with its file still open, and failed
+      // copies of a model to a runner ran out of descriptors (HB-0928).
+      let input: Readable | undefined;
+      const dropInput = () => { input?.destroy(); };
       let child: ChildProcessWithoutNullStreams;
       try { child = spawn(this.docker, this.#argv(argv)); } catch (err) { letGo(); reject(err); return; }
       // Once the call is given up (timeout, unreadable input), the killed
@@ -3067,6 +3443,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         if (abandoned) return;
         abandoned = true;
         clearTimeout(timer);
+        dropInput();
         child.kill('SIGKILL');
         // Given up only when its removal did not show it gone.
         const after = (gone: boolean) => { if (!gone) this.#gaveUpOn(volume); letGo(); reject(err); };
@@ -3081,6 +3458,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       child.stdout.on('data', (c) => (stdout += c));
       child.stderr.on('data', (c) => (stderr += c));
       child.on('error', (err) => {
+        dropInput();
         if (abandoned) return;
         abandoned = true;
         clearTimeout(timer);
@@ -3091,6 +3469,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       });
       child.on('close', (code) => {
         clearTimeout(timer);
+        dropInput();
         if (abandoned) return;
         const r = { code: code ?? 1, stdout, stderr };
         const done = () => { letGo(); resolve(r); };
@@ -3103,15 +3482,21 @@ export class LocalDockerProvider implements RuntimeProvider {
       // swallow it (the close handler above is the real result).
       child.stdin.on('error', () => {});
       if (Buffer.isBuffer(data)) child.stdin.end(data);
-      else createReadStream(data.file).on('error', abandon).pipe(child.stdin);
+      else (input = createReadStream(data.file)).on('error', abandon).pipe(child.stdin);
     });
   }
 
-  /** `childEnv`: values a bare `-e NAME` takes from the client's environment (#withEnvFile). */
-  async #docker(args: string[], timeoutMs?: number, childEnv?: Record<string, string>): Promise<ExecResult> {
+  /**
+   * `childEnv`: values a bare `-e NAME` takes from the client's environment (#withEnvFile).
+   * `merged`: the client's stderr is its stdout, one pipe, so what it writes to
+   * the two comes back in the order it wrote it (logs, HB-1107); a client that
+   * could not be run is told by its shell's 126 or 127.
+   */
+  async #docker(args: string[], timeoutMs?: number, childEnv?: Record<string, string>, o: { merged?: boolean } = {}): Promise<ExecResult> {
     if (!(await this.reachable())) return { code: 1, stdout: '', stderr: `cannot connect: ${UNREACHABLE_WORDS}`, timedOut: true, unreachable: true };
+    const [file, argv] = o.merged ? ['sh', ['-c', 'exec "$0" "$@" 2>&1', this.docker, ...this.#argv(args)]] : [this.docker, this.#argv(args)];
     try {
-      const { stdout, stderr } = await execFileP(this.docker, this.#argv(args), {
+      const { stdout, stderr } = await execFileP(file, argv, {
         ...(childEnv ? { env: { ...process.env, ...childEnv } } : {}),
         maxBuffer: 8 * 1024 * 1024,
         // A hung daemon must fail this call, not freeze the control plane.
@@ -3134,8 +3519,8 @@ export class LocalDockerProvider implements RuntimeProvider {
       // launchd; EACCES) is "docker unavailable", not "exited 1": a rejected
       // execFile always carries stdout '', which used to read as a clean
       // failure — and status() then called every container absent (night review).
-      if (err?.code === 'ENOENT' || err?.code === 'EACCES') {
-        throw new ProviderError(`docker unavailable: ${String(err)}`, 'Docker is not available on this host.');
+      if (err?.code === 'ENOENT' || err?.code === 'EACCES' || (o.merged && (err?.code === 126 || err?.code === 127))) {
+        throw new ProviderError(`docker unavailable: ${o.merged ? String(err?.stdout ?? err).trim().slice(0, 300) : String(err)}`, 'Docker is not available on this host.');
       }
       if (typeof err?.code === 'number' || err?.stdout !== undefined) {
         return {
@@ -3162,14 +3547,46 @@ function shq(s: string): string {
 }
 
 /**
- * A `docker --memory` value in bytes, as Docker reads it (binary units, an
- * optional i/b: "1g", "512m", "1.5GiB"); undefined when it is not one.
+ * A setting's value, or its default when it is unset or empty. `X=` in .env
+ * is set and empty: taken with ??, the engine was started with `--memory ''`,
+ * which Docker refuses, while Settings showed 2g (HB-1401).
+ */
+const orDefault = (v: string | undefined, fallback: string): string => v?.trim() || fallback;
+
+/** The memory search engine's limit, as asked for now (Settings → Hosts, or .env). */
+const embedderMemory = () => orDefault(process.env.HATCHABOT_EMBEDDER_MEMORY, '2g');
+
+/**
+ * Whether an engine runs on another limit than the one asked for now
+ * (HB-1021). Judged as a browser's is (HB-0326): by the limit it was started
+ * with, its label (`asked`); an engine from before the label by the limit
+ * Docker holds (`held`, bytes), and not at all where Docker holds none (a
+ * kernel without memory limits), so no engine is replaced for nothing.
+ */
+function engineOffLimit(asked: string, held: string): boolean {
+  const had = asked && asked !== '<no value>' ? dockerMemoryBytes(asked) : (/^\d+$/.test(held) && Number(held) > 0 ? Number(held) : undefined);
+  const want = dockerMemoryBytes(embedderMemory());
+  return had !== undefined && want !== undefined && had !== want;
+}
+
+/**
+ * A `docker --memory` value in bytes, as Docker reads it (go-units'
+ * RAMInBytes, Podman's too): a number as Go's ParseFloat reads one (".5",
+ * "5.", "1e9"), one space or none, then no unit, b, or k, m, g, t or p in
+ * binary units with an optional b or ib ("1g", "512m", "1.5GiB"), in any
+ * case, and nothing around it; undefined where Docker refuses it ("1gi",
+ * "-1g", " 2g", "2g "). It used to refuse ".5g", "5." and "1e9", which Docker
+ * takes: a limit so written was never judged, and an engine or browser on
+ * another kept it. And it took " 2g", which Docker refuses: an engine on 2g
+ * was judged off that limit, only for its replacement's run to be refused.
+ * Go's hexadecimal floats and "inf" are left out: no one writes a memory
+ * limit so.
  */
 export function dockerMemoryBytes(value: string): number | undefined {
-  const m = /^\s*(\d+(?:\.\d+)?)\s*([bkmgtp])?i?b?\s*$/i.exec(value);
+  const m = /^(\+?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?) ?(b|[kmgtp](?:i?b)?)?$/i.exec(value);
   if (!m) return undefined;
-  const power = 'bkmgtp'.indexOf((m[2] ?? 'b').toLowerCase());
-  return Math.trunc(Number(m[1]) * 1024 ** power);
+  const bytes = Number(m[1]) * 1024 ** 'bkmgtp'.indexOf((m[2]?.[0] ?? 'b').toLowerCase());
+  return Number.isFinite(bytes) ? Math.trunc(bytes) : undefined;
 }
 
 /** Every secret a seed carries: token-like values in the config patch and the env. */
@@ -3244,11 +3661,63 @@ export function tcpReachable(host: string, port: number, timeoutMs: number): Pro
   });
 }
 
+/** Where ssh connects for a runner: a host and port, or `through` another machine first. */
+export type SshRoute = { host: string; port: number } | 'through';
+
+/**
+ * Where ssh itself connects for an ssh:// endpoint, from what `ssh -G` says
+ * its config makes of it (HostName, Port, ProxyJump, ProxyCommand) with the
+ * name and port docker passes it. Undefined when ssh cannot say (no ssh, an
+ * address sshTarget does not take, no answer in 5 s): the address as
+ * written is all there is.
+ */
+export async function sshRoute(endpoint: string, ssh = 'ssh'): Promise<SshRoute | undefined> {
+  const t = sshTarget(endpoint);
+  if (!t) return undefined;
+  let out: string;
+  try {
+    ({ stdout: out } = await execFileP(ssh, ['-G', ...(t.port ? ['-p', t.port] : []), t.dest], { timeout: 5_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }));
+  } catch { return undefined; }
+  const said = new Map<string, string>();
+  for (const line of out.split('\n')) {
+    const m = /^(\S+)\s+(.+)$/.exec(line.trim());
+    if (m && !said.has(m[1]!.toLowerCase())) said.set(m[1]!.toLowerCase(), m[2]!.trim());
+  }
+  const set = (key: string) => { const v = said.get(key); return !!v && v.toLowerCase() !== 'none'; };
+  if (set('proxyjump') || set('proxycommand')) return 'through';
+  const host = said.get('hostname'), port = Number(said.get('port'));
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
+  return { host, port };
+}
+
+/**
+ * The quick connect test for an ssh:// runner: a TCP connect to where its
+ * ssh connects, not to the name as written and port 22. One added through
+ * a Host alias in ~/.ssh/config (another HostName or Port) answered Docker,
+ * and then every call to it was refused at once as "not answering"
+ * (HB-1057). One reached through another machine (ProxyJump, ProxyCommand)
+ * is not probed: a connect from here says nothing of it, and its calls wait
+ * on docker's own time limits, as before the probe. ssh is asked on every
+ * probe (milliseconds; reachable() probes at most every REACH_OK_MS): an
+ * alias edited to a new HostName, a machine made again elsewhere, is where
+ * docker goes next, and a route kept for the life of the process knocked
+ * on the old one, every call refused until a restart.
+ */
+export function sshReachProbe(endpoint: string, ssh = 'ssh'): (host: string, port: number, timeoutMs: number) => Promise<boolean> {
+  return async (host, port, timeoutMs) => {
+    const route = await sshRoute(endpoint, ssh);
+    if (route === 'through') return true;
+    return tcpReachable(route?.host ?? host, route?.port ?? port, timeoutMs);
+  };
+}
+
 /** `ssh://user@host[:port]` → what ssh wants, or undefined for anything else. */
 export function sshTarget(dockerHost: string): { dest: string; port?: string } | undefined {
   // A plain user@host only: nothing that ssh could read as an option
-  // (a leading "-", e.g. -oProxyCommand=…), no spaces.
-  const m = /^ssh:\/\/([A-Za-z0-9_][A-Za-z0-9._-]*(?:@[A-Za-z0-9][A-Za-z0-9.-]*)?)(?::(\d{1,5}))?\/?$/.exec(dockerHost.trim());
+  // (a leading "-", e.g. -oProxyCommand=…), no spaces. A host may have an
+  // underscore, as an ssh alias may and as Add takes it (parseSshEndpoint):
+  // refused here, its runner ran agents whose consoles never opened (HB-1115).
+  const m = /^ssh:\/\/([A-Za-z0-9_][A-Za-z0-9._-]*(?:@[A-Za-z0-9_][A-Za-z0-9._-]*)?)(?::(\d{1,5}))?\/?$/.exec(dockerHost.trim());
   return m ? { dest: m[1]!, port: m[2] } : undefined;
 }
 

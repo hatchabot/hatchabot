@@ -4,7 +4,7 @@ import * as crypto from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
-import { allowlistScrubScript, denyPairing, DROP_CHAT_ACCOUNTS_SCRIPT, grantChannelAccess, grantRoomAccess, keepOnlyTelegramAccountScript, setDmPolicy } from '../src/orchestrator/members.js';
+import { allowlistScrubScript, denyPairing, DROP_CHAT_ACCOUNTS_SCRIPT, grantChannelAccess, grantRoomAccess, keepOnlyTelegramAccountScript, setDmPolicy } from '../src/orchestrator/members/members.js';
 
 const STATE = '/home/node/.openclaw';
 

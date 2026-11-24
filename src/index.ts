@@ -1,5 +1,5 @@
-import { sweepMoveCopies } from './orchestrator/backups.js';
-import { whileBusy } from './orchestrator/busy.js';
+import { sweepMoveCopies } from './orchestrator/backups/backupFiles.js';
+import { whileBusy } from './orchestrator/lifecycle/busy.js';
 import { ensureOpsServer } from './ops/opsServer.js';
 import { opsToolsFingerprint } from './ops/opsTools.js';
 import { requestLogSerializer } from './api/requestLog.js';
@@ -12,6 +12,8 @@ import Database from 'better-sqlite3';
 import { installErrorHandler } from './api/errorHandler.js';
 import Fastify, { type FastifyServerOptions } from 'fastify';
 import { Store } from './store/store.js';
+import { SchemaTooNewError } from './store/schemaVersion.js';
+import { holdInstanceLock, InstanceLockedError, InstanceLockUnwritableError } from './store/instanceLock.js';
 import { LocalSecretStore } from './secrets/localSecretStore.js';
 import { MockProvider } from './providers/mockProvider.js';
 import { LocalDockerProvider, setVolumeEventSink } from './providers/localDockerProvider.js';
@@ -21,11 +23,12 @@ import { TelegramPoolProvisioner } from './channels/telegramPool.js';
 import { TelegramManualProvisioner, verifyBotToken } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
+import { markInterruptedConfirms } from './api/mgmtChat.js';
 import { authIsEnabled, authModeFromEnv, bindHostFor, noSignInRefusal, registerAuth } from './api/auth.js';
 import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
-import { reconcileAgents, reconcileEventLog, startReconcileLoop } from './orchestrator/reconcile.js';
-import { markInterrupted, runtimeEventLog, setOperationJournal } from './orchestrator/operations.js';
-import { runPostureSweep } from './orchestrator/posture.js';
+import { reconcileAgents, reconcileEventLog, startReconcileLoop } from './orchestrator/lifecycle/reconcile.js';
+import { markInterrupted, runtimeEventLog, setOperationJournal } from './orchestrator/lifecycle/operations.js';
+import { runPostureSweep } from './orchestrator/health/posture.js';
 import { LOCAL_OWNER } from './api/principal.js';
 import { firstAccountAdoption } from './api/firstAccount.js';
 import type { RuntimeProvider } from './providers/provider.js';
@@ -42,6 +45,18 @@ try {
 } catch {
   /* best-effort — a shared/system-owned dir shouldn't block boot */
 }
+// One server process per database, before anything reads or writes it: a
+// second one's start swept the first's secrets in flight (HB-1436). Held
+// until the process ends; a crashed one's lets go with it.
+const instanceLock = (() => {
+  try {
+    return holdInstanceLock(DB_PATH);
+  } catch (err) {
+    if (!(err instanceof InstanceLockedError || err instanceof InstanceLockUnwritableError)) throw err;
+    console.error(err.message);
+    process.exit(1);
+  }
+})();
 const db = new Database(DB_PATH);
 // The DB holds encrypted secrets AND cleartext gateway tokens — no other
 // local user has any business reading it. (WAL siblings too.)
@@ -58,7 +73,18 @@ for (const f of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
 // has already produced one worthless backup on this host.
 db.pragma('wal_autocheckpoint = 256');
 
-const store = new Store(db);
+// A database a newer release changed in a way this one cannot work with: its
+// message alone, where the service log and restart.sh show it, not a stack
+// trace (HB-0813; docs/troubleshooting.md).
+const store = (() => {
+  try {
+    return new Store(db);
+  } catch (err) {
+    if (!(err instanceof SchemaTooNewError)) throw err;
+    console.error(err.message);
+    process.exit(1);
+  }
+})();
 const secrets = new LocalSecretStore(db, LocalSecretStore.keyFromEnv());
 // The log callback is deferred on purpose: `app` is built further down, and
 // nothing here logs before then. Rename outcomes are worth having — a lease
@@ -141,7 +167,7 @@ const providerForHost = (host: Host): RuntimeProvider | undefined => {
     return resolveProvider(host, providers, remoteProviders, { image: process.env.HATCHABOT_IMAGE, prefix: process.env.HATCHABOT_PREFIX });
   } catch { return undefined; }
 };
-// Long operations (orchestrator/operations.ts) write their steps to the
+// Long operations (orchestrator/lifecycle/operations.ts) write their steps to the
 // journal too. Rows a previous process left `running` were cut off by the
 // restart: marked interrupted BEFORE reconcile, so reconcile leaves those
 // agents to resumeOperations below (an interrupted import is undone, never
@@ -150,6 +176,8 @@ setOperationJournal((e, d) => app.log.info(d, e));
 // A provider's note about an agent's volume: a warning, and on its Activity.
 setVolumeEventSink(runtimeEventLog(store, (e, d) => app.log.warn(d, e)));
 markInterrupted(store);
+// A confirmed card whose change the restart cut off says so (HB-1053).
+try { markInterruptedConfirms(store); } catch (err) { app.log.warn({ error: String(err) }, 'mgmt.interrupted_confirms_unmarked'); }
 // Reconcile's findings about an agent go to its timeline as well as the
 // journal (they were journal-only: "found stopped" never reached Activity).
 const reconcileLog = reconcileEventLog(store, (e, d) => app.log.info(d, e));
@@ -254,14 +282,18 @@ const routes = await registerRoutes(app, {
 });
 
 // Checkpoint and close cleanly so the on-disk file is whole after a restart.
+// First the services the routes built stop their timers and waits (HB-0807):
+// nothing of theirs starts work on a database that is about to close.
 for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   process.once(sig, () => {
+    try { routes.stop(); } catch (err) { app.log.error({ err }, 'shutdown: stopping the services failed'); }
     try {
       db.pragma('wal_checkpoint(TRUNCATE)');
       db.close();
     } catch (err) {
       app.log.error({ err }, 'shutdown checkpoint failed');
     }
+    instanceLock.release(); // last: the database is closed
     process.exit(0);
   });
 }

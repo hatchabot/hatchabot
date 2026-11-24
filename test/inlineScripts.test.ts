@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { inlineScripts } from '../scripts/inline-scripts.mjs';
+import { inlineScripts, pageScripts, pageWithScripts } from '../scripts/inline-scripts.mjs';
 
 describe('inlineScripts: the page code check-web and the web tests read (HB-0620)', () => {
   it('reads each bare <script> to the first </script>; text in a body is not markup', () => {
@@ -38,17 +38,49 @@ describe('inlineScripts: the page code check-web and the web tests read (HB-0620
     expect(() => inlineScripts('<script>x = "<!--<script>";</script>y();</script>')).toThrow(/no script open/);
   });
 
-  it('reads the real pages: three scripts in index.html, two in join.html', () => {
-    expect(inlineScripts(readFileSync('web/index.html', 'utf8'))).toHaveLength(3);
-    expect(inlineScripts(readFileSync('web/join.html', 'utf8'))).toHaveLength(2);
+  it('reads the real pages: their scripts are files in web/app/, none inline', () => {
+    // Since HB-0811 the pages hold no inline script: each names its files in web/app/.
+    const read = (name: string) => readFileSync(`web/app/${name}`, 'utf8');
+    const index = pageScripts(readFileSync('web/index.html', 'utf8'), read);
+    expect(index.length).toBeGreaterThan(10);
+    expect(index.every((s) => s.src !== null && s.code.length > 0)).toBe(true);
+    expect(index.map((s) => s.src).slice(0, 2)).toEqual(['theme.js', 'core.js']);
+    expect(pageScripts(readFileSync('web/join.html', 'utf8'), read).map((s) => s.src)).toEqual(['theme.js', 'join.js']);
+    // Without a reader, a page script is refused rather than skipped.
+    expect(() => inlineScripts(readFileSync('web/index.html', 'utf8'))).toThrow(/not a bare <script>/);
+  });
+
+  it('reads a page script by its file, exactly that shape, and puts it in place for a reader of the page (HB-0811)', () => {
+    const files: Record<string, string> = { 'a.js': 'a()', 'b-2.js': 'b()' };
+    const read = (name: string) => { if (!(name in files)) throw new Error(`no ${name}`); return files[name]!; };
+    const html = '<p>x</p><script src="app/a.js"></script>\n<script src="/app/b-2.js"></script><script>c()</script>';
+    expect(pageScripts(html, read)).toEqual([
+      { src: 'a.js', code: 'a()', line: 1 }, { src: 'b-2.js', code: 'b()', line: 2 }, { src: null, code: 'c()', line: 2 },
+    ]);
+    expect(pageWithScripts(html, read)).toBe('<p>x</p><script>\na()</script>\n<script>\nb()</script><script>c()</script>');
+    for (const tag of ['<script src="app/a.js" defer></script>', '<script src="app/../a.js"></script>', '<script src="app/A.js"></script>',
+      '<script src="lib/a.js"></script>', '<script src="https://x.example/app/a.js"></script>', '<script src="app/a.js"></script >', "<script src='app/a.js'></script>"]) {
+      expect(() => pageScripts(tag, read), tag).toThrow(/neither a bare <script> nor|not a bare/);
+    }
+    expect(() => pageScripts('<script src="app/gone.js"></script>', read)).toThrow(/no gone\.js/);
+  });
+
+  it('gives each script the line it starts on', () => {
+    const html = '<script>a()</script><script>b()</script>\n\n<p>\n<script>\nc()\n</script>\n<script src="app/core.js"></script>';
+    expect(pageScripts(html, (name) => `// ${name}`).map((x) => [x.src, x.line])).toEqual([[null, 1], [null, 1], [null, 4], ['core.js', 7]]);
   });
 
   it('stays quick on hostile text', () => {
-    const hostile = ['<'.repeat(200000), '<script>' + '<'.repeat(200000), '<p>' + '</scrip'.repeat(30000), '<script>a()</script>'.repeat(20000)];
+    // Big enough that time in the square of the length shows whatever the machine: a page of
+    // 160,000 scripts took 4 s in each function when every script's line was counted from the
+    // top (HB-0850), and takes about 50 ms now. Each function is timed on its own.
+    const hostile = ['<'.repeat(1_600_000), '<script>' + '<'.repeat(1_600_000), '<p>' + '</scrip'.repeat(240_000), '<script>a()</script>'.repeat(160_000)];
     for (const h of hostile) {
-      const t0 = performance.now();
-      try { inlineScripts(h); } catch { /* refused */ }
-      expect(performance.now() - t0, h.slice(0, 20)).toBeLessThan(1000);
+      for (const [name, read] of [['inlineScripts', () => inlineScripts(h)], ['pageScripts', () => pageScripts(h, () => '')]] as const) {
+        const t0 = performance.now();
+        try { read(); } catch { /* refused */ }
+        expect(performance.now() - t0, `${name}: ${h.slice(0, 20)}`).toBeLessThan(1000);
+      }
     }
   });
 });

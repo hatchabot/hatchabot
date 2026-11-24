@@ -4,10 +4,10 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage.js';
-import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
-import { agentCost, COST_BANDS, COST_PERIODS, costsFor, priceParts, SPEND_RANGES, spendSeries, tierOf, TtlCache, windowPricing } from '../src/orchestrator/agentCosts.js';
-import { priceMix } from '../src/orchestrator/modelOptions.js';
+import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage/usage.js';
+import type { StoredProfile } from '../src/orchestrator/usage/modelScorecard.js';
+import { agentCost, COST_BANDS, COST_PERIODS, costsFor, priceParts, SPEND_RANGES, spendSeries, tierOf, TtlCache, windowPricing } from '../src/orchestrator/usage/agentCosts.js';
+import { priceMix } from '../src/orchestrator/sources/modelOptions.js';
 import { publicClassFor } from '../src/api/publicRoutes.js';
 
 /** The home screen's cost badges: GET /v1/costs and what it is figured from (made-up agents and numbers). */
@@ -262,6 +262,31 @@ describe('spend over time (the Usage chart)', () => {
     expect(one.choices).toEqual([]);
     const sel = (await w.f.inject({ method: 'GET', url: '/v1/usage/spend?range=day&agents=c-plan,c-elsewhere', headers: as(OWNER) })).json();
     expect(sel.totals.cost).toBeGreaterThanOrEqual(0); // an id that is not theirs is dropped, not an error
+  });
+});
+
+describe('spend made before a switch to a local model (HB-0955)', () => {
+  it('stays on the chart and in the window\'s price; the local model\'s own tokens still are not charted', async () => {
+    const w = await world();
+    const now = Date.parse('2026-10-05T12:30:00Z');
+    w.store.setModelProfile('c-big', profile({ 'claude-opus-4-8': model({ [now - 2 * HOUR]: { cacheWrite: 1.6e6, output: 0.2e6 } }) }), iso(now)); // $15
+    w.store.setModelProfile('c-local', profile({ 'qwen3:8b': model({ [now - 2 * HOUR]: { input: 3e6 } }) }), iso(now));
+    const before = { window: windowPricing(w.store, OWNER, 24, now), chart: spendSeries(w.store, OWNER, 'day', { now }) };
+    expect(before.window.total).toBe(15);
+    // Research Desk moves to the local model; its records are as they were.
+    w.store.setAgentAIProfile('c-big', 'oll');
+    const window = windowPricing(w.store, OWNER, 24, now);
+    expect(window.total).toBe(15);
+    expect(window.agents['c-big']).toMatchObject({ cost: 15 });
+    expect(window.models).toEqual([{ model: 'claude-opus-4-8', cost: 15 }]);
+    const chart = spendSeries(w.store, OWNER, 'day', { now });
+    expect(chart.totals).toEqual(before.chart.totals);
+    expect(chart.choices.map((c) => c.id)).toEqual(before.chart.choices.map((c) => c.id));
+    expect(spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-big' }).totals.cost).toBe(15);
+    // An agent that was always local: no spend, no tokens charted, not offered.
+    expect(chart.choices.some((c) => c.id === 'c-local')).toBe(false);
+    expect(spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-local' }).totals).toMatchObject({ cost: 0, tokens: 0 });
+    expect(window.agents['c-local']).toBeUndefined();
   });
 });
 

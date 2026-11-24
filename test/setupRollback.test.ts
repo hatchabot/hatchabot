@@ -5,13 +5,13 @@ import { TelegramPoolProvisioner } from '../src/channels/telegramPool.js';
 import { TelegramManualProvisioner } from '../src/channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from '../src/channels/composite.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
-import { runProvisionSteps } from '../src/orchestrator/provision.js';
-import { reconcileAgents } from '../src/orchestrator/reconcile.js';
+import { runProvisionSteps } from '../src/orchestrator/lifecycle/provision.js';
+import { reconcileAgents } from '../src/orchestrator/lifecycle/reconcile.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { Store } from '../src/store/store.js';
 import { MemSecrets } from './support/world.js';
-import { isBusy } from '../src/orchestrator/busy.js';
+import { isBusy } from '../src/orchestrator/lifecycle/busy.js';
 
 /**
  * A setup that failed and can be retried: nothing is over for the people on the

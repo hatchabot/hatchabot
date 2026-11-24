@@ -9,9 +9,9 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { beginOperation, operationSummary, operationTitles, runInBackground, spanWords } from '../src/orchestrator/operations.js';
+import { beginOperation, operationSummary, operationTitles, runInBackground, spanWords } from '../src/orchestrator/lifecycle/operations.js';
 import { followOperation } from '../src/mgmt/broker.js';
-import { exportAgent, importAgent } from '../src/orchestrator/transfer.js';
+import { exportAgent, importAgent } from '../src/orchestrator/transfer/transfer.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 afterEach(() => vi.restoreAllMocks());

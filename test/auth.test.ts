@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import { authModeFromEnv, registerAuth } from '../src/api/auth.js';
+import { _resetLoginThrottle, authModeFromEnv, registerAuth } from '../src/api/auth.js';
 import { LOCAL_OWNER, ownerIdOf, principalOf } from '../src/api/principal.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { Store } from '../src/store/store.js';
@@ -71,6 +71,18 @@ describe('password sessions', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it('takes a password that is not text, or a body that is not an object, as a wrong password (HB-0814)', async () => {
+    for (const payload of [{ password: 42 }, { password: true }, { password: ['correct-horse'] }, { password: { value: 'correct-horse' } }, ['correct-horse'], 'correct-horse']) {
+      _resetLoginThrottle();
+      const app = await appWith('correct-horse');
+      const res = await app.inject({ method: 'POST', url: '/v1/login', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(payload) });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(401);
+      expect(res.json()).toEqual({ error: 'Wrong password' });
+      expect(res.cookies).toHaveLength(0);
+    }
+    _resetLoginThrottle();
+  });
+
   it('invalidates existing sessions when the password is rotated', async () => {
     const before = await appWith('old-password');
     const cookie = await loginCookie(before, 'old-password');
@@ -103,6 +115,17 @@ describe('password sessions', () => {
     const app = await appWith('pw');
     app.get('/v1/invites/:code', async () => ({ valid: false }));
     expect((await app.inject({ method: 'GET', url: '/v1/invites/ABC' })).statusCode).toBe(200);
+  });
+
+  it("lets the page's scripts through before sign-in, as the page itself, and nothing shaped otherwise (HB-0811)", async () => {
+    const app = await appWith('pw');
+    app.get('/app/:name', async () => 'script');
+    app.get('/app/:name/:more', async () => 'not a script');
+    expect((await app.inject({ method: 'GET', url: '/app/core.js?v=abc' })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/app/core.js' })).statusCode).toBe(200);
+    for (const url of ['/app/core.js/x', '/app/Core.js', '/app/core.json', '/app/x', '/v1/whoami']) {
+      expect((await app.inject({ method: 'GET', url })).statusCode, url).toBe(401);
+    }
   });
 });
 

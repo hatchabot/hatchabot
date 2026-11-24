@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,8 +19,8 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const driver = resolve('node_modules/better-sqlite3');
 
-/** A fake bundle tree for `tag`: its restart.sh exits with `restartRc`. */
-function bundleTree(root: string, tag: string, restartRc = 0, docs = false): string {
+/** A fake bundle tree for `tag`: its restart.sh exits with `restartRc` (or is `restart`, given). */
+function bundleTree(root: string, tag: string, restartRc = 0, docs = false, restart?: string): string {
   const dir = join(root, 'hatchabot');
   mkdirSync(join(dir, 'scripts'), { recursive: true });
   mkdirSync(join(dir, '.node', 'bin'), { recursive: true });
@@ -28,7 +28,7 @@ function bundleTree(root: string, tag: string, restartRc = 0, docs = false): str
   symlinkSync(process.execPath, join(dir, '.node', 'bin', 'node'));
   symlinkSync(driver, join(dir, 'node_modules', 'better-sqlite3'));
   for (const s of ['upgrade.sh', 'follow-channel.sh', 'follow-tries.sh', 'release-target.sh', 'release-manifest.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
-  writeFileSync(join(dir, 'scripts', 'restart.sh'), `#!/usr/bin/env bash\nexit ${restartRc}\n`, { mode: 0o755 });
+  writeFileSync(join(dir, 'scripts', 'restart.sh'), restart ?? `#!/usr/bin/env bash\nexit ${restartRc}\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'VERSION'), tag);
   writeFileSync(join(dir, 'BUNDLE.json'), JSON.stringify({ version: tag.slice(1), tag, platform: 'linux-arm64' }) + '\n');
   const files = ['.bundle-files', '.node', 'BUNDLE.json', 'VERSION', 'node_modules', 'scripts'];
@@ -38,9 +38,9 @@ function bundleTree(root: string, tag: string, restartRc = 0, docs = false): str
 }
 
 /** The release assets for `tag` under base/tag/: the tarball and its .sha256. */
-function publish(base: string, tag: string, opts: { restartRc?: number; badHash?: boolean; docs?: boolean } = {}): void {
+function publish(base: string, tag: string, opts: { restartRc?: number; badHash?: boolean; docs?: boolean; restart?: string } = {}): void {
   const work = mkdtempSync(join(tmpdir(), 'hb-bundle-src-'));
-  bundleTree(work, tag, opts.restartRc ?? 0, opts.docs);
+  bundleTree(work, tag, opts.restartRc ?? 0, opts.docs, opts.restart);
   const name = `hatchabot-${tag}-linux-arm64.tar.gz`;
   mkdirSync(join(base, tag), { recursive: true });
   const r = spawnSync('tar', ['-czf', join(base, tag, name), '-C', work, 'hatchabot']);
@@ -103,6 +103,58 @@ describe('scripts/upgrade.sh on a bundle install', () => {
     expect(read(join(w.install, '.env'))).toBe('HATCHABOT_SECRET_KEY=made-up\n');
     expect(existsSync(join(w.install, 'data', 'hatchabot.sqlite'))).toBe(true);
   });
+
+  it('another install of the dependencies holding their lock: the swap, which moves node_modules too, waits with nothing changed, then goes on once it is free (review of HB-1212)', async () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    // The npm holding it: this test's own process stands for it, alive throughout.
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    const sum = spawnSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.install], { encoding: 'utf8' }).stdout.trim();
+    const lock = join(w.home, '.local', 'state', 'hatchabot', `deps-${sum}.lock.d`);
+    mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, 'owner'), `${process.pid} ${start}\n`);
+    const p = spawn('bash', [join(w.install, 'scripts', 'upgrade.sh'), 'v2.0.1'], {
+      env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: w.home, TMPDIR: join(w.home, 'tmp'), HATCHABOT_BUNDLE_BASE: `file://${w.base}`, HATCHABOT_UPGRADE_IMAGE: '0' },
+    });
+    let out = '', ended = false;
+    p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { out += d; });
+    const done = new Promise<number | null>((res) => p.on('close', (code) => { ended = true; res(code); }));
+    try {
+      for (const end = Date.now() + 30_000; !out.includes('Waiting for an install of the dependencies') && !ended && Date.now() < end;) await new Promise((res) => setTimeout(res, 50));
+      expect(out).toContain('Waiting for an install of the dependencies in');
+      await new Promise((res) => setTimeout(res, 300));
+      expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+      expect(existsSync(join(w.install, '.prev-release'))).toBe(false);
+      expect(existsSync(join(w.install, '.swapping'))).toBe(false);
+    } finally {
+      rmSync(lock, { recursive: true, force: true }); // the npm done
+    }
+    expect(await done, out).toBe(0);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.1');
+    expect(existsSync(lock)).toBe(false); // let go
+  }, 60_000);
+
+  it('a release that does not come up, and a rollback that cannot have the dependencies\' lock: what to run next is said, still 1, and the record stays (review of HB-1212)', () => {
+    const w = world();
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    const sum = spawnSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.install], { encoding: 'utf8' }).stdout.trim();
+    const lock = join(w.home, '.local', 'state', 'hatchabot', `deps-${sum}.lock.d`);
+    // The new release's restart fails, with another npm holding the lock meanwhile (this test's process stands for it).
+    publish(w.base, 'v2.0.1', { restart: `#!/usr/bin/env bash\nmkdir -p ${JSON.stringify(lock)}\nprintf '%s\\n' '${process.pid} ${start}' > ${JSON.stringify(join(lock, 'owner'))}\nexit 1\n` });
+    // Half an hour of one-second waits, made instant: only `sleep 1`, the lock's.
+    const fast = join(w.root, 'fast'); mkdirSync(fast);
+    writeFileSync(join(fast, 'sleep'), '#!/bin/bash\n[ "$1" = 1 ] && exit 0\nexec /bin/sleep "$@"\n', { mode: 0o755 });
+    // Its own timeout: the half-hour of waits, instant, still takes some 50 s.
+    const r = spawnSync('bash', [join(w.install, 'scripts', 'upgrade.sh'), 'v2.0.1'], {
+      encoding: 'utf8', timeout: 180_000,
+      env: { PATH: `${fast}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: w.home, TMPDIR: join(w.home, 'tmp'), HATCHABOT_BUNDLE_BASE: `file://${w.base}`, HATCHABOT_UPGRADE_IMAGE: '0', HATCHABOT_DEPS_WAIT_SECS: '3' },
+    });
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain("for half an hour, so v2.0.0's files were left in");
+    expect(r.stdout).toContain('Then run hatchabot upgrade: it puts v2.0.0 back first, from its record.');
+    expect(existsSync(join(w.install, '.swapping'))).toBe(true); // the record stays
+  }, 200_000);
 
   it('a checksum that does not match, or no bundle yet for what a channel names, changes nothing (exit 3: tried again later)', () => {
     const w = world();

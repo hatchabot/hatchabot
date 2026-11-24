@@ -67,6 +67,130 @@ describe('scripts/link-cli.sh on a bundle install', () => {
   });
 });
 
+describe('scripts/link-cli.sh on a bundle install leaves another program\'s command where it is (HB-1077)', () => {
+  // Another program's command, which writes that it ran when it does.
+  const other = (b: ReturnType<typeof bundle>, at: string) => {
+    const body = `#!/bin/sh\n# made-up-tool: not Hatchabot\necho "other program ran: $*" >> '${join(b.root, 'other.log')}'\n`;
+    writeFileSync(at, body, { mode: 0o755 });
+    return body;
+  };
+  const otherRan = (b: ReturnType<typeof bundle>) => existsSync(join(b.root, 'other.log'));
+
+  for (const onPath of [true, false]) {
+    it(`another program at ~/.local/bin/hbt (${onPath ? 'on the PATH' : 'not on the PATH'}): kept, and hatchabot is linked`, () => {
+      const b = bundle();
+      const at = join(b.launchers, 'hbt'), body = other(b, at);
+      const env = onPath ? b.env : scriptEnv(b.home, `${b.bin}:/usr/bin:/bin`);
+      const r = spawnSync('bash', [join(b.app, 'scripts', 'link-cli.sh'), '--no-doctor'], { encoding: 'utf8', input: '', env });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(readFileSync(at, 'utf8')).toBe(body);
+      expect(r.stdout).toContain(`another program here is already called hbt (${at}), so use the full name: hatchabot`);
+      expect(r.stdout).toContain(`linked: ${join(b.launchers, 'hatchabot')}\n`);
+      expect(readFileSync(join(b.launchers, 'hatchabot'), 'utf8')).toContain(`"${b.app}/bin/hatchabot.mjs"`);
+    });
+  }
+
+  it('a link there that leads to another program is kept too', () => {
+    const b = bundle();
+    const tool = join(b.root, 'other-tool'); const body = other(b, tool);
+    symlinkSync(tool, join(b.launchers, 'hbt'));
+    const r = b.run('link-cli.sh', '--no-doctor');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(lstatSync(join(b.launchers, 'hbt')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(b.launchers, 'hbt'), 'utf8')).toBe(body);
+  });
+
+  it('another program at ~/.local/bin/hatchabot: kept and not run; the run says so and fails, hbt is still linked', () => {
+    const b = bundle();
+    const at = join(b.launchers, 'hatchabot'), body = other(b, at);
+    const r = b.run('link-cli.sh'); // with the doctor at the end, which would run "hatchabot doctor"
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain(`${at} is another program, not Hatchabot's, so it was left as it is`);
+    expect(readFileSync(at, 'utf8')).toBe(body);
+    expect(otherRan(b)).toBe(false);
+    expect(readFileSync(join(b.launchers, 'hbt'), 'utf8')).toContain(`"${b.app}/bin/hatchabot.mjs"`);
+  });
+
+  it('its own launchers, from a run before or another bundle install, are still replaced', () => {
+    const b = bundle();
+    expect(b.run('link-cli.sh', '--no-doctor').status).toBe(0);
+    for (const name of ['hatchabot', 'hbt']) writeFileSync(join(b.launchers, name), '#!/usr/bin/env bash\n# Hatchabot (x) — written by scripts/link-cli.sh\nexec "/elsewhere/.node/bin/node" "/elsewhere/bin/hatchabot.mjs" "$@"\n', { mode: 0o755 });
+    const r = b.run('link-cli.sh', '--no-doctor');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    for (const name of ['hatchabot', 'hbt']) expect(readFileSync(join(b.launchers, name), 'utf8'), name).toContain(`"${b.app}/bin/hatchabot.mjs"`);
+  });
+
+  it('the launcher the rename from AgentClaw wrote (scripts/migrate-rename-host.sh) is replaced, and the link to it then runs this install (review of HB-1077)', () => {
+    const b = bundle();
+    // What that script writes, for the checkout it moved.
+    const migrated = `#!/usr/bin/env bash\ncd "${join(b.root, 'old-checkout')}" && exec node_modules/.bin/tsx src/cli.ts "$@"\n`;
+    writeFileSync(join(b.launchers, 'hatchabot'), migrated, { mode: 0o755 });
+    symlinkSync(join(b.launchers, 'hatchabot'), join(b.launchers, 'agentclaw'));
+    expect(readFileSync('scripts/migrate-rename-host.sh', 'utf8')).toContain(`printf '#!/usr/bin/env bash\\ncd "%s" && exec node_modules/.bin/tsx src/cli.ts "$@"\\n'`);
+    const r = b.run('link-cli.sh', '--no-doctor');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    for (const name of ['hatchabot', 'agentclaw']) expect(readFileSync(join(b.launchers, name), 'utf8'), name).toContain(`"${b.app}/bin/hatchabot.mjs"`);
+  });
+
+  it('that launcher is replaced too while the checkout it runs is still there, as long as that checkout is Hatchabot\'s', () => {
+    const b = bundle();
+    const checkout = join(b.root, 'old-checkout'); mkdirSync(checkout);
+    writeFileSync(join(checkout, 'package.json'), '{\n  "name": "hatchabot",\n  "version": "1.0.0"\n}\n');
+    writeFileSync(join(b.launchers, 'hatchabot'), `#!/usr/bin/env bash\ncd "${checkout}" && exec node_modules/.bin/tsx src/cli.ts "$@"\n`, { mode: 0o755 });
+    const r = b.run('link-cli.sh', '--no-doctor');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(join(b.launchers, 'hatchabot'), 'utf8')).toContain(`"${b.app}/bin/hatchabot.mjs"`);
+  });
+
+  // Another TypeScript tool's wrapper can look much like it: "cd to the
+  // project, run its CLI with tsx" is a common shape (review of HB-1077).
+  const wrappers: Array<[string, (b: ReturnType<typeof bundle>) => string]> = [
+    ['a longer wrapper with the same run line', (b) => `#!/usr/bin/env bash\n# made-up-tool: not Hatchabot\nDIR="${join(b.root, 'other-tool')}"\ncd "$DIR" && exec node_modules/.bin/tsx src/cli.ts "$@"\n`],
+    ['the same two lines, for a checkout of another tool', (b) => {
+      const dir = join(b.root, 'other-tool'); mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'package.json'), '{"name":"made-up-tool","version":"1.0.0"}\n');
+      return `#!/usr/bin/env bash\ncd "${dir}" && exec node_modules/.bin/tsx src/cli.ts "$@"\n`;
+    }],
+  ];
+  for (const [what, write] of wrappers) {
+    for (const name of ['hatchabot', 'hbt']) {
+      it(`another tool's tsx wrapper at ~/.local/bin/${name} (${what}) is kept`, () => {
+        const b = bundle();
+        const at = join(b.launchers, name), body = write(b);
+        writeFileSync(at, body, { mode: 0o755 });
+        const r = b.run('link-cli.sh', '--no-doctor');
+        expect(readFileSync(at, 'utf8')).toBe(body);
+        if (name === 'hbt') {
+          expect(r.status, r.stdout + r.stderr).toBe(0);
+          expect(r.stdout).toContain(`another program here is already called hbt (${at})`);
+        } else {
+          expect(r.status, r.stdout + r.stderr).toBe(1);
+          expect(r.stdout).toContain(`${at} is another program, not Hatchabot's, so it was left as it is`);
+        }
+      });
+    }
+  }
+
+  it('the rename\'s launcher shape at ~/.local/bin/hbt is kept: that script wrote no hbt', () => {
+    const b = bundle();
+    const at = join(b.launchers, 'hbt'), body = `#!/usr/bin/env bash\ncd "${join(b.root, 'old-checkout')}" && exec node_modules/.bin/tsx src/cli.ts "$@"\n`;
+    writeFileSync(at, body, { mode: 0o755 });
+    const r = b.run('link-cli.sh', '--no-doctor');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(at, 'utf8')).toBe(body);
+    expect(readFileSync(join(b.launchers, 'hatchabot'), 'utf8')).toContain(`"${b.app}/bin/hatchabot.mjs"`);
+  });
+
+  it('a link left by a native install since removed (it leads nowhere now) is replaced', () => {
+    const b = bundle();
+    symlinkSync(join(b.root, 'removed-native', 'bin', 'hatchabot.mjs'), join(b.launchers, 'hatchabot'));
+    symlinkSync(join(b.launchers, 'hatchabot'), join(b.launchers, 'hbt'));
+    const r = b.run('link-cli.sh', '--no-doctor');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    for (const name of ['hatchabot', 'hbt']) expect(readFileSync(join(b.launchers, name), 'utf8'), name).toContain(`"${b.app}/bin/hatchabot.mjs"`);
+  });
+});
+
 describe('scripts/link-cli.sh writes a PATH line a new shell reads as written (audit, 2026-10-29)', () => {
   it('a $, a backtick or a quote in the home folder\'s name stays in the profile\'s line, and a second run adds no other', () => {
     const b = bundle('hatchabot', 'home$EXPANSION `x` "q"');

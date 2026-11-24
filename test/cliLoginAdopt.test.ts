@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { botOf, noAnswer, otherBotLine, tokenTurnedDown } from '../src/cli.js';
+import { botOf, gatewayRestartCommand, noAnswer, otherBotLine, tokenTurnedDown } from '../src/cli.js';
 
 /**
  * The deep audit of v2.177.0 (2026-11-07): what `hatchabot login` saves, and
@@ -19,7 +19,7 @@ const work = mkdtempSync(join(sandbox, 'work-'));
 afterAll(() => rmSync(sandbox, { recursive: true, force: true }));
 
 interface Route { path: string; method?: string; status?: number; reply?: unknown; replies?: Array<{ status?: number; reply?: unknown; reject?: string }> }
-interface Seen { path: string; method: string; body?: any; origin: string; authorization?: string }
+interface Seen { path: string; method: string; body?: any; origin: string; search?: string; authorization?: string }
 
 function newHome(config?: string): { home: string; config: string } {
   const home = mkdtempSync(join(sandbox, 'home-'));
@@ -145,6 +145,40 @@ describe('adopt (HB-0542, HB-0543, HB-0544)', () => {
     expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
   }, 60_000);
 
+  it('--reuse-bot of a bot whose account is still on, with Telegram off for the whole instance, says the account must go off too, and makes nothing (HB-1031)', () => {
+    const live = { accountId: 'made_up_old_bot', sourceAgentId: 'source-test', enabledInSource: true, channelOffInSource: true, polling: 'idle' };
+    const routes = base(true).map((x) => (x.path === '/v1/workspaces/inspect'
+      ? { ...x, reply: { path: '/made-up/workspace', markdownFiles: [], files: [], bytes: 0, existingBot: live } } : x));
+    const r = run(routes, ['--reuse-bot']);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('Telegram is switched off in your hand-built instance\'s config, but its account "made_up_old_bot"');
+    expect(r.stderr).toContain('openclaw config set channels.telegram.accounts.made_up_old_bot.enabled false');
+    expect(r.stderr).not.toContain('systemctl');
+    expect(r.requests.some((x) => x.path === '/v1/agents' && x.method === 'POST')).toBe(false);
+  }, 60_000);
+
+  it('--reuse-bot refused: the command that switches the account off is printed only for a key a shell takes as it is, else the change in words (HB-1031)', () => {
+    const refusal = (bot: Record<string, unknown>) => run(base(true).map((x) => (x.path === '/v1/workspaces/inspect'
+      ? { ...x, reply: { path: '/made-up/workspace', markdownFiles: [], files: [], bytes: 0, existingBot: { sourceAgentId: 'source-test', polling: 'idle', ...bot } } } : x)), ['--reuse-bot']);
+    // A key edited by hand, with a space, a quote, a ; and a $( ): pasted as a command, it breaks or runs something.
+    const odd = 'old bot";$(true)';
+    for (const bot of [
+      { accountId: odd, enabledInSource: true, channelOffInSource: true }, // Telegram off there, the account on
+      { accountId: odd, enabledInSource: true, channelOffInSource: false }, // still live
+    ]) {
+      const r = refusal(bot);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).not.toContain('openclaw config set');
+      expect(r.stderr).toContain(`under channels.telegram.accounts, set "enabled": false on the account ${JSON.stringify(odd)}`);
+      expect(r.requests.some((x) => x.path === '/v1/agents' && x.method === 'POST')).toBe(false);
+    }
+    // A plain key: the command, in both.
+    for (const channelOffInSource of [true, false]) {
+      expect(refusal({ accountId: 'made_up_old_bot', enabledInSource: true, channelOffInSource }).stderr)
+        .toContain('  openclaw config set channels.telegram.accounts.made_up_old_bot.enabled false\n');
+    }
+  }, 60_000);
+
   // The third review: the pasted-token path had the same early look.
   it('a pasted token: adopt waits for setup to take it up before copying the workspace', () => {
     const r = cli(newHome().home, [...base(false), { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, { reply: setting }, { reply: agent }] },
@@ -233,16 +267,49 @@ describe('adopt (HB-0542, HB-0543, HB-0544)', () => {
     expect(r.stdout).not.toMatch(/is RUNNING/);
   }, 60_000);
 
-  it('--reuse-bot on an agent that fails after the handover says why, removes it, and adopts nothing', () => {
+  // HB-1276: removed, it took the bot it had just been given offline, and the
+  // token setup holds for a Retry went with it; the web app's adopt keeps it (HB-1225).
+  it('an agent that fails after its bot was handed over, --reuse-bot or a pasted token: kept with its bot, told how to finish the adopt and what a Retry does, and nothing adopted', () => {
     const failed = { ...agent, state: 'FAILED', stateReason: 'made-up start failure' };
-    const r = run([...base(true), { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, { reply: setting }, { reply: failed }] },
+    // Review of HB-1276: "Retry it" brought the bot back up on an agent with nothing of the old one copied in,
+    // and a delete after that parks the bot in the pool. Removed now, nothing is parked. Parked, an adopt
+    // with --reuse-bot is refused it, and one without may lease it, or another spare (review): so the
+    // words say to take it out of the pool first, true of both.
+    const said = `error: "Kitchen Helper" has its bot, but could not start (made-up start failure), so it was kept with its bot, and nothing was adopted.\n`
+      + `To finish the adopt, remove it and run this again: hatchabot delete ${agent.id} --yes\n`
+      + `A Retry (hatchabot retry ${agent.id}) brings the bot back up on an agent with nothing copied from the old one; to adopt again after that, remove it with: hatchabot delete ${agent.id} --yes --no-recycle\n`
+      // HB-1419: the CLI had no way to take a parked bot out of the pool; --no-recycle keeps it out.
+      + `(Removed without --no-recycle, the bot is parked in your Bot pool, and an adopt is refused it until it is taken out under ⚙ Settings → Messaging → Telegram.)\n`;
+    const notOnAgain = "Don't switch the bot's account back on in your hand-built instance while this agent holds it: once it runs, both would poll it, and messages would be lost.\n";
+    const reuse = run([...base(true), { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, { reply: setting }, { reply: failed }] },
       { path: `/v1/agents/${agent.id}/channel-token`, method: 'POST', status: 202, reply: { username: 'made_up_old_bot' } }], ['--reuse-bot']);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/@made_up_old_bot was not taken over: "Kitchen Helper" could not start: made-up start failure/);
-    expect(r.requests.some((x) => x.path.endsWith('/adopt-workspace'))).toBe(false);
-    expect(r.requests.some((x) => x.method === 'DELETE' && x.path === `/v1/agents/${agent.id}`)).toBe(true);
-    expect(r.stdout).not.toMatch(/took over/);
+    const pasted = cli(newHome().home, [...base(false), { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, { reply: setting }, { reply: failed }] },
+      { path: `/v1/agents/${agent.id}/channel-token`, method: 'POST', status: 202, reply: { username: 'made_up_new_bot' } }],
+    ['adopt', '/made-up/workspace', 'Kitchen Helper'], { ...env, HATCHABOT_BOT_TOKEN: '123:made-up-token' });
+    for (const r of [reuse, pasted]) {
+      expect(r.status).toBe(1);
+      expect(r.stderr).toBe(said + (r === reuse ? notOnAgain : ''));
+      expect(r.requests.some((x) => x.path.endsWith('/channel-token'))).toBe(true);
+      expect(r.requests.some((x) => x.path.endsWith('/adopt-workspace'))).toBe(false);
+      expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
+      expect(r.stdout).not.toMatch(/took over/);
+    }
   }, 60_000);
+
+  // HB-1163: the hand-over steps restart the gateway as the server's own hand-over does on this machine.
+  it('a bot still live in the old instance: the steps to hand it over, with this machine\'s gateway restart', () => {
+    const routes = base(true).map((x) => (x.path === '/v1/workspaces/inspect'
+      ? { ...x, reply: { ...(x.reply as object), existingBot: { accountId: 'made_up_old_bot', sourceAgentId: 'source-test', enabledInSource: true, polling: 'idle' } } } : x));
+    const r = run(routes, ['--reuse-bot']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('  openclaw config set channels.telegram.accounts.made_up_old_bot.enabled false\n  ' + gatewayRestartCommand(process.platform, {}) + '\n');
+    expect(r.requests.some((x) => x.method === 'POST' && x.path === '/v1/agents')).toBe(false);
+  });
+  it('the gateway restart: the systemd unit on Linux, OpenClaw\'s own command on a Mac', () => {
+    expect(gatewayRestartCommand('linux', {})).toBe('systemctl --user restart openclaw-gateway');
+    expect(gatewayRestartCommand('linux', { HATCHABOT_OPENCLAW_GATEWAY_UNIT: 'made-up-gateway' })).toBe('systemctl --user restart made-up-gateway');
+    expect(gatewayRestartCommand('darwin', {})).toBe('openclaw gateway restart');
+  });
 
   // Eighth review: Telegram not answering says nothing of the token.
   it('a token Telegram did not answer for is sent again on its own, and adopts with no new paste', () => {
@@ -295,6 +362,9 @@ describe('adopt (HB-0542, HB-0543, HB-0544)', () => {
     expect(r.stderr).toMatch(/@made_up_old_bot was not taken over: "Kitchen Helper" could not start: made-up start failure/);
     expect(r.stderr).not.toMatch(/did not wait for a bot/);
     expect(r.requests.some((x) => x.path.endsWith('/channel-token'))).toBe(false);
+    // Nothing was handed over, so nothing holds the bot: removed, as before HB-1276 kept one that failed after.
+    expect(r.requests.some((x) => x.method === 'DELETE' && x.path === `/v1/agents/${agent.id}`)).toBe(true);
+    expect(r.stderr).toMatch(/was cleaned up/);
   }, 60_000);
 
   it('--reuse-bot on an agent that came up with another bot stops, and removes it', () => {
@@ -327,6 +397,8 @@ describe('adopt (HB-0542, HB-0543, HB-0544)', () => {
     expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
     expect(r.stderr).toMatch(/"Kitchen Helper" was still PROVISIONING after 0\.000001 min, after its bot was handed over: it was left to finish/);
     expect(r.stderr).toMatch(/hatchabot setup-log agent-0001-test/);
+    // Once it runs on the bot, a plain delete parks it in the pool, which an adopt is refused (HB-1419).
+    expect(r.stderr).toContain('once it runs, remove it (hatchabot delete agent-0001-test --yes --no-recycle, which keeps its bot out of your Bot pool) and run this again.');
     expect(r.stderr).not.toMatch(/cleaned up/);
   }, 60_000);
 
@@ -400,6 +472,131 @@ describe('adopt (HB-0542, HB-0543, HB-0544)', () => {
     expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
   }, 60_000);
 
+  // HB-1277, the CLI's side: four hand-over posts with no answer, and the
+  // server may have taken one. It was removed at once, and with --reuse-bot
+  // the old account was already off, so the bot went dark. The agent is read.
+  const unanswered: Route = { path: `/v1/agents/${agent.id}/channel-token`, method: 'POST', replies: [
+    { reject: 'ECONNRESET' }, { status: 503, reply: { error: 'Telegram did not answer, so the token could not be checked. Try again in a moment.' } },
+    { status: 504, reply: { error: 'Gateway Timeout' } }, { status: 502, reply: { error: 'Bad Gateway' } }] };
+  const reads = (r: { requests: Seen[] }) => r.requests.filter((x) => x.method === 'GET' && x.path === `/v1/agents/${agent.id}`).length;
+  const posts = (r: { requests: Seen[] }) => r.requests.filter((x) => x.path.endsWith('/channel-token')).length;
+  const later = 'Watch it with: hatchabot setup-log agent-0001-test — if it still asks for a bot token, remove it (hatchabot delete agent-0001-test --yes) and run this again. '
+    + 'Once it runs on that bot, remove it with hatchabot delete agent-0001-test --yes --no-recycle before adopting again: removed without --no-recycle, the bot is parked in your Bot pool, and an adopt is refused it until it is taken out under ⚙ Settings → Messaging → Telegram.\n';
+  const notOn = "Don't switch the bot's account back on in your hand-built instance while this agent may hold it: once it runs, both would poll it, and messages would be lost.\n";
+
+  it('four posts with no answer, a server that says, the step answered: handed over, watched to running and adopted, nothing removed, --reuse-bot or a token', () => {
+    for (const [args, extra, bot] of [[['--reuse-bot'], env, true], [[], BOT_ENV, false]] as const) {
+      const r = cli(newHome().home, [saying, ...base(bot), unanswered,
+        { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, { reply: setting }, { reply: setting }, { reply: agent }] }],
+      ['adopt', '/made-up/workspace', 'Kitchen Helper', ...args], extra, '', 90_000);
+      expect(r.status, r.stderr).toBe(0);
+      expect(posts(r)).toBe(4);
+      expect(r.requests.some((x) => x.path.endsWith('/adopt-workspace'))).toBe(true);
+      expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
+    }
+  }, 200_000);
+
+  it('four posts with no answer, a server that says, the step still open: none was taken, and it is removed, as before', () => {
+    const r = cli(newHome().home, [saying, ...base(false), unanswered, { path: `/v1/agents/${agent.id}`, method: 'GET', reply: waiting }],
+      ['adopt', '/made-up/workspace', 'Kitchen Helper'], BOT_ENV, '', 90_000);
+    expect(r.status).toBe(1);
+    expect(posts(r)).toBe(4);
+    expect(reads(r)).toBe(2);
+    expect(r.stderr).toMatch(/error: Bad Gateway\nNothing was adopted and "Kitchen Helper" was cleaned up/);
+    expect(r.requests.some((x) => x.method === 'DELETE')).toBe(true);
+  }, 120_000);
+
+  it('four posts with no answer and the agent not read after: kept, and said, whichever server', () => {
+    for (const routes of [[saying], []]) {
+      const r = cli(newHome().home, [...routes, ...base(true), unanswered,
+        { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, { status: 502, reply: { error: 'Bad gateway, for the test.' } }] }],
+      ['adopt', '/made-up/workspace', 'Kitchen Helper', '--reuse-bot'], env, '', 90_000);
+      expect(r.status).toBe(1);
+      expect(posts(r)).toBe(4);
+      expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
+      expect(r.requests.some((x) => x.path.endsWith('/adopt-workspace'))).toBe(false);
+      expect(r.stderr.slice(r.stderr.indexOf('error: '))).toBe('error: "Kitchen Helper" was kept, and nothing was adopted: the hand-over of its bot may not have gone through (Bad Gateway), '
+        + 'and it could not be read after that (Bad gateway, for the test.), so whether it has its bot is not known.\n' + later + notOn);
+    }
+  }, 200_000);
+
+  it('an older server: four posts with no answer and its step still showing, which it shows until setup takes a token: kept, and said; the step gone: adopted', () => {
+    const kept = cli(newHome().home, [...base(false), unanswered, { path: `/v1/agents/${agent.id}`, method: 'GET', reply: waiting }],
+      ['adopt', '/made-up/workspace', 'Kitchen Helper'], BOT_ENV, '', 90_000);
+    expect(kept.status).toBe(1);
+    expect(kept.requests.some((x) => x.method === 'DELETE')).toBe(false);
+    expect(kept.stderr.slice(kept.stderr.indexOf('error: '))).toBe('error: "Kitchen Helper" was kept, and nothing was adopted: the hand-over of its bot may not have gone through (Bad Gateway), '
+      + 'and it still asks for a bot token, which this server (v2.177 or before) shows until setup takes one, so whether it has its bot is not known.\n' + later);
+    const taken = cli(newHome().home, [...base(false), unanswered,
+      { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, { reply: setting }, { reply: setting }, { reply: agent }] }],
+    ['adopt', '/made-up/workspace', 'Kitchen Helper'], BOT_ENV, '', 90_000);
+    expect(taken.status, taken.stderr).toBe(0);
+    expect(taken.requests.some((x) => x.path.endsWith('/adopt-workspace'))).toBe(true);
+    expect(taken.requests.some((x) => x.method === 'DELETE')).toBe(false);
+  }, 200_000);
+
+  // Review of HB-1277's CLI side: create keeps its agent too (it never removes one), but said only the
+  // bare sentence, with no name, no id, no word that it was kept, and no next step.
+  it('create: four posts with no answer and whether it has its bot not known: kept, named with its id, and the next step said, whichever server', () => {
+    const next = 'Watch it with: hatchabot setup-log agent-0001-test — if it still asks for a bot token, give it the token again in its sheet in the web app, '
+      + 'or remove it (hatchabot delete agent-0001-test --yes) and run this again.\n';
+    for (const [config, read, why] of [
+      [saying, { status: 502, reply: { error: 'Bad gateway, for the test.' } }, 'it could not be read after that (Bad gateway, for the test.)'],
+      [accounts, { reply: waiting }, 'it still asks for a bot token, which this server (v2.177 or before) shows until setup takes one']] as const) {
+      const r = cli(newHome().home, [config,
+        { path: '/v1/ai-profiles', reply: [{ id: 'profile-test', name: 'test', mine: true }] },
+        { path: '/v1/hosts', reply: [{ id: 'host-test', kind: 'local' }] },
+        { path: '/v1/agents', method: 'POST', reply: agent },
+        { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, read] }, unanswered],
+      ['create', 'Kitchen Helper'], BOT_ENV, '', 90_000);
+      expect(r.status).toBe(1);
+      expect(posts(r)).toBe(4);
+      expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
+      expect(r.stderr.slice(r.stderr.indexOf('error: '))).toBe('error: "Kitchen Helper" (agent-0001-test) was kept: the hand-over of its bot may not have gone through (Bad Gateway), '
+        + `and ${why}, so whether it has its bot is not known.\n` + next);
+    }
+  }, 200_000);
+
+  // Review of HB-1277's CLI side: a 409 to a post sent again after no answer was worded as the first had
+  // no answer, "may not have gone through (This agent is not waiting for a bot token.)": that 409 is
+  // what an earlier post that landed brings, and is said so.
+  it('a server that says: no answer, a 409 to the post sent again, and the agent not read after: kept, said as an earlier hand-over that may have gone through', () => {
+    const r = cli(newHome().home, [saying, ...base(true),
+      { path: `/v1/agents/${agent.id}/channel-token`, method: 'POST', replies: [{ reject: 'ECONNRESET' }, { status: 409, reply: { error: 'This agent is not waiting for a bot token.' } }] },
+      { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, { status: 502, reply: { error: 'Bad gateway, for the test.' } }] }],
+    ['adopt', '/made-up/workspace', 'Kitchen Helper', '--reuse-bot'], env, '', 90_000);
+    expect(r.status).toBe(1);
+    expect(posts(r)).toBe(2);
+    expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
+    expect(r.stderr.slice(r.stderr.indexOf('error: '))).toBe('error: "Kitchen Helper" was kept, and nothing was adopted: an earlier hand-over of its bot may have gone through '
+      + '(sent again after no answer, it was refused: This agent is not waiting for a bot token.), and it could not be read after that (Bad gateway, for the test.), '
+      + 'so whether it has its bot is not known.\n' + later + notOn);
+  }, 120_000);
+
+  // Review of HB-1277's CLI side: a 404 at that read was said as "was kept", with a delete to run. It is gone.
+  it('four posts with no answer and the agent gone at the read after (404): said so, nothing to keep or remove, adopt and create', () => {
+    const gone = { status: 404, reply: { error: 'No such agent.' } };
+    for (const [args, extra, bot] of [[['--reuse-bot'], env, true], [[], BOT_ENV, false]] as const) {
+      const r = cli(newHome().home, [saying, ...base(bot), unanswered, { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, gone] }],
+        ['adopt', '/made-up/workspace', 'Kitchen Helper', ...args], extra, '', 90_000);
+      expect(r.status).toBe(1);
+      expect(posts(r)).toBe(4);
+      expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
+      expect(r.requests.some((x) => x.path.endsWith('/adopt-workspace'))).toBe(false);
+      expect(r.stderr.slice(r.stderr.indexOf('error: '))).toBe('error: "Kitchen Helper" is gone (No such agent.): it was removed while its bot was being handed over, '
+        + 'so nothing was adopted, and there is nothing to remove. Run this again.\n');
+    }
+    const made = cli(newHome().home, [saying,
+      { path: '/v1/ai-profiles', reply: [{ id: 'profile-test', name: 'test', mine: true }] },
+      { path: '/v1/hosts', reply: [{ id: 'host-test', kind: 'local' }] },
+      { path: '/v1/agents', method: 'POST', reply: agent },
+      { path: `/v1/agents/${agent.id}`, method: 'GET', replies: [{ reply: waiting }, gone] }, unanswered],
+    ['create', 'Kitchen Helper'], BOT_ENV, '', 90_000);
+    expect(made.status).toBe(1);
+    expect(made.requests.some((x) => x.method === 'DELETE')).toBe(false);
+    expect(made.stderr.slice(made.stderr.indexOf('error: '))).toBe('error: "Kitchen Helper" is gone (No such agent.): it was removed while its bot was being handed over. Run this again.\n');
+  }, 300_000);
+
   it('a server that says: a step after the hand-over is a refusal at once, with no 30 s grace and no word of an older server', () => {
     const started = Date.now();
     const r = cli(newHome().home, [saying, ...base(false), { path: `/v1/agents/${agent.id}`, method: 'GET', reply: waiting },
@@ -429,6 +626,38 @@ describe('adopt (HB-0542, HB-0543, HB-0544)', () => {
     expect(r.requests.some((x) => x.method === 'DELETE' && x.path === `/v1/agents/${agent.id}`)).toBe(true);
     expect(r.stderr).toMatch(/"Kitchen Helper" was still PROVISIONING after 0\.000001 min/);
     expect(r.stderr).toMatch(/was cleaned up/);
+  }, 60_000);
+
+  // HB-0980 review: a copy torn part way is held on the agent, and a Delete goes through that hold.
+  const torn: Route = { path: `/v1/agents/${agent.id}/adopt-workspace`, method: 'POST', status: 400, reply: {
+    error: 'Copying the workspace in failed part way (made-up: no space left on device) — the agent is left stopped because its files may be half-replaced, and it is not started until you choose on its page. Adopt again copies every file in the folder in again, whole; one the cut-off copy wrote that the folder no longer has stays as it was left. Or delete it.',
+    code: 'adopt-held', operation: 'op_madeup0001', detail: 'made-up: no space left on device' } };
+  it('a copy torn part way: the half-made agent is removed, and that is what it says', () => {
+    const r = run([torn, ...base(false).filter((x) => !x.path.endsWith('/adopt-workspace')), { path: `/v1/agents/${agent.id}`, method: 'GET', reply: agent }], []);
+    expect(r.status).toBe(1);
+    expect(r.requests.some((x) => x.method === 'DELETE' && x.path === `/v1/agents/${agent.id}`)).toBe(true);
+    expect(r.stderr).toMatch(/Copying the workspace into "Kitchen Helper" failed part way \(made-up: no space left on device\)\.\nNothing was adopted and "Kitchen Helper" was cleaned up/);
+    expect(r.stderr).not.toMatch(/choose on its page/);
+  }, 60_000);
+
+  it('a copy torn part way and a cleanup refused: both ways out that work, Adopt again and the delete', () => {
+    const routes = base(false).filter((x) => x.method !== 'DELETE' && !x.path.endsWith('/adopt-workspace'));
+    const r = run([torn, ...routes, { path: `/v1/agents/${agent.id}`, method: 'GET', reply: agent },
+      { path: `/v1/agents/${agent.id}`, method: 'DELETE', status: 409, reply: { error: 'Another operation is already running on this agent.' } }], []);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/"Kitchen Helper" \(agent-0001-test\) could not be removed: Another operation is already running on this agent\./);
+    expect(r.stderr).toMatch(/hatchabot ops recover op_madeup0001 adopt-again/);
+    expect(r.stderr).toMatch(/hatchabot delete agent-0001-test --yes/);
+  }, 60_000);
+
+  it('copied in whole but not started: the agent is kept, not cleaned up, and it says how to start it (HB-0980 re-review)', () => {
+    const copied: Route = { path: `/v1/agents/${agent.id}/adopt-workspace`, method: 'POST', status: 400, reply: {
+      error: 'The workspace from /made-up/workspace was copied in whole, but it could not be started (made-up: docker did not answer): start it once its machine answers.', code: 'adopt-not-started' } };
+    const r = run([copied, ...base(false).filter((x) => !x.path.endsWith('/adopt-workspace')), { path: `/v1/agents/${agent.id}`, method: 'GET', reply: agent }], []);
+    expect(r.status).toBe(1);
+    expect(r.requests.some((x) => x.method === 'DELETE')).toBe(false);
+    expect(r.stderr).toMatch(/copied in whole, but it could not be started \(made-up: docker did not answer\): start it once its machine answers\.\n"Kitchen Helper" \(agent-0001-test\) is kept, with every file copied in\. Start it once its machine answers: hatchabot start agent-0001-test/);
+    expect(r.stderr).not.toMatch(/cleaned up/);
   }, 60_000);
 
   it('a cleanup the server refuses is said, with the agent\'s id and how to remove it', () => {
@@ -497,4 +726,59 @@ describe('the bot an agent runs on, against the one handed over (thirteenth revi
     expect(otherBotLine({}, 'made_up_new_bot')).toBeUndefined();
     expect(otherBotLine({ botUsername: 'made_up_pool_bot' }, undefined)).toBeUndefined();
   });
+});
+
+describe('delete --no-recycle keeps the bot out of the Bot pool (HB-1419)', () => {
+  // A bot parked in the pool is refused to an adopt ("is a spare bot in the pool"),
+  // and the CLI has no way to take one out of it: an adopt kept on its bot, then
+  // retried, could be finished only from the web page.
+  const agent = { id: 'agent-0002-test', name: 'Porch Helper', slug: 'porch-helper', state: 'RUNNING' };
+  const env = { HATCHABOT_URL: 'http://fixture.invalid', HATCHABOT_TOKEN: 'fixture-cli-value' };
+  const routes: Route[] = [
+    { path: '/v1/agents', method: 'GET', reply: [agent] },
+    { path: `/v1/agents/${agent.id}/bot-token`, method: 'GET', status: 404, reply: { error: 'No bot.' } },
+    { path: `/v1/agents/${agent.id}`, method: 'DELETE', reply: {} },
+  ];
+  const deleted = (r: { requests: Seen[] }) => r.requests.filter((x) => x.method === 'DELETE');
+
+  it('asks the server to forget its bots, not park them; without it, the server parks them, as before', () => {
+    const kept = cli(newHome().home, routes, ['delete', agent.id, '--yes', '--no-recycle'], env);
+    expect(kept.status, kept.stderr).toBe(0);
+    expect(deleted(kept)).toEqual([expect.objectContaining({ path: `/v1/agents/${agent.id}`, search: '?recycleBot=0' })]);
+    expect(kept.stdout).toContain('"Porch Helper" deleted.');
+    const plain = cli(newHome().home, routes, ['delete', agent.id, '--yes'], env);
+    expect(plain.status, plain.stderr).toBe(0);
+    expect(deleted(plain)).toEqual([expect.objectContaining({ path: `/v1/agents/${agent.id}` })]);
+    expect(deleted(plain)[0]!.search).toBeUndefined();
+  }, 60_000);
+
+  it('the help names it', () => {
+    const r = cli(newHome().home, [], ['help'], env);
+    expect(r.stdout).toContain('delete <agent> [--yes] [--no-recycle]');
+    expect(r.stdout).toContain('--no-recycle forgets it instead');
+  }, 60_000);
+  it("never asks for the bot's token, and says what happens to its bot, from the agent list (HB-1419 review)", () => {
+    const run = (a: Record<string, unknown>, more: string[] = []) => cli(newHome().home, [
+      { path: '/v1/agents', method: 'GET', reply: [{ ...agent, ...a }] },
+      { path: `/v1/agents/${agent.id}`, method: 'DELETE', reply: {} },
+    ], ['delete', agent.id, '--yes', ...more], env);
+    const pasted = run({ botUsername: 'made_up_porch_bot', botPooled: false });
+    expect(pasted.status, pasted.stderr).toBe(0);
+    expect(pasted.requests.some((x) => x.path.endsWith('/bot-token'))).toBe(false);
+    expect(pasted.stdout).toContain('note: bot @made_up_porch_bot is parked in your Bot pool for the next agent (--no-recycle forgets it instead).');
+    const forgot = run({ botUsername: 'made_up_porch_bot', botPooled: false }, ['--no-recycle']);
+    expect(forgot.stdout).toContain('note: bot @made_up_porch_bot is forgotten, not parked: save its token first (hatchabot token agent-0002-test) if you want it for another agent.');
+    expect(forgot.requests.some((x) => x.path.endsWith('/bot-token'))).toBe(false);
+    const leased = run({ botUsername: 'made_up_pool_bot', botPooled: true }, ['--no-recycle']);
+    expect(leased.stdout).toContain('note: bot @made_up_pool_bot goes back to the Bot pool it came from.');
+    const copied = run({ botUsername: 'made_up_porch_bot', botPooled: false, state: 'STOPPED', exportedAt: '2026-11-20T10:00:00.000Z' });
+    expect(copied.stdout).toContain('note: bot @made_up_porch_bot is left to the copy of "Porch Helper" that was downloaded, which may answer on it: it is not parked for another agent here.');
+    // Moved to another Hatchabot: the server leaves its bot to the peer, which answers on it now (round-2 review).
+    const moved = run({ botUsername: 'made_up_porch_bot', botPooled: false, state: 'STOPPED', migratedTo: 'garden-shed' });
+    expect(moved.stdout).toContain('note: bot @made_up_porch_bot is left to "Porch Helper" on garden-shed, where it was moved: it is not parked for another agent here.');
+    expect(moved.stdout).not.toContain('Bot pool');
+    const none = run({ webOnly: true });
+    expect(none.stdout).not.toContain('note:');
+    expect(none.requests.some((x) => x.path.endsWith('/bot-token'))).toBe(false);
+  }, 60_000);
 });

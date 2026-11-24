@@ -20,14 +20,17 @@ const cfgPath = join(tmp, 'openclaw.json');
 const dbPath = join(tmp, 'state.sqlite');
 const wsTech = join(tmp, 'workspace-tech'); // inspect allows /tmp
 const wsFresh = join(tmp, 'workspace-fresh');
-// External data folder must live OUTSIDE /tmp (the scan excludes /tmp).
-const repoTmp = mkdtempSync(join(process.cwd(), 'acl-adopt-data-'));
+// The external data folder, in a root of its own in the temp folder, not
+// under the checkout: the scan leaves out a path with a hidden folder on the
+// way, and a checkout in an agent's worktree (.claude/worktrees) has one
+// (HB-0817).
+const repoTmp = mkdtempSync(join(tmpdir(), 'acl-adopt-data-'));
 const dataDir = join(repoTmp, 'condo-docs');
-// A checkout that is itself under a system tree (a self-hosted runner's
-// /var/lib/...): the route's scan keeps every other system prefix.
-vi.mock('../src/orchestrator/dataPaths.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../src/orchestrator/dataPaths.js')>();
-  const here = process.cwd();
+// The temp folder is a system tree the scan excludes too: the route's scan
+// keeps every system prefix but the one the fixtures are under.
+vi.mock('../src/orchestrator/transfer/dataPaths.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/orchestrator/transfer/dataPaths.js')>();
+  const here = `${(await import('node:os')).tmpdir()}/acl-adopt-data-`;
   const prefixes = real.SYSTEM_PREFIXES.filter((s) => !here.startsWith(`${s}/`));
   return { ...real, scanWorkspacePaths: (ws: string) => real.scanWorkspacePaths(ws, prefixes) };
 });

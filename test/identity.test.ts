@@ -326,6 +326,21 @@ describe('identity verification with malformed input and slow certificates (HB-0
     } finally { await f.close(); }
   });
 
+  it('reads a body that is not an object as without a token, as the cast did (HB-0814)', async () => {
+    const f = Fastify();
+    installErrorHandler(f);
+    await registerAuth(f, { secret: Buffer.alloc(32, 3), mode: 'identity', verifier: verifier() });
+    try {
+      for (const payload of [[makeToken()], 'a sign-in token', 7]) {
+        _resetLoginThrottle();
+        const r = await f.inject({ method: 'POST', url: '/v1/session', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(payload) });
+        expect(r.statusCode, r.body).toBe(400);
+        expect(r.json()).toEqual({ error: 'idToken required' });
+        expect(r.cookies).toHaveLength(0);
+      }
+    } finally { await f.close(); }
+  });
+
   it('requires the numeric dates and string identity fields before admitting a signed token', async () => {
     for (const bad of [{ exp: '1800003600' }, { iat: null }, { iat: '1800000000' }, { email: {} }, { email_verified: 'true' }, { name: [] }]) {
       await expect(verifier().verify(makeToken(bad))).rejects.toBeInstanceOf(IdentityError);

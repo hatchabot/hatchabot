@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { adminAccounts, evaluateSafeguards, failingSafeguards, publicConfig, type SafeguardFacts } from '../src/api/safeguards.js';
-import { autoUpgradeStatus, type AutoUpgradeProbes } from '../src/ops/autoUpgrade.js';
+import { autoUpgradeStatus, realProbes, type AutoUpgradeProbes } from '../src/ops/autoUpgrade.js';
 import { doctorReport, publicAccessLines, type DoctorFacts } from '../src/doctor.js';
 
 const good = (): SafeguardFacts => ({
@@ -70,7 +70,7 @@ describe('the public-access setting', () => {
 
 describe('automatic upgrades: what counts as on', () => {
   const probes = (o: Partial<{ enabled: string; active: string; unit: string | undefined; pin: string | undefined; platform: NodeJS.Platform }> = {}): AutoUpgradeProbes => ({
-    platform: o.platform ?? 'linux', home: '/home/x',
+    platform: o.platform ?? 'linux', home: '/home/x', installDir: '/home/x/hatchabot', realpath: async (d) => d,
     systemctl: async (args) => (args[0] === 'is-enabled' ? ('enabled' in o ? o.enabled : 'enabled') : ('active' in o ? o.active : 'active')),
     readFile: async (p) => p.endsWith('.service')
       ? ('unit' in o ? o.unit : '[Service]\nType=oneshot\nExecStart=/usr/bin/env bash "/home/x/hatchabot/scripts/follow-channel.sh" stable\n')
@@ -94,7 +94,7 @@ describe('automatic upgrades: what counts as on', () => {
   });
   it('the channel chosen last is the one the timer follows (audit #043)', async () => {
     expect(await autoUpgradeStatus(probes({ pin: 'beta\n' }))).toMatchObject({ ok: false, channel: 'beta' });
-    const beta = `ExecStart=/usr/bin/env bash "/x/scripts/follow-channel.sh" beta\n`;
+    const beta = `ExecStart=/usr/bin/env bash "/home/x/hatchabot/scripts/follow-channel.sh" beta\n`;
     expect(await autoUpgradeStatus(probes({ unit: beta, pin: 'stable\n' }))).toEqual({ ok: true, channel: 'stable' });
     expect((await autoUpgradeStatus(probes({ unit: beta, pin: 'v2.100.0\n' }))).ok).toBe(false);
   });
@@ -111,7 +111,37 @@ describe('automatic upgrades: what counts as on', () => {
   it('reads the install back from a unit that escapes a %, a $ or a quote in its folder (audit, 2026-10-29)', async () => {
     const files: Record<string, string> = { '/home/x/hb-%q $x "q"/data/channel': 'stable\n', '/home/x/.config/hatchabot/channel': 'beta\n' };
     const unit = '[Service]\nExecStart=/usr/bin/env bash "/home/x/hb-%%q $$x \\"q\\"/scripts/follow-channel.sh" stable\n';
-    expect(await autoUpgradeStatus({ ...probes(), readFile: async (f: string) => (f.endsWith('.service') ? unit : files[f]) })).toEqual({ ok: true, channel: 'stable' });
+    expect(await autoUpgradeStatus({ ...probes(), installDir: '/home/x/hb-%q $x "q"', readFile: async (f: string) => (f.endsWith('.service') ? unit : files[f]) })).toEqual({ ok: true, channel: 'stable' });
+  });
+  it('the timer upgrades this install, not another of the same user\'s (HB-0919)', async () => {
+    const other = '[Service]\nExecStart=/usr/bin/env bash "/home/x/other-install/scripts/follow-channel.sh" stable\n';
+    const r = await autoUpgradeStatus(probes({ unit: other }));
+    expect(r.ok).toBe(false);
+    expect(r.why).toContain('upgrades the install in /home/x/other-install, not this one in /home/x/hatchabot');
+    // The same folder by a link to it is this install.
+    const links: Record<string, string> = { '/home/x/hb-link': '/srv/hatchabot', '/home/x/hatchabot': '/srv/hatchabot' };
+    const linked = { ...probes({ unit: other.replace('other-install', 'hb-link') }), realpath: async (d: string) => links[d] ?? d };
+    expect(await autoUpgradeStatus(linked)).toEqual({ ok: true, channel: 'stable' });
+    // As v2.38.0 wrote the unit, unquoted: read the same way.
+    expect(await autoUpgradeStatus(probes({ unit: 'ExecStart=/usr/bin/env bash /home/x/hatchabot/scripts/follow-channel.sh stable\n' }))).toEqual({ ok: true, channel: 'stable' });
+    expect((await autoUpgradeStatus(probes({ unit: 'ExecStart=/usr/bin/env bash /home/x/other-install/scripts/follow-channel.sh stable\n' }))).ok).toBe(false);
+    // A service that names no install cannot show it is this one.
+    expect(await autoUpgradeStatus(probes({ unit: 'ExecStart=/usr/local/bin/my-upgrader follow-channel.sh stable\n' }))).toMatchObject({ ok: false });
+  });
+  it('the install is read from the ExecStart line itself, never from a line after it (HB-0919)', async () => {
+    // A service that runs something else, with the line it replaced commented out below it.
+    const other = '[Service]\nType=oneshot\nExecStart=/usr/local/bin/other-upgrader --quiet\n# ExecStart=/usr/bin/env bash /home/x/hatchabot/scripts/follow-channel.sh stable\n';
+    expect(await autoUpgradeStatus(probes({ unit: other, pin: 'stable\n' }))).toMatchObject({ ok: false, why: expect.stringContaining('does not say which install') });
+    // Quoted, the same: a quote left open on the line that runs does not reach the next.
+    const open = '[Service]\nExecStart=/usr/local/bin/other-upgrader "--quiet\n# ExecStart=/usr/bin/env bash /home/x/hatchabot/scripts/follow-channel.sh" stable\n';
+    expect((await autoUpgradeStatus(probes({ unit: open, pin: 'stable\n' }))).ok).toBe(false);
+    // Nor the channel: a word on the line after an ExecStart that ends at the script.
+    expect((await autoUpgradeStatus(probes({ unit: 'ExecStart=/usr/bin/env bash /home/x/hatchabot/scripts/follow-channel.sh\nstable\n' }))).ok).toBe(false);
+    // One that ends at the script, its channel pinned in the install: still this install.
+    expect(await autoUpgradeStatus(probes({ unit: 'ExecStart=/usr/bin/env bash /home/x/hatchabot/scripts/follow-channel.sh\n', pin: 'stable\n' }))).toEqual({ ok: true, channel: 'stable' });
+  });
+  it('this install\'s folder is the one its code runs from', () => {
+    expect(realProbes().installDir).toBe(process.cwd());
   });
 });
 

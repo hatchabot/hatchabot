@@ -8,10 +8,12 @@ import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { Agent } from '../src/domain/types.js';
 import type { ExecResult } from '../src/providers/provider.js';
-import { accessAlertOf, accessOverview, accessProbeScript, verifyAgentAccess } from '../src/orchestrator/accessOverview.js';
-import { recordGoogleSeen, syncConnections } from '../src/orchestrator/googleConnections.js';
-import { PAIRING_DB } from '../src/orchestrator/claim.js';
+import { accessAlertOf, accessOverview, accessProbeScript, REPLACED_WHILE_CHECKED, verifyAgentAccess } from '../src/orchestrator/google/accessOverview.js';
+import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
+import { recordGoogleSeen, syncConnections } from '../src/orchestrator/google/googleConnections.js';
+import { PAIRING_DB } from '../src/orchestrator/members/claim.js';
 import vm from 'node:vm';
+import { telegramRefuses } from './support/telegramStandIn.js';
 import nodePath from 'node:path';
 import nodeCrypto from 'node:crypto';
 
@@ -47,6 +49,8 @@ interface Inside {
   paths: Record<string, boolean>;
   admitted: Record<string, string[]>;
   probeFails?: boolean;
+  /** Awaited before the runtime answers a shell line: a step held while the test changes the agent. */
+  before?: (script: string) => Promise<void>;
   /** Run the real generated probe in an isolated VM against this made-up container instead of faking its output. */
   vm?: VmInside;
 }
@@ -139,6 +143,7 @@ async function world() {
   const scripts: string[] = [];
   provider.execShell = (async (_ref: string, script: string): Promise<ExecResult> => {
     scripts.push(script);
+    await inside.before?.(script);
     if (script.includes('gog auth list')) {
       return inside.gog ? { code: 0, stdout: JSON.stringify({ accounts: inside.gog.map((email) => ({ email })) }), stderr: '' } : { code: 1, stdout: '', stderr: 'no gog' };
     }
@@ -172,6 +177,7 @@ async function world() {
   await registerRoutes(f, {
     store, secrets, providers: new Map([['mock', provider]]),
     channel: { pool: { availableCount: () => 0, owns: () => false }, release: async () => {} } as never,
+    oauthFetch: telegramRefuses, // the bots' names on the agent list
   } as never);
   const deps = { store, secrets, provider };
   const rows = (a: string) => accessOverview(store, store.getAgent(a)!).groups.flatMap((g) => g.rows);
@@ -325,6 +331,43 @@ describe('Verify now records what is inside the running agent', () => {
     expect(w.row('a1', 'google', 'mail@example.org')!.verified).toEqual(before);
   });
 
+  it('an agent moved, rebuilt or stopped while it is looked into: nothing found there is kept, and it says so (HB-0967)', async () => {
+    /** A verification held at `step` (gog's list or the probe) while `change` happens to the agent. */
+    const heldWhile = async (step: 'gog auth list' | 'HB_ACCESS_PROBE=', change: (w: Awaited<ReturnType<typeof world>>) => void) => {
+      const w = await world();
+      await verifyAgentAccess(w.deps, 'a1');
+      // What the old container answers: the account still there, and the variable gone.
+      w.inside.env = {};
+      let release!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      let reached = false;
+      w.inside.before = async (script) => { if (script.includes(step)) { reached = true; await held; } };
+      const verifying = verifyAgentAccess(w.deps, 'a1');
+      await vi.waitFor(() => expect(reached).toBe(true));
+      change(w);
+      // Newer evidence, from the agent as it is now.
+      w.store.recordAccessCheck('a1', 'google', 'mail@example.org', false, 'gone 2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z');
+      release();
+      expect(await verifying).toEqual({ status: 'not-checkable', reason: REPLACED_WHILE_CHECKED });
+      expect(w.row('a1', 'google', 'mail@example.org')!.verified).toMatchObject({ status: 'absent', at: '2026-11-20T00:00:00.000Z' });
+      expect(w.row('a1', 'env', 'SEARCH_KEY')!.verified.status).toBe('present');
+    };
+    await heldWhile('gog auth list', (w) => w.store.setAgentRuntimeRef('a1', 'mock://a1-rebuilt'));
+    await heldWhile('HB_ACCESS_PROBE=', (w) => w.store.setAgentRuntimeRef('a1', 'mock://a1-rebuilt'));
+    await heldWhile('HB_ACCESS_PROBE=', (w) => {
+      w.store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'remote', provider: 'mock', name: 'laptop', settings: {}, createdAt: 'now' } as never);
+      w.store.setAgentHost('a1', 'h2');
+    });
+    await heldWhile('gog auth list', (w) => w.store.setAgentState('a1', 'STOPPED'));
+    // A rebuild keeps the runtime's name: its operation beginning is what tells.
+    await heldWhile('HB_ACCESS_PROBE=', (w) => { beginOperation(w.store, 'rebuild', 'a1', {}); });
+    // Nothing changed meanwhile: what it found is kept.
+    const w = await world();
+    w.inside.env = {};
+    expect(await verifyAgentAccess(w.deps, 'a1')).toMatchObject({ status: 'checked' });
+    expect(w.row('a1', 'env', 'SEARCH_KEY')!.verified.status).toBe('absent');
+  });
+
   it('half a check: gog answers, the probe does not — Google is recorded, the rest is said to be skipped', async () => {
     const w = await world();
     w.inside.probeFails = true;
@@ -419,6 +462,37 @@ describe('an admission source that cannot be read is no proof that nobody is adm
     const r = await verifyAgentAccess(w.deps, 'a1');
     expect((r as { skipped?: string[] }).skipped?.join(' ')).toMatch(/allowFrom not a list/);
     expect(w.row('a1', 'person', 'u-sam')).toMatchObject({ mismatch: 'extra' });
+  });
+
+  it('a door open to everybody (allowFrom ["*"], or dmPolicy open) still admits a revoked member: the warning stays (HB-0932)', async () => {
+    const tg = (extra: Record<string, unknown>, acct: Record<string, unknown> = {}, accounts = true) => JSON.stringify({ channels: { telegram: {
+      ...extra, ...(accounts ? { accounts: { TestAgentBot: { enabled: true, botToken: BOT_VALUE, allowFrom: [tgId(1)], ...acct } } } : {}),
+    } } });
+    for (const cfg of [
+      tg({}, { dmPolicy: 'open', allowFrom: ['*'] }),
+      tg({}, { allowFrom: [tgId(1), 'telegram:*'] }),
+      tg({ allowFrom: ['*'] }),
+      tg({}, { dmPolicy: 'open' }),
+      tg({ dmPolicy: 'open' }),
+      tg({ dmPolicy: 'open', botToken: BOT_VALUE }, {}, false),
+    ]) {
+      const w = await revokedButAdmitted();
+      w.inside.vm = container([], { files: { [`${STATE}/openclaw.json`]: cfg } });
+      await verifyAgentAccess(w.deps, 'a1');
+      expect(w.row('a1', 'person', 'u-sam'), cfg).toMatchObject({ intended: false, mismatch: 'extra', verified: { status: 'present' } });
+    }
+    // An account's own door decides over the app's: one kept to its list is believed.
+    const w = await revokedButAdmitted();
+    w.inside.vm = container([], { files: { [`${STATE}/openclaw.json`]: tg({ dmPolicy: 'open' }, { dmPolicy: 'allowlist' }) } });
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.row('a1', 'person', 'u-sam')).toBeUndefined();
+    // A turned-off account's open door admits nobody.
+    const off = await revokedButAdmitted();
+    off.inside.vm = container([], { files: { [`${STATE}/openclaw.json`]: JSON.stringify({ channels: { telegram: { accounts: {
+      TestAgentBot: { enabled: true, botToken: BOT_VALUE, allowFrom: [tgId(1)] }, Spare: { enabled: false, dmPolicy: 'open', allowFrom: ['*'] },
+    } } } }) } });
+    await verifyAgentAccess(off.deps, 'a1');
+    expect(off.row('a1', 'person', 'u-sam')).toBeUndefined();
   });
 
   it('a complete read that no longer admits them is believed: the warning clears', async () => {

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
-import type { LimitsCheckSummary } from '../src/orchestrator/swap.js';
+import type { LimitsCheckSummary } from '../src/domain/swap.js';
 
 const GiB = 1024 ** 3;
 const gate = () => {

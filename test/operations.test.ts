@@ -1,5 +1,5 @@
 /**
- * Durable operations (src/orchestrator/operations.ts, operationsResume.ts):
+ * Durable operations (src/orchestrator/lifecycle/operations.ts, operationsResume.ts):
  * a long change records its steps on disk, and a restart in the middle is
  * finished, undone or held on purpose.
  *
@@ -16,16 +16,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
-import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
-import { migrateAgent } from '../src/orchestrator/migrate.js';
-import { exportAgent, importAgent } from '../src/orchestrator/transfer.js';
-import { reconcileAgents, reconcileEventLog } from '../src/orchestrator/reconcile.js';
-import { clearBusy } from '../src/orchestrator/busy.js';
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { moveAgentToHost } from '../src/orchestrator/transfer/moveHost.js';
+import { migrateAgent } from '../src/orchestrator/transfer/migrate.js';
+import { exportAgent, importAgent } from '../src/orchestrator/transfer/transfer.js';
+import { reconcileAgents, reconcileEventLog } from '../src/orchestrator/lifecycle/reconcile.js';
+import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import {
   beginOperation, markInterrupted, newBootForTests, operationRefusal, setStepHookForTests, SimulatedCrash, STEPS,
-} from '../src/orchestrator/operations.js';
-import { recoverOperation, resumeOperations, retryHeldOperations, type ResumeContext } from '../src/orchestrator/operationsResume.js';
+} from '../src/orchestrator/lifecycle/operations.js';
+import { recoverOperation, resumeOperations, retryHeldOperations, type ResumeContext } from '../src/orchestrator/lifecycle/operationsResume.js';
 import { Store } from '../src/store/store.js';
 import { MemSecrets, makeWorld, seedRunningAgent, viaGlobalFetch } from './support/world.js';
 

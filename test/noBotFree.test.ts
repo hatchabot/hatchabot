@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { createAgentRecord, runProvisionSteps, skipPoolOnce } from '../src/orchestrator/provision.js';
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { createAgentRecord, runProvisionSteps, SKIP_POOL } from '../src/orchestrator/lifecycle/provision.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
@@ -90,9 +90,11 @@ describe('no pool bot free, in a flow that never asked', () => {
     expect(store.getAgent(a.id)!.pendingAction?.type).toBe('bot_token');
 
     const b = createAgentRecord(store, { ownerId: OWNER, name: 'Bespoke', aiProfileId: 'p1', hostId: 'h1' });
-    skipPoolOnce.add(b.id);
+    store.setAgentHold(b.id, SKIP_POOL, '1');
     expect((await runProvisionSteps({ ...plain, webOnlyIfNoBot: true }, b.id)).setupRequired).toBeDefined();
     expect(store.getAgent(b.id)!.webOnly).toBeFalsy();
+    // Parked for its token: the record drives every retry from here, and the mark has done its work.
+    expect(store.agentHold(b.id, SKIP_POOL)).toBeUndefined();
   });
 
   it('the notice ends once a Telegram bot is attached or detached; a Discord change does not end it', () => {

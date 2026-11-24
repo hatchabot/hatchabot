@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clearBusy } from '../src/orchestrator/busy.js';
-import { rebuildAgent } from '../src/orchestrator/provision.js';
+import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { rebuildAgent } from '../src/orchestrator/lifecycle/provision.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 describe('event-trigger permissions reach the runtime (HB-0690)', () => {

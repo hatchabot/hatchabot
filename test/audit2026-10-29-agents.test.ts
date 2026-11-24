@@ -16,11 +16,11 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
-import { hibernateAgent, NoLongerSleepy } from '../src/orchestrator/hibernate.js';
-import { beginOperation, handleFor, newBootForTests } from '../src/orchestrator/operations.js';
-import { recoverOperation, resumeOperations } from '../src/orchestrator/operationsResume.js';
-import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
-import { exportAgent, importAgent } from '../src/orchestrator/transfer.js';
+import { hibernateAgent, NoLongerSleepy } from '../src/orchestrator/lifecycle/hibernate.js';
+import { beginOperation, handleFor, newBootForTests } from '../src/orchestrator/lifecycle/operations.js';
+import { recoverOperation, resumeOperations } from '../src/orchestrator/lifecycle/operationsResume.js';
+import { moveAgentToHost } from '../src/orchestrator/transfer/moveHost.js';
+import { exportAgent, importAgent } from '../src/orchestrator/transfer/transfer.js';
 
 const OWNER = 'user-owner';
 const H = { 'x-hatchabot-owner': OWNER };

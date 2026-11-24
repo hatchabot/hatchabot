@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { waitForSkillsSettled } from '../src/orchestrator/provision.js';
+import { waitForSkillsSettled } from '../src/orchestrator/lifecycle/provision.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
 
 /**

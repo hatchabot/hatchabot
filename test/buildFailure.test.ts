@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFailureReason, needsSharedEmbedder } from '../src/orchestrator/buildFailure.js';
+import { buildFailureReason, needsSharedEmbedder } from '../src/orchestrator/machines/buildFailure.js';
 
 describe('why a base-image build failed', () => {
   it('quotes the script\'s own marked reason, through docker\'s line prefixes', () => {

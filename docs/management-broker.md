@@ -215,7 +215,7 @@ executes lives server-side in the pending record, never in Telegram
 Differences from the verb-shaped mutates:
 
 - **Validation is the control plane's own.** Setup fields are checked with the
-  real `TemplateParamSchema` (orchestrator/template.ts), name clashes are
+  real `TemplateParamSchema` (orchestrator/transfer/template.ts), name clashes are
   rejected at propose time, and `update_definition` computes a line-diff stat
   against the LIVE file so the card says how big the change is.
 - **Placement is broker-chosen, never model-chosen.** `create_agent` always
@@ -272,7 +272,10 @@ The `pending` shape is what stops a hijacked model from "believing" it acted:
 the mutate result is explicitly *not done yet*.
 
 Error codes: `NOT_FOUND`, `AMBIGUOUS`, `INVALID_INPUT`, `READ_ONLY_MODE`,
-`RATE_LIMITED`, `FORBIDDEN_TOOL`, `UPSTREAM_ERROR` (with the `/v1` status).
+`RATE_LIMITED`, `TOO_MANY_OPEN` (the owner's list of cards is full; the
+management agent is told in the same words as before anything was resolved,
+and the filing uses no change slot), `FORBIDDEN_TOOL`, `UPSTREAM_ERROR`
+(with the `/v1` status).
 
 ---
 

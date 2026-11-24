@@ -5,8 +5,8 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { TelegramPoolProvisioner } from '../src/channels/telegramPool.js';
 import { CompositeTelegramProvisioner } from '../src/channels/composite.js';
 import { TelegramManualProvisioner } from '../src/channels/telegramManual.js';
-import { archiveAgent } from '../src/orchestrator/archive.js';
-import { runProvisionSteps } from '../src/orchestrator/provision.js';
+import { archiveAgent } from '../src/orchestrator/lifecycle/archive.js';
+import { runProvisionSteps } from '../src/orchestrator/lifecycle/provision.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**

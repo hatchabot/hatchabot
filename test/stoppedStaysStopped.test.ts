@@ -4,8 +4,8 @@ import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { wakeAgent, type HibernateDeps } from '../src/orchestrator/hibernate.js';
-import { machineTz, monthKey } from '../src/orchestrator/budgets.js';
+import { wakeAgent, type HibernateDeps } from '../src/orchestrator/lifecycle/hibernate.js';
+import { machineTz, monthKey } from '../src/orchestrator/usage/budgets.js';
 
 /**
  * HB-0411, HB-0420, HB-0441. A rebuild ends RUNNING, so a change that rebuilds

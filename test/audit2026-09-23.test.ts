@@ -4,11 +4,12 @@ import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { ProviderError } from '../src/providers/provider.js';
 import { Store } from '../src/store/store.js';
-import { isPrivateModelUrl, registerRoutes } from '../src/api/routes.js';
+import { registerRoutes } from '../src/api/routes.js';
+import { isPrivateModelUrl } from '../src/orchestrator/sources/aiSources.js';
 import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
 import { installErrorHandler } from '../src/api/errorHandler.js';
-import { computePosture } from '../src/orchestrator/posture.js';
-import { markBusy, clearBusy } from '../src/orchestrator/busy.js';
+import { computePosture } from '../src/orchestrator/health/posture.js';
+import { markBusy, clearBusy } from '../src/orchestrator/lifecycle/busy.js';
 
 /**
  * 26th audit (2026-09-23): what the seven antagonistic reviews found and

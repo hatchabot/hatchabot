@@ -6,13 +6,14 @@
  * route's scoping, the drill route, its schedule and its operation.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listBackups } from '../src/orchestrator/backups.js';
-import { drillDue, drillEvery, listDrills, resetDrillStateForTests, startDrill, type DrillRunState } from '../src/orchestrator/drills.js';
-import { computeReadiness, usableFor, type ReadinessAgentIn } from '../src/orchestrator/recoveryReadiness.js';
-import { newBootForTests, beginOperation } from '../src/orchestrator/operations.js';
+import { listBackups } from '../src/orchestrator/backups/backupFiles.js';
+import { drillDue, drillEvery, drillRunState, listDrills, resetDrillStateForTests, startDrill, type DrillRunState } from '../src/orchestrator/backups/drills.js';
+import { computeReadiness, usableFor, type ReadinessAgentIn } from '../src/orchestrator/backups/recoveryReadiness.js';
+import { newBootForTests, beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import { as, makeWorld, seedRunningAgent } from './support/world.js';
 
 const dirs: string[] = [];
@@ -75,6 +76,35 @@ describe('readiness from the sets on disk', () => {
     expect(by.a3!.restorable.map((s) => s.date)).toEqual([day(3)]);
     expect(by.a3!.restorable[0]).toMatchObject({ drill: 'failed' });
     expect(r).toMatchObject({ newestSet: day(1), newestFresh: true });
+  });
+
+  it('a passed drill of a volume whose name is longer than 80 characters is its proof (HB-1101)', () => {
+    // A custom prefix (HATCHABOT_PREFIX) long enough to make its volumes' names pass 80.
+    const prefix = 'household-garden-shed-household-garden-shed-household-garden-shed';
+    vi.stubEnv('HATCHABOT_PREFIX', prefix);
+    try {
+      const w = base();
+      const container = `${prefix}-kitchen-helper-9221b8b8`;
+      const vol = `${container}-vol`;
+      expect(vol.length).toBeGreaterThan(80);
+      w.set(day(0), [vol], { state: 'complete', captured: [vol] });
+      w.drill('2026-01-05T05-10-00Z', day(0), [{ volume: vol, readable: true, layout: true, restored: true, note: '', result: 'passed' }]);
+      expect(listDrills(w.b)[0]!.volumes[0]!.volume).toBe(vol);
+      const r = computeReadiness({ sets: listBackups(w.b), drills: listDrills(w.b), agents: [agent('long', { runtimeRef: `docker://${container}` })], host: hosts, now: Date.now() });
+      expect(r.agents[0]).toMatchObject({ status: 'ready', drill: { passed: true } });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('a drill record of more than 500 volumes keeps every one, so the 501st has its proof (HB-1101)', () => {
+    const w = base();
+    const vols = Array.from({ length: 501 }, (_, i) => `hatchabot-agent-${String(i).padStart(3, '0')}-9221b8b8-vol`);
+    w.set(day(0), vols, { state: 'complete', captured: vols });
+    w.drill('2026-01-05T05-10-00Z', day(0), vols.map((volume) => ({ volume, readable: true, layout: true, restored: true, note: '', result: 'passed' })));
+    expect(listDrills(w.b)[0]!.volumes).toHaveLength(501);
+    const r = computeReadiness({ sets: listBackups(w.b), drills: listDrills(w.b), agents: [agent('last', { runtimeRef: 'docker://hatchabot-agent-500-9221b8b8' })], host: hosts, now: Date.now() });
+    expect(r.agents[0]).toMatchObject({ status: 'ready', drill: { passed: true } });
   });
 
   it('a drill that found an archive missing from its set says so (HB-0276)', () => {
@@ -360,6 +390,51 @@ echo "made-up drill passed"
     expect(done).toMatchObject({ status: 'error' });
     expect(done!.summary).toContain('was stopped');
   }, 20_000);
+  it('a clean-up the drill\'s trap begins after the time limit, stuck on Docker, is killed and the drill settled (HB-0924)', async () => {
+    // Like the real script: its EXIT trap starts new docker calls once the TERM has come.
+    const dir = tmp('hb-drill-stuck-');
+    const pids = join(dir, 'pids');
+    const script = join(dir, 'drill.sh');
+    writeFileSync(script, `#!/bin/bash\ntrap 'exit 143' TERM\ntrap 'sleep 30 & echo $! >> "${pids}"; wait $!' EXIT\nx=$(sleep 30; echo done)\necho "$x"\n`);
+    chmodSync(script, 0o700);
+    process.env.HATCHABOT_DRILL_SCRIPT = script;
+    let done: DrillRunState | undefined;
+    const t0 = Date.now();
+    expect(startDrill(t0, 'app', (s) => { done = s; }, 200, 500).status).toBe('running');
+    await vi.waitFor(() => expect(done).toBeTruthy(), { timeout: 10_000, interval: 50 });
+    expect(Date.now() - t0).toBeLessThan(8_000);
+    expect(done).toMatchObject({ status: 'error' });
+    expect(done!.summary).toMatch(/was stopped[\s\S]*clean-up did not finish either/);
+    const left = readFileSync(pids, 'utf8').trim().split('\n').map(Number);
+    const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    await vi.waitFor(() => expect(left.every(gone)).toBe(true), { timeout: 5_000, interval: 50 });
+  }, 20_000);
+
+  const realTimeout = spawnSync('bash', ['-c', 'command -v timeout'], { encoding: 'utf8' }).stdout.trim();
+  it.skipIf(!realTimeout)('a step that outlives the time limit (GNU timeout leaves the group) never settles the next drill: each ends once, as itself', async () => {
+    const dir = tmp('hb-drill-late-');
+    // Drill one: its restore step under a plain `timeout`, a process group of its
+    // own, which the time limit's TERM and KILL never reach: it holds the output open.
+    const one = join(dir, 'one.sh');
+    writeFileSync(one, `#!/bin/bash\ntrap 'exit 143' TERM\nx="$("${realTimeout}" 2 sleep 2)"\n`);
+    const two = join(dir, 'two.sh');
+    writeFileSync(two, '#!/bin/bash\nsleep 3\necho "drill two passed"\n');
+    chmodSync(one, 0o700); chmodSync(two, 0o700);
+    const first: DrillRunState[] = [], second: DrillRunState[] = [];
+    process.env.HATCHABOT_DRILL_SCRIPT = one;
+    startDrill(Date.now(), 'app', (s) => { first.push(s); }, 100, 200);
+    await vi.waitFor(() => expect(first).toHaveLength(1), { timeout: 5_000, interval: 20 });
+    expect(first[0]).toMatchObject({ status: 'error' });
+    process.env.HATCHABOT_DRILL_SCRIPT = two;
+    expect(startDrill(Date.now(), 'app', (s) => { second.push(s); }).status).toBe('running');
+    await new Promise((r) => setTimeout(r, 2_300));
+    expect(drillRunState().status).toBe('running');
+    expect(second).toEqual([]);
+    await vi.waitFor(() => expect(second).toHaveLength(1), { timeout: 5_000, interval: 20 });
+    expect(second[0]).toMatchObject({ status: 'ok', summary: 'drill two passed' });
+    expect(first).toHaveLength(1);
+  }, 20_000);
+
   it('a drill cut off by a restart is recorded as failed, with what to do', async () => {
     const w = await world();
     const op = beginOperation(w.store, 'restore-drill', null, { trigger: 'scheduled' }, { hostId: 'h1' });

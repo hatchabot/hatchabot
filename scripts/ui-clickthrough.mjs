@@ -21,6 +21,7 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeF
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readPage } from './page-source.mjs';
 import { STUB } from '../docs/deck/shot-data.mjs';
 
 // Headless Chrome, pinned to a digest so CI runs the image it was reviewed with
@@ -32,13 +33,26 @@ const CONTAINER_CLI = process.env.CONTAINER_CLI || 'docker';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const keep = process.argv.includes('--keep');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+/** The stub's line that sets the version (docs/deck/shot-data.mjs), left out here: the page reads it from its meta tag. */
+const STUB_SETS_VERSION = "window.HATCHABOT_VERSION = '__VERSION__';";
 const icon = `data:image/png;base64,${readFileSync(join(root, 'web', 'icons', 'icon-192.png')).toString('base64')}`;
-const page = readFileSync(join(root, 'web', 'index.html'), 'utf8').replaceAll('src="/icons/icon-192.png"', `src="${icon}"`);
+// The page with its scripts (web/app/, HB-0811) in place, each still a script of its own: the file
+// opens here as file://, and the join page in a srcdoc frame, where an address names nothing.
+const page = readPage(join(root, 'web', 'index.html')).replaceAll('src="/icons/icon-192.png"', `src="${icon}"`);
 // The invite page, for the scenarios that open it in a frame; as JSON with no "<" so it cannot end the <script> it sits in.
-const joinPage = JSON.stringify(readFileSync(join(root, 'web', 'join.html'), 'utf8')).replaceAll('<', '\\u003c');
+const joinPage = JSON.stringify(readPage(join(root, 'web', 'join.html'))).replaceAll('<', '\\u003c');
 
 /** Wraps the stub's fetch: records every call, lets a scenario override any GET, answers mutations. */
 const RECORDER = `(() => {
+  // The page's own forever loops, started as its scripts load: the console's read mark every 20 s and the
+  // manager's proposals every 4 s (web/app/console.js, start.js). Under virtual time Chrome runs on through
+  // them whenever a scenario waits on real work (a body read, a frame load) with no shorter timer due, 4 s a
+  // firing as fast as they fire, so one scenario or another took tens to over a thousand virtual seconds
+  // from run to run (HB-1306). Noted here; the scenarios stop them, as they stop the poll, and tick by hand.
+  const nativeInterval = window.setInterval;
+  window.__pageLoops = [];
+  window.setInterval = function (...args) { const id = nativeInterval.apply(window, args); window.__pageLoops.push(id); return id; };
+  document.addEventListener('DOMContentLoaded', () => { window.setInterval = nativeInterval; }, { once: true });
   const stubFetch = window.fetch;
   window.__calls = []; window.__override = {}; window.__confirms = []; window.__confirmAnswer = true; window.__movedResult = true;
   window.fetch = async (input, init = {}) => {
@@ -65,6 +79,56 @@ const RECORDER = `(() => {
   window.confirm = (text) => { window.__confirms.push(text); return window.__confirmAnswer; };
   window.prompt = () => window.__promptAnswer ?? null;
   window.alert = () => {};
+  // A dialog's close event: Chromium sends it with the next animation frame, which a headless page
+  // under virtual time draws now and then, so a dialog closed in one scenario heard of it in a later
+  // one, often minutes of virtual time on (measured: most of them did), and its handler cut into that
+  // scenario's work: the sheet's close cleared v2SheetNotes between an editor's two picks, a console's
+  // moved the console ticket under an open waiting on it (HB-1280, HB-1295). And a scenario that waited
+  // on what the event ends (a choice closed by close() answers when its dialog's close event comes) ran
+  // virtual time on until a frame came: from none to over two thousand virtual seconds, run to run
+  // (HB-1306). Each close() is owed its event, and it is sent a frame's time on (16 ms), as a browser
+  // that draws would send it; window.__settleDialogs(), after every scenario, sends any still owed, and
+  // the real one is dropped when it comes. The real event carries its close()'s time as its timeStamp:
+  // that is how it is known. A close event a scenario sends itself stands for the one owed; one it sends
+  // after the owed one was sent, on a dialog still closed, would be a second for one close(), and is
+  // dropped (a scenario that waits a frame or more between the two: early). On a dialog open again it is a
+  // late one sent on purpose, and goes through.
+  const nativeClose = HTMLDialogElement.prototype.close, owed = new Map(), told = new Map(), early = new Map(), ours = new WeakSet();
+  const nativeTimeout = window.setTimeout;
+  const list = (map, d) => map.get(d) || map.set(d, []).get(d);
+  const take = (map, d, at) => { const l = map.get(d) || [], i = l.findIndex((t) => Math.abs(t - at) < 0.5); if (i >= 0) l.splice(i, 1); return i >= 0; };
+  const send = (d, at) => { list(told, d).push(at); const e = new Event('close'); ours.add(e); d.dispatchEvent(e); };
+  HTMLDialogElement.prototype.close = function (...args) {
+    const was = this.open, at = performance.now();
+    const r = nativeClose.apply(this, args);
+    if (was && !this.open) {
+      list(owed, this).push(at);
+      nativeTimeout.call(window, () => { if (take(owed, this, at)) { send(this, at); list(early, this).push(at); } }, 16);
+    }
+    return r;
+  };
+  for (const m of ['show', 'showModal']) {
+    const native = HTMLDialogElement.prototype[m];
+    HTMLDialogElement.prototype[m] = function (...args) { early.delete(this); return native.apply(this, args); };
+  }
+  window.addEventListener('close', (e) => {
+    const d = e.target;
+    if (!(d instanceof HTMLDialogElement) || ours.has(e)) return;
+    if (!e.isTrusted) {
+      const l = owed.get(d), sent = early.get(d);
+      if (l && l.length) list(told, d).push(l.shift());
+      else if (sent && sent.length && !d.open) { sent.shift(); e.stopImmediatePropagation(); }
+      return;
+    }
+    if (take(told, d, e.timeStamp)) e.stopImmediatePropagation(); // its scenario has had it
+    else take(owed, d, e.timeStamp);
+  }, true);
+  window.__settleDialogs = () => {
+    early.clear();
+    let sent = 0;
+    for (const [d, l] of owed) while (l.length) { send(d, l.shift()); sent++; }
+    return sent;
+  };
   // Headless Chrome under virtual time draws no frames (2026-11-08): no requestAnimationFrame callback
   // runs and no ResizeObserver reports. window.__frame() stands in for one, in a browser's order: the
   // frame callbacks waiting run, then each ResizeObserver hears of the boxes it watches whose size has
@@ -101,9 +165,21 @@ const SCENARIOS = String.raw`(() => {
   const results = [];
   // Checks refresh by hand; a timed poll mid-check made the suite flaky under load.
   window.__noAutoPoll = true; clearTimeout(pollTimer);
+  // The page's forever loops too (RECORDER, HB-1306): scenarios call consoleSeenTick() and loadProposals() themselves.
+  for (const id of window.__pageLoops) clearInterval(id);
   // A reload would end the check: another account signing in reloads the page (HB-0491), so the page's own is counted instead.
   window.__reloads = 0; pageReload = () => { window.__reloads++; };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // The page's own long waits taken at once, each still asked for (HB-1306): Adopt looks at a new agent
+  // every 3 s for up to 15 minutes, and a scenario that ran that wait through five times spent 4,680 of the
+  // run's 7,200 virtual seconds on it. While run() runs, a page timer of a second or more fires at once;
+  // the delays asked for are returned, so the scenario still checks how long the page would have waited.
+  const fastWaits = async (run) => {
+    const native = window.setTimeout, asked = [];
+    window.setTimeout = function (f, ms, ...args) { if (Number(ms) >= 1000) { asked.push(Number(ms)); ms = 0; } return native.call(window, f, ms, ...args); };
+    try { await run(); } finally { window.setTimeout = native; }
+    return asked;
+  };
   // 8 s: a condition that holds returns at once; a slow run of headless Chrome
   // (it happens) used to fail checks that were only late.
   // The setup form opens once the file's first bytes are read — real work, during which virtual
@@ -299,8 +375,11 @@ const SCENARIOS = String.raw`(() => {
         ok('and the agents-by-model summary line (the By agent pie says who)', !/\d+ agents? · \d+×/.test(document.getElementById('aiList').textContent));
         const local = profiles.find((x) => x.vendor === 'local');
         if (local) ok('a local model server has no costs box', ![...document.querySelectorAll('#aiList .srcspend .spendchart')].some((el) => el.dataset.source === local.id));
-        box.open = false; box.dispatchEvent(new Event('toggle'));
-        ok('folding is remembered', localStorage.getItem('hb-src-spend-folded:' + box.querySelector('.spendchart').dataset.source) === '1');
+        // Its own toggle event, not one made here: the real one comes a task later, and after the cleanup below it
+        // folded the drawer again for every later scenario (HB-1280).
+        box.open = false;
+        await until(() => localStorage.getItem('hb-src-spend-folded:' + box.querySelector('.spendchart').dataset.source) === '1');
+        ok('folding is remembered', true);
       } finally {
         delete window.__override['/v1/usage/spend'];
         for (const k of Object.keys(localStorage)) if (k.startsWith('hb-src-spend-folded:')) localStorage.removeItem(k);
@@ -860,7 +939,7 @@ const SCENARIOS = String.raw`(() => {
     },
     bulkBolt: async () => {
       const household = byText('#v2groups .v2ghead', 'Household');
-      const bolt = [...household.querySelectorAll('button')].find((b) => (b.getAttribute('onclick') || '').includes('v2BulkSection'));
+      const bolt = [...household.querySelectorAll('button')].find((b) => (b.getAttribute('data-on-click') || '').split(' ').includes('v2BulkSection'));
       ok('the bolt on Household', !!bolt);
       bolt.click();
       await until(() => fleetActionsDlg.open);
@@ -1370,14 +1449,46 @@ const SCENARIOS = String.raw`(() => {
       const before = hosts;
       hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }, { id: 'h2', name: 'Laptop', kind: 'docker' }];
       window.__promptAnswer = '1';
+      const missing = '"Homework Helper" is pinned to the image hatchabot-runtime:derived-x, which Laptop does not have, and it couldn\'t be rebuilt there (the base is not on that machine). Move it on that runner\'s default image instead — its extra packages will be missing there.';
       window.__answer = { 'POST /v1/agents/a1/move-host': [
-        { status: 409, body: { error: 'pinned', code: 'pinned_image_missing', image: 'hatchabot-runtime:derived-x' } },
+        { status: 409, body: { error: missing, code: 'pinned_image_missing', image: 'hatchabot-runtime:derived-x' } },
         { status: 200, body: { ok: true } } ] };
       await moveHostAgent('a1', 'Homework Helper');
       const posts = calls('POST', /\/v1\/agents\/a1\/move-host$/);
       eq('first the plain move, then on the runner\'s default image', posts.map((c) => c.body), [{ hostId: 'h2' }, { hostId: 'h2', dropPin: true }]);
-      ok('it asked about the pin', /pinned to the image/.test(window.__confirms.at(-1)));
+      eq('it asked about the pin, in the server\'s words', window.__confirms.at(-1), missing + '\n\nMove "Homework Helper" on Laptop\'s default image now?');
+      // HB-1325 review: one there of that name, built another way, is not one it "does not have".
+      const differs = '"Homework Helper" is pinned to the image hatchabot-runtime:2026.9.8-plus-jq, and Laptop has a different image of that name (the one there runs OpenClaw 2026.9.6, not 2026.9.8), which is left as it is. Move it on that runner\'s default image instead — its extra packages will be missing there.';
+      window.__answer = { 'POST /v1/agents/a1/move-host': [
+        { status: 409, body: { error: differs, code: 'pinned_image_missing', image: 'hatchabot-runtime:2026.9.8-plus-jq' } },
+        { status: 200, body: { ok: true } } ] };
+      await moveHostAgent('a1', 'Homework Helper');
+      const said = window.__confirms.at(-1);
+      ok('a different image there is said as the server says it, never "does not have"', said.startsWith(differs) && !said.includes('does not have'));
       hosts = before; window.__promptAnswer = null; window.__answer = {};
+    },
+    imageNamesOnARegistryPort: async () => {
+      // HB-1357 review: a repository on a registry with a port shows its tags, never "5000/hatchabot-runtime:…".
+      const R = 'registry.example:5000/hatchabot-runtime';
+      eq('the tag after the repository', [imageTagOf(R + ':2026.9.8'), imageTagOf('hatchabot-runtime:latest'), imageTagOf(R), imageTagOf('hatchabot-runtime')],
+        ['2026.9.8', 'latest', R, 'hatchabot-runtime']);
+      window.__override['/v1/runtime/images'] = { unpinned: [], defaultInfo: { openclawVersion: '2026.9.8', resolvesTo: [R + ':2026.9.8'] }, tags: [
+        { tag: R + ':latest', exists: true, isDefault: true, openclawVersion: '2026.9.8', pinned: [], classes: [], blockers: [] },
+        { tag: R + ':derived-media', exists: true, openclawVersion: '2026.9.8', derived: { status: 'READY', base: R + ':2026.9.8' }, pinned: [], classes: [], blockers: [] } ] };
+      window.__override['/v1/images'] = { images: [{ name: 'media', tag: R + ':derived-media', status: 'READY', dockerfile: 'RUN true', base: R + ':2026.9.8', builtAt: '2026-10-01T00:00:00Z', pinnedBy: 0 }] };
+      try {
+        await openAiDlg('images');
+        const list = await until(() => document.querySelector('#rtList tbody') && document.getElementById('rtList'));
+        ok('the images list shows each tag, never the port', list.textContent.includes('latest') && list.textContent.includes('derived-media')
+          && list.textContent.includes('FROM 2026.9.8') && list.textContent.includes('also tagged 2026.9.8') && !list.textContent.includes('5000/'));
+        aiDlg.close();
+        await openAiDlg('derived');
+        const dv = await until(() => document.querySelector('#derivedList tbody') && document.getElementById('derivedList'));
+        ok('the derived images list too', dv.textContent.includes('derived-media') && dv.textContent.includes('FROM 2026.9.8') && !dv.textContent.includes('5000/'));
+      } finally {
+        try { aiDlg.close(); } catch {}
+        delete window.__override['/v1/runtime/images']; delete window.__override['/v1/images'];
+      }
     },
     moveToAnotherHatchabot: async () => {
       window.__override['/v1/peers'] = [{ id: 'p1', name: 'Laptop Hatchabot', url: 'https://laptop.example' }];
@@ -2083,6 +2194,28 @@ const SCENARIOS = String.raw`(() => {
           .catch(() => { throw new Error('the Usage tab showed: ' + JSON.stringify((document.getElementById('v2UsageBody') || { textContent: '(no tab body)' }).textContent.slice(0, 160)) + ' state=' + JSON.stringify(agents.find((x) => x.id === 'a1')?.state)); });
       } finally { v2Close(); delete window.__override['/v1/agents/a1/usage']; }
     },
+    agentUsagePractice: async () => {
+      // Skill practice counts as the agent's own use, and its Usage page says how much was practice (HB-0933).
+      const practice = { runs: 2, calls: 3, tokens: 50_000, input: 5_000, output: 1_000, cacheRead: 40_000, cacheWrite: 4_000, usd: 0.04, last: new Date().toISOString(),
+        lastDay: { calls: 3, tokens: 50_000 }, byModel: [{ model: 'claude-opus-4-8', runs: 2, calls: 3, tokens: 50_000 }] };
+      try {
+        window.__override['/v1/agents/a1/usage'] = { totalTokens: 1_050_000, input: 60_000, output: 10_000, cacheRead: 900_000, cacheWrite: 80_000, calls: 120, sessions: 2,
+          lastActive: new Date().toISOString(), byModel: [{ model: 'claude-opus-4-8', tokens: 1_000_000, calls: 117, sessions: 2, input: 55_000, output: 9_000, cacheRead: 860_000, cacheWrite: 76_000 }],
+          practice, alerts: [] };
+        await openUsage('a1', 'Homework Helper');
+        const body = await until(() => { const t = document.getElementById('usageBody').textContent; return t.includes('practice') ? t : null; });
+        ok('the totals say how much was practice: ' + body.slice(0, 200), /120 calls · 2 sessions · 2 practice runs \(50K\)/.test(body));
+        ok('a practice row beside its model, labelled', /claude-opus-4-8\s*practice · 2 runs · 3 calls\s*50K/.test(body));
+        ok('the model row is still its own', /117 calls · 2 sessions\s*1\.0M/.test(body));
+        usageDlg.close();
+        // An agent that has only practised has used something: not "nothing used".
+        window.__override['/v1/agents/a1/usage'] = { totalTokens: 50_000, input: 5_000, output: 1_000, cacheRead: 40_000, cacheWrite: 4_000, calls: 3, sessions: 0, byModel: [], practice, alerts: [] };
+        await openUsage('a1', 'Homework Helper');
+        const only = await until(() => { const t = document.getElementById('usageBody').textContent; return t.includes('practice') ? t : null; });
+        ok('practice only: its tokens, not "nothing used": ' + only.slice(0, 160), !only.includes('nothing used') && /50K tokens\s*in all/.test(only) && only.includes('2 practice runs'));
+        usageDlg.close();
+      } finally { delete window.__override['/v1/agents/a1/usage']; }
+    },
     billingLineIds: async () => {
       // The usage page's price line finds a model by its own id: a provider prefix or a dated id found none (HB-0067).
       const saved = profiles, a = agents.find((x) => x.id === 'a1'), was = a.aiProfileId;
@@ -2408,6 +2541,34 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/agents/a1/fs']; v2FilesPath.delete('a1');
       }
     },
+    filesTextPreviewReadsUpToTheCap: async () => {
+      // HB-1042: a log listed small that has grown to 3 MB since: the first 2 MB is shown, said so, and the rest is not read.
+      const realFetch = window.fetch, CHUNK = 64 * 1024, TOTAL = 3 * 1024 * 1024;
+      let pulled = 0;
+      try {
+        window.__override['/v1/agents/a1/fs'] = { path: 'logs', entries: [{ name: 'run.log', type: 'file', size: 1, mtime: '' }] };
+        window.fetch = async (input, init = {}) => {
+          const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+          if (path !== '/v1/agents/a1/fs/file') return realFetch(input, init);
+          pulled = 0;
+          const line = new TextEncoder().encode('x'.repeat(CHUNK - 1) + '\n');
+          const body = new ReadableStream({ pull(c) { if (pulled >= TOTAL) return c.close(); pulled += CHUNK; c.enqueue(line); } }, { highWaterMark: 0 });
+          return new Response(body, { status: 200, headers: { 'content-type': 'text/plain' } });
+        };
+        openV2Agent('a1', 'files');
+        await v2LoadFiles('a1', 'logs');
+        await v2OpenFile('a1', 'logs', 'run.log', 1);
+        const pre = await until(() => $('v2Files').querySelector('pre#v2FileBody'));
+        eq('the first 2 MB is shown', pre.textContent.length, 2 * 1024 * 1024);
+        ok('and it says there is more: ' + $('v2Files').textContent.slice(0, 300), $('v2Files').textContent.includes('Only the first 2 MB is shown'));
+        ok('the rest is not read: ' + pulled, pulled <= 2 * 1024 * 1024 + CHUNK);
+        ok('Open in a tab and ⬇ are still there', !!byText('#v2Files a', 'Open in a tab') && !!document.querySelector('#v2Files a[download]'));
+      } finally {
+        window.fetch = realFetch;
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/fs']; v2FilesPath.delete('a1');
+      }
+    },
     consoleOpensAtOnce: async () => {
       const list = await (await fetch('/v1/agents')).json();
       const A = list.find((x) => !x.ops && (x.role ? x.role === 'owner' : true) && x.state === 'RUNNING');
@@ -2556,6 +2717,45 @@ const SCENARIOS = String.raw`(() => {
         poolAvail = was;
         if (createDlg.open) createDlg.close();
         el('agentName').value = ''; el('agentTelegram').checked = false; agentTelegramChanged();
+      }
+    },
+    autoPlacementPassesOverAnOfflineRunner: async () => {
+      // HB-1039: Auto takes the least-loaded runner that answers, not one the hosts list says is offline; with every
+      // runner offline it says so and sends nothing. Made-up machines.
+      const el = (id) => document.getElementById(id);
+      const creates = () => calls('POST', /\/v1\/agents$/);
+      const had = hosts;
+      const open = async () => { el('fabBtn').click(); await until(() => createDlg.open); el('agentHost').value = 'auto'; onHostPicked(); };
+      try {
+        hosts = [{ id: 'h1', name: 'This machine', kind: 'local', agentCount: 5 },
+          { id: 'r-off', name: 'Garage Box', kind: 'remote', agentCount: 0, reachable: false },
+          { id: 'r-on', name: 'Attic Box', kind: 'remote', agentCount: 1, reachable: true },
+          { id: 'r-new', name: 'Shed Box', kind: 'remote', agentCount: 2 }];
+        await open();
+        el('agentName').value = 'Pantry Notes';
+        let n0 = creates().length;
+        await createAgent();
+        eq('Auto: the least-loaded runner that answers', creates().slice(n0).map((c) => c.body.hostId), ['r-on']);
+        // One whose answer is not known yet is still a choice.
+        hosts = hosts.map((h) => (h.id === 'r-on' ? { ...h, reachable: false } : h));
+        await open();
+        el('agentName').value = 'Pantry Notes Two';
+        n0 = creates().length;
+        await createAgent();
+        eq('not known: still a choice', creates().slice(n0).map((c) => c.body.hostId), ['r-new']);
+        // Every runner offline: said, and nothing sent.
+        hosts = hosts.map((h) => (h.kind === 'local' ? h : { ...h, reachable: false }));
+        await open();
+        el('agentName').value = 'Pantry Notes Three';
+        n0 = creates().length;
+        await createAgent();
+        eq('every runner offline: nothing sent', creates().length - n0, 0);
+        ok('and it says so: ' + el('createErr').textContent, /^No runner answers just now \(Garage Box, Attic Box, Shed Box\), so Auto has nowhere to put it\. Choose This machine, or try again once a runner answers\.$/.test(el('createErr').textContent));
+        ok('the form stays open', createDlg.open);
+      } finally {
+        hosts = had;
+        if (createDlg.open) createDlg.close();
+        el('agentName').value = ''; el('createErr').textContent = '';
       }
     },
     sheetDesktopKeepsItsClose: async () => {
@@ -2783,6 +2983,9 @@ const SCENARIOS = String.raw`(() => {
       const prevId = consoleAgentId;
       try {
         consoleAgentId = 'a1'; consoleDlg.showModal();
+        // Its chat on the screen (HB-1147: only the chat counts as read). The runner's /v1 frame is an opaque error page.
+        $('consoleFrame').setAttribute('src', '/v1/agents/a1/ui/chat?session=agent%3Ahomework-helper%3Amain'); $('consoleCover').hidden = true;
+        await until(() => { try { void $('consoleFrame').contentWindow.location.href; return false; } catch { return true; } }, 120000);
         Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
         const n = seen();
         consoleSeenTick();
@@ -2793,7 +2996,78 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         delete document.hidden;
         if (consoleDlg.open) consoleDlg.close();
+        $('consoleFrame').src = 'about:blank';
         consoleAgentId = prevId;
+      }
+    },
+    voiceSettingsAreNotReading: async () => {
+      // HB-1147: the console opened on its voice settings, or switched to them, marks nothing read; its chat, once shown, does.
+      const seen = () => calls('POST', /\/v1\/agents\/a1\/seen$/).length;
+      const committed = () => { try { void $('consoleFrame').contentWindow.location.href; return false; } catch { return true; } }; // the runner's /v1 frame: an opaque error page
+      const slug = v2Find('a1').slug;
+      window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+      window.__override['/v1/agents/a1/console/pending'] = { pending: 0 };
+      try {
+        // Signed in, as the page knows it: a named view opens only then, and a scenario before can leave the session ended.
+        await loadMyAccount();
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        const n = seen();
+        await openGateway('a1', slug, 'voice-settings');
+        ok('on its voice settings: ' + $('consoleFrame').getAttribute('src'), /\/ui\/settings\/talk/.test($('consoleFrame').getAttribute('src')));
+        eq('not marked read while it opens', seen() - n, 0);
+        await until(() => $('consoleCover').hidden && committed(), 120000);
+        consoleSeenTick();
+        eq('shown, on its settings: not marked read', seen() - n, 0);
+        closeConsole(); await sleep(50);
+        eq('nor when it closes', seen() - n, 0);
+        // Its chat: marked once it shows.
+        await openGateway('a1', slug);
+        await until(() => $('consoleCover').hidden && committed(), 120000);
+        consoleSeenTick();
+        ok('its chat shown: marked read', seen() - n >= 1);
+        // A tab on its chat, sent to the voice settings: not marked for that.
+        const m = seen();
+        await openGateway('a1', slug, 'voice-settings');
+        ok('switched to its settings', /\/ui\/settings\/talk/.test($('consoleFrame').getAttribute('src')));
+        await until(committed, 120000);
+        consoleSeenTick();
+        eq('switched to its settings: not marked read', seen() - m, 0);
+      } finally {
+        if (consoleDlg.open) closeConsole();
+        consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/console/pending'];
+      }
+    },
+    consoleMovedOffItsChatIsNotRead: async () => {
+      // HB-1147, where the frame is now: given its chat's address, a console this page may read that has moved off it
+      // (here a srcdoc page, at about:srcdoc) marks nothing read; the same console back on the check's own /v1 frame,
+      // which this page may not read, goes by the address it was given. A page this one may read at a /ui/chat path
+      // cannot be served here (the check runs from file://), so that case is not run.
+      const seen = () => calls('POST', /\/v1\/agents\/a1\/seen$/).length;
+      const committed = () => { try { void $('consoleFrame').contentWindow.location.href; return false; } catch { return true; } };
+      const slug = v2Find('a1').slug;
+      window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+      window.__override['/v1/agents/a1/console/pending'] = { pending: 0 };
+      try {
+        await loadMyAccount();
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        await openGateway('a1', slug);
+        await until(() => $('consoleCover').hidden && committed(), 120000);
+        ok('given its chat', /\/ui\/chat/.test($('consoleFrame').getAttribute('src')));
+        $('consoleFrame').srcdoc = '<main><h1>Settings</h1><p>Made-up page the console moved to.</p></main>';
+        await until(() => { try { return $('consoleFrame').contentWindow.location.href === 'about:srcdoc'; } catch { return false; } }, 20000);
+        const n = seen();
+        consoleSeenTick();
+        eq('moved off its chat: not marked read', seen() - n, 0);
+        $('consoleFrame').removeAttribute('srcdoc');
+        await until(committed, 120000);
+        consoleSeenTick();
+        eq('back on a frame not read, given its chat: marked', seen() - n, 1);
+      } finally {
+        $('consoleFrame')?.removeAttribute('srcdoc');
+        if (consoleDlg.open) closeConsole();
+        consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/console/pending'];
       }
     },
     staleRefreshDropped: async () => {
@@ -2855,7 +3129,7 @@ const SCENARIOS = String.raw`(() => {
         ok('a source read by the older pass alone is shown', profiles.some((p) => p.id === 'added-p'));
         // The pairing knocks: the older pass's (one knock) land after the newer pass's (none).
         const knocking = agents.find((a) => a.state === 'RUNNING' && v2ChannelKinds(a).length);
-        holdNext('/v1/agents/' + knocking.id + '/pairing', [{ kind: 'telegram', code: 'STALE1', id: '1', name: 'Stale Knock' }]);
+        holdNext('/v1/pending', [{ agentId: knocking.id, agentName: knocking.name, kind: 'telegram', code: 'STALE1', channelUserId: '1', firstName: 'Stale Knock' }]);
         pairTick = 0;
         const olderPair = refresh(false);
         await sleep(20);
@@ -2911,7 +3185,7 @@ const SCENARIOS = String.raw`(() => {
       } finally { window.fetch = prev; if (inspectDlg.open) inspectDlg.close(); }
     },
     pollFetchesLess: async () => {
-      // No /members fan-out on v2, no /pairing for web-only agents, no hidden Activity card, a light backups read (night review #24/#25/#47).
+      // No /members fan-out on v2, no /pairing fan-out (HB-1142), no hidden Activity card, a light backups read (night review #24/#25/#47).
       // Let a refresh still running from the scenario before (the tab shown again starts one) finish first:
       // its pairing round landed in this pass and counted a1 twice when the timing shifted.
       await sleep(400);
@@ -2922,10 +3196,11 @@ const SCENARIOS = String.raw`(() => {
       const pass = window.__calls.slice(mark);
       const got = (re) => pass.filter((c) => c.method === 'GET' && re.test(c.path));
       eq('members reads on a poll', got(/\/members$/).length, 0);
-      ok('pairing still read for chat agents', got(/\/v1\/agents\/a1\/pairing$/).length === 1);
-      const webOnly = agents.filter((a) => !a.botUsername && !(a.otherChannels || []).length).map((a) => a.id);
-      ok('web-only agents in the stub', webOnly.length >= 2);
-      eq('pairing reads for web-only agents', got(/\/pairing$/).filter((c) => webOnly.some((id) => c.path === '/v1/agents/' + id + '/pairing')).length, 0);
+      eq("Discord's and Slack's parked bots, read and never used (HB-1141)", got(/^\/v1\/(discord-bots|slack-apps)$/).length, 0);
+      eq("Telegram's count still read", got(/^\/v1\/pool$/).length, 1);
+      // Every knock in one bounded read, not one per agent at once (HB-1142).
+      eq('knocks still read, once', got(/^\/v1\/pending$/).length, 1);
+      eq('no per-agent knock reads', got(/\/pairing$/).length, 0);
       eq('events for a hidden card', got(/^\/v1\/events$/).length, 0);
       const bk = got(/^\/v1\/backups$/);
       ok('the backups read is the light one', bk.length === 1 && bk[0].url.includes('latest=1'));
@@ -3062,10 +3337,18 @@ const SCENARIOS = String.raw`(() => {
         ok('it says this browser is still signed in, and how to retry: ' + said, said.includes('still signed in') && said.includes('Try Sign out again'));
         eq('nothing forgotten here', localStorage.getItem('hatchabot_email'), 'owner@example.org');
         eq('one call', logouts() - base, 1);
+        // It gets there, and the sign-out could not be saved (HB-0957): said as the server said it, not as "did not answer".
+        window.__answer = { 'POST /v1/logout': [{ status: 503, body: { error: 'Hatchabot could not save the sign-out, so a copy of this sign-in could still be used. Try again in a moment.' } }] };
+        document.getElementById('toast').textContent = '';
+        document.querySelector('#v2AcctPop .v2signout').click();
+        const refused = await until(() => { const t = document.getElementById('toast'); return t.textContent.includes('could not save the sign-out') ? t.textContent : null; });
+        ok('the server\'s reason, and still signed in: ' + refused, refused.includes('still signed in') && !refused.includes('did not answer'));
+        eq('still nothing forgotten here', localStorage.getItem('hatchabot_email'), 'owner@example.org');
+        window.__answer = {};
         // Again, and this time it gets there.
         document.querySelector('#v2AcctPop .v2signout').click();
         await until(() => localStorage.getItem('hatchabot_email') === null);
-        eq('two calls', logouts() - base, 2);
+        eq('three calls', logouts() - base, 3);
       } finally {
         window.__answer = {};
         if (before !== null) localStorage.setItem('hatchabot_email', before); else localStorage.removeItem('hatchabot_email');
@@ -3188,6 +3471,9 @@ const SCENARIOS = String.raw`(() => {
     },
     // The full chat (2026-09-30): on a rebuilt agent a guest's 💬 Chat is OpenClaw's own console, on their own conversation — no token, nothing of the owner's.
     webChatConsole: async () => {
+      // Seen marks sent since this began: the scenario before had its console's close event before it ended (HB-1280).
+      const opened = window.__calls.length;
+      const othersSeen = () => window.__calls.slice(opened).filter((c) => c.method === 'POST' && /\/v1\/agents\/(?!w1\/)[^/]+\/seen$/.test(c.path)).length;
       try {
         const list = await (await fetch('/v1/agents')).json();
         const base = list.find((a) => a.id === 'a1');
@@ -3206,11 +3492,55 @@ const SCENARIOS = String.raw`(() => {
         ok('the chat here stayed closed', !webChatDlg.open);
         closeConsole();
         await sleep(100);
-        eq('nothing of the owner\'s (seen marks) was sent', calls('POST', /\/v1\/agents\/w1\/seen$/).length, 0);
+        // The seen mark it sends is the guest's own, for their own conversation (HB-1139: guestChatReadClearsItsUnread).
+        eq('nothing of the owner\'s was sent: no other agent marked read', othersSeen(), 0);
       } finally {
         if (document.getElementById('consoleDlg').open) closeConsole();
         try { v2Close(); } catch {}
         delete window.__override['/v1/agents']; delete window.__override['/v1/agents/w1/console/access'];
+        await refresh(false);
+      }
+    },
+    guestChatReadClearsItsUnread: async () => {
+      // HB-1139: a web-chat guest reads their own conversation, in the full chat or in the chat here: their seen mark moves,
+      // and the badge goes. The full chat marks once it has loaded, every 20 s while it shows, and on close.
+      const seen = () => calls('POST', /\/v1\/agents\/w1\/seen$/).length;
+      const committed = () => { try { void $('consoleFrame').contentWindow.location.href; return false; } catch { return true; } }; // the runner's /v1 frame: an opaque error page
+      try {
+        const list = await (await fetch('/v1/agents')).json();
+        const base = list.find((a) => a.id === 'a1');
+        window.__override['/v1/agents'] = [...list, { ...base, id: 'w1', name: 'Book Club', role: 'user', ownerId: 'o2', webChat: true, botUsername: undefined, deepLink: undefined, otherChannels: [], unread: true }];
+        window.__override['/v1/agents/w1/console/access'] = { role: 'guest', console: 'identity', session: 'agent:book-club:guest:0123456789abcdef' };
+        await refresh(false);
+        let n = seen();
+        await openWebChat('w1');
+        // Loaded (the frame's own load event): a page load is real work, through which virtual time can run on.
+        await until(() => seen() > n, 120000);
+        ok('its full chat is open', consoleDlg.open && committed());
+        ok('the badge goes', !v2Find('w1').unread);
+        n = seen(); consoleSeenTick();
+        eq('every 20 s while it shows', seen() - n, 1);
+        n = seen(); closeConsole(); await sleep(50);
+        eq('and on close', seen() - n, 1);
+        // The chat here (no secure page, or not rebuilt): a read that worked, and its close.
+        window.__override['/v1/agents/w1/chat'] = { messages: [{ role: 'assistant', text: 'Chapter three is ready.', at: new Date().toISOString() }] };
+        n = seen();
+        await openWebChatPanel('w1');
+        eq('the chat here, read: marked', seen() - n, 1);
+        webChatDlg.close(); webChatDlg.dispatchEvent(new Event('close')); // headless Chrome under virtual time sends none
+        eq('and closed: marked', seen() - n, 2);
+        // A read that could not be done marks nothing.
+        window.__override['/v1/agents/w1/chat'] = { messages: [], note: 'It is being rebuilt, for the test.' };
+        n = seen();
+        await openWebChatPanel('w1');
+        webChatDlg.close(); webChatDlg.dispatchEvent(new Event('close'));
+        ok('closed', webChatAgentId === null);
+        eq('a read that said nothing: not marked', seen() - n, 0);
+      } finally {
+        if (consoleDlg.open) closeConsole();
+        if (webChatDlg.open) webChatDlg.close();
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/w1/console/access']; delete window.__override['/v1/agents/w1/chat'];
         await refresh(false);
       }
     },
@@ -4162,6 +4492,319 @@ const SCENARIOS = String.raw`(() => {
         for (const id of ['a1', 'a2']) for (const path of ['/console/access', '/console/pending']) delete window.__override['/v1/agents/' + id + path];
       }
     },
+    consoleApprovalWatchEndsOnTheButton: async () => {
+      // HB-1135: the approval watch over with nothing approved, for a browser not approved here before, leaves the
+      // Approve button only while OpenClaw's pairing screen shows: a slow first pairing gets it (the screen coming
+      // after the watch), a console that asks for no pairing (behind a trusted proxy) does not. Each page here is put
+      // in the frame as srcdoc, which this page may read, as it may the real console; the check's own /v1 frame is an
+      // error page it may not read, and gets the button.
+      const slug = v2Find('a1').slug, OK = 'hb-console-ok:a1';
+      const had = (() => { try { return localStorage.getItem(OK); } catch { return null; } })();
+      const reads = () => calls('GET', /\/v1\/agents\/a1\/console\/pending$/).length;
+      const btn = () => !$('consoleApproveBtn').hidden;
+      const CHAT = '<main><h1>Chat</h1><p>Made-up conversation: nothing to approve here.</p></main>';
+      // In another language, in a shadow root: what is read is the command every language's screen names.
+      const PAIRING = '<div id="app"></div><script>document.getElementById("app").attachShadow({ mode: "open" }).innerHTML ='
+        + ' "<h2>Gerätekopplung erforderlich</h2><p>Führe openclaw devices list auf dem Gateway-Host aus.</p>";<\/script>';
+      const page = (html) => { $('consoleFrame').srcdoc = html; };
+      window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+      window.__override['/v1/agents/a1/console/pending'] = { pending: 0 };
+      const open = async (known) => {
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        $('consoleFrame')?.removeAttribute('srcdoc');
+        if (known) localStorage.setItem(OK, '1'); else localStorage.removeItem(OK);
+        const before = reads();
+        await openGateway('a1', slug);
+        ok('opened, the button hidden', consoleDlg.open && !btn());
+        return () => reads() - before >= 40;
+      };
+      try {
+        // A console that asks for no pairing: its chat shows, nothing asked, and no button, then or a minute on.
+        let over = await open(false);
+        page(CHAT);
+        await until(over, 120000);
+        await sleep(62000);
+        ok('no pairing asked, the chat shown: no button', !btn() && $('consoleCover').hidden);
+        // A slow first load: the pairing screen comes after the watch, and the button with it.
+        over = await open(false);
+        page('<p></p>');
+        await until(over, 120000);
+        await sleep(5000);
+        ok('nothing shown yet: no button', !btn());
+        page(PAIRING);
+        await until(btn, 10000);
+        ok('the pairing screen came: the button', btn() && $('consoleCover').hidden);
+        // A frame this page may not read (the check's own): the button, as before.
+        over = await open(false);
+        await until(over, 120000);
+        await until(btn, 10000);
+        ok('a frame not read: the button', btn());
+        // The pending read fails: the button with the pairing screen, none with the chat.
+        window.__answer = { 'GET /v1/agents/a1/console/pending': [{ status: 502, body: { error: 'Bad gateway, for the test.' } }] };
+        await open(false);
+        page(PAIRING);
+        await until(btn, 20000);
+        ok('the read failed, the pairing screen: the button, the console uncovered', $('consoleCover').hidden);
+        window.__answer = { 'GET /v1/agents/a1/console/pending': [{ status: 502, body: { error: 'Bad gateway, for the test.' } }] };
+        await open(true);
+        page(CHAT);
+        await sleep(64000);
+        ok('the read failed, the chat shown: no button', !btn() && $('consoleCover').hidden);
+        window.__answer = {};
+        // Approved here before: no request is the usual case, and no button.
+        over = await open(true);
+        await until(over, 120000);
+        await sleep(400);
+        ok('known here: no button', !btn());
+      } finally {
+        window.__answer = {};
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        $('consoleFrame')?.removeAttribute('srcdoc');
+        try { if (had === null) localStorage.removeItem(OK); else localStorage.setItem(OK, had); } catch {}
+        delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/console/pending'];
+      }
+    },
+    consoleApprovalRemembersOnlyWhatItSaw: async () => {
+      // HB-1278: a browser not approved here before is remembered as approved only once a request from it was approved,
+      // or its console said it connected (OpenClaw's app's gateway snapshot). No request alone was a slow first load too:
+      // remembered then, a later open had no cover, and no button when its pairing screen came. Pages as srcdoc, as in HB-1135's.
+      const slug = v2Find('a1').slug, OK = 'hb-console-ok:a1';
+      const had = (() => { try { return localStorage.getItem(OK); } catch { return null; } })();
+      const reads = () => calls('GET', /\/v1\/agents\/a1\/console\/pending$/).length;
+      const btn = () => !$('consoleApproveBtn').hidden;
+      const remembered = () => localStorage.getItem(OK) === '1';
+      const PAIRING = '<main><h2>Pairing required</h2><p>Run openclaw devices approve on the gateway host.</p></main>';
+      // OpenClaw's app, as the console page holds it, saying where its gateway connection is.
+      const app = (phase) => '<openclaw-app></openclaw-app><script>document.querySelector("openclaw-app").context = { gateway: { snapshot: { phase: '
+        + JSON.stringify(phase) + ' } } };<\/script>';
+      window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+      window.__override['/v1/agents/a1/console/pending'] = { pending: 0 };
+      const open = async (html) => {
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        $('consoleFrame')?.removeAttribute('srcdoc');
+        localStorage.removeItem(OK);
+        const before = reads();
+        await openGateway('a1', slug);
+        $('consoleFrame').srcdoc = html;
+        return () => reads() - before >= 40;
+      };
+      try {
+        // A slow first load: nothing asked in the watch, nothing connected. Not remembered; its pairing screen, later, brings the button.
+        let over = await open('<p></p>');
+        await until(over, 120000);
+        await sleep(400);
+        ok('nothing asked, nothing connected: not remembered', !remembered());
+        $('consoleFrame').srcdoc = PAIRING;
+        await until(btn, 10000);
+        ok('its pairing screen came: the button, and still not remembered', btn() && !remembered());
+        // Still connecting all the watch: not remembered either.
+        over = await open(app('connecting'));
+        await until(over, 120000);
+        await sleep(400);
+        ok('connecting: not remembered', !remembered());
+        // Connected with nothing asked (approved before, its note here gone; or behind a trusted proxy): remembered, no button.
+        // A page load is real work, through which virtual time can run on (webChatConsole), so the watch could end before
+        // the page had loaded: its first look waits until the page says it connected, and what is waited on is the remembering.
+        // The hold is a page load's, so it gets webChatConsole's bound for one (virtual time can jump minutes through it),
+        // and a page that never says it connected fails as that, not as "timed out waiting for remembered" (review).
+        const realFetch = window.fetch;
+        let hold = true, said; // said: undefined while held, then whether the page said it connected
+        window.fetch = async (input, init) => {
+          if (hold && /\/v1\/agents\/a1\/console\/pending$/.test(String(input))) {
+            hold = false;
+            said = await until(() => consoleConnected($('consoleFrame')), 120000).then(() => true, () => false);
+          }
+          return realFetch(input, init);
+        };
+        try {
+          over = await open(app('connected'));
+          await until(() => said !== undefined, 130000).catch(() => { throw new Error('connected: the watch never asked whether anything was pending'); });
+          ok('connected: the console page said it connected within a page load', said);
+          await until(remembered, 20000);
+          ok('connected: remembered', remembered());
+          await until(over, 120000);
+          await sleep(400);
+          ok('connected: no button', !btn());
+        } finally { window.fetch = realFetch; }
+        // A request from it, approved: remembered, as before.
+        window.__answer = { 'GET /v1/agents/a1/console/pending': [{ body: { pending: 1 } }], 'POST /v1/agents/a1/console/approve': [{ body: { approved: 1 } }] };
+        await open(app('connecting'));
+        await until(remembered, 20000);
+        ok('a request approved: remembered', remembered());
+      } finally {
+        window.__answer = {};
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        $('consoleFrame')?.removeAttribute('srcdoc');
+        try { if (had === null) localStorage.removeItem(OK); else localStorage.setItem(OK, had); } catch {}
+        delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/console/pending'];
+      }
+    },
+    consoleApprovalFailedKeepsTheButton: async () => {
+      // HB-1134: a request found that OpenClaw would not approve. The server says so (502), or an older one answered
+      // 200 with nothing approved: either way this browser is not taken for approved, the console is not reloaded, and
+      // the Approve button stays; pressed, it says why and stays.
+      const slug = v2Find('a1').slug, OK = 'hb-console-ok:a1';
+      const had = (() => { try { return localStorage.getItem(OK); } catch { return null; } })();
+      const btn = () => !$('consoleApproveBtn').hidden;
+      const approves = () => calls('POST', /\/v1\/agents\/a1\/console\/approve$/).length;
+      const said = 'OpenClaw did not approve this browser. Try again in a moment; if it keeps failing, rebuild the agent (its timeline has what OpenClaw said).';
+      // A reload sets the frame's address to about:blank and back within 50 ms, so the address read after is the same:
+      // each time it is set is counted instead (HB-1134 review).
+      const watching = [];
+      const srcSets = (frame) => { let n = 0; const mo = new MutationObserver((recs) => { n += recs.length; }); mo.observe(frame, { attributes: true, attributeFilter: ['src'] }); watching.push(mo); return () => n; };
+      window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+      window.__override['/v1/agents/a1/console/pending'] = { pending: 1 };
+      try {
+        for (const [what, answer] of [['a 502', { status: 502, body: { error: said } }], ['200 with nothing approved', { body: { approved: 0 } }]]) {
+          window.__answer = { 'POST /v1/agents/a1/console/approve': [answer] };
+          if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+          localStorage.removeItem(OK);
+          const before = approves();
+          await openGateway('a1', slug);
+          const reloads = srcSets($('consoleFrame'));
+          await until(btn, 20000);
+          eq(what + ': asked once', approves() - before, 1);
+          ok(what + ': this browser is not taken for approved', localStorage.getItem(OK) === null);
+          ok(what + ': the console uncovered', $('consoleCover').hidden);
+          await sleep(200);
+          eq(what + ': the console not reloaded', reloads(), 0);
+          ok(what + ': the button stays', btn());
+        }
+        window.__answer = { 'POST /v1/agents/a1/console/approve': [{ status: 502, body: { error: said } }, { body: { approved: 0 } }] };
+        await approveConsoleBrowser($('consoleApproveBtn'));
+        ok('pressed, a 502: its reason said', $('toast').textContent.includes('OpenClaw did not approve this browser'));
+        ok('pressed, a 502: the button stays', btn());
+        await approveConsoleBrowser($('consoleApproveBtn'));
+        ok('pressed, nothing approved: said so, not "Nothing to approve"', $('toast').textContent.includes('This browser was not approved') && !$('toast').textContent.includes('Nothing to approve'));
+        ok('pressed, nothing approved: the button stays', btn());
+      } finally {
+        for (const mo of watching) mo.disconnect();
+        window.__answer = {};
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        try { if (had === null) localStorage.removeItem(OK); else localStorage.setItem(OK, had); } catch {}
+        delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/console/pending'];
+      }
+    },
+    consoleApprovalNotSureWatchesThePairingScreen: async () => {
+      // HB-1134 review: an approval that may not have been this browser's is not taken for one. Some requests refused
+      // ({approved: 1, failed: 1}), or another approval (another tab's) took this browser's request first, so the
+      // approval came back with nothing approved and nothing is waiting now: the console is loaded again and OpenClaw's
+      // pairing screen looked for, which brings the button back; the chat showing brings none. Pressed, the same, and
+      // a 409 "Nothing is waiting" just after another approval is no failure to show. Pages as srcdoc, as in HB-1135's.
+      const slug = v2Find('a1').slug, OK = 'hb-console-ok:a1';
+      const had = (() => { try { return localStorage.getItem(OK); } catch { return null; } })();
+      const btn = () => !$('consoleApproveBtn').hidden;
+      const approves = () => calls('POST', /\/v1\/agents\/a1\/console\/approve$/).length;
+      const CHAT = '<main><h1>Chat</h1><p>Made-up conversation: nothing to approve here.</p></main>';
+      const PAIRING = '<main><h2>Pairing required</h2><p>Run openclaw devices approve on the gateway host.</p></main>';
+      const said = 'OpenClaw did not approve this browser. Try again in a moment; if it keeps failing, rebuild the agent (its timeline has what OpenClaw said).';
+      const watching = [];
+      const srcSets = (frame) => { let n = 0; const mo = new MutationObserver((recs) => { n += recs.length; }); mo.observe(frame, { attributes: true, attributeFilter: ['src'] }); watching.push(mo); return () => n; };
+      window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+      /** Opened for a browser not approved here before, showing the page html; pending: first for the first read, then after. */
+      const open = async (html, first, then, approve) => {
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        localStorage.removeItem(OK);
+        window.__override['/v1/agents/a1/console/pending'] = { pending: then };
+        window.__answer = { 'GET /v1/agents/a1/console/pending': [{ body: { pending: first } }], 'POST /v1/agents/a1/console/approve': approve };
+        const before = approves();
+        await openGateway('a1', slug);
+        $('consoleFrame').srcdoc = html;
+        const reloads = srcSets($('consoleFrame'));
+        await until(() => approves() - before >= 1, 20000);
+        return reloads;
+      };
+      try {
+        // Two requests, this browser's the one refused: loaded again, its pairing screen brings the button back.
+        let reloads = await open(PAIRING, 2, 2, [{ body: { approved: 1, failed: 1 } }]);
+        await until(btn, 20000);
+        ok('some refused, the pairing screen: the console reloaded', reloads() >= 2);
+        ok('some refused: this browser is not remembered as approved', localStorage.getItem(OK) === null);
+        ok('some refused: the console uncovered', $('consoleCover').hidden);
+        // This browser's the one approved: the chat shows, and no button.
+        // (The watch looks within 1.5 s of the reload, then each second: a chat 5 s on brought no button.)
+        reloads = await open(CHAT, 2, 0, [{ body: { approved: 1, failed: 1 } }]);
+        await sleep(5000);
+        ok('some refused, the chat: reloaded, no button', reloads() >= 2 && !btn() && $('consoleCover').hidden);
+        // Another approval took it first: a 502, and nothing waiting after. No button with the chat, one with the screen.
+        reloads = await open(CHAT, 1, 0, [{ status: 502, body: { error: said } }]);
+        await sleep(5000);
+        ok('taken meanwhile, the chat: reloaded, no button', reloads() >= 2 && !btn() && $('consoleCover').hidden);
+        reloads = await open(PAIRING, 1, 0, [{ status: 502, body: { error: said } }]);
+        await until(btn, 20000);
+        ok('taken meanwhile, the pairing screen: reloaded, the button', reloads() >= 2);
+        // Pressed: the auto approval failed first (the button), then the press approves some and refuses some.
+        reloads = await open(PAIRING, 1, 1, [{ status: 502, body: { error: said } }, { body: { approved: 1, failed: 1 } }]);
+        await until(btn, 20000);
+        eq('the auto approval failed: no reload', reloads(), 0);
+        await approveConsoleBrowser($('consoleApproveBtn'));
+        ok('pressed, some refused: not said to be approved, asked to press again if it still asks', $('toast').textContent.includes('Approved one of the 2 browsers waiting — if this one still asks, press Approve again.'));
+        ok('pressed, some refused, the pairing screen: reloaded, and the button back', reloads() >= 2 && btn());
+        // Pressed just after another approval took it: 409 "Nothing is waiting", and nothing waiting. No failure said.
+        reloads = await open(CHAT, 1, 1, [{ status: 502, body: { error: said } }, { status: 409, body: { error: 'Nothing is waiting for approval. Open the console first — it asks once per browser.' } }]);
+        await until(btn, 20000);
+        window.__override['/v1/agents/a1/console/pending'] = { pending: 0 };
+        $('toast').textContent = '';
+        void approveConsoleBrowser($('consoleApproveBtn')); // its watch goes on for a minute; the console's closing ends it
+        await sleep(5000);
+        ok('pressed, taken meanwhile: "Nothing is waiting" not said', !$('toast').textContent.includes('Nothing is waiting'));
+        ok('pressed, taken meanwhile, the chat: reloaded, no button', reloads() >= 2 && !btn());
+      } finally {
+        for (const mo of watching) mo.disconnect();
+        window.__answer = {};
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        $('consoleFrame')?.removeAttribute('srcdoc');
+        try { if (had === null) localStorage.removeItem(OK); else localStorage.setItem(OK, had); } catch {}
+        delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/console/pending'];
+      }
+    },
+    consoleApprovalUnreadIsAFailure: async () => {
+      // HB-1134 review: after an approval that approved nothing, only a definite "nothing waiting" (pending: 0) is
+      // taken for another approval having taken the request. A read that failed (the server's 502: it could read
+      // neither OpenClaw's store nor its CLI, a runtime or runner failing) or an answer with no count is the failure
+      // it was: the button and the reason, no reload.
+      const slug = v2Find('a1').slug, OK = 'hb-console-ok:a1';
+      const had = (() => { try { return localStorage.getItem(OK); } catch { return null; } })();
+      const btn = () => !$('consoleApproveBtn').hidden;
+      const approves = () => calls('POST', /\/v1\/agents\/a1\/console\/approve$/).length;
+      const CHAT = '<main><h1>Chat</h1><p>Made-up conversation: nothing to approve here.</p></main>';
+      const said = 'OpenClaw did not approve this browser. Try again in a moment; if it keeps failing, rebuild the agent (its timeline has what OpenClaw said).';
+      const unread = 'Could not read which browsers are waiting for approval: OpenClaw did not answer. Try again in a moment; if it keeps failing, rebuild the agent.';
+      const watching = [];
+      const srcSets = (frame) => { let n = 0; const mo = new MutationObserver((recs) => { n += recs.length; }); mo.observe(frame, { attributes: true, attributeFilter: ['src'] }); watching.push(mo); return () => n; };
+      window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+      window.__override['/v1/agents/a1/console/pending'] = { pending: 1 };
+      try {
+        for (const [what, after] of [['a read that failed', { status: 502, body: { error: unread } }], ['an answer with no count', { body: { pending: null } }]]) {
+          if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+          localStorage.removeItem(OK);
+          window.__answer = { 'GET /v1/agents/a1/console/pending': [{ body: { pending: 1 } }, after], 'POST /v1/agents/a1/console/approve': [{ status: 502, body: { error: said } }] };
+          const before = approves();
+          await openGateway('a1', slug);
+          $('consoleFrame').srcdoc = CHAT; // the chat: only the failure, not the watch after a reload, brings the button
+          const reloads = srcSets($('consoleFrame'));
+          await until(btn, 20000);
+          eq(what + ': asked once', approves() - before, 1);
+          await sleep(200);
+          eq(what + ': not reloaded', reloads(), 0);
+          ok(what + ': not remembered', localStorage.getItem(OK) === null);
+        }
+        // Pressed: the approval could not read the requests, nor could the read after. Its reason, and the button stays.
+        window.__answer = { 'POST /v1/agents/a1/console/approve': [{ status: 502, body: { error: unread } }], 'GET /v1/agents/a1/console/pending': [{ status: 502, body: { error: unread } }] };
+        const reloads = srcSets($('consoleFrame'));
+        $('toast').textContent = '';
+        await approveConsoleBrowser($('consoleApproveBtn'));
+        ok('pressed, unread: its reason said', $('toast').textContent.includes('Could not read which browsers are waiting'));
+        ok('pressed, unread: the button stays, no reload', btn() && reloads() === 0);
+      } finally {
+        for (const mo of watching) mo.disconnect();
+        window.__answer = {};
+        if (consoleDlg.open) closeConsole(); consoleTabs = []; localStorage.removeItem('hb-console-tabs');
+        $('consoleFrame')?.removeAttribute('srcdoc');
+        try { if (had === null) localStorage.removeItem(OK); else localStorage.setItem(OK, had); } catch {}
+        delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/console/pending'];
+      }
+    },
     consoleEscapeWhileOpening: async () => {
       const realFetch = window.fetch;
       let answer;
@@ -4877,6 +5520,45 @@ const SCENARIOS = String.raw`(() => {
         try { v2Close(); } catch {}
       }
     },
+    // HB-1047: a settings check with no usable answer is not "clean", in the panel or in Check all.
+    healthLintUnread: async () => {
+      const healthy = { status: 'healthy', reachable: true, doctor: { ok: true, findings: [], checksRun: 12, mutedCount: 0, omittedCount: 0, complete: true } };
+      const empty = { status: 'healthy', reachable: true, doctor: { findings: [], checksRun: 0, mutedCount: 0, omittedCount: 0, complete: false } };
+      try {
+        window.__override['/v1/agents/a1/health'] = empty;
+        openV2Agent('a1', 'overview');
+        await until(() => document.getElementById('v2HealthSlot'));
+        byText('#v2AgentDlg button', 'Check health').click();
+        const body = document.getElementById('healthBody');
+        await until(() => body.textContent.includes('Config lint'));
+        const t = () => body.textContent.replace(/\s+/g, ' ');
+        ok('an empty answer is not clean: ' + t().slice(0, 200), t().includes('Config lint not checked') && !t().includes('checks clean'));
+        window.__override['/v1/agents/a1/health'] = { status: 'healthy', reachable: true }; // the check could not run at all
+        await loadHealth();
+        await until(() => !t().includes('checks clean') && t().includes('Config lint'));
+        ok('a missing one is said too', t().includes('Config lint not checked'));
+        window.__override['/v1/agents/a1/health'] = healthy;
+        await loadHealth();
+        await until(() => t().includes('checks clean'));
+        ok('a complete run is clean', t().includes('12 checks clean'));
+        v2Close();
+        ok('no alert for it', v2HealthProblems(empty).length === 0);
+        // Check all: never "their settings are clean" while one was not read.
+        const running = agents.filter((a) => a.state === 'RUNNING' && v2Mine(a));
+        for (const a of running) window.__override['/v1/agents/' + a.id + '/health'] = healthy;
+        window.__override['/v1/agents/' + running[0].id + '/health'] = empty;
+        await v2CheckAll();
+        const said = () => document.getElementById('v2CheckAll').textContent.replace(/\s+/g, ' ');
+        ok('Check all says one was not read: ' + said(), said().includes("all answered, but 1 agent's settings could not be checked") && !said().includes('settings are clean'));
+        window.__override['/v1/agents/' + running[0].id + '/health'] = healthy;
+        await v2CheckAll();
+        ok('and clean when all were read: ' + said(), said().includes('all answered, and their settings are clean'));
+      } finally {
+        for (const a of agents) delete window.__override['/v1/agents/' + a.id + '/health'];
+        try { v2Close(); } catch {}
+        v2ClearChecks();
+      }
+    },
     // Chat → Memory (2026-09-30): a turn that changed nothing is not "Saved".
     checkpointNothingNew: async () => {
       try {
@@ -5136,7 +5818,7 @@ const SCENARIOS = String.raw`(() => {
         ok('the address is shown: ' + document.getElementById('reachAddress').textContent, !document.getElementById('reachAddress').hidden && document.getElementById('reachAddress').textContent.includes('https://box.example.com:8443'));
         ok('with its QR code', !!document.querySelector('#reachAddress img[src^="/v1/public-access/qr.svg"]'));
         const copy = document.querySelector('#reachAddress button');
-        ok('Copy reads the address from a data attribute, not from a script string', copy.dataset.copy === 'https://box.example.com:8443' && !copy.getAttribute('onclick').includes('box.example.com'));
+        ok('Copy reads the address from a data attribute, not from a script string', copy.dataset.copy === 'https://box.example.com:8443' && copy.getAttribute('data-on-click') === 'copyAndSay' && !(copy.getAttribute('data-on-click-args') || '').includes('box.example.com'));
         ok('On is replaced by Off', document.getElementById('reachOnBtn').hidden && !document.getElementById('reachOffBtn').hidden);
         ok('the invited-only switch is locked while on', document.getElementById('reachInvited').disabled);
         // The record, with a sign-out for whoever signed in.
@@ -5490,7 +6172,8 @@ const SCENARIOS = String.raw`(() => {
         v2Close();
         // The machine's setting, with the note on whether this machine compresses swap.
         window.__override['/v1/machine-defaults'] = { defaults: [
-          { key: 'agentSwap', label: 'Compressed swap per agent', help: 'h', applies: 'now', fallback: 'off', value: 'off', set: false, note: 'This machine compresses swap: zswap (zstd, zsmalloc, pool ≤ 20%) in front of /swap.img · nothing stored yet.' } ] };
+          { key: 'agentSwap', label: 'Compressed swap per agent', help: 'h', applies: 'now', fallback: 'off', value: 'off', set: false, note: 'This machine compresses swap: zswap (zstd, zsmalloc, pool ≤ 20%) in front of /swap.img · nothing stored yet.' },
+          { key: 'engineMemory', label: 'Memory for the memory search service', help: 'h', applies: 'now', fallback: '2g', value: '2g', set: false } ] };
         window.__answer = { 'PUT /v1/machine-defaults': [{ status: 200, body: { default: { key: 'agentSwap', value: '2g' }, applied: 3 } }] };
         await openAiDlg('hosts');
         const input = await until(() => document.getElementById('md-agentSwap'));
@@ -5506,6 +6189,13 @@ const SCENARIOS = String.raw`(() => {
         input.parentElement.querySelector('button').click();
         await until(() => document.getElementById('toast').textContent.includes('Not on Kitchen'));
         ok('a gone volume is named: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('the volume is gone'));
+        // Saved, but the memory search service did not restart: said, not "applied to 1 service" (HB-0937).
+        window.__answer = { 'PUT /v1/machine-defaults': [{ status: 200, body: { default: { key: 'engineMemory', value: '3g' }, applied: 0, notApplied: "The memory search service did not restart: Couldn't stop the memory search service. Try again in a moment. It may keep its old memory, or be off, until it next starts: Hatchabot tries again within about 5 minutes, and at its own next start. To do it now, press Restart under Settings → Hosts → Memory search service (Start, if it shows Start)." } }] };
+        const engine = document.getElementById('md-engineMemory');
+        engine.value = '3g';
+        engine.parentElement.querySelector('button').click();
+        await until(() => document.getElementById('toast').textContent.includes('did not restart'));
+        ok('a failed restart is said: ' + document.getElementById('toast').textContent, !document.getElementById('toast').textContent.includes('applied to'));
         aiDlg.close();
         window.__answer = { 'PATCH /v1/agents/a1': [{ status: 200, body: { id: 'a1', filesCapPending: 'The limit is saved, but it could not be written to the agent. Its volume is gone.' } }] };
         await v2SetAgentPolicy('a1', { filesMaxMb: 5 });
@@ -6056,6 +6746,24 @@ const SCENARIOS = String.raw`(() => {
         aiDlg.close();
       } finally { if (typeof aiDlg !== 'undefined' && aiDlg.open) aiDlg.close(); delete window.__override['/v1/budgets']; await agentsCleanup(); }
     },
+    // A budget pause of a month that is over, whose start on the 1st failed: still paused on its tile and in Alerts, with no Recommended item to raise (HB-1011).
+    budgetPauseOwed: async () => {
+      const month = new Date().toISOString().slice(0, 7);
+      const OWED = "Its budget's pause ended on November 1, but it could not be started yet: Hatchabot tries again each pass, or start it now. It used $23.50 in October";
+      const MOWED = "Its pause for this Hatchabot's budget ended on November 1, but it could not be started yet: Hatchabot tries again each pass, or start it now. This Hatchabot used $240 in October";
+      try {
+        await withAgents((a) => a.name === 'Stock Watcher' ? { ...a, state: 'STOPPED', budget: { scope: a.id, usd: 20, atLimit: 'pause', month, spent: 0, pct: 0, level: 0, resetsOn: 'next 1st', paused: { at: new Date().toISOString(), ended: { month: '2026-10', spent: 23.5, on: 'November 1' } }, line: OWED } }
+          : a.name === 'Meal Planner' ? { ...a, state: 'STOPPED', budgetPaused: { scope: 'machine', at: new Date().toISOString(), ended: { month: '2026-10', spent: 240, on: 'November 1' }, line: MOWED } } : undefined);
+        const t = tile('Stock Watcher');
+        ok('the tile says its pause has ended but it is not started yet: ' + t.getAttribute('aria-label'), t.getAttribute('aria-label').includes("its budget's pause has ended, but it could not be started yet"));
+        ok('its tooltip has the line', tipText('Stock Watcher').includes(OWED));
+        const own = agentAttention(agents.find((x) => x.name === 'Stock Watcher')).find((x) => x.key.startsWith('budget-owed:'));
+        ok('an Alert, with the line and no Recommended item', !!own && own.why === OWED && !own.rec);
+        ok('the machine one says so on its tile too', tile('Meal Planner').getAttribute('aria-label').includes("its budget's pause has ended"));
+        const mach = agentAttention(agents.find((x) => x.name === 'Meal Planner')).find((x) => x.key.startsWith('mbudget-pause:'));
+        eq('the machine one\'s Alert is its line', mach?.why, MOWED);
+      } finally { await agentsCleanup(); }
+    },
     // Its own browser (docs/browser.md): off by default, switched on from Advanced, which rebuilds it.
     agentBrowserSwitch: async () => {
       const a1 = agents.find((a) => a.id === 'a1');
@@ -6168,6 +6876,182 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    adoptHandOverStepsFitTheMachine: async () => {
+      // HB-1163: the steps to hand a still-live bot over restart OpenClaw's gateway as Hatchabot's own hand-over does on
+      // the machine: its systemd unit on Linux, OpenClaw's own command on a Mac (or the machine not known).
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-garden-helper';
+      const bot = { accountId: 'made_up_garden_bot', sourceAgentId: 'garden', enabledInSource: true, polling: 'idle', allowFrom: [] };
+      const hadHosts = hosts, hadOs = myAccount.hostOs;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const steps = async (os) => {
+        if (os === undefined) delete myAccount.hostOs; else myAccount.hostOs = os;
+        openAdoptDlg(); await sleep(100);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        return $('adoptBotArea').querySelector('.invite-link')?.textContent ?? '';
+      };
+      try {
+        const two = (restart) => 'openclaw config set channels.telegram.accounts.made_up_garden_bot.enabled false\n' + restart;
+        eq('on a Mac', await steps('darwin'), two('openclaw gateway restart'));
+        eq('on Linux', await steps('linux'), two('systemctl --user restart openclaw-gateway'));
+        eq('the machine not known', await steps(undefined), two('openclaw gateway restart'));
+        // Adopted anyway, with no token: the error says the same.
+        myAccount.hostOs = 'darwin';
+        $('adoptName').value = 'Garden Helper';
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad7', name: 'Garden Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad7'] = [{ body: { id: 'ad7', name: 'Garden Helper', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } } }];
+        window.__answer['DELETE /v1/agents/ad7'] = [{ status: 200, body: {} }];
+        await runAdopt(); await sleep(100);
+        ok('the error, on a Mac: ' + $('adoptErr').textContent, $('adoptErr').textContent.includes('(openclaw config set channels.telegram.accounts.made_up_garden_bot.enabled false ; openclaw gateway restart), then try again.'));
+      } finally {
+        hosts = hadHosts;
+        if (hadOs === undefined) delete myAccount.hostOs; else myAccount.hostOs = hadOs;
+        for (const k of ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad7', 'DELETE /v1/agents/ad7']) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    // HB-1031: Telegram off for the whole hand-built instance, the bot's
+    // account still on: not offered for takeover, and the words say the
+    // account must go off too, not that the bot is live. Made-up workspace and bot.
+    adoptChannelOffAccountOn: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-porch-light';
+      const bot = { accountId: 'made_up_porch_bot', sourceAgentId: 'porch', enabledInSource: true, channelOffInSource: true, polling: 'idle', allowFrom: [] };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        const t = $('adoptBotArea').textContent;
+        ok('taking over its bot is not offered', !$('adoptReuse'));
+        ok('it says Telegram is off there but the account is on: ' + t, t.includes("Telegram is switched off in your hand-built instance's config") && t.includes('made_up_porch_bot') && t.includes('is still on'));
+        ok('and gives the one command that switches the account off', t.includes('openclaw config set channels.telegram.accounts.made_up_porch_bot.enabled false') && !t.includes('systemctl'));
+        ok('not that the bot is live', !t.includes('is still live'));
+      } finally {
+        hosts = hadHosts;
+        delete window.__answer['POST /v1/workspaces/inspect'];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    // HB-1031: an account key edited by hand (a space, a quote, a ; and a
+    // $( )) is never printed into a command to paste: the change is said in
+    // words, in each of the three places that give it. Made-up workspace and bot.
+    adoptOddAccountKeyInWords: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-porch-light';
+      const key = 'porch bot";$(true)';
+      const words = 'under channels.telegram.accounts, set "enabled": false on the account “' + key + '”';
+      const inspect = (bot) => { window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }]; };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      try {
+        openAdoptDlg(); await sleep(250);
+        $('adoptPath').value = WS;
+        for (const [what, off] of [['Telegram off there, the account on', true], ['still live', false]]) {
+          inspect({ accountId: key, sourceAgentId: 'porch', enabledInSource: true, channelOffInSource: off, polling: 'idle', allowFrom: [] });
+          await adoptInspect(); await sleep(50);
+          const t = $('adoptBotArea').textContent;
+          ok(what + ': no command with that key to paste', !t.includes('openclaw config set'));
+          ok(what + ': the change in words: ' + t, t.includes(words));
+          // The machine's own restart (HB-1163): its systemd unit on Linux, else OpenClaw's command.
+          ok(what + ': a restart still given as a command where one is needed', off || t.includes('systemctl --user restart openclaw-gateway') || t.includes('openclaw gateway restart'));
+        }
+        // Adopted anyway, with neither its bot nor another: the error says it in words too.
+        $('adoptName').value = 'Porch Light';
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Light', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad3'] = [{ body: { id: 'ad3', name: 'Porch Light', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } } }];
+        window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
+        await runAdopt(); await sleep(100);
+        const e = $('adoptErr').textContent;
+        ok('the error has no command with that key: ' + e, !e.includes('openclaw config set') && e.includes(words));
+        // A plain key: the command, as before.
+        inspect({ accountId: 'made_up_porch_bot', sourceAgentId: 'porch', enabledInSource: true, channelOffInSource: false, polling: 'idle', allowFrom: [] });
+        await adoptInspect(); await sleep(50);
+        ok('a plain key is given as the command', $('adoptBotArea').textContent.includes('openclaw config set channels.telegram.accounts.made_up_porch_bot.enabled false'));
+      } finally {
+        hosts = hadHosts;
+        for (const k of ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad3', 'DELETE /v1/agents/ad3']) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    // A copy torn part way is held on the new agent (HB-0980): Bring in removes
+    // it (a Delete goes through that hold) and says so; one it cannot remove
+    // says where the choices are. Made-up workspace.
+    adoptTornCopyCleanup: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-shed-helper';
+      window.__override['/v1/agents/ad5'] = { id: 'ad5', name: 'Shed Helper', state: 'RUNNING' };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'POST /v1/agents/ad5/adopt-workspace', 'DELETE /v1/agents/ad5'];
+      const torn = { status: 400, body: { error: 'Copying the workspace in failed part way (fixture: no space left on device) — the agent is left stopped because its files may be half-replaced, and it is not started until you choose on its page. Adopt again copies every file in the folder in again, whole; one the cut-off copy wrote that the folder no longer has stays as it was left. Or delete it.',
+        code: 'adopt-held', operation: 'op-shed', detail: 'fixture: no space left on device' } };
+      try {
+        for (const [deleted, want] of [
+          [{ status: 200, body: {} }, /Copying the workspace into “Shed Helper” failed part way \(fixture: no space left on device\), so “Shed Helper” was removed and nothing was adopted\. Fix the cause and adopt again\./],
+          [{ status: 409, body: { error: 'Another operation is already running on this agent.' } }, /Or delete it\. “Shed Helper” could not be removed just now: choose on its page, or delete it from its card\./],
+        ]) {
+          openAdoptDlg(); await sleep(250);
+          window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: null, links: [] } }];
+          $('adoptPath').value = WS;
+          await adoptInspect(); await sleep(50);
+          $('adoptName').value = 'Shed Helper';
+          window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad5', name: 'Shed Helper', state: 'PROVISIONING' } }];
+          window.__answer['POST /v1/agents/ad5/adopt-workspace'] = [torn];
+          window.__answer['DELETE /v1/agents/ad5'] = [deleted];
+          window.__calls.length = 0;
+          await runAdopt(); await sleep(100);
+          ok('a torn copy: the half-made agent is deleted', window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad5'));
+          ok('and it says how that went (' + deleted.status + '): ' + $('adoptErr').textContent, want.test($('adoptErr').textContent));
+          if (adoptDlg.open) adoptDlg.close();
+        }
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        delete window.__override['/v1/agents/ad5'];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    // Copied in whole but not started (HB-0980 re-review): the adopt is done,
+    // so the new agent is kept, not removed, and it says to start it once its
+    // machine answers. Made-up workspace.
+    adoptCopiedNotStartedKept: async () => {
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-seed-keeper';
+      window.__override['/v1/agents/ad6'] = { id: 'ad6', name: 'Seed Keeper', state: 'RUNNING' };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'POST /v1/agents/ad6/adopt-workspace', 'DELETE /v1/agents/ad6'];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: null, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        $('adoptName').value = 'Seed Keeper';
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad6', name: 'Seed Keeper', state: 'PROVISIONING' } }];
+        window.__answer['POST /v1/agents/ad6/adopt-workspace'] = [{ status: 400, body: { error: 'The workspace from ' + WS + ' was copied in whole, but it could not be started (fixture: docker did not answer): start it once its machine answers.', code: 'adopt-not-started' } }];
+        window.__answer['DELETE /v1/agents/ad6'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('copied in whole but not started: the new agent is not deleted', !window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad6'));
+        ok('and it says it is kept, to start once its machine answers: ' + $('adoptErr').textContent,
+          /could not be started \(fixture: docker did not answer\): start it once its machine answers\. “Seed Keeper” is kept, with every file copied in\./.test($('adoptErr').textContent));
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        delete window.__override['/v1/agents/ad6'];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
     // Adopt waits as long as the CLI after a bot is handed over (15 minutes),
     // and an agent still setting up then is left to finish, not removed
     // (eighth review). Made-up workspace and bot.
@@ -6195,9 +7079,10 @@ const SCENARIOS = String.raw`(() => {
         window.__answer['POST /v1/agents/ad3/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
         window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
         window.__calls.length = 0;
-        await runAdopt(); await sleep(100);
+        const waits = await fastWaits(runAdopt); await sleep(100);
         const looks = window.__calls.filter((c) => c.method === 'GET' && c.path === '/v1/agents/ad3').length;
-        ok('it waits 15 minutes for setup after the hand-over (' + looks + ' looks)', looks >= 300);
+        const looked = waits.filter((ms) => ms === 3000).length;
+        ok('it waits 15 minutes for setup after the hand-over (' + looks + ' looks, ' + looked + ' waits of 3 s)', looks === 301 && looked === 300);
         ok('an agent still setting up then is not removed', !window.__calls.some((c) => c.method === 'DELETE'));
         ok('nothing is copied into it', !window.__calls.some((c) => c.path === '/v1/agents/ad3/adopt-workspace'));
         ok('and it says so: ' + $('adoptErr').textContent, /“Porch Helper” is still setting up after 15 minutes, so it was left to finish, and nothing was copied/.test($('adoptErr').textContent));
@@ -6210,7 +7095,7 @@ const SCENARIOS = String.raw`(() => {
         window.__answer['POST /v1/agents/ad3/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
         window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
         window.__calls.length = 0;
-        await runAdopt(); await sleep(100);
+        await fastWaits(runAdopt); await sleep(100);
         ok('rebuilding at 15 minutes after the hand-over: not removed', !window.__calls.some((c) => c.method === 'DELETE'));
         ok('and it says so, with its state: ' + $('adoptErr').textContent, /“Porch Helper” is still setting up after 15 minutes \(it is rebuilding\), so it was left to finish/.test($('adoptErr').textContent));
         window.__override['/v1/agents/ad3'] = setting;
@@ -6222,14 +7107,14 @@ const SCENARIOS = String.raw`(() => {
         delete window.__answer['GET /v1/agents/ad3'];
         window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
         window.__calls.length = 0;
-        await runAdopt(); await sleep(100);
+        await fastWaits(runAdopt); await sleep(100);
         ok('cut off before the hand-over: no bot is handed over', !window.__calls.some((c) => /channel-token/.test(c.path)));
         ok('and the agent is removed', window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad3'));
         ok('and it says so: ' + $('adoptErr').textContent, /“Porch Helper” was still setting up after 15 minutes, before @made_up_porch_bot was handed over, so it was removed and nothing was copied/.test($('adoptErr').textContent));
         window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' } }];
         window.__answer['DELETE /v1/agents/ad3'] = [{ status: 409, body: { error: 'Another operation is already running on this agent.' } }];
         window.__calls.length = 0;
-        await runAdopt(); await sleep(100);
+        await fastWaits(runAdopt); await sleep(100);
         ok('a delete refused then is said, with the reason: ' + $('adoptErr').textContent, /could not be removed: Another operation is already running on this agent\. Remove it from its card/.test($('adoptErr').textContent));
 
         // A pasted token, and still setting up after 15 minutes before it was
@@ -6239,7 +7124,7 @@ const SCENARIOS = String.raw`(() => {
         window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad3', name: 'Porch Helper', state: 'PROVISIONING' } }];
         window.__answer['DELETE /v1/agents/ad3'] = [{ status: 200, body: {} }];
         window.__calls.length = 0;
-        await runAdopt(); await sleep(100);
+        await fastWaits(runAdopt); await sleep(100);
         ok('a pasted token cut off before the hand-over: the token is never posted', !window.__calls.some((c) => /channel-token/.test(c.path)));
         ok('and the agent is removed', window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad3'));
         ok('and it says so: ' + $('adoptErr').textContent, /“Porch Helper” was still setting up after 15 minutes, before its bot token was handed over, so it was removed and nothing was copied/.test($('adoptErr').textContent));
@@ -6254,7 +7139,7 @@ const SCENARIOS = String.raw`(() => {
         window.__answer['POST /v1/agents/ad3/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
         window.__answer['POST /v1/agents/ad3/adopt-workspace'] = [{ status: 200, body: { files: 1, bytes: 1024, crons: { carried: 0 } } }];
         window.__calls.length = 0;
-        await runAdopt(); await sleep(100);
+        await fastWaits(runAdopt); await sleep(100);
         ok('a setup of three minutes is waited for, and the workspace copied', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad3/adopt-workspace'));
         ok('and the agent is not removed', !window.__calls.some((c) => c.method === 'DELETE'));
       } finally {
@@ -6392,6 +7277,12 @@ const SCENARIOS = String.raw`(() => {
         window.__override['/v1/hosts/r1/install-image'] = { startedAt: 'now', bytes: 2.2e9, total: 2.2e9, done: true, ok: true };
         await sleep(3600);
         ok('done: the row checks again and shows the same version as here: ' + $('hostping-r1').textContent, /OpenClaw 2026\.9\.8/.test($('hostping-r1').textContent) && !/Update image/.test($('hostping-r1').textContent));
+        // A runner on another CPU got the published image, not built as this machine's is: said, not a plain ✅ (HB-1189).
+        const differs = "It is not built quite as this machine's image is: the published image has its own memory search engine, and this machine's image is engine-free. Only extra packages can be built again on a runner of another CPU; agents there run it as it is.";
+        window.__override['/v1/hosts/r1/install-image'] = { startedAt: 'now', bytes: 0, done: true, ok: true, pulled: 'registry.example.org/runtime:2026.9.8', differs };
+        await followImageCopy('r1'); await sleep(100);
+        const told = document.getElementById('toast').textContent;
+        ok('an install on another CPU says how it differs: ' + told, told === '⚠ Runtime image installed on Laptop runner. ' + differs);
       } finally {
         if (window.__answer) delete window.__answer['POST /v1/hosts/r1/install-image'];
         for (const k of ['/v1/hosts', '/v1/embedder', '/v1/hosts/r1/ping', '/v1/hosts/r1/install-image']) delete window.__override[k];
@@ -7020,7 +7911,7 @@ const SCENARIOS = String.raw`(() => {
     tooltipCompact: async () => {
       const tip = document.getElementById('v2Tip');
       const mins = (m) => new Date(Date.now() - m * 60000).toISOString();
-      const recent = v2Recent, pad = document.body.style.paddingBottom;
+      const recent = v2Recent, pad = document.body.style.paddingBottom, padTop = document.body.style.paddingTop;
       const overlaps = (a, b) => a.top < b.bottom && a.bottom > b.top && a.left < b.right && a.right > b.left;
       try {
         await withAgents((a) => a.name === 'Meal Planner' ? { ...a, state: 'RUNNING', openclawVersion: '2026.9.8', model: 'claude-sonnet-5', updateAvailable: true,
@@ -7045,8 +7936,11 @@ const SCENARIOS = String.raw`(() => {
         const prev = tip.querySelector('.v2tipprev'), lh = parseFloat(getComputedStyle(tip).lineHeight);
         ok('the whole line is there', prev.textContent.includes(said));
         ok('shown on two lines at most: ' + prev.getBoundingClientRect().height + ' for ' + lh, prev.getBoundingClientRect().height <= 2 * lh + 1 && prev.scrollHeight > prev.clientHeight);
-        // Low on the screen: above the icon, not pushed up over it.
+        // Low on the screen: above the icon, not pushed up over it. Padding above and below, so
+        // the page can scroll the icon to the foot of the window wherever the tiles start
+        // (it once relied on the setup guide left open above them by an earlier scenario).
         document.body.style.paddingBottom = '2000px';
+        document.body.style.paddingTop = innerHeight + 'px';
         const t = tile('Meal Planner');
         window.scrollBy(0, t.querySelector('.v2ic').getBoundingClientRect().bottom - (innerHeight - 30));
         v2ShowTip(t);
@@ -7061,7 +7955,7 @@ const SCENARIOS = String.raw`(() => {
           if (b.top - 18 < tr.height && innerHeight - b.bottom - 18 < tr.height) continue; // no room either way
           ok(x.textContent.trim().slice(0, 30) + ': its tooltip leaves the icon in sight', !overlaps(tr, b));
         }
-        window.scrollTo(0, 0); document.body.style.paddingBottom = pad;
+        window.scrollTo(0, 0); document.body.style.paddingBottom = pad; document.body.style.paddingTop = padTop;
         // A press may start a drag: the tooltip goes, and comes back only on the next hover.
         const d = document.querySelector('#v2groups .v2agent:not([data-v2fixed])');
         ok('a tile that can be dragged', !!d);
@@ -7076,7 +7970,7 @@ const SCENARIOS = String.raw`(() => {
         d.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
         ok('the next hover shows it', !tip.hidden);
       } finally {
-        tip.hidden = true; window.scrollTo(0, 0); document.body.style.paddingBottom = pad;
+        tip.hidden = true; window.scrollTo(0, 0); document.body.style.paddingBottom = pad; document.body.style.paddingTop = padTop;
         v2Recent = recent; await agentsCleanup();
       }
     },
@@ -7287,7 +8181,7 @@ const SCENARIOS = String.raw`(() => {
       }
     },
     checkAll: async () => {
-      const healthy = { status: 'healthy', reachable: true, doctor: { findings: [], checksRun: 12 } };
+      const healthy = { status: 'healthy', reachable: true, doctor: { ok: true, findings: [], checksRun: 12, complete: true } };
       const running = agents.filter((a) => a.state === 'RUNNING' && v2Mine(a));
       for (const a of agents) window.__override['/v1/agents/' + a.id + '/health'] = healthy;
       window.__override['/v1/agents/a1/health'] = { status: 'healthy', reachable: true, doctor: { findings: [{ severity: 'warn', checkId: 'search', message: 'web search is turned off' }], checksRun: 12 } };
@@ -8310,7 +9204,7 @@ const SCENARIOS = String.raw`(() => {
         await loadEditFile(); await loadSnapshots();
         ok('loaded first', $('editContent').value === 'old soul' && !$('editSaveBtn').disabled);
         const before = reads();
-        const btn = await until(() => [...document.querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert' && /s2/.test(b.getAttribute('onclick'))));
+        const btn = await until(() => [...document.querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert' && /s2/.test(b.getAttribute('data-on-click-args'))));
         btn.click();
         await until(() => $('editErr').textContent.includes('reloads when it is done'));
         eq('not read again while it runs', reads(), before);
@@ -8345,12 +9239,12 @@ const SCENARIOS = String.raw`(() => {
         openV2Agent('a1', 'files');
         await v2LoadFiles('a1', 'notes');
         const row = await until(() => [...document.querySelectorAll('#v2Files a')].find((x) => x.textContent === 'packing-list.pdf'));
-        ok('the name opens the file here, not by a new tab', /v2OpenFile\(/.test(row.getAttribute('onclick') || '') && !row.target);
+        ok('the name opens the file here, not by a new tab', row.getAttribute('data-on-click') === 'v2OpenFile' && !row.target);
         row.click();
         const name = await until(() => byText('#v2Files a', 'Open in a tab'));
         const down = [...document.querySelectorAll('#v2Files a.btn')].find((x) => x.textContent === '⬇');
-        ok('the ⬇ goes by sfLink: ' + down?.getAttribute('onclick'), /sfLink\(event, this, 'packing-list\.pdf'\)/.test(down?.getAttribute('onclick') || ''));
-        ok('Open in a tab goes by sfOpen', /^return sfOpen\(/.test(name.getAttribute('onclick') || ''));
+        ok('the ⬇ goes by sfLink: ' + down?.getAttribute('data-on-click-args'), down?.getAttribute('data-on-click') === 'sfLink' && down?.getAttribute('data-on-click-args') === JSON.stringify([{ $: 'event' }, { $: 'el' }, 'packing-list.pdf']));
+        ok('Open in a tab goes by sfOpen', name.getAttribute('data-on-click') === 'sfOpen' && (name.getAttribute('data-on-click-mods') || '').split(' ').includes('return'));
         let prevented = false; const ev = { preventDefault: () => { prevented = true; } };
         appConfig.publicAddress = false;
         ok('a plain link at the private address', sfOpen(ev, name, '/v1/agents/a1/fs?path=notes') === true && !prevented);
@@ -8423,7 +9317,7 @@ const SCENARIOS = String.raw`(() => {
       try {
         editAgentId = 'a1'; $('editFile').value = 'SOUL.md';
         await loadEditFile(); await loadSnapshots();
-        const btn = await until(() => [...document.querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert' && /s3/.test(b.getAttribute('onclick'))));
+        const btn = await until(() => [...document.querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert' && /s3/.test(b.getAttribute('data-on-click-args'))));
         btn.click();
         await until(() => v2Ops.has('op_rv2'));
         // A 5xx (or the network) while it runs: still followed, the hook not run.
@@ -8549,6 +9443,17 @@ const SCENARIOS = String.raw`(() => {
         await cloneAgent('a1', 'Homework Helper');
         const t = $('toast').textContent;
         ok('names the credential left out: ' + t, t.includes('MAIL_KEY') && t.includes('Extra credentials'));
+      } finally { window.prompt = p; window.__answer = {}; }
+    },
+    cloneNamesModelNotCarried: async () => {
+      // HB-1165: its owner's model, which the copy's AI source does not offer, is named, not left to its timeline.
+      const p = window.prompt;
+      window.prompt = () => 'Homework Copy';
+      window.__answer = { 'POST /v1/agents/a1/clone': [{ status: 201, body: { id: 'a-copy', name: 'Homework Copy', notCopied: [], envNotCopied: [], modelNotCopied: 'made-up-model', memoryNotCopied: [] } }] };
+      try {
+        await cloneAgent('a1', 'Homework Helper');
+        const t = $('toast').textContent;
+        ok('names the model left out: ' + t, t.includes('made-up-model') && t.includes("that source's default"));
       } finally { window.prompt = p; window.__answer = {}; }
     },
     cloneNamesUnreadableMemory: async () => {
@@ -9125,6 +10030,74 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = {};
       }
     },
+    joinPageSaysWhenTheInviteCouldNotBeChecked: async () => {
+      // HB-1034: no answer, or an error, says nothing of the invite: said so, with Try again, not "isn't valid".
+      const open = async (answers) => {
+        window.__answer = { 'GET /v1/invites/srcdoc': answers };
+        const frame = document.createElement('iframe');
+        frame.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:800px;background:#fff;z-index:99999';
+        frame.srcdoc = window.__joinPage.replace('<head>', () => '<head><script>window.fetch = (...a) => parent.fetch(...a);<\/script>');
+        document.body.appendChild(frame);
+        await until(() => frame.contentDocument && frame.contentDocument.querySelector('#card .agent'));
+        return frame;
+      };
+      let frame;
+      try {
+        frame = await open([{ reject: 'Failed to fetch' }, { body: { valid: true, agentName: 'Homework Helper', channels: [{ kind: 'telegram' }] } }]);
+        let d = frame.contentDocument, card = () => d.getElementById('card').textContent;
+        ok('no answer: said as that: ' + card().trim().slice(0, 200), card().includes('This invite could not be checked just now: Failed to fetch. The link may still be good, so try again in a moment.'));
+        ok('not called invalid', !card().includes("isn't valid") && !card().includes('new one'));
+        d.getElementById('retryBtn').click();
+        await until(() => d.getElementById('joinBtn'));
+        ok('Try again reads it again, and it is good', card().includes('Homework Helper'));
+        frame.remove();
+        frame = await open([{ status: 429, body: { valid: false, reason: 'Too many attempts — try again later.' } }]);
+        d = frame.contentDocument;
+        ok('too many tries: said, not invalid: ' + card().trim().slice(0, 200), card().includes('could not be checked just now: Too many attempts — try again later.') && !card().includes("isn't valid"));
+        frame.remove();
+        frame = await open([{ status: 502, body: {} }]);
+        d = frame.contentDocument;
+        ok('a server error: said: ' + card().trim().slice(0, 200), card().includes('could not be checked just now: The server answered 502.'));
+        frame.remove();
+        // An answer that it is not good: as before.
+        frame = await open([{ body: { valid: false, reason: 'used' } }]);
+        d = frame.contentDocument;
+        ok('a used one is said so', card().includes('This invite was already used. Ask the person who sent it for a new one.') && !d.getElementById('retryBtn'));
+        frame.remove();
+        frame = await open([{ body: { valid: false, reason: 'unknown' } }]);
+        d = frame.contentDocument;
+        ok('an unknown one is not valid', card().includes("This invite link isn't valid."));
+      } finally {
+        if (frame) frame.remove();
+        window.__answer = {};
+      }
+    },
+    joinPageKeepsAJoinWhoseSessionFails: async () => {
+      // HB-1148: the Google sign-in joined (the invite is spent), then starting the session here never reached the server:
+      // the join is shown, with what to do, not the join form with the error.
+      let frame;
+      try {
+        window.__answer = { 'GET /v1/invites/srcdoc': [{ body: { valid: true, webChat: true, agentName: 'Homework Helper', authMode: 'identity', localAccounts: false } }],
+          'POST /v1/join': [{ status: 201, body: { agentName: 'Homework Helper', agentId: 'a1', webChat: true } }],
+          'POST /v1/session': [{ reject: 'Failed to fetch' }] };
+        frame = document.createElement('iframe');
+        frame.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:800px;background:#fff;z-index:99999';
+        frame.srcdoc = window.__joinPage.replace('<head>', () => '<head><script>window.fetch = (...a) => parent.fetch(...a);<\/script>');
+        document.body.appendChild(frame);
+        await until(() => frame.contentDocument && frame.contentDocument.querySelector('#card .agent'));
+        const d = frame.contentDocument;
+        window.__calls.length = 0;
+        await frame.contentWindow.joinWeb('made-up-id-token');
+        const card = d.getElementById('card').textContent;
+        ok('the join is shown: ' + card.trim().slice(0, 200), card.includes("You're in"));
+        ok('with what to do', card.includes("You're a member, but this page could not reach Hatchabot to sign you in (Failed to fetch). Open Hatchabot and sign in with Google there."));
+        ok('and the way to the app', !!d.querySelector('#card a.btn[href="/"]'));
+        eq('joined once, the session asked once', [calls('POST', /^\/v1\/join$/).length, calls('POST', /^\/v1\/session$/).length], [1, 1]);
+      } finally {
+        if (frame) frame.remove();
+        window.__answer = {};
+      }
+    },
     rosterPendingAndExpired: async () => {
       // HB-0422: a spent reset must not make a long-standing member look un-joined, and an expired invitation says so.
       const was = { authMode: appConfig.authMode };
@@ -9171,6 +10144,36 @@ const SCENARIOS = String.raw`(() => {
         delete window.__override['/v1/local-accounts']; delete window.__override['/v1/local-accounts/me'];
         window.__answer = {};
         document.getElementById('acctInviteOut').style.display = 'none';
+        for (const [id, hidden] of panels) document.getElementById(id).hidden = hidden;
+      }
+    },
+    passwordAccountBesideGoogleManagesItsOwn: async () => {
+      // HB-1138: Google sign-in with password accounts beside it. Someone signed in with a password account sees their
+      // own password and recovery code; the Google owner, who has no such account, sees the roster, as before.
+      const was = { authMode: appConfig.authMode, localAccounts: appConfig.localAccounts };
+      const panels = ['acctSelf', 'acctAdmin'].map((id) => [id, document.getElementById(id).hidden]);
+      try {
+        appConfig.authMode = 'identity'; appConfig.localAccounts = true;
+        $('acctSelf').hidden = true; $('acctAdmin').hidden = true;
+        window.__override['/v1/local-accounts/me'] = { id: 'la-2', username: 'sam', hostOwner: false, recoveryCodeCreatedAt: null };
+        window.__answer = { 'GET /v1/local-accounts': [{ status: 403, body: { error: 'Only the account that set up this machine can do that.' } }] };
+        window.__calls.length = 0;
+        await loadAccounts();
+        ok('a password account: its own password and recovery code', !$('acctSelf').hidden);
+        ok('said it has no recovery code: ' + $('recoveryStatus').textContent, $('recoveryStatus').textContent.includes('You have none'));
+        ok('no roster for a member', $('acctAdmin').hidden && !calls('GET', /^\/v1\/local-accounts$/).length);
+        // The Google owner: no account of that kind (404), the roster.
+        $('acctSelf').hidden = true; $('acctAdmin').hidden = true;
+        delete window.__override['/v1/local-accounts/me'];
+        window.__override['/v1/local-accounts'] = [{ id: 'la-2', username: 'sam', agents: 1, pending: false, invitationExpired: false }];
+        window.__answer = { 'GET /v1/local-accounts/me': [{ status: 404, body: { error: 'Not found' } }] };
+        await loadAccounts();
+        ok('the Google owner: the roster', !$('acctAdmin').hidden && $('acctList').textContent.includes('sam'));
+        ok('and no password of its own', $('acctSelf').hidden);
+      } finally {
+        Object.assign(appConfig, was);
+        delete window.__override['/v1/local-accounts']; delete window.__override['/v1/local-accounts/me'];
+        window.__answer = {};
         for (const [id, hidden] of panels) document.getElementById(id).hidden = hidden;
       }
     },
@@ -9542,7 +10545,7 @@ const SCENARIOS = String.raw`(() => {
         ok("A's people are not offered on B's: " + $('tgKnownPeople').textContent, !$('tgKnownPeople').textContent.includes('Sam Example'));
         editAgentId = 'a1';
         await renderKnownPeople();
-        ok("on A's, Add adds to A: " + $('tgKnownPeople').innerHTML, $('tgKnownPeople').innerHTML.includes("addKnownPerson('a1','u-made-up','Sam Example')"));
+        ok("on A's, Add adds to A: " + $('tgKnownPeople').innerHTML, [...$('tgKnownPeople').querySelectorAll('button')].some((b) => b.getAttribute('data-on-click') === 'addKnownPerson' && b.getAttribute('data-on-click-args') === JSON.stringify(['a1', 'u-made-up', 'Sam Example'])));
         // An edit left on A's Advanced tab, then B's Schedule tab.
         openV2Agent('a1', 'advanced');
         await until(() => v2AgentId === 'a1' && $('v2Pane').querySelector('#envName'));
@@ -10343,6 +11346,51 @@ const SCENARIOS = String.raw`(() => {
         if (webChatDlg.open) webChatDlg.close();
       }
     },
+    webChatSentBeforeTheReadShowsOnce: async () => {
+      // HB-1041: sent while the conversation loads, and the read holds it already (by its message id, with its answer):
+      // one bubble each, whether the answer comes before the read or after it.
+      const list = await (await fetch('/v1/agents')).json();
+      const a = list[1];
+      const chat = '/v1/agents/' + a.id + '/chat';
+      const box = $('wchatText');
+      const realFetch = window.fetch;
+      const older = [{ role: 'user', text: 'hello', at: new Date(Date.now() - 30 * 60000).toISOString() }, { role: 'assistant', text: 'Hello again.', at: new Date(Date.now() - 30 * 60000).toISOString() }];
+      const count = (sel, text) => [...$('wchatLog').querySelectorAll(sel)].filter((el) => el.textContent === text).length;
+      try {
+        for (const answerFirst of [true, false]) {
+          const how = answerFirst ? 'answered before the read' : 'answered after the read';
+          box.value = ''; $('wchatErr').textContent = ''; webChatUnsure.clear();
+          if (webChatDlg.open) webChatDlg.close();
+          let readGate = null, sendGate = null, sent = null;
+          window.fetch = async (input, init = {}) => {
+            const path = String(typeof input === 'string' ? input : input.url).split('?')[0], method = (init.method || 'GET').toUpperCase();
+            if (path === chat && method === 'GET' && !readGate) await new Promise((r) => { readGate = r; });
+            else if (path === chat && method === 'POST' && !sendGate) { sent = JSON.parse(init.body); await new Promise((r) => { sendGate = r; }); }
+            return realFetch(input, init);
+          };
+          const opening = openWebChatPanel(a.id);
+          await until(() => readGate);
+          box.value = 'hello';
+          const sending = webChatSend();
+          await until(() => sendGate);
+          ok(how + ': the send carries its id', /^[0-9a-f-]{36}$/.test(sent?.messageId || ''));
+          const at = new Date().toISOString();
+          window.__answer = { ['POST ' + chat]: [{ body: { reply: 'Hi there.' } }] };
+          window.__override[chat] = { messages: [...older, { role: 'user', text: 'hello', at, messageId: sent.messageId }, { role: 'assistant', text: 'Hi there.', at }] };
+          if (answerFirst) { sendGate(); await sending; readGate(); await opening; }
+          else { readGate(); await opening; sendGate(); await sending; }
+          eq(how + ': the older "hello" and this one, each once', count('.wchat-msg.me', 'hello'), 2);
+          eq(how + ': its answer once', count('.wchat-msg:not(.me)', 'Hi there.'), 1);
+          ok(how + ': nothing still thinking', !$('wchatLog').querySelector('.wchat-msg.wait'));
+          window.fetch = realFetch; window.__answer = {};
+        }
+      } finally {
+        window.fetch = realFetch;
+        window.__answer = {}; delete window.__override[chat];
+        webChatUnsure.clear(); box.value = ''; $('wchatErr').textContent = '';
+        if (webChatDlg.open) webChatDlg.close();
+      }
+    },
   });
   // The 2026-11-05 workflow audit (made-up data).
   Object.assign(T, {
@@ -10433,6 +11481,7 @@ const SCENARIOS = String.raw`(() => {
         await refresh(true);
         const q = profiles.find((x) => x.id === p.id);
         availableModels[p.id] = saved.avail; Object.assign(q, { model: saved.model, models: saved.models });
+        try { localStorage.removeItem('hb-src-spend-folded:' + p.id); } catch {} // the drawer folded above, remembered by its toggle
         aiRowsDrawn = {}; renderAiList();
       }
     },
@@ -11189,7 +12238,9 @@ const SCENARIOS = String.raw`(() => {
         await loadMyAccount();
         ok('back once it is read, with its words', recoveryDlg.open && $('recoveryCode').textContent === 'MADE-UP-RECOVERY' && $('recoveryLede').textContent === 'Made-up lede.');
         ok('still waiting for "I have saved it"', $('recoveryDone').disabled);
-        recoveryDlg.close(); await rc;
+        // Closed, and its close event sent now (HB-0656): rc settles in the close handler, and Chromium sends the
+        // real event with an animation frame, which a headless page under virtual time gets rarely (HB-0484).
+        recoveryDlg.close(); recoveryDlg.dispatchEvent(new Event('close')); await rc;
         await sleep(0);
         eq('closed, it leaves the page', $('recoveryCode').textContent, '');
       } finally {
@@ -11547,6 +12598,44 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = {};
         window.__override['/v1/account'] = account;
         if (sfDlg.open) await sfCancel().catch(() => {});
+        if (loginDlg.open) loginDlg.close();
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    signInScreenOpensOnce: async () => {
+      // HB-0951: two requests find the session gone while the sign-in screen is closed. It opens once, on one config
+      // read; signed in, nothing puts it back. And a sign-in found while that read waits (another tab) opens nothing.
+      const realFetch = window.fetch, held = [];
+      let reads = 0;
+      try {
+        window.fetch = (input, init = {}) => {
+          const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+          if (path !== '/v1/config' || (init.method || 'GET').toUpperCase() !== 'GET') return realFetch(input, init);
+          reads++;
+          return new Promise((r) => held.push(() => r(realFetch(input, init))));
+        };
+        showLogin(); showLogin();
+        await sleep(50);
+        eq('one config read for both', reads, 1);
+        held.shift()(); await until(() => loginDlg.open);
+        // Signed in: the screen closes, and who it is is read.
+        loginDlg.close(); await loadMyAccount();
+        while (held.length) held.shift()();
+        await sleep(200);
+        ok('signed in, the sign-in screen stays closed', !loginDlg.open);
+        // Signed in somewhere else while its read waits: not opened.
+        reads = 0;
+        showLogin();
+        await until(() => held.length === 1);
+        await loadMyAccount();
+        held.shift()(); await sleep(200);
+        ok('a session found meanwhile: not opened', !loginDlg.open);
+      } finally {
+        window.fetch = realFetch;
+        while (held.length) held.shift()();
+        await sleep(50);
         if (loginDlg.open) loginDlg.close();
         await loadMyAccount();
         pageReloadWanted = false;
@@ -12369,8 +13458,11 @@ const SCENARIOS = String.raw`(() => {
       const list = await (await fetch('/v1/agents')).json();
       const set = async (state) => { window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, state } : a); await refresh(false); };
       const paneText = () => $('v2Pane').textContent;
-      // The close event arrives a task later, and clears what the sheet held: waited for, with no deadline (virtual time can jump past one).
-      const closeSheet = () => new Promise((r) => { v2AgentDlg.addEventListener('close', r, { once: true }); v2Close(); });
+      // Closed, and its close event (which clears what the sheet held) sent at once, as the other scenarios
+      // do. Chromium sends the real one with the next animation frame, and a headless page under virtual
+      // time gets frames rarely: waiting for it cost minutes of virtual time, or the whole budget (HB-0484).
+      // The real one, when it comes, finds the sheet closed or open again, which its handler allows for.
+      const closeSheet = () => { v2Close(); v2AgentDlg.dispatchEvent(new Event('close')); };
       try {
         await set('STOPPED');
         openV2Agent('a1', 'schedule');
@@ -12577,6 +13669,1121 @@ const SCENARIOS = String.raw`(() => {
         const sent = await until(() => calls('POST', /\/v1\/ai-profiles$/).at(-1));
         eq('every model, however they were separated', sent.body.models, ['local-default', 'model-a', 'model-b', 'model-c', 'model-d']);
       } finally { window.__answer = {}; $('aiModelsAdd').value = ''; $('aiName').value = ''; $('aiModel').value = ''; if (aiDlg.open) aiDlg.close(); }
+    },
+  });
+  // The deep audit of 2026-11-23, its web app items (wave 3). Made-up names, rooms and text.
+  Object.assign(T, {
+    operatorSaveKeepsNewerDraft: async () => {
+      // HB-0898: text typed while the operator profile saves stays, an edit not saved yet; and while it is read.
+      const h = auditHold(), box = $('operatorText'), was = box.value;
+      try {
+        operatorSaved = 'Saved before'; box.value = 'Sent version'; syncOperatorBtn();
+        window.__answer = { 'PUT /v1/operator-profile': [{ body: { content: 'Sent version', pushing: 0 } }] };
+        h.once(/\/v1\/operator-profile$/, 'PUT');
+        const saving = saveOperator();
+        await until(() => h.held.length === 1);
+        box.value = 'New draft typed during save';
+        await h.free(); await saving;
+        eq('the draft typed during the save stays', box.value, 'New draft typed during save');
+        eq('the sent text is what is saved', calls('PUT', /\/v1\/operator-profile$/).at(-1).body, { content: 'Sent version' });
+        ok('and Save is on for the draft', !$('operatorSaveBtn').disabled);
+        // Nothing typed meanwhile: the text as the server keeps it goes in.
+        window.__answer = { 'PUT /v1/operator-profile': [{ body: { content: 'New draft, as kept', pushing: 0 } }] };
+        await saveOperator();
+        eq('nothing typed meanwhile: the saved text', box.value, 'New draft, as kept');
+        ok('and Save is off', $('operatorSaveBtn').disabled);
+        // A read under way when typing starts: what is typed stays.
+        window.__override['/v1/operator-profile'] = { content: 'From the server' };
+        h.once(/\/v1\/operator-profile$/);
+        const reading = loadOperator();
+        await until(() => h.held.length === 1);
+        box.value = 'Typed while it was read';
+        await h.free(); await reading;
+        eq('typed while it was read: kept', box.value, 'Typed while it was read');
+        ok('and Save is on for it', !$('operatorSaveBtn').disabled);
+        // Saved, and the tab opened again before the save answers: its read, of the text from
+        // before the save, does not put that back over the saved text with Save on.
+        await h.free();
+        operatorSaved = 'Before the save'; box.value = 'Saved again'; syncOperatorBtn();
+        window.__answer = { 'PUT /v1/operator-profile': [{ body: { content: 'Saved again', pushing: 0 } }] };
+        window.__override['/v1/operator-profile'] = { content: 'Before the save' };
+        h.once(/\/v1\/operator-profile$/, 'PUT');
+        const saving2 = saveOperator();
+        await until(() => h.held.length === 1);
+        await loadOperator();
+        eq('a read under the save leaves the box', box.value, 'Saved again');
+        await h.free(); await saving2;
+        eq('the saved text stays', box.value, 'Saved again');
+        ok('and Save is off', $('operatorSaveBtn').disabled);
+        // A read once the save has answered is taken as it comes.
+        window.__override['/v1/operator-profile'] = { content: 'Changed elsewhere' };
+        await loadOperator();
+        eq('a read after it: taken', box.value, 'Changed elsewhere');
+      } finally {
+        await h.free(); window.__answer = {}; delete window.__override['/v1/operator-profile'];
+        box.value = was; operatorSaved = null; syncOperatorBtn();
+      }
+    },
+    editorAsksBeforeAnotherFile: async () => {
+      // HB-0936: an unsaved SOUL.md edit, then MEMORY.md picked: asked first. No keeps the edit, on SOUL.md; yes opens MEMORY.md.
+      const sel = $('editFile'), box = $('editContent');
+      const pick = (file) => { sel.value = file; sel.dispatchEvent(new Event('change', { bubbles: true })); };
+      window.__override['/v1/agents/a1/files/SOUL.md'] = { content: 'saved soul' };
+      window.__override['/v1/agents/a1/files/MEMORY.md'] = { content: 'saved memory' };
+      try {
+        editAgentId = 'a1'; sel.value = 'SOUL.md'; await loadEditFile();
+        window.__confirms = [];
+        pick('MEMORY.md');
+        await until(() => box.value === 'saved memory' && !$('editSaveBtn').disabled);
+        eq('nothing unsaved: no question', window.__confirms, []);
+        pick('SOUL.md');
+        await until(() => box.value === 'saved soul' && !$('editSaveBtn').disabled);
+        box.value = 'saved soul, edited';
+        window.__confirmAnswer = false;
+        const reads = calls('GET', /\/v1\/agents\/a1\/files\/MEMORY\.md$/).length;
+        pick('MEMORY.md');
+        await sleep(200);
+        eq('asked, naming both files', window.__confirms, ['Your changes to SOUL.md are not saved. Open MEMORY.md and lose them?']);
+        eq('No: the edit stays, on SOUL.md', [box.value, sel.value, editLoaded?.file], ['saved soul, edited', 'SOUL.md', 'SOUL.md']);
+        eq('and the other file is not read', calls('GET', /\/v1\/agents\/a1\/files\/MEMORY\.md$/).length, reads);
+        ok('Save is still on, for SOUL.md', !$('editSaveBtn').disabled);
+        window.__confirmAnswer = true;
+        pick('MEMORY.md');
+        await until(() => box.value === 'saved memory' && editLoaded?.file === 'MEMORY.md');
+        eq('asked again, then let go', window.__confirms.length, 2);
+      } finally {
+        window.__confirmAnswer = true; window.__confirms = [];
+        for (const k of ['/v1/agents/a1/files/SOUL.md', '/v1/agents/a1/files/MEMORY.md']) delete window.__override[k];
+        sel.value = 'SOUL.md'; editLoaded = null; editAgentId = null;
+      }
+    },
+    findRoomsStaysWithItsAgent: async () => {
+      // HB-0990: Find rooms for A, the sheet moved to B before the answer came: B's room stays B's.
+      const shut = () => { v2Close(); v2AgentId = null; v2EditFor = null; v2SheetNotes.clear(); if (typeof v2NotesFor !== 'undefined') v2NotesFor = null; };
+      const h = auditHold();
+      const roomsOf = (roomId) => ({ channels: [{ kind: 'telegram', rooms: { mode: 'room', roomId } }], imageSupports: [] });
+      window.__override['/v1/agents/a1/channels'] = roomsOf('-1001000000001');
+      window.__override['/v1/agents/a2/channels'] = roomsOf('-1001000000002');
+      window.__override['/v1/agents/a1/group-chats'] = { rooms: [{ id: '-1001000000009' }] };
+      const shows = (id, roomId) => $('v2Chans')?.dataset.agent === id && $('chanRoom-telegram')?.value === roomId && !!$('chanRoomFind-telegram');
+      try {
+        shut();
+        openV2Agent('a1', 'messaging');
+        await until(() => shows('a1', '-1001000000001'));
+        h.once(/\/v1\/agents\/a1\/group-chats$/);
+        $('chanRoomFind-telegram').click();
+        await until(() => h.held.length === 1);
+        openV2Agent('a2', 'messaging');
+        await until(() => shows('a2', '-1001000000002'));
+        await h.free();
+        eq("B's room ID and picker stay B's", [$('chanRoom-telegram').value, $('chanRoomPick-telegram').value], ['-1001000000002', '-1001000000002']);
+        // For the agent it was asked for, the answer goes in.
+        openV2Agent('a1', 'messaging');
+        await until(() => shows('a1', '-1001000000001'));
+        $('chanRoomFind-telegram').click();
+        await until(() => $('chanRoom-telegram').value === '-1001000000009');
+        eq('its own sheet gets its rooms', $('chanRoomPick-telegram').value, '-1001000000009');
+      } finally {
+        await h.free();
+        for (const k of ['/v1/agents/a1/channels', '/v1/agents/a2/channels', '/v1/agents/a1/group-chats']) delete window.__override[k];
+        shut(); editAgentId = null;
+        await refresh(false);
+      }
+    },
+    guestChatOpensTheNewestChoice: async () => {
+      // HB-0991: 💬 Chat for A, then B while A's access is read; B answers first, then A: B's chat stays.
+      const h = auditHold();
+      const keys = ['/v1/agents', '/v1/agents/w1/console/access', '/v1/agents/w2/console/access'];
+      try {
+        const list = await (await fetch('/v1/agents')).json();
+        const base = list.find((a) => a.id === 'a1');
+        const guest = (id, name) => ({ ...base, id, name, role: 'user', ownerId: 'o2', webChat: true, botUsername: undefined, deepLink: undefined, otherChannels: [] });
+        window.__override['/v1/agents'] = [...list, guest('w1', 'Book Club'), guest('w2', 'Garden Club')];
+        window.__override['/v1/agents/w1/console/access'] = { role: 'guest', console: 'identity', session: 'agent:book-club:guest:0123456789abcdef' };
+        window.__override['/v1/agents/w2/console/access'] = { role: 'guest', console: 'identity', session: 'agent:garden-club:guest:fedcba9876543210' };
+        await refresh(false);
+        h.once(/\/v1\/agents\/w1\/console\/access$/);
+        const first = openWebChat('w1');
+        await until(() => h.held.length === 1);
+        await openWebChat('w2');
+        ok('B opened', $('consoleDlg').open && $('consoleTitle').textContent === 'Garden Club');
+        await h.free(); await first;
+        eq("A's late answer leaves B's chat open", [$('consoleTitle').textContent, $('consoleFrame').getAttribute('src')],
+          ['Garden Club', '/v1/agents/w2/ui/chat?session=agent%3Agarden-club%3Aguest%3Afedcba9876543210']);
+      } finally {
+        await h.free();
+        if ($('consoleDlg').open) closeConsole();
+        for (const k of keys) delete window.__override[k];
+        await refresh(false);
+      }
+    },
+    derivedLogFailureWaitsLonger: async () => {
+      // HB-0996: a build whose log will not read is read again after a wait that doubles, said once; the list is read
+      // again only when the build ends. The poll's own waits are held here and let go by hand.
+      // HB-1295: only pollDerivedBuild's own wait is held (the stack says who set a timer). Every timer of a multiple of
+      // 1.5 s was: a runner's image-copy follower left polling every 3 s by an earlier check (the stub's empty answer,
+      // now idle) was held in the same turn as the poll's wait, the count went 0 to 2, and the wait for 1 ran out (CI,
+      // twice). A wait that runs out says what it saw.
+      const name = 'made-up-tools';
+      const img = { name, tag: 'hatchabot-runtime:derived-made-up-tools', status: 'BUILDING', base: 'hatchabot-runtime:latest', dockerfile: 'RUN apt-get install -y made-up-tool', pinnedBy: 0 };
+      const realFetch = window.fetch, realTimeout = window.setTimeout, held = [];
+      let reads = 0, answer = () => new Response(JSON.stringify({ error: 'The build log could not be read.' }), { status: 500 });
+      const lists = () => calls('GET', /^\/v1\/images$/).length;
+      window.__override['/v1/images'] = { images: [img] };
+      window.fetch = async (input, init = {}) => {
+        const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
+        if (path === '/v1/images/' + name + '/log') { reads++; return answer(); }
+        return realFetch(input, init);
+      };
+      // Its wait, the promise it awaits between reads: not a toast it shows, nor anything else's timer.
+      const theirs = () => /at new Promise[^\n]*\n\s*at pollDerivedBuild\b/.test(String(new Error().stack));
+      window.setTimeout = (f, ms, ...rest) => theirs() ? (held.push({ f, ms }), 0) : realTimeout(f, ms, ...rest);
+      const letGo = () => { const t = held.shift(); t.f(); return t.ms; };
+      const seen = () => JSON.stringify({ reads, held: held.map((t) => t.ms), following: derivedBuilding.has(name) });
+      const waited = async (n) => { try { await until(() => reads >= n && held.length > 0); } catch { throw new Error('read ' + n + ' and its wait not seen: ' + seen()); } };
+      try {
+        $('toast').textContent = '';
+        ok('nothing follows this build yet', !derivedBuilding.has(name));
+        const before = lists();
+        pollDerivedBuild(name);
+        await waited(1);
+        eq('one read, then a wait of 3 s', [reads, held.map((t) => t.ms)], [1, [3000]]);
+        eq('the list is not read again', lists(), before);
+        ok('said: ' + $('toast').textContent, $('toast').textContent.includes('The build log could not be read.'));
+        $('toast').textContent = '';
+        letGo();
+        await waited(2);
+        eq('read again, then a wait of 6 s', [reads, held.map((t) => t.ms)], [2, [6000]]);
+        ok('not said again', !$('toast').textContent.includes('could not be read'));
+        eq('the list is still not read', lists(), before);
+        // The log reads again, and the build is done: the list is shown once.
+        answer = () => new Response(JSON.stringify({ status: 'READY', log: 'Built, for the test.' }), { status: 200 });
+        window.__override['/v1/images'] = { images: [{ ...img, status: 'READY' }] };
+        letGo();
+        await until(() => lists() === before + 1);
+        ok('built: ' + $('toast').textContent, $('toast').textContent.includes('Built made-up-tools'));
+        eq('no wait left, and nothing followed any more', [held.length, derivedBuilding.has(name)], [0, false]);
+      } finally {
+        window.setTimeout = realTimeout; window.fetch = realFetch;
+        for (const t of held.splice(0)) realTimeout(t.f, 0);
+        delete window.__override['/v1/images'];
+      }
+    },
+    adoptKeepsAgentWhenReadFailsAfterHandOver: async () => {
+      // HB-1092: the bot handed over, then a read of the agent fails (no answer, or the server's error): left to finish, not removed.
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-shed-helper';
+      const bot = { accountId: 'made_up_shed_bot', sourceAgentId: 'shed', enabledInSource: false, polling: 'idle', allowFrom: [] };
+      const waiting = { id: 'ad4', name: 'Shed Helper', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad4', 'POST /v1/agents/ad4/channel-token', 'DELETE /v1/agents/ad4'];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('taking over its bot is offered and ticked', !!$('adoptReuse')?.checked);
+        $('adoptName').value = 'Shed Helper';
+        for (const [how, lost] of [['no answer', { reject: 'Failed to fetch' }], ['a server error', { status: 502, body: { error: 'Bad gateway, for the test.' } }]]) {
+          window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad4', name: 'Shed Helper', state: 'PROVISIONING' } }];
+          window.__answer['GET /v1/agents/ad4'] = [{ body: waiting }, lost];
+          window.__answer['POST /v1/agents/ad4/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
+          window.__answer['DELETE /v1/agents/ad4'] = [{ status: 200, body: {} }];
+          window.__calls.length = 0;
+          await runAdopt(); await sleep(100);
+          ok(how + ': the bot was handed over', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad4/channel-token'));
+          ok(how + ': the agent is not removed', !window.__calls.some((c) => c.method === 'DELETE'));
+          ok(how + ': nothing is copied into it', !window.__calls.some((c) => c.path === '/v1/agents/ad4/adopt-workspace'));
+          ok(how + ': and it says so: ' + $('adoptErr').textContent, /“Shed Helper” has its bot, but could not be read just now \(.+\), so it was left to finish setting up, and nothing was copied/.test($('adoptErr').textContent));
+        }
+        // Running on its bot, then the copy fails, however (no answer, the server's error, the agent busy, the machine's 400s): kept too.
+        keys.push('POST /v1/agents/ad4/adopt-workspace');
+        for (const [how, cut] of [['no answer', { reject: 'Failed to fetch' }], ['a server error', { status: 502, body: { error: 'Bad gateway, for the test.' } }],
+          ['the agent busy', { status: 409, body: { error: 'Shed Helper is busy, for the test.' } }],
+          ['its stop not confirmed', { status: 400, body: { error: 'The runtime did not confirm it stopped. Nothing was copied into the agent.' } }],
+          ['torn partway', { status: 400, body: { error: 'Copying the workspace in failed partway — the agent is left stopped because its files may be half-replaced. Adopt again (a clean copy fixes a torn one), or restore a snapshot.' } }]]) {
+          window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad4', name: 'Shed Helper', state: 'PROVISIONING' } }];
+          window.__answer['GET /v1/agents/ad4'] = [{ body: waiting }, { body: { id: 'ad4', name: 'Shed Helper', state: 'RUNNING' } }];
+          window.__answer['POST /v1/agents/ad4/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
+          window.__answer['POST /v1/agents/ad4/adopt-workspace'] = [cut];
+          window.__answer['DELETE /v1/agents/ad4'] = [{ status: 200, body: {} }];
+          window.__calls.length = 0;
+          await runAdopt(); await sleep(100);
+          ok('copy, ' + how + ': it was asked', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad4/adopt-workspace'));
+          ok('copy, ' + how + ': the agent is not removed', !window.__calls.some((c) => c.method === 'DELETE'));
+          ok('copy, ' + how + ': and it says so: ' + $('adoptErr').textContent, /“Shed Helper” has its bot, but its workspace could not be copied \(.+\), so it was kept with its bot\. Remove it and adopt again\./.test($('adoptErr').textContent));
+        }
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    adoptKeepsAgentWhenItFailsAfterHandOver: async () => {
+      // HB-1225: the bot handed over, then the agent fails: kept and said, never removed. Failed before any hand-over,
+      // it is still removed (a half-made agent holds the name), as one that asks for a bot again is (adoptReuseBotRunsFirst).
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-shed-helper';
+      const bot = { accountId: 'made_up_shed_bot', sourceAgentId: 'shed', enabledInSource: false, polling: 'idle', allowFrom: [] };
+      const waiting = { id: 'ad5', name: 'Shed Helper', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } };
+      const failed = { id: 'ad5', name: 'Shed Helper', state: 'FAILED', stateReason: 'The runtime did not start, for the test.' };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad5', 'POST /v1/agents/ad5/channel-token', 'DELETE /v1/agents/ad5'];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('taking over its bot is offered and ticked', !!$('adoptReuse')?.checked);
+        $('adoptName').value = 'Shed Helper';
+        for (const [how, after, said] of [
+          ['failed', failed, /^“Shed Helper” has its bot, but could not start \(The runtime did not start, for the test\.\), so it was kept with its bot, and nothing was copied\. To finish the adopt, remove it and adopt again\. A Retry brings the bot back up on an agent with nothing copied from the old one; removed after that, the bot is parked in your Bot pool \(⚙ Settings → Messaging → Telegram\), so remove it from there before adopting again\. Don’t switch the bot’s account back on in OpenClaw while this agent holds it: once it runs, both would poll it, and messages would be lost\.$/]]) {
+          window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad5', name: 'Shed Helper', state: 'PROVISIONING' } }];
+          window.__answer['GET /v1/agents/ad5'] = [{ body: waiting }, { body: after }];
+          window.__answer['POST /v1/agents/ad5/channel-token'] = [{ status: 202, body: { username: bot.accountId } }];
+          window.__answer['DELETE /v1/agents/ad5'] = [{ status: 200, body: {} }];
+          window.__calls.length = 0;
+          await runAdopt(); await sleep(100);
+          ok(how + ': the bot was handed over', window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad5/channel-token'));
+          ok(how + ': the agent is not removed', !window.__calls.some((c) => c.method === 'DELETE'));
+          ok(how + ': nothing is copied into it', !window.__calls.some((c) => c.path === '/v1/agents/ad5/adopt-workspace'));
+          ok(how + ': and it says so: ' + $('adoptErr').textContent, said.test($('adoptErr').textContent));
+        }
+        // Failed before its bot was handed over: removed, as before.
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad5', name: 'Shed Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad5'] = [{ body: failed }];
+        window.__answer['DELETE /v1/agents/ad5'] = [{ status: 200, body: {} }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('failed first: no hand-over', !window.__calls.some((c) => c.path === '/v1/agents/ad5/channel-token'));
+        ok('failed first: removed', window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad5'));
+        ok('failed first: said: ' + $('adoptErr').textContent, $('adoptErr').textContent.includes('Could not start: The runtime did not start, for the test.'));
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    adoptKeepsAgentWhenHandOverIsNotKnown: async () => {
+      // HB-1277: no answer to any of the four bot hand-over posts. The agent is read: its step answered, it was
+      // handed over (adopted, not removed); the step still open, it was not (removed, as before); not read either,
+      // whether it has the bot is not known: kept and said, not removed with a bot it may hold.
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-shed-helper';
+      const bot = { accountId: 'made_up_shed_bot', sourceAgentId: 'shed', enabledInSource: false, polling: 'idle', allowFrom: [] };
+      const waiting = { id: 'ad9', name: 'Shed Helper', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } };
+      const setting = { id: 'ad9', name: 'Shed Helper', state: 'PROVISIONING' };
+      const unanswered = () => [{ reject: 'Failed to fetch' }, { status: 503, body: { error: 'Telegram did not answer, so the token could not be checked. Try again in a moment.' } },
+        { status: 504, body: { error: 'Gateway Timeout' } }, { status: 502, body: { error: 'Bad Gateway' } }];
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad9', 'POST /v1/agents/ad9/channel-token', 'POST /v1/agents/ad9/adopt-workspace', 'DELETE /v1/agents/ad9'];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('taking over its bot is offered and ticked', !!$('adoptReuse')?.checked);
+        $('adoptName').value = 'Shed Helper';
+        const attempt = async (reads, posts = unanswered()) => {
+          window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad9', name: 'Shed Helper', state: 'PROVISIONING' } }];
+          window.__answer['GET /v1/agents/ad9'] = [{ body: waiting }, ...reads];
+          window.__answer['POST /v1/agents/ad9/channel-token'] = posts;
+          window.__answer['POST /v1/agents/ad9/adopt-workspace'] = [{ status: 200, body: { files: 1, bytes: 1024, crons: { carried: 0 } } }];
+          window.__answer['DELETE /v1/agents/ad9'] = [{ status: 200, body: {} }];
+          window.__calls.length = 0;
+          await runAdopt(); await sleep(100);
+          return {
+            posts: window.__calls.filter((c) => c.method === 'POST' && c.path === '/v1/agents/ad9/channel-token').length,
+            copied: window.__calls.some((c) => c.method === 'POST' && c.path === '/v1/agents/ad9/adopt-workspace'),
+            removed: window.__calls.some((c) => c.method === 'DELETE' && c.path === '/v1/agents/ad9'),
+            said: $('adoptErr').textContent,
+          };
+        };
+        // The step answered: one of the posts was taken. Watched on, and adopted.
+        const taken = await attempt([{ body: setting }, { body: setting }, { body: { ...setting, state: 'RUNNING' } }]);
+        eq('step answered: four posts, copied in, not removed', [taken.posts, taken.copied, taken.removed], [4, true, false]);
+        // The step still open: none was taken. Removed, and the last answer said, as before.
+        const open = await attempt([{ body: waiting }]);
+        eq('step still open: four posts, nothing copied, removed', [open.posts, open.copied, open.removed], [4, false, true]);
+        ok('and the last answer is what it says: ' + open.said, /Bad Gateway/.test(open.said));
+        // Not read either: kept, and said.
+        for (const [how, lost] of [['no answer', { reject: 'Failed to fetch' }], ['a server error', { status: 502, body: { error: 'Bad gateway, for the test.' } }]]) {
+          const unknown = await attempt([lost]);
+          eq(how + ': four posts, nothing copied, not removed', [unknown.posts, unknown.copied, unknown.removed], [4, false, false]);
+          ok(how + ': and it says so: ' + unknown.said, /^“Shed Helper” was kept, and nothing was copied: the hand-over of its bot may not have gone through \(Bad Gateway\), and it could not be read after that \(.+\), so whether it has its bot is not known\. Look at its card: if it still asks for a bot token, remove it and adopt again\. Removed once it runs on that bot, the bot is parked in your Bot pool \(⚙ Settings → Messaging → Telegram\), so remove it from there before adopting again\. Don’t switch the bot’s account back on in OpenClaw while this agent may hold it: once it runs, both would poll it, and messages would be lost\.$/.test(unknown.said));
+        }
+        // Review: a 409 to the post sent again after no answer is what an earlier post that landed brings. Not read
+        // after: kept, and said as that, not as a post with no answer.
+        const again = await attempt([{ status: 502, body: { error: 'Bad gateway, for the test.' } }],
+          [{ reject: 'Failed to fetch' }, { status: 409, body: { error: 'This agent is not waiting for a bot token.' } }]);
+        eq('409 to the post sent again: two posts, nothing copied, not removed', [again.posts, again.copied, again.removed], [2, false, false]);
+        ok('409 to the post sent again: and it says an earlier one may have gone through: ' + again.said, again.said.startsWith('“Shed Helper” was kept, and nothing was copied: an earlier hand-over of its bot may have gone through (sent again after no answer, it was refused: This agent is not waiting for a bot token.), and it could not be read after that (Bad gateway, for the test.), so whether it has its bot is not known. Look at its card: '));
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    adoptSaysWhenTheAgentIsGoneAtTheHandOver: async () => {
+      // Review of HB-1277: no answer to the four bot hand-over posts, and the agent read after them is gone (404). It was
+      // said as kept, with its card to look at: it is gone, so there is nothing to keep, and no delete is sent.
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-shed-helper';
+      const bot = { accountId: 'made_up_shed_bot', sourceAgentId: 'shed', enabledInSource: false, polling: 'idle', allowFrom: [] };
+      const waiting = { id: 'ad10', name: 'Shed Helper', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } };
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad10', 'POST /v1/agents/ad10/channel-token', 'DELETE /v1/agents/ad10'];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: bot, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('taking over its bot is offered and ticked', !!$('adoptReuse')?.checked);
+        $('adoptName').value = 'Shed Helper';
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad10', name: 'Shed Helper', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad10'] = [{ body: waiting }, { status: 404, body: { error: 'No such agent.' } }];
+        window.__answer['POST /v1/agents/ad10/channel-token'] = [{ reject: 'Failed to fetch' }, { status: 503, body: { error: 'Telegram did not answer, so the token could not be checked. Try again in a moment.' } },
+          { status: 504, body: { error: 'Gateway Timeout' } }, { status: 502, body: { error: 'Bad Gateway' } }];
+        window.__answer['DELETE /v1/agents/ad10'] = [{ status: 404, body: { error: 'No such agent.' } }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        eq('four posts', window.__calls.filter((c) => c.method === 'POST' && c.path === '/v1/agents/ad10/channel-token').length, 4);
+        ok('no delete is sent', !window.__calls.some((c) => c.method === 'DELETE'));
+        ok('and it says it is gone: ' + $('adoptErr').textContent, $('adoptErr').textContent === '“Shed Helper” is gone (No such agent.): it was removed while its bot was being handed over, so nothing was copied, and there is nothing to remove. Adopt again.');
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    adoptUsesThePastedToken: async () => {
+      // HB-1144: a BotFather token pasted into a manual adopt is the bot it gets: no pool bot is taken first.
+      window.__answer = window.__answer || {};
+      const WS = '/home/tester/.openclaw/workspace-garden-notes';
+      const TOKEN = 'made-up-token-for-the-test';
+      const hadHosts = hosts;
+      if (!hosts?.length) hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }];
+      const keys = ['POST /v1/workspaces/inspect', 'POST /v1/agents', 'GET /v1/agents/ad6', 'POST /v1/agents/ad6/channel-token', 'POST /v1/agents/ad6/adopt-workspace', 'DELETE /v1/agents/ad6'];
+      try {
+        openAdoptDlg(); await sleep(250);
+        window.__answer['POST /v1/workspaces/inspect'] = [{ status: 200, body: { path: WS, files: ['SOUL.md'], bytes: 1024, markdownFiles: ['SOUL.md'], existingBot: null, links: [] } }];
+        $('adoptPath').value = WS;
+        await adoptInspect(); await sleep(50);
+        ok('no bot of its own: "No Telegram" is ticked', !!$('adoptWeb')?.checked);
+        $('adoptWeb').checked = false; adoptWebChanged();
+        $('adoptToken').value = TOKEN;
+        $('adoptName').value = 'Garden Notes';
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad6', name: 'Garden Notes', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad6'] = [{ body: { id: 'ad6', name: 'Garden Notes', state: 'PROVISIONING', pendingAction: { type: 'bot_token', instructions: 'made up' } } },
+          { body: { id: 'ad6', name: 'Garden Notes', state: 'RUNNING' } }];
+        window.__answer['POST /v1/agents/ad6/channel-token'] = [{ status: 202, body: { username: 'made_up_garden_bot' } }];
+        window.__answer['POST /v1/agents/ad6/adopt-workspace'] = [{ status: 200, body: { files: 1, bytes: 1024, crons: { carried: 0 } } }];
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        const made = calls('POST', /^\/v1\/agents$/)[0];
+        eq('the agent is made to wait for that token, not given a pool bot', made?.body?.skipPool, true);
+        eq('the pasted token is handed over', calls('POST', /^\/v1\/agents\/ad6\/channel-token$/).map((c) => c.body), [{ token: TOKEN }]);
+        ok('and the workspace copied in', calls('POST', /^\/v1\/agents\/ad6\/adopt-workspace$/).length === 1);
+        // Came up on another bot all the same: said, and nothing copied.
+        window.__answer['POST /v1/agents'] = [{ status: 202, body: { id: 'ad6', name: 'Garden Notes', state: 'PROVISIONING' } }];
+        window.__answer['GET /v1/agents/ad6'] = [{ body: { id: 'ad6', name: 'Garden Notes', state: 'RUNNING', botUsername: 'made_up_pool_bot' } }];
+        window.__answer['DELETE /v1/agents/ad6'] = [{ status: 200, body: {} }];
+        adoptDlg.open || adoptDlg.showModal();
+        $('adoptName').value = 'Garden Notes'; $('adoptToken').value = TOKEN;
+        window.__calls.length = 0;
+        await runAdopt(); await sleep(100);
+        ok('on another bot: said: ' + $('adoptErr').textContent, $('adoptErr').textContent.includes('“Garden Notes” did not wait for a bot (it has @made_up_pool_bot), so the token you pasted was not used.'));
+        ok('on another bot: nothing copied', !calls('POST', /adopt-workspace$/).length);
+      } finally {
+        hosts = hadHosts;
+        for (const k of keys) delete window.__answer[k];
+        if (adoptDlg.open) adoptDlg.close();
+        await refresh(false);
+      }
+    },
+    signInSavesWhatItSent: async () => {
+      // HB-1133: the password manager is offered the pair that was sent and answered, not what the fields hold when the answer comes.
+      const account = await (await fetch('/v1/account')).json();
+      const realFetch = window.fetch, hadCred = window.PasswordCredential, hadStore = navigator.credentials.store;
+      const where = location.pathname + location.search + location.hash;
+      const stored = [];
+      let held = null, release = null;
+      try {
+        window.PasswordCredential = class { constructor(d) { Object.assign(this, d); } };
+        navigator.credentials.store = async (c) => { stored.push([c.id, c.password]); };
+        window.fetch = async (input, init = {}) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (held && (init.method || 'GET').toUpperCase() === 'POST' && url.split('?')[0] === held.path) {
+            const { reply } = held; held = null;
+            await new Promise((r) => { release = r; });
+            return new Response(JSON.stringify(reply), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          return realFetch(input, init);
+        };
+        // Sent with one pair, the fields edited while the answer waits, then answered.
+        const run = async (what, path, reply, start, fields, want) => {
+          for (const [id, v] of Object.entries(fields)) $(id).value = v[0];
+          stored.length = 0; release = null; held = { path, reply };
+          const going = start();
+          await until(() => release);
+          for (const [id, v] of Object.entries(fields)) $(id).value = v[1];
+          release();
+          await going;
+          eq(what + ': the pair saved', stored, [want]);
+        };
+        await run('sign-in', '/v1/login', { ok: true }, acctSignIn,
+          { loginUser: ['made-up-first', 'made-up-second'], loginAcctPw: ['first-made-up-pw', 'second-made-up-pw'] }, ['made-up-first', 'first-made-up-pw']);
+        await run('invitation', '/v1/local-accounts/claim', { username: 'made-up-invited', id: account.ownerId }, acctClaim,
+          { claimPw: ['first-made-up-pw', 'second-made-up-pw'] }, ['made-up-invited', 'first-made-up-pw']);
+        await run('first account', '/v1/local-accounts/bootstrap', { id: account.ownerId }, acctBootstrap,
+          { setupUser: ['made-up-owner', 'made-up-other'], setupPw: ['first-made-up-pw', 'second-made-up-pw'], setupCode: ['', ''] }, ['made-up-owner', 'first-made-up-pw']);
+        await run('recovery code', '/v1/local-accounts/recover-with-code', { username: 'made-up-recovered', recoveryCode: 'MADE-UP-RECOVERY', ownerId: account.ownerId }, acctRecover,
+          { recUser: ['made-up-recovered', 'made-up-recovered'], recCode: ['MADE-UP-OLD', 'MADE-UP-OLD'], recPw: ['first-made-up-pw', 'second-made-up-pw'] }, ['made-up-recovered', 'first-made-up-pw']);
+      } finally {
+        window.fetch = realFetch;
+        window.PasswordCredential = hadCred; navigator.credentials.store = hadStore;
+        history.replaceState(null, '', where);
+        for (const id of ['loginUser', 'loginAcctPw', 'claimPw', 'setupUser', 'setupPw', 'recUser', 'recCode', 'recPw']) $(id).value = '';
+        if (recoveryDlg.open) recoveryDlg.close();
+        if (loginDlg.open) loginDlg.close();
+        await loadMyAccount();
+        pageReloadWanted = false;
+        await refresh(true);
+      }
+    },
+    joinPageSaysNotRunning: async () => {
+      // HB-0992: the real web/join.html in a frame. A join to an agent that is not running is kept: the page says so,
+      // on each app, and still offers the way in; a join to a running one says nothing of it.
+      const WAIT = "It's not running right now; your first message will be let in as soon as it is.";
+      const TG = { kind: 'telegram', deepLink: 'https://t.me/homework_helper_bot' };
+      const DC = { kind: 'discord', deepLink: 'https://discord.com/users/000000000000000001', servers: ['Rivergate FC'] };
+      const joinAs = async (way, answer, joinAnswer = { status: 201, body: { agentName: 'Homework Helper', channel: way.kind, deepLink: way.deepLink, channels: [way], ...answer } }) => {
+        window.__answer = { 'GET /v1/invites/srcdoc': [{ body: { valid: true, agentName: 'Homework Helper', channels: [way] } }],
+          'POST /v1/join': [joinAnswer] };
+        const frame = document.createElement('iframe');
+        frame.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:800px;background:#fff;z-index:99999';
+        frame.srcdoc = window.__joinPage.replace('<head>', () => '<head><script>window.fetch = (...a) => parent.fetch(...a);<\/script>');
+        document.body.appendChild(frame);
+        await until(() => frame.contentDocument && frame.contentDocument.getElementById('joinBtn'));
+        const d = frame.contentDocument;
+        d.getElementById('joinBtn').click();
+        await until(() => d.getElementById('card').textContent.includes("You're in") || d.getElementById('err')?.textContent);
+        return frame;
+      };
+      let frame;
+      try {
+        frame = await joinAs(TG, { botUsername: 'homework_helper_bot', notRunning: true });
+        let card = frame.contentDocument.getElementById('card');
+        ok('Telegram: told it is not running: ' + card.textContent.trim().slice(0, 200), card.textContent.includes(WAIT));
+        ok('and the bot is still offered', !!card.querySelector('a.btn[href="https://t.me/homework_helper_bot"]'));
+        frame.remove();
+        frame = await joinAs(DC, { notRunning: true });
+        card = frame.contentDocument.getElementById('card');
+        ok('Discord: told too', card.textContent.includes(WAIT) && !!card.querySelector('a.btn[href^="https://discord.com/"]'));
+        frame.remove();
+        frame = await joinAs(TG, { botUsername: 'homework_helper_bot' });
+        ok('running: nothing said of it', !frame.contentDocument.getElementById('card').textContent.includes('not running'));
+        frame.remove();
+        // Stopped by its owner, and the invite names nobody: refused, said as the server words it, and Join still there for once it runs.
+        const REFUSED = "Homework Helper isn't running right now. Ask its owner to start it, then open this invite again: it is still good.";
+        frame = await joinAs(TG, {}, { status: 409, body: { error: REFUSED } });
+        const fd = frame.contentDocument;
+        eq('refused: said', fd.getElementById('err').textContent, REFUSED);
+        ok('and Join can be pressed again', !!fd.getElementById('joinBtn') && !fd.getElementById('joinBtn').disabled);
+      } finally {
+        if (frame) frame.remove();
+        window.__answer = {};
+      }
+    },
+    joinPageSaysWhenTheAppGaveNoLink: async () => {
+      // HB-1218: a Discord or Slack join whose app gave no link: said as that, with where to look, not "isn't running".
+      const join = async (way) => {
+        window.__answer = { 'GET /v1/invites/srcdoc': [{ body: { valid: true, agentName: 'Homework Helper', channels: [way] } }],
+          'POST /v1/join': [{ status: 201, body: { agentName: 'Homework Helper', channel: way.kind, channels: [way] } }] };
+        const frame = document.createElement('iframe');
+        frame.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:800px;background:#fff;z-index:99999';
+        frame.srcdoc = window.__joinPage.replace('<head>', () => '<head><script>window.fetch = (...a) => parent.fetch(...a);<\/script>');
+        document.body.appendChild(frame);
+        await until(() => frame.contentDocument && frame.contentDocument.getElementById('joinBtn'));
+        frame.contentDocument.getElementById('joinBtn').click();
+        await until(() => frame.contentDocument.getElementById('card').textContent.includes("You're in"));
+        return frame;
+      };
+      let frame;
+      try {
+        frame = await join({ kind: 'discord', servers: ['Rivergate FC'] });
+        let card = frame.contentDocument.getElementById('card').textContent.replace(/\s+/g, ' ');
+        ok('Discord: no link, said so: ' + card.slice(0, 400), card.includes('Discord gave no link to it, so there is no button here. Look for Homework Helper in the member list of Rivergate FC and send it a direct message.'));
+        ok('not "isn\'t running"', !card.includes("isn't running") && !frame.contentDocument.querySelector('#card a.btn'));
+        frame.remove();
+        frame = await join({ kind: 'slack', team: 'Rivergate FC' });
+        card = frame.contentDocument.getElementById('card').textContent.replace(/\s+/g, ' ');
+        ok('Slack: where to look: ' + card.slice(0, 400), card.includes('Look for Homework Helper under Apps in the Rivergate FC Slack workspace') && !card.includes("isn't running"));
+      } finally {
+        if (frame) frame.remove();
+        window.__answer = {};
+      }
+    },
+  });
+  /** Requests whose path matches re held until a scenario answers each, in any order; end() answers what is left and lets go. */
+  const heldReads = (re, method = 'GET') => {
+    const real = window.fetch, waiting = [];
+    window.fetch = (input, init = {}) => {
+      const url = String(typeof input === 'string' ? input : input.url);
+      if ((init.method || 'GET').toUpperCase() !== method || !re.test(url.split('?')[0])) return real(input, init);
+      return new Promise((resolve) => waiting.push({ url, answer: (body, status = 200) => resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })) }));
+    };
+    return { waiting, end: () => { window.fetch = real; for (const w of waiting.splice(0)) w.answer({ error: 'Ended, for the test.' }, 503); } };
+  };
+  Object.assign(T, {
+    auditShowsItsOwnFilter: async () => {
+      // HB-0913: an agent picked in the full log, then another before the first answered: the log is the one picked, in either order.
+      const h = heldReads(/^\/v1\/events$/);
+      const ev = (name) => [{ at: new Date().toISOString(), event: 'agent.started', agentName: name }];
+      const list = () => $('auditList').textContent;
+      const pick = (id) => { $('auditAgent').value = id; $('auditAgent').dispatchEvent(new Event('change', { bubbles: true })); };
+      try {
+        const opening = openAudit('a1');
+        await until(() => h.waiting.length === 1);
+        pick('a2');
+        await until(() => h.waiting.length === 2);
+        const [a1, a2] = h.waiting.splice(0);
+        ok('each read asks for its agent', a1.url.includes('agentId=a1') && a2.url.includes('agentId=a2'));
+        a2.answer(ev('Soccer Schedule'));
+        await until(() => list().includes('Soccer Schedule'));
+        a1.answer(ev('Homework Helper')); await opening; await sleep(50);
+        ok('the slower answer for the agent picked before is not drawn: ' + list().replace(/\s+/g, ' ').slice(0, 80), list().includes('Soccer Schedule') && !list().includes('Homework Helper'));
+        // The other order: the older answer comes first, and is not drawn; the newer one is.
+        $('auditList').innerHTML = '';
+        pick('a1'); pick('a2');
+        await until(() => h.waiting.length === 2);
+        const [older, newer] = h.waiting.splice(0);
+        older.answer(ev('Homework Helper')); await sleep(50);
+        ok('an older answer that comes first is not drawn', !list().includes('Homework Helper'));
+        newer.answer(ev('Soccer Schedule'));
+        await until(() => list().includes('Soccer Schedule'));
+        // Nor an older read's error.
+        pick('a1'); pick('a2');
+        await until(() => h.waiting.length === 2);
+        const [failed, fine] = h.waiting.splice(0);
+        fine.answer(ev('Soccer Schedule')); await sleep(50);
+        failed.answer({ error: 'The log could not be read.' }, 500); await sleep(50);
+        ok("nor an older read's error", list().includes('Soccer Schedule') && !list().includes('could not be read'));
+        eq('the filter still says the agent picked', $('auditAgent').value, 'a2');
+      } finally { h.end(); if (auditDlg.open) auditDlg.close(); }
+    },
+    machineLineKeepsWhatItKnew: async () => {
+      // HB-1043: a runner offline and a late backup, then a read of the machine that fails: both stay, on the line and in Alerts.
+      const now = Date.now(), owner = myAccount.hostOwner, was = v2Machine;
+      window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 3 }, { id: 'h2', name: 'Laptop runner', kind: 'cloud', agentCount: 2, reachable: false }];
+      window.__override['/v1/backups'] = { backups: [{ date: new Date(now - 5 * 864e5).toISOString().slice(0, 10), hasKey: true, complete: true }], keepDays: 14, missing: [] };
+      window.__override['/v1/runtime'] = { imageVersion: '2026.9.6', upgradeAvailable: false };
+      const keys = () => v2MachineAlerts().map((x) => x.key.split(':')[0]).sort();
+      myAccount.hostOwner = true;
+      try {
+        await v2LoadMachine(true);
+        eq('first: the runner and the backups', keys(), ['backup', 'runner-down']);
+        // Every part of the read fails: what was known stays.
+        window.__answer = { 'GET /v1/hosts': [{ status: 500, body: { error: 'Down, for the test.' } }], 'GET /v1/backups': [{ status: 500, body: {} }], 'GET /v1/runtime': [{ reject: 'Failed to fetch' }] };
+        await v2LoadMachine(true);
+        eq('a failed read: both still said', keys(), ['backup', 'runner-down']);
+        const line = $('v2Machine').textContent;
+        ok('and on the line: ' + line.replace(/\s+/g, ' ').slice(0, 160), line.includes('not answering') && line.includes('days old') && line.includes('OpenClaw 2026.9.6'));
+        // A part that is read again is taken as it comes: the runner answers now; the backups read fails and stays.
+        window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 3 }, { id: 'h2', name: 'Laptop runner', kind: 'cloud', agentCount: 2, reachable: true }];
+        window.__answer = { 'GET /v1/backups': [{ status: 500, body: {} }] };
+        await v2LoadMachine(true);
+        eq('the runner back, the backups as they were', keys(), ['backup']);
+      } finally {
+        window.__answer = {}; myAccount.hostOwner = owner;
+        for (const k of ['/v1/hosts', '/v1/backups', '/v1/runtime']) delete window.__override[k];
+        v2Machine = was; v2PaintMachine();
+      }
+    },
+    membersLinkedOnAnyApp: async () => {
+      // HB-1045: a member linked on Discord or Slack only is linked, with the app named: no "hasn't messaged yet", no door to open again.
+      try {
+        window.__override['/v1/agents/a1/members'] = [
+          { userId: 'o1', role: 'owner', status: 'active', channelUserId: '11', identities: { telegram: '11' }, account: true, webChat: false },
+          { userId: 'member-dc', displayName: 'Sam', role: 'user', status: 'active', identities: { discord: 'dc-made-up-sam' }, account: false, webChat: false },
+          { userId: 'member-sl', displayName: 'Jo', role: 'user', status: 'active', identities: { slack: 'U0MADEUP1' }, account: false, webChat: false },
+          { userId: 'member-two', displayName: 'Lee', role: 'user', status: 'active', channelUserId: '13', identities: { telegram: '13', discord: 'dc-made-up-lee' }, account: false, webChat: false },
+          { userId: 'member-new', displayName: 'Maria', role: 'user', status: 'active', identities: {}, account: false, webChat: false }];
+        openV2Agent('a1', 'sharing');
+        const rows = await until(() => { const r = [...document.querySelectorAll('#tgMemberList .pair')]; return r.length === 5 ? r : null; });
+        const [owner, sam, jo, lee, maria] = rows.map((r) => r.textContent.replace(/\s+/g, ' '));
+        ok('Discord only: linked, and where: ' + sam, sam.includes('✓ linked on Discord') && !sam.includes("hasn't messaged yet") && !sam.includes('Let them in again'));
+        ok('Slack only: linked, and where: ' + jo, jo.includes('✓ linked on Slack') && !jo.includes("hasn't messaged yet") && !jo.includes('Let them in again'));
+        ok('the owner: linked on Telegram: ' + owner, owner.includes('✓ linked on Telegram'));
+        ok('both apps named: ' + lee, lee.includes('✓ linked on Telegram and Discord'));
+        ok('its ids in the tip', rows[3].querySelector('[title]').title === 'Telegram id 13 · Discord id dc-made-up-lee');
+        ok('never messaged: said, and the door offered: ' + maria, maria.includes("hasn't messaged yet") && maria.includes('Let them in again') && !maria.includes('linked'));
+      } finally {
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/members'];
+      }
+    },
+    webChatOnAnAppSeatKeepsItsDoor: async () => {
+      // HB-1136 review: joined by a Telegram invite, never wrote, then given web chat: still "hasn't messaged yet",
+      // with the door to open again. One who came in for web chat alone is told neither.
+      try {
+        window.__override['/v1/agents/a1/members'] = [
+          { userId: 'o1', role: 'owner', status: 'active', channelUserId: '11', identities: { telegram: '11' }, account: true, webChat: false, joinedByAppInvite: false },
+          { userId: 'member-app', displayName: 'Sam', role: 'user', status: 'active', identities: {}, account: true, webChat: true, joinedByAppInvite: true },
+          { userId: 'member-web', displayName: 'Jo', role: 'user', status: 'active', identities: {}, account: true, webChat: true, joinedByAppInvite: false }];
+        openV2Agent('a1', 'sharing');
+        const rows = await until(() => { const r = [...document.querySelectorAll('#tgMemberList .pair')]; return r.length === 3 ? r : null; });
+        const [, sam, jo] = rows.map((r) => r.textContent.replace(/\s+/g, ' '));
+        ok('came in on Telegram, then web chat: the door is offered: ' + sam, sam.includes("hasn't messaged yet") && sam.includes('Let them in again'));
+        ok('web chat alone: no bot to message: ' + jo, !jo.includes("hasn't messaged yet") && !jo.includes('Let them in again'));
+      } finally {
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/members'];
+      }
+    },
+    healthStaysWithItsAgent: async () => {
+      // HB-1046: A's health checked, then B's before A's answered: B's sheet shows B's answer, in either order, and never A's error.
+      const h = heldReads(/^\/v1\/agents\/a[12]\/health$/);
+      const body = () => $('healthBody').textContent.replace(/\s+/g, ' ');
+      const lint = { findings: [], checksRun: 3, mutedCount: 0 };
+      const check = async (id) => {
+        openV2Agent(id, 'overview');
+        await until(() => $('v2HealthSlot'));
+        const n = h.waiting.length;
+        byText('#v2AgentDlg button', 'Check health').click();
+        await until(() => h.waiting.length === n + 1);
+      };
+      try {
+        await check('a1'); await check('a2');
+        let [a, b] = h.waiting.splice(0);
+        ok('each check asks for its agent', a.url.includes('/a1/') && b.url.includes('/a2/'));
+        b.answer({ reachable: true, status: 'healthy', ok: true, doctor: lint });
+        await until(() => body().includes('Responding'));
+        a.answer({ reachable: false, status: 'unreachable' }); await sleep(50);
+        ok("A's slower answer is not drawn under B: " + body().slice(0, 120), body().includes('Responding') && !body().includes('Not answering'));
+        ok("the pane is B's", $('v2HealthSlot').contains($('healthBody')) && v2AgentId === 'a2');
+        // The other order: A's answer first, not drawn; then B's, drawn.
+        await check('a1'); await check('a2');
+        [a, b] = h.waiting.splice(0);
+        a.answer({ reachable: false, status: 'unreachable' }); await sleep(50);
+        ok('an older answer that comes first is not drawn', !body().includes('Not answering'));
+        b.answer({ reachable: true, status: 'healthy', ok: true, doctor: lint });
+        await until(() => body().includes('Responding'));
+        // Nor an older check's error.
+        await check('a1'); await check('a2');
+        [a, b] = h.waiting.splice(0);
+        b.answer({ reachable: true, status: 'healthy', ok: true, doctor: lint });
+        await until(() => body().includes('Responding'));
+        a.answer({ error: 'The gateway check failed, for the test.' }, 500); await sleep(50);
+        ok("nor an older check's error", body().includes('Responding') && !body().includes('failed, for the test'));
+      } finally { h.end(); try { v2Close(); } catch {} }
+    },
+    budgetsKeepOtherRowsDrafts: async () => {
+      // HB-1051: drafts in two rows of All budgets; saving one keeps the other's, and the row saved shows what the server keeps.
+      const month = new Date().toISOString().slice(0, 7);
+      const row = (id, name, usd, every) => ({ id, name, state: 'RUNNING', billing: 'api', spent: 4, lastMonth: 3, monthlyNow: 6, suggested: 10,
+        ...(usd ? { budget: { scope: id, usd, atLimit: 'warn', month, spent: 4, pct: Math.round(400 / usd), level: 0, resetsOn: 'next 1st' } } : {}),
+        ...(every ? { alertEvery: { every, month, spent: 4, passed: 0, next: every } } : {}) });
+      const answer = (rows) => { window.__override['/v1/budgets'] = { month, tz: 'UTC', agents: rows }; };
+      const f = (id) => document.querySelector('#budgetsBody [id="' + id + '"]');
+      const reread = async (mark) => { await until(() => window.__calls.slice(mark).some((c) => c.method === 'GET' && c.path === '/v1/budgets')); await sleep(100); };
+      answer([row('a1', 'Homework Helper', 20), row('a2', 'Soccer Schedule', 30), row('a3', 'Piano Practice', 15)]);
+      try {
+        openBudgets();
+        await until(() => f('bgUsd_a3'));
+        f('bgUsd_a1').value = '60';
+        f('bgUsd_a2').value = '77'; f('bgAt_a2').value = 'pause'; f('bgStep_a2').value = '9';
+        f('bgStep_a2').focus();
+        // A's 60 is kept; Piano Practice's budget was changed elsewhere meanwhile, with nothing typed in its row.
+        answer([row('a1', 'Homework Helper', 60), row('a2', 'Soccer Schedule', 30), row('a3', 'Piano Practice', 25)]);
+        let mark = window.__calls.length;
+        f('bgUsd_a1').parentElement.querySelector('button').click();
+        await until(() => window.__calls.slice(mark).some((c) => c.method === 'PUT' && c.path === '/v1/agents/a1/budget'));
+        await reread(mark);
+        eq("B's drafts stay", [f('bgUsd_a2').value, f('bgAt_a2').value, f('bgStep_a2').value], ['77', 'pause', '9']);
+        ok('the focus too', document.activeElement === f('bgStep_a2'));
+        eq('A shows what the server keeps, as drawn', [f('bgUsd_a1').value, f('bgUsd_a1').defaultValue], ['60', '60']);
+        eq('a row with nothing typed shows the server now', f('bgUsd_a3').value, '25');
+        // B's step saved: its step shows the server's, its limit drafts stay.
+        answer([row('a1', 'Homework Helper', 60), row('a2', 'Soccer Schedule', 30, 9), row('a3', 'Piano Practice', 25)]);
+        mark = window.__calls.length;
+        f('bgStep_a2').parentElement.querySelector('button').click();
+        await until(() => window.__calls.slice(mark).some((c) => c.method === 'PUT' && c.path === '/v1/agents/a2/spend-alert'));
+        await reread(mark);
+        eq("B's step as kept, as drawn", [f('bgStep_a2').value, f('bgStep_a2').defaultValue], ['9', '9']);
+        eq("and its limit's drafts still there", [f('bgUsd_a2').value, f('bgAt_a2').value], ['77', 'pause']);
+      } finally {
+        delete window.__override['/v1/budgets'];
+        if (aiDlg.open) aiDlg.close();
+      }
+    },
+    budgetReadsDrawTheNewest: async () => {
+      // HB-1051: two rows of All budgets saved one after the other, their reads answered in either order: only the newest
+      // is drawn, and both rows saved show what the server keeps.
+      const month = new Date().toISOString().slice(0, 7);
+      const row = (id, name, usd) => ({ id, name, state: 'RUNNING', billing: 'api', spent: 4, lastMonth: 3, monthlyNow: 6, suggested: 10,
+        budget: { scope: id, usd, atLimit: 'warn', month, spent: 4, pct: Math.round(400 / usd), level: 0, resetsOn: 'next 1st' } });
+      const body = (a1, a2) => ({ month, tz: 'UTC', agents: [row('a1', 'Homework Helper', a1), row('a2', 'Soccer Schedule', a2)] });
+      const f = (id) => document.querySelector('#budgetsBody [id="' + id + '"]');
+      // The agent sheet's own budget row reads the same list: out of the way, so each save here makes one read.
+      const sheetRow = $('v2BudgetRow');
+      sheetRow?.removeAttribute('id');
+      const h = heldReads(/^\/v1\/budgets$/);
+      const save = async (id, usd) => {
+        const n = h.waiting.length;
+        f('bgUsd_' + id).value = String(usd);
+        f('bgUsd_' + id).parentElement.querySelector('button').click();
+        await until(() => h.waiting.length === n + 1);
+        return h.waiting[n];
+      };
+      try {
+        openBudgets();
+        await until(() => h.waiting.length >= 1);
+        for (const w of h.waiting.splice(0)) w.answer(body(20, 30));
+        await until(() => f('bgUsd_a2'));
+        // Saved A, then B; A's read, begun before B was saved, lands last.
+        let a = await save('a1', 60), b = await save('a2', 77);
+        b.answer(body(60, 77)); await sleep(100);
+        a.answer(body(60, 30)); await sleep(100);
+        h.waiting.length = 0;
+        eq("B's box keeps what was saved, not the older read's", [f('bgUsd_a2').value, f('bgUsd_a2').defaultValue], ['77', '77']);
+        eq("and A's", [f('bgUsd_a1').value, f('bgUsd_a1').defaultValue], ['60', '60']);
+        // The other order: A's read first, then B's. The newest drawn shows both rows as the server keeps them, A's
+        // changed elsewhere meanwhile: not A's 61 kept as if it were still typed.
+        a = await save('a1', 61); b = await save('a2', 78);
+        a.answer(body(65, 77)); await sleep(100);
+        b.answer(body(65, 78)); await sleep(100);
+        h.waiting.length = 0;
+        eq('both as kept, as drawn', [f('bgUsd_a1').value, f('bgUsd_a1').defaultValue, f('bgUsd_a2').value, f('bgUsd_a2').defaultValue], ['65', '65', '78', '78']);
+      } finally {
+        h.end();
+        if (sheetRow) sheetRow.id = 'v2BudgetRow';
+        if (aiDlg.open) aiDlg.close();
+      }
+    },
+    setupGuideKeepsTyping: async () => {
+      // HB-1140: a token half pasted into the setup guide, and the poll draws the guide again: the field, its text and the focus stay;
+      // another step changed meanwhile (the guide drawn anew) keeps what is typed in the fields still there.
+      const was = { profiles, account: myAccount, open: setupOpen, keys: fleetKeys };
+      try {
+        profiles = []; myAccount = { ...myAccount, hostOwner: true }; setupOpen = true; fleetKeys = { ...fleetKeys, media: false };
+        renderSetup();
+        const box = $('setupToken') || $('setupApiKey');
+        ok('the guide asks for the AI', !!box);
+        box.value = 'made-up-half-pasted'; $('setupModel').value = 'claude-sonnet-5';
+        box.focus(); box.setSelectionRange(4, 4);
+        $('setupErr').textContent = 'Paste a token, for the test.';
+        renderSetup(); renderSetup(); // two polls, nothing changed
+        const same = $('setupToken') || $('setupApiKey');
+        ok('the same field, with its text: ' + same.value, same === box && box.value === 'made-up-half-pasted');
+        ok('the focus stays', document.activeElement === box);
+        eq('and what it said', $('setupErr').textContent, 'Paste a token, for the test.');
+        // A shared key saved meanwhile: that step changes and the guide is drawn anew; the AI step's typing and focus carry over.
+        fleetKeys = { ...fleetKeys, media: true };
+        renderSetup();
+        const now = $('setupToken') || $('setupApiKey');
+        ok('drawn anew', now !== box && $('setup').textContent.includes('Shared Gemini key saved'));
+        eq('what is typed is kept', [now.value, $('setupModel').value], ['made-up-half-pasted', 'claude-sonnet-5']);
+        ok('with the focus and the caret', document.activeElement === now && now.selectionStart === 4);
+      } finally {
+        profiles = was.profiles; myAccount = was.account; setupOpen = was.open; fleetKeys = was.keys;
+        document.activeElement?.blur?.();
+        renderSetup();
+      }
+    },
+    knocksFromOneRead: async () => {
+      // HB-1142: the poll reads every knock in one bounded read; each shows on its agent, on the home screen and in its sheet,
+      // the newest read wins in either order, and a turn-away reads them again.
+      const chat = agents.filter((a) => a.state === 'RUNNING' && v2ChannelKinds(a).length && v2Mine(a) && !a.ops).slice(0, 2);
+      ok('two chat agents in the stub', chat.length === 2);
+      const [x, y] = chat;
+      const knock = (a, code, who, kind = 'telegram') => ({ agentId: a.id, agentName: a.name, kind, code, channelUserId: 'u-' + code, ...(kind === 'telegram' ? { telegramId: 'u-' + code } : {}), username: who.toLowerCase(), firstName: who });
+      const h = heldReads(/^\/v1\/pending$/);
+      const joins = () => $('v2JoinList')?.textContent.replace(/\s+/g, ' ') ?? '';
+      // A poll started, once its knock read is waiting: { done } settles when the poll does (returned bare, the promise was awaited).
+      const poll = async () => { const n = h.waiting.length; pairTick = 0; const done = refresh(false); await until(() => h.waiting.length === n + 1); return { done }; };
+      const confirms = window.__confirms.length, answer = window.__confirmAnswer;
+      try {
+        const mark = window.__calls.length;
+        const one = await poll();
+        h.waiting.shift().answer([knock(x, 'K1', 'Maria'), knock(y, 'K2', 'Sam', 'discord'), knock(x, 'K3', 'Lee')]);
+        await one.done;
+        eq('kept by agent, as the per-agent read gave them', [pairings[x.id].map((p) => [p.code, p.id, p.meta.firstName]), pairings[y.id].map((p) => [p.kind, p.code])],
+          [[['K1', 'u-K1', 'Maria'], ['K3', 'u-K3', 'Lee']], [['discord', 'K2']]]);
+        eq('no per-agent read', window.__calls.slice(mark).filter((c) => /\/pairing$/.test(c.path)).length, 0);
+        const j = await until(() => joins().includes('Sam') && joins());
+        ok('on the home screen, each with its agent: ' + j.slice(0, 200), j.includes('Maria wants to talk to ' + x.name) && j.includes('Sam wants to talk to ' + y.name + ' on Discord'));
+        // Its sheet says who is knocking.
+        openV2Agent(x.id, 'overview');
+        const sheet = await until(() => { const t = $('v2AgentDlg').textContent; return t.includes('Maria') && t; });
+        ok("in its sheet: Maria and Lee, not Sam", sheet.includes('Lee') && !sheet.includes('Sam wants'));
+        v2Close();
+        // Two polls; the older answer lands last: the newer is kept. Then the other order.
+        const older = await poll(), newer = await poll();
+        const [o, n] = h.waiting.splice(0);
+        n.answer([knock(y, 'K4', 'Jo')]); await newer.done;
+        o.answer([knock(x, 'K1', 'Maria')]); await older.done;
+        eq('the older answer, landing last, is dropped', Object.keys(pairings), [y.id]);
+        const older2 = await poll(), newer2 = await poll();
+        const [o2, n2] = h.waiting.splice(0);
+        o2.answer([knock(x, 'K1', 'Maria')]); await older2.done;
+        n2.answer([]); await newer2.done;
+        eq('the newer answer, landing last, is kept', Object.keys(pairings), []);
+        // A failed read keeps what was found.
+        const kept = await poll(); h.waiting.shift().answer([knock(y, 'K4', 'Jo')]); await kept.done;
+        const failed = await poll(); h.waiting.shift().answer({ error: 'Down, for the test.' }, 503); await failed.done;
+        eq('a failed read keeps the knocks', (pairings[y.id] ?? []).map((p) => p.code), ['K4']);
+        // Turned away: read again at once, and the knock goes.
+        window.__confirmAnswer = true;
+        const deny = denyPair(y.id, 'K4', 'Jo', 'discord');
+        await until(() => h.waiting.length === 1);
+        h.waiting.shift().answer([]); await deny;
+        eq('read again after a turn-away', pairings[y.id], undefined);
+      } finally {
+        h.end(); window.__confirmAnswer = answer; window.__confirms.length = confirms;
+        try { v2Close(); } catch {}
+        pairings = {}; pairTick = 0;
+        await refresh(false);
+      }
+    },
+    handledKnockLeaves: async () => {
+      // HB-1142: a knock let in or turned away leaves the page at once, though the read after it fails (a failed read keeps
+      // the knocks it had), and a read begun before it, answered after it, does not put it back.
+      const chat = agents.filter((a) => a.state === 'RUNNING' && v2ChannelKinds(a).length && v2Mine(a) && !a.ops).slice(0, 2);
+      ok('two chat agents in the stub', chat.length === 2);
+      const [x, y] = chat;
+      const knock = (a, code, who, kind = 'telegram') => ({ agentId: a.id, agentName: a.name, kind, code, channelUserId: 'u-' + code, ...(kind === 'telegram' ? { telegramId: 'u-' + code } : {}), username: who.toLowerCase(), firstName: who });
+      const list = await (await fetch('/v1/agents')).json();
+      const h = heldReads(/^\/v1\/pending$/);
+      let lists = null;
+      const joins = () => $('v2JoinList')?.textContent.replace(/\s+/g, ' ') ?? '';
+      const codes = (id) => (pairings[id] ?? []).map((p) => p.code);
+      const down = (w) => w.answer({ error: 'Down, for the test.' }, 503);
+      const answer = window.__confirmAnswer;
+      try {
+        pairTick = 0;
+        const first = refresh(false);
+        await until(() => h.waiting.length === 1);
+        h.waiting.shift().answer([knock(x, 'K1', 'Maria'), knock(x, 'K2', 'Sam', 'discord'), knock(y, 'K3', 'Lee')]);
+        await first;
+        await until(() => joins().includes('Lee'));
+        // Let in, and the read after it fails.
+        const letIn = approve(x.id, 'K1', false, 'telegram', 'Maria');
+        await until(() => h.waiting.length === 1);
+        down(h.waiting.shift()); await letIn;
+        eq('let in: gone, the rest kept', [codes(x.id), codes(y.id)], [['K2'], ['K3']]);
+        ok('and off the home screen: ' + joins().slice(0, 200), !joins().includes('Maria') && joins().includes('Lee'));
+        // Turned away, and the read after it fails.
+        window.__confirmAnswer = true;
+        const away = denyPair(y.id, 'K3', 'Lee', 'telegram');
+        await until(() => h.waiting.length === 1);
+        down(h.waiting.shift()); await away;
+        eq('turned away: gone', pairings[y.id], undefined);
+        ok('off the home screen too', !joins().includes('Lee'));
+        // A poll's read under way, then Sam turned away; the poll's answer, with Sam still in it, lands before the next read starts.
+        pairTick = 0;
+        const before = refresh(false);
+        await until(() => h.waiting.length === 1);
+        lists = heldReads(/^\/v1\/agents$/);
+        const after = denyPair(x.id, 'K2', 'Sam', 'discord');
+        await until(() => lists.waiting.length === 1);
+        h.waiting.shift().answer([knock(x, 'K2', 'Sam', 'discord')]); await before;
+        eq('a read from before it does not bring it back', pairings[x.id], undefined);
+        lists.waiting.shift().answer(list);
+        await until(() => h.waiting.length === 1);
+        down(h.waiting.shift()); await after;
+        eq('nor does the failed read after it', pairings[x.id], undefined);
+      } finally {
+        lists?.end(); h.end(); window.__confirmAnswer = answer;
+        pairings = {}; pairTick = 0;
+        await refresh(false);
+      }
+    },
+    imagePinFollowsTheSave: async () => {
+      // HB-1143: whether a pin rebuilds is the save's answer, not the page's last poll: an agent the page saw asleep that
+      // woke since is asked about and rebuilt; one it saw running that stopped since is left for its next start.
+      const toastText = () => $('toast').textContent;
+      const tax = agents.find((a) => a.name === 'Tax Filing'), run = agents.find((a) => a.id === 'a1');
+      ok('a stopped and a running agent in the stub', tax?.state === 'STOPPED' && run?.state === 'RUNNING');
+      const sel = $('editImage'), tag = 'hatchabot/runtime:trial';
+      const pin = async (a, state, rebuild) => {
+        editAgentId = a.id;
+        const o = document.createElement('option'); o.value = tag; sel.replaceChildren(o); sel.value = tag;
+        sel.dataset.agent = a.id; delete sel.dataset.loading;
+        window.__answer = { ['PATCH /v1/agents/' + a.id]: [{ status: 200, body: { ...a, image: tag, state, runtimeRef: a.runtimeRef || 'made-up-ref', sameImage: false } }],
+          ...(rebuild ? { ['POST /v1/agents/' + a.id + '/rebuild']: [{ status: 202, body: rebuild }] } : {}) };
+        $('toast').textContent = '';
+        const asked = window.__confirms.length, sent = calls('POST', new RegExp('/v1/agents/' + a.id + '/rebuild$')).length;
+        await saveImagePin();
+        return { asked: window.__confirms.slice(asked), sent: calls('POST', new RegExp('/v1/agents/' + a.id + '/rebuild$')).slice(sent) };
+      };
+      const confirms = window.__confirms.length;
+      try {
+        // Seen asleep, running now: asked, then rebuilt, the server deciding if it stopped meanwhile.
+        let r = await pin(tax, 'RUNNING', { rebuilding: true });
+        ok('asked first: ' + r.asked.join(' | '), r.asked.length === 1 && r.asked[0].includes('rebuilds "Tax Filing" now'));
+        eq('then rebuilt, a stop meanwhile kept for its next start', r.sent.map((c) => c.body), [{ stoppedWaits: true }]);
+        await until(() => toastText().includes('rebuilding onto it now'));
+        // Refused: nothing sent, and it says when it moves.
+        window.__confirmAnswer = false;
+        r = await pin(tax, 'RUNNING');
+        eq('refused: no rebuild', r.sent.length, 0);
+        await until(() => toastText().includes('at its next rebuild'));
+        window.__confirmAnswer = true;
+        // Seen running, stopped now: nothing asked, nothing rebuilt (the save keeps it for its next start).
+        r = await pin(run, 'STOPPED');
+        eq('stopped since: not asked, not rebuilt', [r.asked.length, r.sent.length], [0, 0]);
+        await until(() => toastText().includes('it moves onto it when it next starts'));
+      } finally {
+        window.__confirmAnswer = true; window.__answer = {}; window.__confirms.length = confirms;
+        editAgentId = null; delete sel.dataset.agent; delete sel.dataset.loading; sel.replaceChildren();
+      }
+    },
+    statusSectionsNameTheirKind: async () => {
+      // HB-1145: by Status, a failed agent and one that did not start again are both blocked, an asleep one and a stopped
+      // one both stopped, as is a running one out of reach: each section is named for its kind, not its first agent; the
+      // tiles keep their own words, and a section whose agents say the same keeps those words.
+      const view = v2View;
+      const list = await (await fetch('/v1/agents')).json();
+      const mine = list.filter((a) => v2Mine(a) && !a.ops && a.state === 'RUNNING' && !a.parentAgentId && !list.some((k) => k.parentAgentId === a.id));
+      ok('four running agents of mine in the stub', mine.length >= 4);
+      const [f, s, z, p] = mine;
+      const set = (as) => { window.__override['/v1/agents'] = list.map((a) => ({ ...a, ...(as[a.id] || {}) })); };
+      const sections = () => [...document.querySelectorAll('#v2groups section.v2group')].map((g) => ({
+        name: g.querySelector('.v2ghead h3')?.textContent.trim(), ids: [...g.querySelectorAll('.v2agent[data-v2id]')].map((t) => t.dataset.v2id),
+        bulk: g.querySelector('.v2ghead button[title^="Bulk actions"]')?.outerHTML ?? '' }));
+      const of = (id) => sections().find((x) => x.ids.includes(id));
+      const words = (id) => document.querySelector('.v2agent[data-v2id="' + id + '"]')?.getAttribute('aria-label') ?? '';
+      try {
+        set({ [f.id]: { state: 'FAILED' }, [s.id]: { state: 'STOPPED', stateReason: 'made-up: it did not come back' },
+          [z.id]: { state: 'STOPPED', hibernatedAt: new Date().toISOString() }, [p.id]: { state: 'STOPPED' } });
+        await refresh(false);
+        v2SetView('state');
+        const blocked = of(f.id), stopped = of(z.id);
+        ok('failed and not started again share a section', !!blocked && blocked.ids.includes(s.id));
+        eq('named for both', blocked.name, 'Failed or blocked');
+        ok('asleep and stopped share one', !!stopped && stopped.ids.includes(p.id));
+        eq('named for both', stopped.name, 'Not running or out of reach');
+        ok('Bulk acts on it under that name', blocked.bulk.includes('Failed or blocked'));
+        ok('each tile keeps its own words: ' + words(f.id) + ' | ' + words(s.id), words(f.id).includes('Failed') && words(s.id).includes('Stopped: it did not start again'));
+        ok('and ' + words(z.id) + ' | ' + words(p.id), words(z.id).includes('Asleep') && words(p.id).includes('Stopped'));
+        // Running on a machine that is not answering, beside a stopped agent: the section does not say neither runs (L5).
+        set({ [z.id]: { hostUnreachable: true, hostName: 'made-up-runner' }, [p.id]: { state: 'STOPPED' } });
+        await refresh(false);
+        ok('out of reach, with the stopped one', of(z.id)?.ids.includes(p.id) && words(z.id).includes("isn't answering"));
+        eq('named for both', of(z.id)?.name, 'Not running or out of reach');
+        // One kind of words in a section: kept.
+        set({ [f.id]: { state: 'FAILED' }, [z.id]: { state: 'STOPPED' }, [p.id]: { state: 'STOPPED' } });
+        await refresh(false);
+        eq('failed alone: Failed', of(f.id)?.name, 'Failed');
+        eq('stopped alike: Stopped', of(z.id)?.name, 'Stopped');
+      } finally {
+        delete window.__override['/v1/agents'];
+        v2SetView(view);
+        await refresh(false);
+      }
+    },
+    pollReadsWhoTheSessionIs: async () => {
+      // HB-0954: another window signs in as someone else, and this one, in view all along, finds out at its next poll: the
+      // page is theirs (the last person's typing gone, a reload asked for) before their agents are drawn.
+      const account = await (await fetch('/v1/account')).json();
+      const list = await (await fetch('/v1/agents')).json();
+      const was = { person: pagePerson, away: pagePersonAway, out: pageSignedOut, cleared: pageCleared, reloads: window.__reloads, wanted: pageReloadWanted,
+        override: Object.prototype.hasOwnProperty.call(window.__override, '/v1/account') ? window.__override['/v1/account'] : undefined };
+      const realRender = renderV2, drawnFor = [];
+      const since = (mark, re) => window.__calls.slice(mark).filter((c) => c.method === 'GET' && re.test(c.path)).length;
+      try {
+        await loadMyAccount();
+        eq('the page is for its person', pagePerson, account.ownerId);
+        // The same person: one cheap read with the list, and nothing more.
+        let mark = window.__calls.length;
+        await refresh(false);
+        eq('one account read with the poll', since(mark, /^\/v1\/account$/), 1);
+        eq('and nothing more for the same person', since(mark, /^\/v1\/rebuild-policy$/), 0);
+        // Someone else signs in in another window: the session is theirs, and so is the list.
+        $('aiKey').value = 'made-up-unsaved-key';
+        // Someone knocking on the last person's agent, and no knock read in the poll that follows: their knocks go with them (HB-1142).
+        const knocked = list.find((a) => a.state === 'RUNNING' && v2ChannelKinds(a).length);
+        pairings = { [knocked.id]: [{ kind: 'telegram', code: 'K9', id: 'u-K9', meta: { firstName: 'Maria' } }] }; pairTick = 1;
+        window.__override['/v1/account'] = { ...account, ownerId: 'someone-else', email: 'robin@example.org' };
+        window.__override['/v1/agents'] = list.map((a) => ({ ...a, ownerId: 'someone-else' }));
+        renderV2 = (...args) => { if (agents.some((a) => a.ownerId === 'someone-else')) drawnFor.push(pagePerson); return realRender(...args); };
+        const reloads = window.__reloads;
+        mark = window.__calls.length;
+        await refresh(false);
+        eq('the page is theirs now', [pagePerson, myAccount.ownerId], ['someone-else', 'someone-else']);
+        ok('their agents drawn for them, never for the last person: ' + JSON.stringify([...new Set(drawnFor)]), drawnFor.length > 0 && drawnFor.every((p) => p === 'someone-else'));
+        eq("the last person's typing is gone", $('aiKey').value, '');
+        eq('and who knocked on their agents', pairings, {});
+        await until(() => window.__reloads > reloads);
+        ok('and the page reloads for them', true);
+      } finally {
+        renderV2 = realRender;
+        if (was.override === undefined) delete window.__override['/v1/account']; else window.__override['/v1/account'] = was.override;
+        delete window.__override['/v1/agents'];
+        $('aiKey').value = ''; pairings = {};
+        await loadMyAccount();
+        clearTimeout(pageReloadTimer); pageReloadTimer = 0; pageReloadWanted = was.wanted;
+        pagePerson = was.person; pagePersonAway = was.away; pageSignedOut = was.out; pageCleared = was.cleared; window.__reloads = was.reloads;
+        await refresh(true);
+      }
+    },
+    listWaitsForWhoTheSessionIs: async () => {
+      // HB-0954: a poll finds someone else signed in, and its read of their account fails: the list is not drawn under the
+      // last person's name. A meta pass's list waits for its read of the account, and is drawn for whoever it names.
+      const account = await (await fetch('/v1/account')).json();
+      const list = await (await fetch('/v1/agents')).json();
+      const was = { person: pagePerson, away: pagePersonAway, out: pageSignedOut, cleared: pageCleared, reloads: window.__reloads, wanted: pageReloadWanted, account: myAccount };
+      const theirs = { ...account, ownerId: 'someone-else', email: 'robin@example.org' };
+      const realRender = renderV2, drawnFor = [];
+      const ownersShown = () => [...new Set(agents.map((a) => a.ownerId))];
+      let h = null;
+      try {
+        await loadMyAccount();
+        eq('the page is for its person', pagePerson, account.ownerId);
+        const shown = ownersShown();
+        window.__override['/v1/agents'] = list.map((a) => ({ ...a, ownerId: 'someone-else' }));
+        renderV2 = (...args) => { if (agents.some((a) => a.ownerId === 'someone-else')) drawnFor.push(pagePerson); return realRender(...args); };
+        h = heldReads(/^\/v1\/account$/);
+        // A poll: who it is says someone else; the read of their account then fails.
+        const poll = refresh(false);
+        await until(() => h.waiting.length === 1);
+        h.waiting.shift().answer(theirs);
+        await until(() => h.waiting.length === 1);
+        h.waiting.shift().answer({ error: 'Down, for the test.' }, 503);
+        await poll;
+        eq('the page is still the last person\'s', [pagePerson, pagePersonAway], [account.ownerId, false]);
+        eq('and so is its list: the next one is not drawn', [ownersShown(), drawnFor], [shown, []]);
+        // A meta pass: the list waits for the account, which says someone else.
+        const reloads = window.__reloads;
+        const mark = window.__calls.length;
+        const meta = refresh(true);
+        await until(() => h.waiting.length === 1 && window.__calls.slice(mark).some((c) => c.method === 'GET' && c.path === '/v1/agents'));
+        await sleep(200);
+        eq('read, and not drawn before the account is', [ownersShown(), drawnFor], [shown, []]);
+        h.waiting.shift().answer(theirs);
+        await meta;
+        eq('the page is theirs', [pagePerson, myAccount.ownerId], ['someone-else', 'someone-else']);
+        ok('and their agents are drawn for them only: ' + JSON.stringify([...new Set(drawnFor)]), drawnFor.length > 0 && drawnFor.every((p) => p === 'someone-else'));
+        await until(() => window.__reloads > reloads);
+        ok('then the page reloads for them', true);
+      } finally {
+        renderV2 = realRender;
+        h?.end();
+        delete window.__override['/v1/agents'];
+        await loadMyAccount();
+        clearTimeout(pageReloadTimer); pageReloadTimer = 0; pageReloadWanted = was.wanted;
+        pagePerson = was.person; pagePersonAway = was.away; pageSignedOut = was.out; pageCleared = was.cleared; window.__reloads = was.reloads;
+        await refresh(true);
+      }
     },
   });
   /** The phone runs (the page opened 360 and 390 px wide): what has to fit a phone screen. The desktop suite is skipped there. */
@@ -12965,7 +15172,7 @@ const SCENARIOS = String.raw`(() => {
       const check = (what) => {
         const r = ver.getBoundingClientRect(), h = header.getBoundingClientRect();
         ok(what + ': the version shows: ' + JSON.stringify(r), r.width > 20 && r.height >= 8 && getComputedStyle(ver).visibility !== 'hidden');
-        eq(what + ': it names the build', ver.textContent, 'v' + window.HATCHABOT_VERSION);
+        eq(what + ': it names the build, as the page\'s meta tag gives it', ver.textContent, 'v' + document.querySelector('meta[name="hatchabot-version"]').content);
         ok(what + ': inside the header', r.top >= h.top && r.bottom <= h.bottom && r.left >= 0);
         ok(what + ': dim, not a colour of its own', getComputedStyle(ver).color === dim);
         const parts = [...header.querySelectorAll('.v2brand img, .v2hubactions button:not([hidden]), .v2avatar, #v2AppVer')].filter((e) => e.getBoundingClientRect().width > 0);
@@ -13428,9 +15635,15 @@ const SCENARIOS = String.raw`(() => {
     const report = () => document.documentElement.setAttribute('data-ui-results', JSON.stringify(results));
     for (const [name, run] of Object.entries(innerWidth <= 500 ? P : innerHeight < 500 ? L : T)) {
       document.documentElement.setAttribute('data-ui-running', name);
-      try { await run(); results.push({ name, ok: true }); }
+      // The virtual seconds each took, so a run near its budget says where the time went (HB-0484).
+      const t0 = performance.now(), secs = () => Math.round((performance.now() - t0) / 1000);
+      try { await run(); results.push({ name, ok: true, secs: secs() }); }
       // A check that finds many things (the phone sweep) says them all in err.detail.
-      catch (err) { results.push(Object.assign({ name, ok: false, error: String(err && err.message || err).slice(0, 300) }, err && err.detail ? { detail: String(err.detail).slice(0, 20000) } : {})); }
+      catch (err) { results.push(Object.assign({ name, ok: false, secs: secs(), error: String(err && err.message || err).slice(0, 300) }, err && err.detail ? { detail: String(err.detail).slice(0, 20000) } : {})); }
+      // Settled before the next one starts: the close events its dialogs are owed (window.__settleDialogs,
+      // HB-1280), and a few turns for what their handlers start.
+      window.__settleDialogs();
+      for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0));
       report();
     }
     document.documentElement.removeAttribute('data-ui-running');
@@ -13468,7 +15681,10 @@ try {
     chmodSync(join(mathAssets, file), 0o644);
   }
   // hb-ui=classic and ?ui=classic (below): opened as a browser that had chosen the classic look (scenario classicMap).
-  const head = `<head><script>localStorage.setItem('theme','light'); localStorage.setItem('hb-ui','classic')</script><script>${STUB.replace('__VERSION__', version)}</script><script>${RECORDER}</script><script>window.__joinPage = ${joinPage}</script>`;
+  // The version as the server writes it into the page: a meta tag web/app/core.js reads (versionMarkup in
+  // src/api/pageRoutes.ts, HB-0812), not the stub's global, so the page's own reading of it is what is checked.
+  if (!STUB.includes(STUB_SETS_VERSION)) throw new Error('ui-clickthrough: the stub no longer sets the version with ' + STUB_SETS_VERSION);
+  const head = `<head><meta name="hatchabot-version" content="${version}"><script>localStorage.setItem('theme','light'); localStorage.setItem('hb-ui','classic')</script><script>${STUB.replace(STUB_SETS_VERSION, '')}</script><script>${RECORDER}</script><script>window.__joinPage = ${joinPage}</script>`;
   const tail = `<script>setTimeout(() => { ${SCENARIOS} }, 2500)</script></body>`;
   // Replacer functions: a bare string is a pattern to replace(), and `$'` inside the scenarios meant "the rest of the page".
   writeFileSync(join(work, 'page.html'), page.replace('<head>', () => head).replace('</body>', () => tail));
@@ -13508,7 +15724,10 @@ try {
     const running = /data-ui-running="([^"]*)"/.exec(dom);
     const on = label === 'desktop' ? '' : ` (${label})`;
     if (!done) { failed++; total++; console.log(`✗ ${running?.[1] ?? '(unknown)'}${on} — the page ran out of virtual time on it (${results.length} scenarios reported before it)`); }
-    else if (done[1] > 3600) console.log(`(the ${label} run used ${done[1]} s of its 7200 s of virtual time)`);
+    else if (done[1] > 3600) {
+      const costly = [...results].sort((a, b) => (b.secs ?? 0) - (a.secs ?? 0)).slice(0, 8).map((r) => `${r.name} ${r.secs} s`);
+      console.log(`(the ${label} run used ${done[1]} s of its 7200 s of virtual time; the most: ${costly.join(', ')})`);
+    }
     for (const r of results) {
       total++;
       if (r.ok) console.log(`✓ ${r.name}${on}`);

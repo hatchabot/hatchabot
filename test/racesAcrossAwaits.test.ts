@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { SourceGoneError, Store } from '../src/store/store.js';
@@ -8,14 +8,14 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { importTemplate } from '../src/orchestrator/template.js';
+import { importTemplate } from '../src/orchestrator/transfer/template.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/busy.js';
-import { machineTz, monthKey } from '../src/orchestrator/budgets.js';
-import { agentMemoryLimits } from '../src/orchestrator/swap.js';
-import { GOOGLE_CLIENT_REF, materializeConnections } from '../src/orchestrator/googleConnections.js';
-import { beginOperation, filesReplacingCount, noteFilesReplacing } from '../src/orchestrator/operations.js';
+import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { machineTz, monthKey } from '../src/orchestrator/usage/budgets.js';
+import { agentMemoryLimits } from '../src/domain/swap.js';
+import { GOOGLE_CLIENT_REF, materializeConnections } from '../src/orchestrator/google/googleConnections.js';
+import { beginOperation, filesReplacingCount, noteFilesReplacing } from '../src/orchestrator/lifecycle/operations.js';
 
 /**
  * A check made before an await reserves nothing: each of these held one
@@ -25,6 +25,22 @@ import { beginOperation, filesReplacingCount, noteFilesReplacing } from '../src/
 
 const OWNER = 'user-household';
 const H = { 'x-hatchabot-owner': OWNER };
+
+// What runs between a waiting install's drop and the code after it: a test
+// sets `ticks` and that many microtasks pass after the drop's turn, before its
+// caller goes on (HB-0627). 0, the rest of the file: the real drop, untouched.
+const afterDrop = vi.hoisted(() => ({ ticks: 0 }));
+vi.mock('../src/orchestrator/apps/appPending.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/orchestrator/apps/appPending.js')>();
+  return {
+    ...real,
+    dropAppPending: (...args: Parameters<typeof real.dropAppPending>) => {
+      const ticks = afterDrop.ticks;
+      if (!ticks) return real.dropAppPending(...args);
+      return real.dropAppPending(...args).then(async (r) => { for (let i = 0; i < ticks; i++) await Promise.resolve(); return r; });
+    },
+  };
+});
 
 class MemSecrets {
   map = new Map<string, string>();
@@ -895,8 +911,9 @@ describe('a manual snapshot during a setup-values change (HB-0566)', () => {
     const taken = w.store.getSnapshot('a1', snap.json().id)!;
     expect(taken.files['SOUL.md']).toBe('Soul new');
     expect(taken.files['AGENTS.md']).toBe('Rules new');
-    // And the values and layer they were made from, not the old ones.
-    expect(taken.params).toEqual({ values: { style: 'new' }, soul: 'Soul {{style}}', agents: 'Rules {{style}}' });
+    // And the values, layer and fields they were made from, not the old ones.
+    expect(taken.params).toEqual({ values: { style: 'new' }, soul: 'Soul {{style}}', agents: 'Rules {{style}}',
+      fields: [{ key: 'style', label: 'Style', type: 'text', required: true, target: 'soul' }] });
   });
 
   it('a snapshot that waited while its agent was archived says so, and takes nothing', async () => {
@@ -1548,6 +1565,79 @@ describe('a waiting app install prepared while the agent is deleted (HB-0569)', 
     expect((await replacing).statusCode).toBe(409);
     expect(w.store.getAppPending('a1')).toBeTruthy();
     expect(secrets.map.get(ref)).toBe(JSON.stringify('made-up-first'));
+  });
+
+  // Its turn on the row comes as the drop's ends. ARCHIVED is written in
+  // that turn, so its first look finds the agent archived, however many
+  // microtasks pass before the archive goes on: written after the turn, two
+  // were enough for the save to look first and save onto it (HB-0627).
+  it.each([
+    ['with a secret to store', { app_password: 'made-up-second' }, 0],
+    ['with nothing to store between its two looks', {}, 0],
+    ['with a secret to store, two microtasks passing after the drop', { app_password: 'made-up-second' }, 2],
+    ['with nothing to store, two microtasks passing after the drop', {}, 2],
+  ])('archived as it is saved, %s: a save waiting for the row behind the archive\'s drop saves nothing (HB-0627)', async (_how, values, ticks) => {
+    afterDrop.ticks = ticks;
+    onTestFinished(() => { afterDrop.ticks = 0; });
+    const manifest = { app: 'garden-log', name: 'Garden log', tasks: [], config: { fields: [{ key: 'app_password', secret: true }] } };
+    const appGit = async (args: string[]) => {
+      const stdout = args.includes('show') ? JSON.stringify(manifest) : args.includes('--verify') ? 'made-up-commit' : '';
+      return { code: 0, stdout: Buffer.from(stdout), stderr: '' };
+    };
+    const g = gate();
+    const secrets = new MemSecrets();
+    const w = await world({ appGit, secrets });
+    w.store.setAgentState('a1', 'STOPPED');
+    // An install already waiting, with a secret: the archive's drop deletes it, and is held there.
+    expect((await w.inject('POST', '/v1/agents/a1/app/pending', { source: '/tmp', values: { app_password: 'made-up-first' } })).statusCode).toBe(200);
+    const del = secrets.delete.bind(secrets);
+    let hold = true;
+    secrets.delete = async (r: string) => { if (hold && r.startsWith('app-pending/')) { hold = false; g.signal(); await g.held; } return del(r); };
+    const archiving = Promise.resolve(w.inject('POST', '/v1/agents/a1/archive', {}));
+    await g.reached;
+    // A save that passed the route's checks while the archive dropped the row: its turn on the row comes after the drop.
+    const saving = Promise.resolve(w.inject('POST', '/v1/agents/a1/app/pending', { source: '/tmp', values }));
+    await new Promise((r) => setTimeout(r, 100));
+    g.release();
+    const [archived, saved] = await Promise.all([archiving, saving]);
+    expect(archived.statusCode, archived.body).toBe(200);
+    expect(w.store.getAgent('a1')?.state).toBe('ARCHIVED');
+    expect(saved.statusCode, saved.body).toBe(409);
+    expect(w.store.getAppPending('a1')).toBeFalsy();
+    expect([...secrets.map.keys()].filter((r) => r.startsWith('app-pending/'))).toEqual([]);
+  });
+
+  // The delete's drop has the same shape, but the agent is DELETING before
+  // it, so a save waiting behind it finds it gone at its first look.
+  it.each([[0], [2]])('deleted as it is saved, %i microtasks passing after the drop: a save waiting behind the delete\'s drop saves nothing (HB-0627)', async (ticks) => {
+    afterDrop.ticks = ticks;
+    onTestFinished(() => { afterDrop.ticks = 0; });
+    const manifest = { app: 'garden-log', name: 'Garden log', tasks: [], config: { fields: [{ key: 'app_password', secret: true }] } };
+    const appGit = async (args: string[]) => {
+      const stdout = args.includes('show') ? JSON.stringify(manifest) : args.includes('--verify') ? 'made-up-commit' : '';
+      return { code: 0, stdout: Buffer.from(stdout), stderr: '' };
+    };
+    const g = gate();
+    const secrets = new MemSecrets();
+    const w = await world({ appGit, secrets });
+    // Stopped, so the install waits (a running agent's goes in at once).
+    w.store.setAgentState('a1', 'STOPPED');
+    expect((await w.inject('POST', '/v1/agents/a1/app/pending', { source: '/tmp', values: { app_password: 'made-up-first' } })).statusCode).toBe(200);
+    expect(secrets.map.has('app-pending/a1/app_password')).toBe(true);
+    const del = secrets.delete.bind(secrets);
+    let hold = true;
+    secrets.delete = async (r: string) => { if (hold && r.startsWith('app-pending/')) { hold = false; g.signal(); await g.held; } return del(r); };
+    const deleting = Promise.resolve(w.inject('DELETE', '/v1/agents/a1'));
+    await g.reached;
+    const saving = Promise.resolve(w.inject('POST', '/v1/agents/a1/app/pending', { source: '/tmp', values: {} }));
+    await new Promise((r) => setTimeout(r, 100));
+    g.release();
+    const [deleted, saved] = await Promise.all([deleting, saving]);
+    expect(deleted.statusCode, deleted.body).toBeLessThan(300);
+    expect(w.store.getAgent('a1')?.state).toBe('DELETED');
+    expect(saved.statusCode, saved.body).toBe(409);
+    expect(w.store.getAppPending('a1')).toBeFalsy();
+    expect([...secrets.map.keys()].filter((r) => r.startsWith('app-pending/'))).toEqual([]);
   });
 });
 

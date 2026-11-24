@@ -156,9 +156,13 @@ Commands:
   tasks <agent> runs <task> [--limit <n>]
                                What its recent runs produced.
   tasks <agent> pause|resume|rm <task>
-  delete <agent> [--yes]       Delete an agent and its memory (copies in this
+  delete <agent> [--yes] [--no-recycle]
+                               Delete an agent and its memory (copies in this
                                machine's nightly backups age out in 14 days;
-                               retypes the name unless --yes)
+                               retypes the name unless --yes). A bot you gave
+                               it is parked in your Bot pool for the next
+                               agent; --no-recycle forgets it instead (one
+                               leased from the pool goes back there anyway)
   archive <agent> [--yes]      Park an agent and hand its Telegram bot back for
                                another agent to use. Keeps memory, members and
                                settings; members are told in the chat.
@@ -358,10 +362,12 @@ Commands:
                                image is FROM the base + your Dockerfile lines,
                                for system packages (apt) a volume install can't
                                provide; your lines run as root, then USER node.
-  image derive <name> [--from <file>] [--base <tag>]
+  image derive <name> [--from <file>] [--base <tag>] [--timeout <min>]
                                Build one (Dockerfile lines from --from or stdin)
-                               and follow the build. Run on the host.
-  image rebuild <name> [--base <tag>]   Rebuild (e.g. onto a promoted base)
+                               and follow the build (up to 60 min; it goes on
+                               regardless). Run on the host.
+  image rebuild <name> [--base <tag>] [--timeout <min>]
+                               Rebuild (e.g. onto a promoted base) and follow it
   image rm <name>              Delete it (refused while an agent pins it)
   image log <name>             Show the last build's output
   image pin <agent> <name-or-tag>       Pin an agent to an image (next rebuild)
@@ -455,9 +461,22 @@ export function writeConfigValues(values: Record<string, string | null>, path = 
   renameSync(tmp, path);
 }
 
+/**
+ * A request to the Hatchabot server the CLI talks to. At this install's own
+ * https address (setup saves one when it serves TLS itself), its own
+ * certificate (HATCHABOT_TLS_CERT in the checkout's .env) is trusted and
+ * pinned there, as doctor trusts it; anywhere else, a plain fetch
+ * (config/installTls.ts, HB-1375).
+ */
+async function installRequest(url: string, init: RequestInit = {}): Promise<Response> {
+  if (!/^https:/i.test(url)) return fetch(url, init);
+  const { installFetch } = await import('./config/installTls.js');
+  return installFetch(url, init, join(repoDir(), '.env'));
+}
+
 async function serverConfig(url: string): Promise<IdentityConfig> {
   try {
-    const res = await fetch(`${url}/v1/config`);
+    const res = await installRequest(`${url}/v1/config`);
     if (res.ok) return (await res.json()) as IdentityConfig;
   } catch { /* older server: password mode */ }
   return { authMode: 'password' };
@@ -506,6 +525,18 @@ async function askSecret(q: string): Promise<string> {
   });
 }
 
+/**
+ * The line that switches a Telegram account off in OpenClaw's config, as
+ * the owner pastes it: the command for a key a shell takes as it is, else
+ * the change in words. A key edited by hand may hold a space, a quote, `;`
+ * or `$(…)`, and the command pasted as printed broke, or ran it (HB-1031).
+ */
+function accountOffLine(key: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(key)
+    ? `  openclaw config set channels.telegram.accounts.${key}.enabled false\n`
+    : `  in OpenClaw's config (openclaw.json), under channels.telegram.accounts, set "enabled": false on the account ${JSON.stringify(key)}\n`;
+}
+
 function fail(msg: string): never {
   console.error(`error: ${msg}`);
   process.exit(1);
@@ -538,6 +569,16 @@ export function archivedBotLine(r: ArchiveAnswer): string {
 export function tokenTurnedDown(err: unknown): boolean {
   const status = (err as { status?: number } | undefined)?.status ?? 0;
   return status === 400 || status === 422;
+}
+
+/**
+ * The command that restarts OpenClaw's gateway on this machine, as the
+ * server's own hand-over runs it (gatewayRestart, HB-0981): its systemd unit
+ * on Linux; elsewhere (a Mac, whose launchd runs it) OpenClaw's own command,
+ * which knows its service manager (HB-1163).
+ */
+export function gatewayRestartCommand(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string {
+  return platform === 'linux' ? `systemctl --user restart ${env.HATCHABOT_OPENCLAW_GATEWAY_UNIT || 'openclaw-gateway'}` : 'openclaw gateway restart';
 }
 
 /** The bot an agent is on: its botUsername, or (a server before v2.178 sends none for one agent) its t.me link. */
@@ -594,6 +635,31 @@ export const HANDOVER_SAYS = 2;
  * for a server without HANDOVER_SAYS.
  */
 const STEP_GRACE_MS = 30_000;
+
+/**
+ * A bot hand-over that may have gone through, and the agent could not say
+ * whether it did: not read after, or an older server's step, which shows
+ * until setup takes the token (HB-1277). Removed then, an agent that took
+ * the bot took it offline: kept, and said. `what`: what the posts got, as
+ * handOver's takenOrNot words it.
+ */
+class HandOverUnknown extends Error {
+  constructor(readonly what: string, readonly why: string) {
+    super(`${what}, and ${why}, so whether it has its bot is not known`);
+  }
+}
+
+/**
+ * The agent read after a bot hand-over that may have gone through was gone
+ * (404): removed meanwhile, so there is nothing to keep, and no delete to
+ * run. Said as "was kept", it pointed at an agent that was not there
+ * (HB-1277 review).
+ */
+class AgentGone extends Error {
+  constructor(readonly said: string) {
+    super(`is gone (${said}): it was removed while its bot was being handed over`);
+  }
+}
 
 /**
  * A server of v2.177 or before still showed the bot-token step
@@ -768,7 +834,7 @@ export function pairingTargets<T extends { state?: string; role?: string; botUse
   return list.filter((a) => a.state === 'RUNNING' && (!a.role || a.role === 'owner') && (!!a.botUsername || !!a.otherChannels?.length));
 }
 
-const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only', 'invited-only', 'other-key']);
+const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only', 'invited-only', 'other-key', 'no-recycle']);
 const VALUE_FLAGS = new Set(['ref', 'kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -804,7 +870,7 @@ export function parseArgs(argv: string[]) {
 }
 
 async function login(url: string, password: string): Promise<Ctx> {
-  const res = await fetch(`${url}/v1/login`, {
+  const res = await installRequest(`${url}/v1/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ password }),
@@ -818,7 +884,7 @@ async function api(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Resp
   const auth: Record<string, string> = ctx.bearer
     ? { authorization: `Bearer ${ctx.bearer}` }
     : { cookie: ctx.cookie };
-  const res = await fetch(`${ctx.url}${path}`, {
+  const res = await installRequest(`${ctx.url}${path}`, {
     ...init,
     headers: { ...auth, ...(init.headers ?? {}) },
   });
@@ -832,6 +898,33 @@ async function api(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Resp
     );
   }
   return res;
+}
+
+/**
+ * One look of a wait (--timeout): GET `path`'s JSON within what is left
+ * before `deadline`, or undefined when it did not answer in time (`init`
+ * for a request that starts what is waited for, as a POST). The
+ * request and its body are cut off: a server or proxy that took the request
+ * and then stalled its answer held the wait minutes past its limit, or for
+ * good (HB-1068). The look a wait makes as it runs out still gets
+ * LOOK_MIN_MS, so a wait ends on what the server last said, as before.
+ * No look gets more than LOOK_MAX_MS, the most a timer holds: past it Node
+ * fired the timer at once, and further on refused it, so a --timeout of
+ * 40000 min or more broke every wait (HB-1068 review). Other failures
+ * throw as api()'s do.
+ */
+const LOOK_MIN_MS = 5_000;
+const LOOK_MAX_MS = 2_147_483_647;
+async function pollJson(ctx: Ctx, path: string, deadline: number, init: RequestInit = {}): Promise<any> {
+  let signal: AbortSignal | undefined;
+  try {
+    const left = Math.ceil(Math.max(deadline - Date.now(), LOOK_MIN_MS));
+    signal = AbortSignal.timeout(Number.isFinite(left) ? Math.min(left, LOOK_MAX_MS) : LOOK_MIN_MS);
+    return await (await api(ctx, path, { ...init, signal })).json();
+  } catch (e) {
+    if (signal?.aborted) return undefined;
+    throw e;
+  }
 }
 
 /**
@@ -877,24 +970,39 @@ async function agents(ctx: Ctx): Promise<any[]> {
 }
 
 /**
+ * What `image derive`/`rebuild` say when their --timeout is up: the build
+ * goes on on the server. `image log` prints its output so far once, and
+ * does not follow it (review of HB-1229).
+ */
+const imageBuildOver = (name: string, limit: number, started: boolean): never => fail(started
+  ? `\nstill building after ${limit} min — it goes on. Its output so far: hatchabot image log ${name} · done or not: hatchabot image list`
+  : `\nno answer from the server in ${limit} min — the build may have started. See: hatchabot image list · its output so far: hatchabot image log ${name}`);
+
+/**
  * Poll a derived image's build log and stream new output until it finishes.
  * The build runs server-side (survives the CLI exiting); this just follows it.
  * Exits non-zero via fail() on FAILED so scripts can trust the status.
+ * Until `deadline`, the end of the --timeout of `limit` minutes that the
+ * request starting the build was made under too, each look within what is
+ * left of it (pollJson): a server that took a look and never answered, or a
+ * build that never ended, held it for good (HB-1229). The build goes on.
  */
-async function streamImageBuild(ctx: Ctx, name: string): Promise<void> {
+async function streamImageBuild(ctx: Ctx, name: string, tag: string, limit: number, deadline: number): Promise<void> {
+  const over = () => imageBuildOver(name, limit, true);
   let printed = 0;
   for (;;) {
-    const r: any = await (await api(ctx, `/v1/images/${encodeURIComponent(name)}/log`)).json();
+    const r: any = (await pollJson(ctx, `/v1/images/${encodeURIComponent(name)}/log`, deadline)) ?? over();
     const log: string = r.log ?? '';
     if (log.length > printed) {
       process.stdout.write(log.slice(printed));
       printed = log.length;
     }
     if (r.status === 'READY') {
-      console.log(`\n✓ Built hatchabot-runtime:derived-${name}. Pin an agent:  hatchabot image pin <agent> ${name}`);
+      console.log(`\n✓ Built ${tag}. Pin an agent:  hatchabot image pin <agent> ${name}`);
       return;
     }
     if (r.status === 'FAILED') fail(`\n✗ Build failed: ${r.error ?? 'see the log above'}`);
+    if (Date.now() > deadline) over();
     await new Promise((res) => setTimeout(res, 1200));
   }
 }
@@ -935,9 +1043,10 @@ async function followOperation(ctx: Ctx, started: Record<string, any>, flags: Ma
     const line = opStepLine(op);
     if (line && line !== said) { console.log(`  ${line}`); said = line; }
     if (!OP_GOING.has(String(op.status))) break;
-    if (Date.now() > deadline) fail(`still under way after ${limit} min — it goes on; follow it with: ${watch}`);
+    const over = `still under way after ${limit} min — it goes on; follow it with: ${watch}`;
+    if (Date.now() > deadline) fail(over);
     await new Promise((r) => setTimeout(r, 1000));
-    op = (await (await api(ctx, `/v1/operations/${encodeURIComponent(started.id)}`)).json()) as Record<string, any>;
+    op = ((await pollJson(ctx, `/v1/operations/${encodeURIComponent(started.id)}`, deadline)) ?? fail(over)) as Record<string, any>;
   }
   if (op.status === 'succeeded') {
     console.log(`✓ ${op.outcome ?? op.summary ?? 'done'}`);
@@ -986,6 +1095,24 @@ export function matchAgent<T extends { id: string; name: string; slug: string }>
     ?? one(list.filter((a) => a.name.toLowerCase() === r.toLowerCase()), 'names')
     ?? (r.length >= 4 ? one(list.filter((a) => a.id.startsWith(r)), 'starts the id of') : undefined)
     ?? { problem: `no agent matches "${r}"${r.length < 4 ? ' (an id needs at least 4 characters)' : ''} — try \`hatchabot list\`` };
+}
+
+/**
+ * `<machine>` → one machine: its id, else its exact name, else its name in
+ * any case. Two machines may share a name (Add allows it): then it is
+ * refused with their ids, not resolved to the first listed (HB-1079). No
+ * match is `{}`: each command says that its own way. Nothing, or only
+ * spaces, is no match, not a machine with no name (HB-1079 review).
+ */
+export function matchMachine<T extends { id: string; name?: string }>(list: T[], ref: string): { hit?: T; problem?: string } {
+  const r = ref.trim();
+  if (!r) return {};
+  const one = (xs: T[]) =>
+    xs.length === 1 ? { hit: xs[0] } : xs.length > 1 ? { problem: `"${r}" names ${xs.length} machines — use its id: ${xs.map((h) => `${h.id} (${h.name})`).join(', ')}` } : undefined;
+  return one(list.filter((h) => h.id === r))
+    ?? one(list.filter((h) => h.name === r))
+    ?? one(list.filter((h) => String(h.name ?? '').toLowerCase() === r.toLowerCase()))
+    ?? {};
 }
 
 async function resolveAgent(ctx: Ctx, ref: string): Promise<any> {
@@ -1071,7 +1198,7 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
       )).trim();
     if (!token) fail('no token given');
     if (!token.startsWith('hatchabot_') && !token.startsWith('agentclaw_')) fail('that does not look like a Hatchabot token');
-    const res = await fetch(`${url}/v1/agents`, { headers: { authorization: `Bearer ${token}` } });
+    const res = await installRequest(`${url}/v1/agents`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) fail(`that token was rejected (${res.status})`);
     save('HATCHABOT_TOKEN', token, 'HATCHABOT_REFRESH_TOKEN');
     console.log(`signed in. Token saved to ${configPath()} (chmod 600)`);
@@ -1603,12 +1730,12 @@ async function main() {
     ctx = await login(url, password);
   }
 
-  const jsonPost = (path: string, body: unknown, method = 'POST') =>
-    api(ctx, path, {
-      method,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+  const jsonInit = (body: unknown, method = 'POST'): RequestInit => ({
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const jsonPost = (path: string, body: unknown, method = 'POST') => api(ctx, path, jsonInit(body, method));
 
   /** Destructive commands ask y/N unless --yes (-y, -f, --force): the app asks too (Chris, 2026-09-26). */
   const confirmOr = async (q: string): Promise<void> => {
@@ -1654,8 +1781,12 @@ async function main() {
     const deadline = Date.now() + limit * 60_000;
     if (handedOver) await new Promise((r) => setTimeout(r, 3000));
     let stepSince: number | undefined;
+    let seen = 'setting up';
     for (;;) {
-      const a = (await (await api(ctx, `/v1/agents/${id}`)).json()) as any;
+      // A look the server took and never answered ends with the wait (HB-1068).
+      const a = (await pollJson(ctx, `/v1/agents/${id}`, deadline)) as any;
+      if (a === undefined) throw new StillWaiting(seen, limit);
+      seen = String(a.state);
       if (a.state === 'RUNNING' || a.state === 'FAILED') return a;
       if (!a.pendingAction) stepSince = undefined;
       else if (!handedOver || handedOver.stepAnswered || handoverSays) return a;
@@ -1671,6 +1802,27 @@ async function main() {
    * few times (HANDOVER_RETRY_MS).
    */
   const handOver = async (id: string, body: Record<string, unknown>): Promise<HandOverAnswer> => {
+    // A post that may have been taken: the agent is read. Its step answered
+    // (or it runs, or failed), it was handed over. Still open on a server
+    // that says, none was taken, and `err` stands. On an older one the step
+    // shows until setup takes the token, so open says nothing; nor does a
+    // read that failed: HandOverUnknown (HB-1277). `again`: `err` is a 409 to
+    // a post sent again after no answer, which an earlier post that landed
+    // brings: said so, not as a post with no answer (HB-1277 review).
+    const takenOrNot = async (err: unknown, again = false): Promise<HandOverAnswer> => {
+      const said = again
+        ? `an earlier hand-over of its bot may have gone through (sent again after no answer, it was refused: ${noAnswerWords(err)})`
+        : `the hand-over of its bot may not have gone through (${noAnswerWords(err)})`;
+      let a: any;
+      try { a = await (await api(ctx, `/v1/agents/${id}`)).json(); }
+      catch (e) {
+        if ((e as { status?: unknown }).status === 404) throw new AgentGone(noAnswerWords(e));
+        throw new HandOverUnknown(said, `it could not be read after that (${noAnswerWords(e)})`);
+      }
+      if (!a?.pendingAction || a.state === 'RUNNING' || a.state === 'FAILED') return handoverSays ? { stepAnswered: true } : {};
+      if (handoverSays) throw err;
+      throw new HandOverUnknown(said, 'it still asks for a bot token, which this server (v2.177 or before) shows until setup takes one');
+    };
     for (let attempt = 0; ; attempt++) {
       try {
         return ((await (await jsonPost(`/v1/agents/${id}/channel-token`, body)).json().catch(() => ({}))) ?? {}) as HandOverAnswer;
@@ -1684,11 +1836,13 @@ async function main() {
         // token again: watched as after a hand-over to it (no stepAnswered).
         if (attempt > 0 && (err as { status?: number }).status === 409) {
           if (!handoverSays) return {};
-          const a = (await (await api(ctx, `/v1/agents/${id}`)).json()) as any;
-          if (a.pendingAction && a.state !== 'RUNNING' && a.state !== 'FAILED') throw err;
-          return { stepAnswered: true };
+          return takenOrNot(err, true);
         }
         const wait = HANDOVER_RETRY_MS[attempt];
+        // The last post got no answer either: any of them may have been
+        // taken, and removing the agent then took the bot offline (with
+        // --reuse-bot the old account is off already), HB-1277.
+        if (wait === undefined && noAnswer(err)) return takenOrNot(err);
         if (wait === undefined || !noAnswer(err)) throw err;
         console.error(`  ${noAnswerWords(err)} Trying again in ${wait / 1000} s…`);
         await new Promise((r) => setTimeout(r, wait));
@@ -1886,7 +2040,15 @@ async function main() {
           console.log(a.pendingAction.instructions ?? 'A Telegram bot token is needed.');
           tok = await askSecret('Paste bot token (hidden): ');
         }
-        const sub = await handOver(a.id, { token: tok });
+        // Whether its hand-over went through not known (HB-1277): it is kept, as
+        // create keeps every agent, and said, by name and id, with the way on.
+        // Left to main()'s catch, only the bare sentence was said.
+        const sub = await handOver(a.id, { token: tok }).catch((err: unknown) => {
+          if (err instanceof AgentGone) return fail(`"${name}" ${err.message}. Run this again.`);
+          if (!(err instanceof HandOverUnknown)) throw err;
+          return fail(`"${name}" (${a.id}) was kept: ${err.message}.\n` +
+            `Watch it with: hatchabot setup-log ${a.id} — if it still asks for a bot token, give it the token again in its sheet in the web app, or remove it (hatchabot delete ${a.id} --yes) and run this again.`);
+        });
         console.log(`${sub.username ? `bot @${sub.username}` : 'bot'} attached — provisioning…`);
         a = await pollAgent(a.id, sub);
         if (a.state === 'RUNNING') { const other = otherBotLine(a, sub.username); if (other) console.log(other); }
@@ -1899,16 +2061,27 @@ async function main() {
       return;
     }
     case 'delete': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot delete <agent> [--yes]'));
-      try {
-        const t: any = await (await api(ctx, `/v1/agents/${a.id}/bot-token`)).json();
-        if (!t.pooled) console.log(`note: bot @${t.accountId} is not pool-managed — save its token first (hatchabot token) if you want to recycle it.`);
-      } catch { /* no channel yet — nothing to save */ }
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot delete <agent> [--yes] [--no-recycle]'));
+      // What becomes of its Telegram bot, as the agent list says: its token is
+      // never asked for here (HB-1419 review: every delete revealed it, and
+      // the server logged a reveal, to print a note that was not true).
+      const bot = typeof a.botUsername === 'string' && a.botUsername ? a.botUsername : undefined;
+      if (bot) {
+        // Moved to another Hatchabot: the server leaves its bot to the peer that has it now.
+        if (typeof a.migratedTo === 'string' && a.migratedTo) console.log(`note: bot @${bot} is left to "${a.name}" on ${a.migratedTo}, where it was moved: it is not parked for another agent here.`);
+        else if (a.exportedAt && a.state !== 'RUNNING') console.log(`note: bot @${bot} is left to the copy of "${a.name}" that was downloaded, which may answer on it: it is not parked for another agent here.`);
+        else if (a.botPooled) console.log(`note: bot @${bot} goes back to the Bot pool it came from.`);
+        else if (flags.has('no-recycle')) console.log(`note: bot @${bot} is forgotten, not parked: save its token first (hatchabot token ${a.id}) if you want it for another agent.`);
+        else console.log(`note: bot @${bot} is parked in your Bot pool for the next agent (--no-recycle forgets it instead).`);
+      }
       if (!flags.has('yes')) {
         const typed = await askLine(`This permanently erases "${a.name}" and everything it remembers. Copies in this machine's nightly backups are removed as they age out (14 days).\nType the agent's name to confirm: `);
         if (typed !== a.name) fail('name did not match — nothing deleted');
       }
-      await api(ctx, `/v1/agents/${a.id}`, { method: 'DELETE' });
+      // --no-recycle: its bots are forgotten, not parked in the Bot pool, as
+      // the API's ?recycleBot=0. A parked bot is refused to an adopt, and the
+      // CLI has no way to take one out of the pool (HB-1419).
+      await api(ctx, `/v1/agents/${a.id}${flags.has('no-recycle') ? '?recycleBot=0' : ''}`, { method: 'DELETE' });
       console.log(`"${a.name}" deleted.`);
       return;
     }
@@ -1995,11 +2168,19 @@ async function main() {
         // Telegram hands each message to exactly ONE poller. Taking over a bot
         // the old instance still polls does not fail loudly — messages just
         // start disappearing into whichever copy won the race.
+        // Telegram off for the whole instance is not the account off (HB-1031).
+        if (bot.enabledInSource && bot.channelOffInSource && bot.polling !== 'busy') {
+          fail(`Telegram is switched off in your hand-built instance's config, but its account "${bot.accountId}"\n` +
+            `for "${bot.sourceAgentId}" is still on: switched back on there, Telegram would poll this bot in both copies.\n` +
+            `Switch that account off too:\n` +
+            accountOffLine(String(bot.accountId)) +
+            `Then run this again.`);
+        }
         if (bot.enabledInSource || bot.polling === 'busy') {
           fail(`@${bot.accountId} is still live for "${bot.sourceAgentId}" in your hand-built instance.\n` +
             `Hand the bot over there first — two pollers on one token lose messages silently:\n` +
-            `  openclaw config set channels.telegram.accounts.${bot.accountId}.enabled false\n` +
-            `  systemctl --user restart openclaw-gateway\n` +
+            accountOffLine(String(bot.accountId)) +
+            `  ${gatewayRestartCommand()}\n` +
             `Then run this again.`);
         }
       }
@@ -2076,6 +2257,23 @@ async function main() {
           }
           a = await pollAgent(a.id, gave);
         }
+        // Its bot handed over, then it failed: kept, as the web app's adopt
+        // keeps it (HB-1225). Removed, it took the bot it had just been given
+        // offline, and the token setup holds for a Retry went with it (HB-1276).
+        // Removed now, nothing is parked (a failed setup let its bot's row go)
+        // and the adopt runs again; a Retry runs it with nothing copied in, and
+        // a delete after that parks the bot in the pool. Parked, --reuse-bot is
+        // refused it, and an adopt without leases from the pool, it or another
+        // spare. Taken out of the pool first, --reuse-bot takes it over, and an
+        // adopt without asks for its token unless another spare is there. A
+        // delete --no-recycle keeps it out of the pool (HB-1419).
+        if (a.state === 'FAILED' && gave) {
+          fail(`"${name}" has its bot, but could not start (${a.stateReason ?? 'no reason given'}), so it was kept with its bot, and nothing was adopted.\n` +
+            `To finish the adopt, remove it and run this again: hatchabot delete ${created.id} --yes\n` +
+            `A Retry (hatchabot retry ${created.id}) brings the bot back up on an agent with nothing copied from the old one; to adopt again after that, remove it with: hatchabot delete ${created.id} --yes --no-recycle\n` +
+            `(Removed without --no-recycle, the bot is parked in your Bot pool, and an adopt is refused it until it is taken out under ⚙ Settings → Messaging → Telegram.)` +
+            (flags.has('reuse-bot') ? `\nDon't switch the bot's account back on in your hand-built instance while this agent holds it: once it runs, both would poll it, and messages would be lost.` : ''));
+        }
         if (a.state === 'FAILED') throw new Error(`${notTaken}"${name}" could not start: ${a.stateReason ?? 'no reason given'}`);
         // Still waiting after the hand-over (the token was turned down): as
         // create does, say so and copy nothing.
@@ -2089,6 +2287,16 @@ async function main() {
 
         res = await (await jsonPost(`/v1/agents/${a.id}/adopt-workspace`, { path: dir })).json();
       } catch (err) {
+        // Gone at the read after its hand-over: nothing to keep or remove.
+        if (err instanceof AgentGone) fail(`"${name}" ${err.message}, so nothing was adopted, and there is nothing to remove. Run this again.`);
+        // Its hand-over may have gone through, and the agent could not say
+        // (handOver): kept, as one on its bot is, and said (HB-1277).
+        if (err instanceof HandOverUnknown) {
+          fail(`"${name}" was kept, and nothing was adopted: ${err.message}.\n` +
+            `Watch it with: hatchabot setup-log ${created.id} — if it still asks for a bot token, remove it (hatchabot delete ${created.id} --yes) and run this again. ` +
+            `Once it runs on that bot, remove it with hatchabot delete ${created.id} --yes --no-recycle before adopting again: removed without --no-recycle, the bot is parked in your Bot pool, and an adopt is refused it until it is taken out under ⚙ Settings → Messaging → Telegram.` +
+            (flags.has('reuse-bot') ? `\nDon't switch the bot's account back on in your hand-built instance while this agent may hold it: once it runs, both would poll it, and messages would be lost.` : ''));
+        }
         // Its bot went to it, and it is still setting up (or an older server
         // does not say whether it took the token): left to finish, as the web
         // app's adopt leaves it, not removed mid-setup.
@@ -2097,15 +2305,30 @@ async function main() {
             ? `was still ${err.state} after ${err.minutes} min, after its bot was handed over`
             : `still asks for a bot token ${STEP_GRACE_MS / 1000} s after its bot was handed over, and this server (v2.177 or before) does not say whether setup took it`;
           fail(`"${name}" ${what}: it was left to finish, and nothing was adopted.\n` +
-            `Watch it with: hatchabot setup-log ${created.id} — once it runs, remove it (hatchabot delete ${created.id} --yes) and run this again.`);
+            `Watch it with: hatchabot setup-log ${created.id} — once it runs, remove it (hatchabot delete ${created.id} --yes --no-recycle, which keeps its bot out of your Bot pool) and run this again.`);
         }
-        const why = err instanceof StillWaiting ? `"${name}" was still ${err.state} after ${err.minutes} min`
+        // Its copy torn part way, the adopt is held on it (HB-0980): a Delete
+        // goes through that, and a kept one says its own way out.
+        const d = (err as { data?: { code?: unknown; operation?: unknown; detail?: unknown } } | undefined)?.data;
+        // Copied in whole, but it could not be started (HB-0980 review): the
+        // adopt is done, so the agent is kept, stopped, not cleaned up.
+        if (d?.code === 'adopt-not-started') {
+          fail(`${err instanceof Error ? err.message : String(err)}\n"${name}" (${created.id}) is kept, with every file copied in. Start it once its machine answers: hatchabot start ${created.id}`);
+        }
+        const torn = d?.code === 'adopt-held' && typeof d.operation === 'string' ? { operation: d.operation, detail: String(d.detail ?? 'no reason given') } : undefined;
+        const why = torn ? `Copying the workspace into "${name}" failed part way (${torn.detail}).`
+          : err instanceof StillWaiting ? `"${name}" was still ${err.state} after ${err.minutes} min`
           : err instanceof Error ? err.message : String(err);
         // Said only when the delete went through: a refused one (still
         // provisioning, the server gone) left the agent while this said it was
         // cleaned up, and the retry it suggested collided with it (HB-0544).
         const kept = await api(ctx, `/v1/agents/${created.id}`, { method: 'DELETE' }).then(() => undefined, (e: unknown) => (e instanceof Error ? e.message : String(e)));
         if (kept === undefined) fail(`${why}\nNothing was adopted and "${name}" was cleaned up — fix the cause and run it again.`);
+        if (torn) {
+          fail(`${why}\nNothing was adopted, but "${name}" (${created.id}) could not be removed: ${kept}\n` +
+            `Its files may be half-replaced, so it stays stopped. Copy the folder in again: hatchabot ops recover ${torn.operation} adopt-again\n` +
+            `— or remove it: hatchabot delete ${created.id} --yes, then fix the cause and run this again.`);
+        }
         fail(`${why}\nNothing was adopted, but "${name}" (${created.id}) could not be removed: ${kept}\n` +
           `Remove it with: hatchabot delete ${created.id} --yes — then fix the cause and run this again.`);
       }
@@ -2163,7 +2386,7 @@ async function main() {
         const look: any = await (await jsonPost('/v1/apps/inspect', { source, ref: flags.get('ref'), name })).json();
         // What is missing by installation's own rule: a required setting with a
         // valid default needs nothing typed (HB-0262).
-        const { mergeConfig, AppError } = await import('./orchestrator/apps.js');
+        const { mergeConfig, AppError } = await import('./orchestrator/apps/apps.js');
         let missing: string[] = [];
         try { missing = mergeConfig(look.manifest, { slug: '', name: name!, timezone: '' }, {}, kv(rest.slice(1))).missingKeys; }
         catch (e) { if (e instanceof AppError) fail(e.message); throw e; }
@@ -2262,23 +2485,54 @@ async function main() {
       const candidate = flags.has('candidate');
       const script = join(repoDir(), 'scripts', 'build-runtime-image.sh');
       if (!existsSync(script)) fail(`Build script not found at ${script} — run this on the Hatchabot host.`);
-      console.log(`Building hatchabot-runtime for OpenClaw ${version}${candidate ? ' (candidate — :latest untouched)' : ' (promotes to :latest)'}…\n`);
+      // The fleet's image settings are the service's .env's, as upgrade.sh
+      // takes them, not this shell's: the build landed in hatchabot-runtime
+      // whatever HATCHABOT_IMAGE the .env named, and `image try` of the
+      // candidate then named an image never built (review of HB-1182).
+      const { envMap } = await import('./doctor.js');
+      const { baseBuildRepo, baseBuildTag } = await import('./orchestrator/machines/runtimeImages.js');
+      const dotenv = envMap(join(repoDir(), '.env'));
+      const env: NodeJS.ProcessEnv = { ...process.env, OPENCLAW_VERSION: version, NO_LATEST: candidate ? '1' : '', ...(flags.has('no-engine') ? { EMBED_ENGINE: 'none' } : {}) };
+      for (const k of ['DOCKER_HOST', 'HATCHABOT_IMAGE', 'HATCHABOT_IMAGE_REGISTRY']) {
+        if (k in dotenv) { if (dotenv[k]) env[k] = dotenv[k]; else delete env[k]; }
+      }
+      // The name the script writes (baseBuildTag, held to its dry run): -lite, -plus-… and -custom-… included.
+      const dockerfileVersion = (() => { try { return /^ARG OPENCLAW_VERSION=(\S+)/m.exec(readFileSync(join(repoDir(), 'docker', 'Dockerfile.runtime'), 'utf8'))?.[1]; } catch { return undefined; } })();
+      const repo = baseBuildRepo(env.HATCHABOT_IMAGE || 'hatchabot-runtime:latest', env);
+      const built = `${repo}:${baseBuildTag(env, dockerfileVersion) ?? version}`;
+      // A build onto a tag agents or classes are pinned to replaces what they
+      // run, and one made the default may strand agents already past it:
+      // refused, as the app's own build is (POST /v1/runtime/build), by the
+      // route's own check (HB-1428; its review: the image listing showed
+      // fewer pins, and the default not at all). Signed out, or not the
+      // machine's owner, it is refused; a service that cannot be asked (not
+      // running) is said, before the build and after it, and it builds.
+      const q = new URLSearchParams({ tag: built, version, ...(candidate ? { candidate: '1' } : {}) });
+      const asked = await api(ctx, `/v1/runtime/build/check?${q}`)
+        .then((r) => r.json() as Promise<{ refused?: string | null }>, (err: unknown) => (err instanceof Error ? err : new Error(String(err))));
+      let unasked: string | undefined;
+      if (asked instanceof Error) {
+        const status = (asked as { status?: number }).status;
+        if (status === 401) fail(`Hatchabot did not take this CLI's sign-in, so it could not say whether ${built} may be built. Log in again (hatchabot login), then build.`);
+        if (status === 403) fail(`${asked.message} Building a runtime image is the machine owner's: log in as them (hatchabot login), then build.`);
+        unasked = `⚠ Could not ask Hatchabot whether ${built} may be built (${asked.message}): if agents are pinned to it, or would run it as the new default, this build changes what they run.`;
+        console.log(unasked);
+      } else if (asked.refused) fail(asked.refused);
+      console.log(`Building ${built} for OpenClaw ${version}${candidate ? ' (candidate — :latest untouched)' : ` (promotes to ${repo}:latest)`}…\n`);
       try {
-        execFileSync('bash', [script], {
-          stdio: 'inherit',
-          env: { ...process.env, OPENCLAW_VERSION: version, NO_LATEST: candidate ? '1' : '', ...(flags.has('no-engine') ? { EMBED_ENGINE: 'none' } : {}) },
-        });
+        execFileSync('bash', [script], { stdio: 'inherit', env });
       } catch {
         fail('Image build failed — see the output above.');
       }
       if (candidate) {
-        console.log(`\nCandidate built (:latest untouched). Smoke-test it, then promote:`);
-        console.log(`  HATCHABOT_IMAGE=hatchabot-runtime:${version} npm run e2e:docker   (from ${repoDir()})`);
-        console.log(`  docker tag hatchabot-runtime:${version} hatchabot-runtime:latest`);
+        console.log(`\nCandidate built as ${built} (:latest untouched). Smoke-test it, then promote:`);
+        console.log(`  HATCHABOT_IMAGE=${built} npm run e2e:docker   (from ${repoDir()})`);
+        console.log(`  docker tag ${built} ${repo}:latest`);
       } else {
-        console.log(`\nDone — :latest is now OpenClaw ${version}. Each agent shows "update available";`);
+        console.log(`\nDone — ${repo}:latest is now OpenClaw ${version}. Each agent shows "update available";`);
         console.log(`Rebuild it to adopt the new version, memory kept:  hatchabot rebuild "<agent>"`);
       }
+      if (unasked) console.log(`\n${unasked}`);
       return;
     }
     case 'image':
@@ -2287,9 +2541,21 @@ async function main() {
       // packages a volume install can't provide. Host-owner only (the API gates
       // it). A bare name means the derived tag from deriveTag — imported, not
       // re-spelled, so the tag scheme has exactly one definition.
-      const { deriveTag } = await import('./orchestrator/derivedImage.js');
+      const { deriveTag } = await import('./orchestrator/machines/derivedImage.js');
+      const { imageRepository } = await import('./domain/imageRepository.js');
       // "2026.9.8" is the base image of that OpenClaw version; another bare name is a derived image's.
-      const toTag = (ref: string) => (ref.includes(':') ? ref : /^\d{4}\.\d+\.\d+(-[\w.-]+)?$/.test(ref) ? `hatchabot-runtime:${ref}` : deriveTag(ref));
+      // Both in the fleet's own names, as the server has them: its default's
+      // repository, and a derived image's record (one made before the fleet
+      // moved to another repository keeps its tag). hatchabot-runtime was
+      // named whatever HATCHABOT_IMAGE said (HB-1182).
+      let fleet: Promise<{ base?: string; images?: Array<{ name: string; tag: string }> }> | undefined;
+      const toTag = async (ref: string): Promise<string> => {
+        if (ref.includes(':')) return ref;
+        const r = await (fleet ??= api(ctx, '/v1/images').then((x) => x.json() as Promise<{ base?: string; images?: Array<{ name: string; tag: string }> }>));
+        const repo = imageRepository(r.base || 'hatchabot-runtime:latest');
+        if (/^\d{4}\.\d+\.\d+(-[\w.-]+)?$/.test(ref)) return `${repo}:${ref}`;
+        return r.images?.find((i) => i.name === ref)?.tag ?? deriveTag(ref, repo);
+      };
       const sub = rest[0];
 
       if (!sub || sub === 'list') {
@@ -2310,7 +2576,7 @@ async function main() {
       }
 
       if (sub === 'derive') {
-        const name = rest[1] ?? fail('usage: hatchabot image derive <name> [--from <file>] [--base <tag>]');
+        const name = rest[1] ?? fail('usage: hatchabot image derive <name> [--from <file>] [--base <tag>] [--timeout <min>]');
         // The Dockerfile snippet comes from --from <file>, or stdin if piped.
         const fromFile = flags.get('from');
         let dockerfile: string;
@@ -2326,19 +2592,26 @@ async function main() {
         // `image derive <name>` is also how an image's lines are changed.
         const body: any = { name, dockerfile, replace: true };
         if (flags.get('base')) body.base = flags.get('base');
-        const res: any = await (await jsonPost('/v1/images', body)).json();
+        // The --timeout holds from the start: the request that starts the
+        // build had none, and a server that took it and never answered held
+        // the command for good (review of HB-1229).
+        const limit = minutesFlag(60), deadline = Date.now() + limit * 60_000;
+        const res: any = (await pollJson(ctx, '/v1/images', deadline, jsonInit(body))) ?? imageBuildOver(name, limit, false);
         console.log(`Building ${res.tag}… (runs as root, then restores USER node)\n`);
-        await streamImageBuild(ctx, name);
+        await streamImageBuild(ctx, name, res.tag, limit, deadline);
         return;
       }
 
       if (sub === 'rebuild') {
-        const name = rest[1] ?? fail('usage: hatchabot image rebuild <name> [--base <tag>]');
+        const name = rest[1] ?? fail('usage: hatchabot image rebuild <name> [--base <tag>] [--timeout <min>]');
         const body: any = {};
         if (flags.get('base')) body.base = flags.get('base');
-        await jsonPost(`/v1/images/${encodeURIComponent(name)}/rebuild`, body);
+        // Its start and the look for its tag within the --timeout too (review of HB-1229).
+        const limit = minutesFlag(60), deadline = Date.now() + limit * 60_000;
+        (await pollJson(ctx, `/v1/images/${encodeURIComponent(name)}/rebuild`, deadline, jsonInit(body))) ?? imageBuildOver(name, limit, false);
         console.log(`Rebuilding ${name}…\n`);
-        await streamImageBuild(ctx, name);
+        fleet = Promise.resolve((await pollJson(ctx, '/v1/images', deadline)) ?? imageBuildOver(name, limit, true));
+        await streamImageBuild(ctx, name, await toTag(name), limit, deadline);
         return;
       }
 
@@ -2361,8 +2634,9 @@ async function main() {
         const agentRef = rest[1] ?? fail('usage: hatchabot image pin <agent> <name-or-tag>');
         const image = rest[2] ?? fail('usage: hatchabot image pin <agent> <name-or-tag>');
         const a = await resolveAgent(ctx, agentRef);
-        await jsonPost(`/v1/agents/${a.id}`, { image: toTag(image) }, 'PATCH');
-        console.log(`"${a.name}" pinned to ${toTag(image)} — applies on: hatchabot rebuild "${a.name}"`);
+        const tag = await toTag(image);
+        await jsonPost(`/v1/agents/${a.id}`, { image: tag }, 'PATCH');
+        console.log(`"${a.name}" pinned to ${tag} — applies on: hatchabot rebuild "${a.name}"`);
         return;
       }
 
@@ -2389,17 +2663,18 @@ async function main() {
         const agentRef = rest[1] ?? fail('usage: hatchabot image try <agent> <tag>');
         const image = rest[2] ?? fail('usage: hatchabot image try <agent> <tag>');
         const a = await resolveAgent(ctx, agentRef);
-        const r: any = await (await jsonPost(`/v1/agents/${a.id}`, { image: toTag(image) }, 'PATCH')).json();
-        if (r.sameImage) { console.log(`"${a.name}" pinned to ${toTag(image)} — it already runs that image, nothing to rebuild.`); return; }
+        const tag = await toTag(image);
+        const r: any = await (await jsonPost(`/v1/agents/${a.id}`, { image: tag }, 'PATCH')).json();
+        if (r.sameImage) { console.log(`"${a.name}" pinned to ${tag} — it already runs that image, nothing to rebuild.`); return; }
         const b: any = await (await jsonPost(`/v1/agents/${a.id}/rebuild`, { stoppedWaits: true }, 'POST')).json().catch(() => null);
         console.log(b?.atNextStart
-          ? `"${a.name}" stays ${a.hibernatedAt ? 'asleep' : 'stopped'}, and moves onto ${toTag(image)} when it next starts (memory kept). Undo: hatchabot image unpin "${a.name}"`
-          : `"${a.name}" is rebuilding on ${toTag(image)} (memory kept). Undo: hatchabot image unpin "${a.name}" && hatchabot rebuild "${a.name}"`);
+          ? `"${a.name}" stays ${a.hibernatedAt ? 'asleep' : 'stopped'}, and moves onto ${tag} when it next starts (memory kept). Undo: hatchabot image unpin "${a.name}"`
+          : `"${a.name}" is rebuilding on ${tag} (memory kept). Undo: hatchabot image unpin "${a.name}" && hatchabot rebuild "${a.name}"`);
         return;
       }
       if (sub === 'promote') {
         const tag = rest[1] ?? fail('usage: hatchabot image promote <tag>');
-        const r = (await (await jsonPost('/v1/runtime/images/promote', { tag: toTag(tag) }, 'POST')).json()) as any;
+        const r = (await (await jsonPost('/v1/runtime/images/promote', { tag: await toTag(tag) }, 'POST')).json()) as any;
         console.log(`${r.promoted} is now ${r.now}. ${(r.followers ?? []).length} agent(s) without a pin will adopt it on rebuild — hatchabot list shows "update available"; rebuild them via Bulk actions or: hatchabot rebuild <agent>`);
         return;
       }
@@ -2484,8 +2759,9 @@ async function main() {
       const ref = rest.slice(1).join(' ').trim() || fail('give the machine to move it to (see: ⚙ Settings → Hosts)');
       const hostList = (await (await api(ctx, '/v1/hosts')).json()) as any[];
       const lower = ref.toLowerCase();
-      const host = hostList.find((h) => h.id === ref)
-        ?? hostList.find((h) => String(h.name).toLowerCase() === lower)
+      const named = matchMachine(hostList, ref);
+      if (named.problem) fail(named.problem);
+      const host = named.hit
         ?? (['local', 'here', 'this machine'].includes(lower) ? hostList.find((h) => h.kind === 'local') : undefined)
         ?? fail(`no machine matches "${ref}" — one of: ${hostList.map((h) => h.name).join(', ')}`);
       if (host.id === a.hostId) fail(`"${a.name}" is already on ${host.name}`);
@@ -2985,8 +3261,12 @@ async function main() {
       // RUNNING while it waits its turn and takes its checkpoint: "RUNNING" is
       // the answer only once it has been seen leaving (use-case audit, 2026-09-27).
       let left = cmd !== 'rebuild' || !!started;
+      let now: any;
       for (;;) {
-        const now = (await (await api(ctx, `/v1/agents/${a.id}`)).json()) as any;
+        // A look that did not answer before the wait was over (HB-1068): the last state it saw, if any.
+        const look = await pollJson(ctx, `/v1/agents/${a.id}`, deadline);
+        if (look === undefined) fail(now ? `"${a.name}" is still ${now.state} after ${limit} min` : `"${a.name}" is not ${want} yet after ${limit} min (the server did not answer in time) — it goes on; check: hatchabot list`);
+        now = look;
         if (!left && (now.state !== 'RUNNING' || now.busy)) left = true;
         if (left && now.state === want && !now.busy) { console.log(`"${a.name}" is ${want}.`); return; }
         if (now.state === 'FAILED') fail(`"${a.name}" failed: ${now.stateReason ?? 'unknown'}`);
@@ -3113,7 +3393,8 @@ async function main() {
       const want = flags.get('host');
       if (typeof want === 'string' && want) {
         const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
-        const h = hosts.find((x) => x.id === want || x.name === want) ?? hosts.find((x) => x.name?.toLowerCase() === want.toLowerCase());
+        const { hit: h, problem } = matchMachine(hosts, want);
+        if (problem) fail(problem);
         if (!h) fail(`no machine called "${want}" (Settings → Hosts lists them)`);
         if (h.kind !== 'local') { hostId = h.id; hostName = h.name; }
       }
@@ -3303,13 +3584,13 @@ async function main() {
       if (!scriptPath.startsWith(`${prefix}/`)) problems.push(`app script points outside the console: ${script}`);
       const base = /data-openclaw-control-ui-base-path="([^"]*)"/.exec(html)?.[1];
       if (base !== undefined && base !== prefix) problems.push(`base path is "${base}", expected ${prefix}`);
-      const js = await fetch(`${ctx.url}${scriptPath}`, { headers: ctx.bearer ? { authorization: `Bearer ${ctx.bearer}` } : { cookie: ctx.cookie } });
+      const js = await installRequest(`${ctx.url}${scriptPath}`, { headers: ctx.bearer ? { authorization: `Bearer ${ctx.bearer}` } : { cookie: ctx.cookie } });
       if (!js.ok) problems.push(`app script ${scriptPath} → HTTP ${js.status}`);
       else if (!/javascript/i.test(js.headers.get('content-type') ?? '')) problems.push(`app script served as ${js.headers.get('content-type')}`);
       // The gateway answers its config with 401 until the browser presents
       // the agent's token (carried in the URL fragment, which we do not have
       // here): 401 means the request reached the gateway; 404 means it did not.
-      const cfg = await fetch(`${ctx.url}${prefix}/control-ui-config.json`, { headers: ctx.bearer ? { authorization: `Bearer ${ctx.bearer}` } : { cookie: ctx.cookie } });
+      const cfg = await installRequest(`${ctx.url}${prefix}/control-ui-config.json`, { headers: ctx.bearer ? { authorization: `Bearer ${ctx.bearer}` } : { cookie: ctx.cookie } });
       if (!cfg.ok && cfg.status !== 401) problems.push(`control-ui-config.json → HTTP ${cfg.status}`);
       if (problems.length) fail(`the console would not start in a browser:\n  ${problems.join('\n  ')}`);
       console.log(`ok: page, app script (${scriptPath.slice(prefix.length)}) and config all load through the proxy`);
@@ -3396,8 +3677,12 @@ async function main() {
         const { hit, problem } = matchTask(await listTasks(), ref ?? fail(usage));
         return hit ?? fail(problem!);
       };
-      const runsOf = async (id: string, n: number): Promise<any[]> =>
-        ((await (await api(ctx, `${base}/${encodeURIComponent(id)}/runs?limit=${n}`)).json()) as any).runs ?? [];
+      /** With `deadline` (a wait's): [] once it is over, the look cut off with it (HB-1068). */
+      const runsOf = async (id: string, n: number, deadline?: number): Promise<any[]> => {
+        const path = `${base}/${encodeURIComponent(id)}/runs?limit=${n}`;
+        const got: any = deadline === undefined ? await (await api(ctx, path)).json() : await pollJson(ctx, path, deadline);
+        return got?.runs ?? [];
+      };
       const whenAgo = (ms?: number) => (ms ? ago(new Date(ms).toISOString()) : '-');
       const whenIn = (ms?: number) => {
         if (!ms) return '-';
@@ -3456,7 +3741,7 @@ async function main() {
         const limit = minutesFlag(10);
         const deadline = Date.now() + limit * 60_000;
         for (;;) {
-          const [latest] = await runsOf(t.id, 1).catch(() => []); // a read that failed: ask again
+          const [latest] = await runsOf(t.id, 1, deadline).catch(() => []); // a read that failed: ask again
           if (latest && latest.runAtMs > before) {
             if (flags.has('json')) console.log(JSON.stringify(latest));
             else printRun(latest);

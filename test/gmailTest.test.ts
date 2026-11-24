@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gmailFailure, isAccountEmail, testGmail } from '../src/orchestrator/googleConnections.js';
+import { gmailFailure, isAccountEmail, testGmail } from '../src/orchestrator/google/googleConnections.js';
 
 // The outputs are gog 0.22.0's own, read from the real binary (made-up accounts, a stand-in Google).
 const LABEL = JSON.stringify({ label: { id: 'INBOX', messagesTotal: 1234, messagesUnread: 7, name: 'INBOX', threadsTotal: 900, threadsUnread: 5, type: 'system' } });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as opsServer from '../src/ops/opsServer.js';
-import { memoryBudgetSection } from '../src/orchestrator/memoryCap.js';
+import { memoryBudgetSection } from '../src/domain/memoryCap.js';
 import Database from 'better-sqlite3';
 import {
   buildRuntimeSpec,
@@ -13,10 +13,10 @@ import {
   SEARCH_KEY_REF,
   syncDataSourceDocs,
   reapplyCurrentSettings,
-} from '../src/orchestrator/provision.js';
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
-import { attributeBrave } from '../src/orchestrator/sourceUsage.js';
-import { AgentBusyError, whileBusy } from '../src/orchestrator/busy.js';
+} from '../src/orchestrator/lifecycle/provision.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
+import { attributeBrave } from '../src/orchestrator/usage/sourceUsage.js';
+import { AgentBusyError, whileBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { dataSourcesSection, fenceScansForTests, memoryPolicySection, operatorSection, replaceSection, withInstallSection, DATA_SOURCES_HEADING, OPERATOR_HEADING } from '../src/openclaw/workspace.js';
 import { Store } from '../src/store/store.js';
@@ -352,23 +352,67 @@ describe('runProvisionSteps', () => {
     expect(adds()).toBe(2);
   });
 
-  it('a retry while something holds the agent is left to it; a stopped agent is not tried (HB-0231)', async () => {
+  it('a retry while something holds the agent waits for it, then adds the task (HB-0834 review); a stopped agent is not tried (HB-0231)', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);
-    w.store.setPendingSchedules(agent.id, [{ name: 'Morning brief', message: 'Post the brief.', everyMs: 3_600_000 }]);
+    const brief = [{ name: 'Morning brief', message: 'Post the brief.', everyMs: 3_600_000 }];
+    w.store.setPendingSchedules(agent.id, brief);
     const adds = () => w.provider.execLog.filter((c) => c[0] === 'cron' && c[1] === 'add').length;
     const before = adds();
+    let retried: Promise<void> | undefined;
     await whileBusy(agent.id, async () => {
       await expect(retryPendingSchedules(w.deps, agent.id)).rejects.toBeInstanceOf(AgentBusyError);
-      await retryPendingSchedulesWhenUp(w.deps, agent.id, () => {}, async () => {}); // quietly left
+      retried = retryPendingSchedulesWhenUp(w.deps, agent.id, () => {}, async () => {});
+      await new Promise((r) => setTimeout(r, 20));
+      expect(adds()).toBe(before); // its turn waits for whatever holds it
     });
-    expect(adds()).toBe(before);
+    await retried; // tried once; the wait for its turn goes on in the background
+    for (let i = 0; i < 50 && adds() === before; i++) await new Promise((r) => setTimeout(r, 5));
+    // Was: quietly left, the task waiting for the next start.
+    expect(adds()).toBe(before + 1);
+    expect(w.store.getPendingSchedules(agent.id)).toEqual([]);
+    w.store.setPendingSchedules(agent.id, brief);
     w.store.setAgentState(agent.id, 'STOPPED');
     expect(await retryPendingSchedules(w.deps, agent.id)).toHaveLength(1);
-    expect(adds()).toBe(before);
+    expect(adds()).toBe(before + 1);
     w.store.setAgentState(agent.id, 'RUNNING');
     expect(await retryPendingSchedules(w.deps, agent.id)).toEqual([]);
-    expect(adds()).toBe(before + 1);
+    expect(adds()).toBe(before + 2);
+  });
+
+  it('two template tasks of one name: the second, refused once, is added on a retry; another task by the name still keeps it waiting (HB-0962)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    // A gateway that keeps the tasks it is given; the second add is refused once.
+    const jobs: Array<Record<string, unknown>> = [];
+    let refuseSecond = true;
+    const realExec = w.provider.exec.bind(w.provider);
+    w.provider.exec = async (ref, argv, opts) => {
+      if (argv[0] === 'cron' && argv[1] === 'list') return { code: 0, stderr: '', stdout: JSON.stringify({ jobs }) };
+      if (argv[0] === 'cron' && argv[1] === 'add') {
+        const at = (flag: string) => argv[argv.indexOf(flag) + 1];
+        if (at('--message') === 'Plan dinner.' && refuseSecond) { refuseSecond = false; return { code: 1, stdout: '', stderr: 'gateway busy' }; }
+        const id = `j${jobs.length + 1}`;
+        jobs.push({ id, enabled: true, name: at('--name'), schedule: { kind: 'cron', expr: at('--cron') }, payload: { kind: 'agentTurn', message: at('--message') } });
+        return { code: 0, stderr: '', stdout: JSON.stringify({ id }) };
+      }
+      return realExec(ref, argv, opts);
+    };
+    const first = { name: 'Morning', message: 'Post the brief.', cron: '0 8 * * *' };
+    const second = { name: 'Morning', message: 'Plan dinner.', cron: '0 9 * * *' };
+    w.store.setPendingSchedules(agent.id, [first, second]);
+    const waiting = await retryPendingSchedules(w.deps, agent.id);
+    expect(waiting).toMatchObject([{ ...second, why: expect.stringMatching(/refused it: gateway busy/) }]);
+    expect(waiting[0]?.beside).toEqual([{ message: first.message, cron: first.cron }]);
+    // The gateway is well again: the second is added, not parked as a clash with the first.
+    expect(await retryPendingSchedules(w.deps, agent.id)).toEqual([]);
+    expect(jobs.map((j) => (j.payload as { message: string }).message)).toEqual(['Post the brief.', 'Plan dinner.']);
+    // The owner's own "Morning" is still another task: a third of the name waits for them.
+    jobs.push({ id: 'own', enabled: true, name: 'Morning', schedule: { kind: 'cron', expr: '0 7 * * *' }, payload: { kind: 'agentTurn', message: 'Something else' } });
+    const third = { name: 'Morning', message: 'Water the plants.', cron: '0 10 * * *' };
+    w.store.setPendingSchedules(agent.id, [{ ...third, beside: [{ message: first.message, cron: first.cron }, { message: second.message, cron: second.cron }] }]);
+    expect(await retryPendingSchedules(w.deps, agent.id)).toMatchObject([{ ...third, why: expect.stringMatching(/another task already has this name/) }]);
+    expect(jobs).toHaveLength(3);
   });
 
   it('a waiting task is dropped as added only when the task of its name is it; another task by that name keeps it waiting (HB-0290)', async () => {

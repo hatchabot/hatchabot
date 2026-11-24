@@ -15,7 +15,7 @@ import { Store } from '../src/store/store.js';
 import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { TelegramPoolProvisioner } from '../src/channels/telegramPool.js';
-import { provisionAgent } from '../src/orchestrator/provision.js';
+import { provisionAgent } from '../src/orchestrator/lifecycle/provision.js';
 import { buildConfigCommands, describeConfigCommands } from '../src/openclaw/configWriter.js';
 
 const db = new Database(':memory:');

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
-import { findUsageSpikes, runUsageAlerts, usageSpikeText } from '../src/orchestrator/usageAlerts.js';
+import { findUsageSpikes, runUsageAlerts, usageSpikeText } from '../src/orchestrator/usage/usageAlerts.js';
+import { buildRecommendations } from '../src/orchestrator/usage/recommendations.js';
 
 // "Token use went up and I don't know where it's from" (2026-09-28).
 
@@ -98,6 +99,40 @@ describe('usage spikes', () => {
     await runUsageAlerts({ store, tell, rules: RULES }, NOW + 3 * H);
     expect(tries).toBe(2);                                  // told now: once a day again
     expect(store.usageAlertsSince(new Date(NOW - D).toISOString(), { ownerId: OWNER })).toMatchObject([{ agentId: 'sched', told: true }]);
+  });
+
+  it('a loop that was to speak for the spike but ended untold leaves the spike to be told (HB-1006)', async () => {
+    const store = world([{ id: 'sched', name: 'Scheduler', perDay: [150e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6] }]);
+    // A loop on it, open, its message held back by the hourly cap.
+    store.openTokenIncident({ id: 'loop1', agentId: 'sched', ownerId: OWNER, kind: 'tool-loop', key: 'k', openedAt: new Date(NOW - H).toISOString(), updatedAt: new Date(NOW - H).toISOString(), count: 9, text: 'Stuck' } as never);
+    const told: string[] = [];
+    const tell = async (_o: string, _a: unknown, text: string) => { told.push(text.slice(0, 30)); return true; };
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW);
+    expect(told).toEqual([]);
+    expect(store.usageAlertsSince(new Date(NOW - D).toISOString(), { agentId: 'sched' })).toMatchObject([{ told: false, covered: 'loop1' }]);
+    // While it is still to be told, it speaks for the spike.
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW + H + 60_000);
+    expect(told).toEqual([]);
+    // It stops before its message went out: the spike is told, under the hourly rule.
+    store.clearTokenIncident('loop1', new Date(NOW + H + 2 * 60_000).toISOString());
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW + 2 * H);
+    expect(told).toEqual(['⚠️ Hatchabot: "Scheduler" used']);
+    expect(store.usageAlertsSince(new Date(NOW - D).toISOString(), { agentId: 'sched' })).toMatchObject([{ told: true }]);
+  });
+
+  it('a spike told on its own after its loop ended untold reads as told on the chat, not with its loop (HB-1006)', async () => {
+    const store = world([{ id: 'sched', name: 'Scheduler', perDay: [150e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6, 20e6] }]);
+    store.openTokenIncident({ id: 'loop1', agentId: 'sched', ownerId: OWNER, kind: 'tool-loop', key: 'k', openedAt: new Date(NOW - H).toISOString(), updatedAt: new Date(NOW - H).toISOString(), count: 9, text: 'Stuck' } as never);
+    const tell = async () => true;
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW);
+    store.clearTokenIncident('loop1', new Date(NOW + 60_000).toISOString());
+    await runUsageAlerts({ store, tell, rules: RULES }, NOW + 2 * H);
+    // What Usage reads (its "told with its loop") and Recommended words.
+    const [row] = store.usageAlertsSince(new Date(NOW - D).toISOString(), { agentId: 'sched' });
+    expect(row).toMatchObject({ told: true });
+    expect(row!.covered).toBeUndefined();
+    const spike = buildRecommendations(store, OWNER, { now: NOW + 2 * H }).items.find((x) => x.kind === 'spike')!;
+    expect(spike.evidence[0]).toMatch(/^Warned .* on your chat$/);
   });
 
   it('clearing the warning on Usage does not make it be told again the same day', async () => {

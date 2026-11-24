@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -8,8 +9,10 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
-import { buildRuntimeSpec, scrubRemovedDataSources, syncGitDataSources } from '../src/orchestrator/provision.js';
-import { isBusy } from '../src/orchestrator/busy.js';
+import { buildRuntimeSpec, scrubRemovedDataSources, syncGitDataSources } from '../src/orchestrator/lifecycle/provision.js';
+import { isBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
+import { createDataSources } from '../src/orchestrator/apps/dataSources.js';
 
 /**
  * Adding/removing data sources (Slice A: folders, ro/rw). Host-folder mounts are
@@ -231,6 +234,36 @@ describe('git data sources (Slice B)', () => {
   });
 });
 
+describe('a private repo cut off while being added (HB-0853)', () => {
+  it('Hatchabot stopped after its deploy key was saved and before its row: the next start deletes the key, and keeps one a row names', async () => {
+    const db = new Database(':memory:');
+    const first = new Store(db);
+    const real = new LocalSecretStore(db, Buffer.alloc(32, 7));
+    first.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    first.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    first.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Kitchen', slug: 'kitchen', state: 'STOPPED', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    const keys = () => (db.prepare(`SELECT ref FROM secrets WHERE ref LIKE 'data-source/%' ORDER BY ref`).all() as Array<{ ref: string }>).map((r) => r.ref);
+    const service = (secrets: SecretStore) => createDataSources({
+      store: first, secrets, providerFor: () => new MockProvider(), trace: () => () => {}, agentGone: () => false,
+      channel: {} as never, withAgentsMdTurn: (_id, fn) => fn(), syncDocsHeld: async () => {},
+    });
+    // One added in full.
+    expect(await service(real).add(first.getAgent('a1')!, { kind: 'git', access: 'ro', repoUrl: 'git@example.org:example-owner/recipes.git' }, () => true)).toBeUndefined();
+    const kept = first.listDataSources('a1')[0]!.secretRef!;
+    // Another, and the process ends once its key is written: nothing after that runs.
+    const stopsThere: SecretStore = { put: async (r, v) => { await real.put(r, v); await new Promise<void>(() => {}); }, get: (r) => real.get(r), delete: (r) => real.delete(r) };
+    void service(stopsThere).add(first.getAgent('a1')!, { kind: 'git', access: 'ro', repoUrl: 'git@example.org:example-owner/chores.git' }, () => true);
+    await vi.waitFor(() => expect(keys()).toHaveLength(2));
+    const stray = keys().find((k) => k !== kept)!;
+    expect(first.listDataSources('a1').map((d) => d.mountName)).toEqual(['recipes']);
+    // The next start (src/index.ts): a new Store over the same database, and its sweep before anything is served.
+    const next = new Store(db);
+    expect(next.sweepOrphanAgentSecrets()).toEqual([stray]);
+    expect(keys()).toEqual([kept]);
+    expect(next.listDataSources('a1').map((d) => d.secretRef)).toEqual([kept]);
+  });
+});
+
 describe('public git repos (https, no deploy key)', () => {
   it('stores the https URL with no key and no secret; any agent owner may add one', async () => {
     const { store, secrets, f } = await world('someone-else');
@@ -390,15 +423,41 @@ describe('a removed repo source whose key could not be scrubbed is retried (A054
     expect(w.secrets.map.has(w.ref)).toBe(false);
   });
 
-  it('a source added again under the same name keeps its new key: the retry does not remove it', async () => {
+  it('a source added again under the same name keeps its new key: the retry leaves a key that is the new one', async () => {
     const w = await live();
     w.provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'busy' });
     await del(w.f, w.id);
     w.provider.execResponses.delete('sh');
     await addSource(w.f, { kind: 'git', access: 'ro', repoUrl: 'git@example.org:example-owner/recipes.git' });
+    const again = w.store.listDataSources('a1')[0]!;
+    const sha = createHash('sha256').update(await w.secrets.get(again.secretRef!), 'utf8').digest('hex');
     const mark = w.provider.execLog.length;
     expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.runtimeRef, true)).toBe(true);
-    expect(w.provider.execLog.slice(mark).some((c) => String(c[1] ?? '').includes('recipes_deploy'))).toBe(false);
+    // The volume is asked: a key file that is the new key is left before anything is removed.
+    const script = w.provider.execLog.slice(mark).map((c) => String(c[1] ?? '')).find((s) => s.includes('recipes_deploy'))!;
+    expect(script.split('\n')[0]).toContain(sha);
+    expect(script.split('\n')[0]).toContain('exit 0');
+    expect(w.secrets.map.has(again.secretRef!)).toBe(true);
+  });
+
+  it('a source added again whose sync has not run: the old key\'s removal stays owed until the volume answers (HB-0963)', async () => {
+    const w = await live();
+    // Its removal is left owed (the runtime could not be reached).
+    w.provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'busy' });
+    await del(w.f, w.id);
+    expect(w.store.dataSourceRemovals('a1')).toMatchObject([{ id: w.id, mountName: 'recipes' }]);
+    // Another private repo under the same name, its key never synced; the runtime still away.
+    await addSource(w.f, { kind: 'git', access: 'ro', repoUrl: 'git@example.org:another-owner/recipes.git' });
+    const mark = w.provider.execLog.length;
+    expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.runtimeRef, true)).toBe(false);
+    expect(w.provider.execLog.slice(mark).some((c) => c[0] === 'sh' && String(c[1] ?? '').includes('rm -f /home/node/.openclaw/.ssh/recipes_deploy'))).toBe(true);
+    expect(w.store.dataSourceRemovals('a1')).toMatchObject([{ id: w.id, mountName: 'recipes' }]);
+    // No runtime to ask: still owed.
+    expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', null, false)).toBe(false);
+    // The volume answers: the old key is taken off and the removal settled.
+    w.provider.execResponses.delete('sh');
+    expect(await scrubRemovedDataSources({ store: w.store, secrets: w.secrets, provider: w.provider }, 'a1', w.runtimeRef, true)).toBe(true);
+    expect(w.store.dataSourceRemovals('a1')).toEqual([]);
   });
 
   it('a sync that had read the key before the removal never writes it back (HB-0274)', async () => {
@@ -554,5 +613,30 @@ describe('HB-0053: a folder shared at its own path cannot land on the agent\'s s
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatch(/would cover \/usr/);
     expect((await addSource(f, { kind: 'folder', access: 'ro', path: '/usr/share' })).statusCode).toBe(200);
+  });
+});
+
+describe('a public repo added to a running agent syncs only itself (HB-1126)', () => {
+  it('each add clones the repo it added; the repos already there are not refreshed again', async () => {
+    const w = await world();
+    const provider = new MockProvider();
+    const f = Fastify();
+    await registerRoutes(f, { store: w.store, secrets: w.secrets, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'kitchen', workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } }, env: {} } as any);
+    w.store.setAgentRuntimeRef('a1', runtimeRef);
+    const names = ['recipes', 'notes', 'garden'];
+    for (const n of names) {
+      expect((await addSource(f, { kind: 'git', access: 'ro', repoUrl: `https://example.org/example-owner/${n}.git`, public: true })).statusCode).toBe(200);
+      for (let i = 0; i < 400 && isBusy('a1'); i++) await new Promise((r) => setTimeout(r, 5));
+      expect(isBusy('a1')).toBe(false);
+    }
+    const synced = provider.execLog
+      .filter((c) => c[0] === 'sh' && String(c[1]).includes('remote set-url origin'))
+      .map((c) => /git -C '\/home\/node\/\.openclaw\/([\w.-]+)' remote set-url/.exec(String(c[1]))?.[1]);
+    expect(synced).toEqual(names);
+    // A start or rebuild still syncs every one (its own path, unchanged).
+    const mark = provider.execLog.length;
+    await syncGitDataSources({ store: w.store, secrets: w.secrets, provider } as any, 'a1', runtimeRef, () => {});
+    expect(provider.execLog.slice(mark).filter((c) => c[0] === 'sh' && String(c[1]).includes('remote set-url origin'))).toHaveLength(3);
   });
 });

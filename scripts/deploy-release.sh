@@ -39,6 +39,7 @@ PROD="$PWD"; DIR="$PWD"; TARGET="$TAG"; REDO="scripts/deploy-release.sh $TAG"
 # that met another fetch's ref lock said 1 before anything was changed, and
 # the tag was set aside for good (audit #032).
 ROLLED_BACK=0; CHANGING=0; RESTARTED=0; ASIDE=0; SERVING=0; LOCK=""; STEP_LOG=""; STEP_SAID=""
+DEPS_HELD=0   # 1 while this run holds the dependencies' lock (deps_lock)
 DISK=0   # 1 once this run found the machine short of room or permission (machine_short)
 finish() {
   local rc=$?
@@ -48,6 +49,7 @@ finish() {
   # it is deployed, not a failure to try again (HB-0266). A node_modules.prev
   # left half removed goes with the next deploy.
   if [ "$SERVING" = 1 ]; then rm -f "$FROM_FILE"; rc=0; fi
+  [ "$DEPS_HELD" != 1 ] || deps_unlock
   [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
   [ -z "$STEP_LOG" ] || rm -f "$STEP_LOG"
   # 5 only where this run found the disk (machine_short): any other 5 under set -e is 3.
@@ -337,15 +339,28 @@ LOCKS="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"
 PRC=0; put_dir "$LOCKS" || PRC=$?
 [ "$PRC" = 0 ] || put_failed "$PRC" "Could not make $LOCKS, where deploys keep their lock (a full disk, or no permission there?): nothing was changed. Free some space or fix its permissions, then try again."
 LOCK_PATH="$LOCKS/upgrade-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
+# When a process started, as ps tells it in this run's time zone: how the
+# holder line (owner) has always been written, and how a release before this
+# one reads it, so it stays that way. Read in two zones the same start differs:
+# a holder started from a shell with TZ set (or by the timer, with none) was
+# taken for gone by a run in another zone, and its lock taken while it ran. So
+# the holder also writes its start in UTC beside it (owner.utc), and that is
+# what this release judges by when it is there (review of HB-1067).
 proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+proc_start_utc() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+# Whether $2 is when pid $1 started, in this zone or in UTC.
+started_as() { [ -n "$2" ] && { [ "$2" = "$(proc_start "$1")" ] || [ "$2" = "$(proc_start_utc "$1")" ]; }; }
 ME="$$"; MY_START="$(proc_start $$)"; [ -z "$MY_START" ] || ME="$$ $MY_START"
+ME_UTC="$$ $(proc_start_utc $$)"
 lock_left_over() {
-  local owner pid
+  local owner pid utc
   owner="$(cat "$LOCK_PATH/owner" 2>/dev/null)" || owner=""
   if [ -z "$owner" ]; then [ -n "$(find "$LOCK_PATH" -maxdepth 0 -mmin +60 2>/dev/null)" ]; return; fi
   pid="${owner%% *}"
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start "$pid")" ]; fi
+  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; return; fi
+  utc="$(cat "$LOCK_PATH/owner.utc" 2>/dev/null)" || utc=""
+  case "$utc" in "$pid "?*) [ "$utc" != "$pid $(proc_start_utc "$pid")" ] ;; *) ! started_as "$pid" "${owner#* }" ;; esac
 }
 take_lock() {
   LOCK_ERR=""
@@ -354,7 +369,8 @@ take_lock() {
     LOCK_ERR="$(LC_ALL=C mkdir "$LOCK_PATH" 2>&1)" || { { [ ! -e "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ]; } || return 1; return 2; }
   fi
   LOCK="$LOCK_PATH"
-  if LOCK_ERR="$( { export LC_ALL=C; printf '%s\n' "$ME" > "$LOCK_PATH/owner.$$" && mv -f "$LOCK_PATH/owner.$$" "$LOCK_PATH/owner"; } 2>&1 )"; then
+  # owner.utc first: a reader that finds it with no owner yet takes the lock as just made.
+  if LOCK_ERR="$( { export LC_ALL=C; printf '%s\n' "$ME_UTC" > "$LOCK_PATH/owner.utc" && printf '%s\n' "$ME" > "$LOCK_PATH/owner.$$" && mv -f "$LOCK_PATH/owner.$$" "$LOCK_PATH/owner"; } 2>&1 )"; then
     # A step log beside the lock is a run's of this install that held it, and
     # one left now is a killed run's (fifth review).
     rm -f "${LOCK_PATH%.lock.d}".step.* 2>/dev/null || true
@@ -392,6 +408,53 @@ if [ "$LOCK_RC" != 0 ]; then
   lock_in_way
   [ "$LOCK_RC" = 0 ] || { echo "Another deploy or upgrade of $PROD is running (lock $LOCK_PATH)."; exit 4; }
 fi
+# The dependencies' own lock, ensure-deps.sh's, held while node_modules is
+# moved aside or put back, as upgrade.sh holds it (HB-1212): moved without
+# it, a restart's npm ci running there meanwhile had its tree moved from
+# under it (review of HB-1212). Copies of upgrade.sh's, held the same by
+# test/nightScripts.test.ts; let go before every restart, whose ensure-deps.sh
+# takes it, and in finish.
+DEPS_LOCK="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
+DEPS_ME="$$"; DEPS_START="$(proc_start_utc $$)"; [ -z "$DEPS_START" ] || DEPS_ME="$$ $DEPS_START"
+# How many one-second tries the lock is waited for: half an hour (tests make it a few).
+DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"; case "$DEPS_WAIT" in ''|*[!0-9]*) DEPS_WAIT=1800 ;; esac
+deps_holder_gone() {
+  local owner pid
+  owner="$(cat "$DEPS_LOCK/owner" 2>/dev/null)" || owner=""
+  if [ -z "$owner" ]; then [ -n "$(find "$DEPS_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; return; fi
+  pid="${owner%% *}"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start_utc "$pid")" ]; fi
+}
+deps_lock() {
+  local waited=0
+  [ "$DEPS_HELD" != 1 ] || return 0
+  until mkdir "$DEPS_LOCK" 2>/dev/null; do
+    [ -d "$DEPS_LOCK" ] || return 0
+    find "$DEPS_LOCK.takeover" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null || true
+    if deps_holder_gone && mkdir "$DEPS_LOCK.takeover" 2>/dev/null; then
+      if deps_holder_gone; then rm -rf "$DEPS_LOCK"; fi
+      rmdir "$DEPS_LOCK.takeover"
+      continue
+    fi
+    [ "$waited" != 0 ] || echo "Waiting for an install of the dependencies in $DIR to finish before moving them…"
+    waited=$((waited + 1))
+    [ "$waited" -lt "$DEPS_WAIT" ] || return 1
+    sleep 1
+  done
+  # A holder it could not write would read as a run just begun: let go, and on without it.
+  if { printf '%s\n' "$DEPS_ME" > "$DEPS_LOCK/owner.$$" && mv -f "$DEPS_LOCK/owner.$$" "$DEPS_LOCK/owner"; } 2>/dev/null; then DEPS_HELD=1
+  else rm -rf "$DEPS_LOCK"; fi
+  return 0
+}
+deps_unlock() {
+  [ "$DEPS_HELD" = 1 ] || return 0
+  DEPS_HELD=0
+  [ "$(cat "$DEPS_LOCK/owner" 2>/dev/null)" != "$DEPS_ME" ] || rm -rf "$DEPS_LOCK"
+  return 0
+}
+DEPS_STUCK="Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so nothing was moved. If no npm is running there, remove it (rm -r \"$DEPS_LOCK\"), then try again."
+
 # A deploy in progress, beside the lock, in the record upgrade.sh keeps
 # (its FROM_FILE, the same file for the same checkout): `from <release>`, then
 # `restarted` once the service was restarted onto the new one. Left behind,
@@ -445,7 +508,7 @@ clear_own_index_lock() {
   while read -r word pid start; do
     [ "$word" = git ] || continue
     named=1
-    if [ -n "$start" ]; then [ "$start" != "$(proc_start "$pid")" ] || { echo "The checkout that deploy started is still running (pid $pid) — try again once it ends."; return 1; }
+    if [ -n "$start" ]; then ! started_as "$pid" "$start" || { echo "The checkout that deploy started is still running (pid $pid) — try again once it ends."; return 1; }
     elif kill -0 "$pid" 2>/dev/null; then echo "The checkout that deploy started is still running (pid $pid) — try again once it ends."; return 1; fi
   done < "$FROM_FILE"
   [ -e .git/index.lock ] || return 0
@@ -498,7 +561,11 @@ if [ -f "$FROM_FILE" ]; then
   echo "A deploy of $PROD was cut off part-way — putting ${FROM:-the previous release} back first."
   clear_own_index_lock || exit 3
   repair_tree || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
-  [ ! -d node_modules.prev ] || { rm -rf node_modules; mv node_modules.prev node_modules; }
+  if [ -d node_modules.prev ]; then
+    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${FROM:-the previous release}'s are still in node_modules.prev, not put back: the next deploy puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; exit 3; }
+    rm -rf node_modules; mv node_modules.prev node_modules
+    deps_unlock
+  fi
   if grep -qx restarted "$FROM_FILE"; then systemctl --user restart "$SVC" || true; fi
   rm -f "$FROM_FILE"
 fi
@@ -526,9 +593,18 @@ echo "Deploying $TAG to $PROD (currently $CUR)…"
 # Only once the working one was moved aside (ASIDE): stopped while a stale
 # node_modules.prev was being removed, the rollback deleted the only working
 # node_modules (HB-0266).
+# Under the dependencies' lock, as upgrade.sh's: one this run cannot have
+# within half an hour leaves them where they are and fails, so the record
+# stays and the next deploy puts them back (review of HB-1212).
 restore_deps() {
+  [ -d node_modules.prev ] || [ "$ASIDE" = 1 ] || return 0
+  if ! deps_lock; then
+    echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${CUR:-the previous release}'s were left in node_modules.prev, not put back. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""
+    return 1
+  fi
   if [ -d node_modules.prev ]; then rm -rf node_modules; mv node_modules.prev node_modules
   elif [ "$ASIDE" = 1 ]; then rm -rf node_modules; fi
+  deps_unlock
   return 0
 }
 # The service is restarted only when it was restarted onto the new release:
@@ -552,7 +628,7 @@ rollback() {
   # running service had none until someone came. The record stays for the repair.
   local back=0
   back_to_cur || back=1
-  restore_deps
+  restore_deps || back=1
   [ "$back" = 0 ] || return 1
   if [ "$RESTARTED" = 1 ]; then systemctl --user restart "$SVC" || return 1; fi
   rm -f "$FROM_FILE"
@@ -566,6 +642,9 @@ INSTALL="${HATCHABOT_INSTALL_CMD:-install_deps}"   # overridable for tests only
 # A deploy killed (or a power cut) right after moving node_modules aside left
 # node_modules.prev as the only working copy. Put back first: deleted as a
 # leftover, a failed install then had nothing to roll back to (audit #033).
+# From here to the move aside below, under the dependencies' lock: taken
+# before the record, so one this run cannot have changes nothing.
+deps_lock || { echo "$DEPS_STUCK"; exit 3; }
 [ -d node_modules ] || [ ! -d node_modules.prev ] || mv node_modules.prev node_modules
 # A leftover, removed before the record is written: half removed under it,
 # the next run's repair would move it in as the old release's.
@@ -580,6 +659,7 @@ PRC=0; put_line "$FROM_FILE" "from $CUR" "to $TAG" pins-recorded || PRC=$?
 [ "$PRC" = 0 ] || put_failed "$PRC" "Could not write $FROM_FILE (a full disk, or no permission there?), so nothing was changed. Free some space, then try again."
 CHANGING=1
 if [ -d node_modules ]; then mv node_modules node_modules.prev; fi; ASIDE=1
+deps_unlock
 # A step that failed puts the old release back (UNDO): 5 when the disk is why
 # (its words, or next to no room left) or a permission or read-only disk (its
 # words, the path named: tenth review), judged before the rollback frees what
@@ -610,6 +690,15 @@ change_failed() {
   fi
   exit 3
 }
+# A rollback once the service was restarted, which did not work (the
+# dependencies' lock held, a checkout, the old release's restart): the record
+# stays and the next run repairs from it. Said, with what to run, as
+# change_failed says it; it ended with exit 1 and no next step (review of
+# HB-1212). Still 1: the release itself did not come up.
+rollback_or_redo() {
+  rollback && return 0
+  echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
+}
 # As upgrade.sh: the step's errors beside the lock, not in TMPDIR (which may
 # be the same full disk) unless that folder takes no new file (new_step_log),
 # and in English, so disk_short reads them (fourth review).
@@ -626,7 +715,7 @@ LANG="${LC_ALL:-${LANG-}}" LC_ALL= LC_MESSAGES=C run_step $INSTALL || change_fai
 # no dependencies at all (night review, 2026-09-28).
 LC_ALL=C run_step put_rec "$FROM_FILE" '>>' restarted || change_failed rollback started "Could not write $FROM_FILE (above)."
 RESTARTED=1
-systemctl --user restart "$SVC" || { CHANGING=0; ROLLED_BACK=1; rollback || true; exit 1; }
+systemctl --user restart "$SVC" || { CHANGING=0; ROLLED_BACK=1; rollback_or_redo || true; exit 1; }
 WANT="$(node -e 'console.log(require("./package.json").version)')"
 # Health URL from the production .env, not the caller's shell: PORT, native
 # TLS and the bind address, read as the service reads them (restart.sh does
@@ -663,4 +752,4 @@ for i in $(seq 1 45); do
   sleep 2
 done
 echo "Service restarted but is not serving $WANT — check: journalctl --user -u $SVC -n 50"
-CHANGING=0; ROLLED_BACK=1; rollback || true; exit 1
+CHANGING=0; ROLLED_BACK=1; rollback_or_redo || true; exit 1

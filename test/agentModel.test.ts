@@ -10,7 +10,7 @@ import type { SecretStore } from '../src/secrets/secretStore.js';
  * Per-agent model override: an agent may run any model on its source's menu,
  * or follow the source default. The API is the boundary — it must reject a
  * model the source doesn't offer, refuse overrides on local sources, and clear
- * the override on null. See src/api/routes.ts modelOverrideProblem.
+ * the override on null. See src/orchestrator/lifecycle/modelRuntime.ts modelOverrideProblem.
  */
 
 class MemSecrets implements SecretStore {

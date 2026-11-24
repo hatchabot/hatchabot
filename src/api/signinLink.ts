@@ -158,6 +158,17 @@ function page(title: string, html: string): string {
 }
 
 /**
+ * What sign-in links are checked against, while they are on (a key file is
+ * set; undefined: they are off): the origin of HATCHABOT_PUBLIC_URL as the
+ * process has it, none when that is unset or no URL (they answer 503 then).
+ * An address written for links since the start counts only from the next
+ * restart (Use for links says so: tailscaleSetup.ts, HB-1314).
+ */
+export function signinLinkAudience(env: NodeJS.ProcessEnv = process.env): { origin: string | undefined } | undefined {
+  return env.HATCHABOT_SIGNIN_KEY_FILE?.trim() ? { origin: originOf(env.HATCHABOT_PUBLIC_URL) } : undefined;
+}
+
+/**
  * GET /signin/link?t=<token>. Registered only when HATCHABOT_SIGNIN_KEY_FILE
  * is set. Every answer is no-store and no-referrer, and a success leaves no
  * token in the address bar: it is a 303 to / (or to the password chooser

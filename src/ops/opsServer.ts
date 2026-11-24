@@ -181,7 +181,16 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
       return deny('429 Too Many Requests');
     }
 
+    // Watched from here: a client that leaves while the peer check is out
+    // was gone before the tunnel's own close watch was set, so its slot and
+    // the far end it dialled were held until the far end closed or idled
+    // out, and enough of them turned real managers away with 429 (HB-0941).
+    // Gone is destroyed, or its FIN: an http socket is half-open, so a client
+    // that ends its half and waits has no close and is not destroyed.
+    let clientEnded = false;
+    sock.once('end', () => { clientEnded = true; });
     const openTunnel = () => {
+      if (clientEnded || sock.destroyed) { sock.destroy(); return; }
       // Counted again at open: the peer check is async and several may pass it together.
       if ((tunnelsBy.get(who) ?? 0) >= MAX_TUNNELS) return deny('429 Too Many Requests');
       tunnelsBy.set(who, (tunnelsBy.get(who) ?? 0) + 1);

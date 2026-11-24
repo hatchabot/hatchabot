@@ -1,20 +1,20 @@
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import type { ExecResult } from '../src/providers/provider.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { clearBusy } from '../src/orchestrator/busy.js';
-import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
-import { resolvePendingValues, stashPendingSecrets } from '../src/orchestrator/appPending.js';
+import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
+import { resolvePendingValues, stashPendingSecrets } from '../src/orchestrator/apps/appPending.js';
 import {
-  AppError, fieldsToAsk, hostGit, installRelease, manifestAt, mergeConfig, parseManifest, parseSource, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, taskTransitionPending, type AgentFacts,
-} from '../src/orchestrator/apps.js';
+  AppError, checkCodeSize, codeSizeBound, fieldsToAsk, gitOnHost, hostGit, installRelease, manifestAt, mergeConfig, mirrorDir, parseManifest, parseSource, releaseTar, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, taskTransitionPending, type AgentFacts,
+} from '../src/orchestrator/apps/apps.js';
 
 /**
  * Apps in agents (docs/apps-in-agents.md): a repo with hatchabot.json installed
@@ -46,6 +46,8 @@ const tmp: string[] = [];
 afterAll(() => { for (const d of tmp) rmSync(d, { recursive: true, force: true }); });
 
 const gitIn = (dir: string, ...a: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test', '-c', 'user.email=test@example.org', '-C', dir, ...a]);
+/** A work tree's git folder: what repoFor gives for it, and what the reads take. */
+const gitOf = (dir: string) => join(dir, '.git');
 
 function repo(manifest: unknown = MANIFEST): string {
   const dir = mkdtempSync(join(tmpdir(), 'hb-app-'));
@@ -198,14 +200,14 @@ describe('reading a repo on the host', { timeout: INTEGRATION_TIMEOUT }, () => {
 
   it('says so when there is no manifest or no such ref', async () => {
     const dir = repo(null);
-    await expect(resolveRelease(hostGit, dir, 'HEAD')).rejects.toThrow(/has no hatchabot.json/);
-    await expect(resolveRelease(hostGit, repo(), 'no-such-branch')).rejects.toThrow(/No commit "no-such-branch"/);
-    await expect(resolveRelease(hostGit, repo(), '--upload-pack=x')).rejects.toThrow(/Not a ref/);
+    await expect(resolveRelease(hostGit, gitOf(dir), 'HEAD')).rejects.toThrow(/has no hatchabot.json/);
+    await expect(resolveRelease(hostGit, gitOf(repo()), 'no-such-branch')).rejects.toThrow(/No commit "no-such-branch"/);
+    await expect(resolveRelease(hostGit, gitOf(repo()), '--upload-pack=x')).rejects.toThrow(/Not a ref/);
   });
 });
 
 describe('installing into an agent', { timeout: INTEGRATION_TIMEOUT }, () => {
-  const rel = async () => resolveRelease(hostGit, repo(), 'HEAD');
+  const rel = async () => resolveRelease(hostGit, gitOf(repo()), 'HEAD');
 
   it('unpacks, writes the config, tests, switches, and syncs only its own tasks', async () => {
     const r = await rel();
@@ -237,7 +239,7 @@ describe('installing into an agent', { timeout: INTEGRATION_TIMEOUT }, () => {
 
   it("a secret setting's value printed by failing tests is masked in the error and the kept output (HB-0052)", async () => {
     const withKey = { ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'feed_code', type: 'text', required: true, secret: true }] } };
-    const r = await resolveRelease(hostGit, repo(withKey), 'HEAD');
+    const r = await resolveRelease(hostGit, gitOf(repo(withKey)), 'HEAD');
     const agent = new FakeAgent();
     agent.testCode = 1;
     agent.testOutput = 'calling with demo-key-not-real-0042\n{"feed_code": "demo-key-not-real-0042"}\nFAILED (failures=1)';
@@ -292,11 +294,11 @@ describe('a failed update leaves the running app as it was', { timeout: INTEGRAT
     const agent = new FakeAgent();
     agent.jobs = [{ id: 'keep', name: 'daily-brief' }];
     const d = { provider: agent, runtimeRef: 'x', facts: FACTS };
-    const v1 = await resolveRelease(hostGit, dir, 'HEAD');
+    const v1 = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
     await installRelease(d, v1, { mailbox: 'first@example.org' });
     writeFileSync(agent.configFile(), OWN_BYTES);
     commit(dir, next);
-    const v2 = await resolveRelease(hostGit, dir, 'HEAD');
+    const v2 = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
     return { agent, d, v1, v2, before: agent.live() };
   }
 
@@ -321,7 +323,7 @@ describe('a failed update leaves the running app as it was', { timeout: INTEGRAT
     const agent = new FakeAgent();
     agent.jobs = [{ id: 'keep', name: 'daily-brief' }];
     agent.failAdd = () => true;
-    await expect(installRelease({ provider: agent, runtimeRef: 'x', facts: FACTS }, await resolveRelease(hostGit, repo(), 'HEAD'), { mailbox: 'demo@example.org' }))
+    await expect(installRelease({ provider: agent, runtimeRef: 'x', facts: FACTS }, await resolveRelease(hostGit, gitOf(repo()), 'HEAD'), { mailbox: 'demo@example.org' }))
       .rejects.toThrow(/Could not schedule demoapp-tick.*Its tasks are as they were. Nothing was left switched on/s);
     expect(agent.live()).toEqual({ current: null, config: null, tasks: [], staging: false });
     expect(agent.jobs).toEqual([{ id: 'keep', name: 'daily-brief' }]);
@@ -749,6 +751,34 @@ describe('the app routes', { timeout: INTEGRATION_TIMEOUT }, () => {
     expect(provider.calls).toEqual([]);
   });
 
+  it('a body of the wrong shape is a 400 from its schema, and changes nothing (HB-0814)', async () => {
+    const { f, store, provider } = await app();
+    const dir = repo();
+    const cases: Array<[string, unknown, RegExp]> = [
+      ['/v1/apps/inspect', { source: dir, ref: 7 }, /^ref: /],
+      ['/v1/apps/inspect', { source: 42 }, /^source: /],
+      ['/v1/agents/a1/app', { source: dir, values: { mailbox: 'demo@example.org' }, allowShared: 'yes' }, /^allowShared: /],
+      ['/v1/agents/a1/app', [dir], /expected object/],
+      ['/v1/agents/a1/app/pending', { source: ['~/demoapp'] }, /^source: /],
+      ['/v1/agents/a1/app/update', 'HEAD', /expected object/],
+      ['/v1/agents/a1/app/update', { ref: false }, /^ref: /],
+    ];
+    for (const [url, payload, words] of cases) {
+      const r = await f.inject({ method: 'POST', url, headers: { ...as, 'content-type': 'application/json' }, payload: JSON.stringify(payload) });
+      expect(r.statusCode, `${url} ${JSON.stringify(payload)}`).toBe(400);
+      expect(r.json().error, `${url} ${JSON.stringify(payload)}`).toMatch(words);
+    }
+    // A bad `values` keeps its own words, beside another bad field too.
+    const both = await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: 5, values: 'x' } });
+    expect(both.json().error).toBe('values must be an object of setting names and their values.');
+    // The owner check still answers first.
+    const other = await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: { 'x-hatchabot-owner': 'someone-else' }, payload: { allowShared: 'yes' } });
+    expect(other.statusCode).toBe(403);
+    expect(store.getAgentApp('a1')).toBeUndefined();
+    expect(store.getAppPending('a1')).toBeUndefined();
+    expect(provider.calls).toEqual([]);
+  });
+
   it('Update on the same commit refreshes what Hatchabot fills once the fact has changed; otherwise it says nothing is new (HB-0426)', async () => {
     const { f, store, provider } = await app();
     const dir = repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'telegram_account', from: 'agent.telegramAccount' }] } });
@@ -777,6 +807,283 @@ describe('the app routes', { timeout: INTEGRATION_TIMEOUT }, () => {
     expect(gone.json().refreshed).toEqual(['telegram_account']);
     expect(config().telegram_account).toBe('');
   });
+
+  it('Update on the same commit whose config cannot be read or judged says so, never "nothing new" (HB-1016)', async () => {
+    const { f, store, provider } = await app();
+    const dir = repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'telegram_account', from: 'agent.telegramAccount' }] } });
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'firstbot', secretRef: 'channel/c1', deepLink: 'https://t.me/firstbot', createdAt: 'now' } as never);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    const file = join(provider.root('mock://a1'), 'demoapp/data/config.json');
+    const bytes = readFileSync(file, 'utf8');
+    const update = () => f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    const readsConfig = (s: string) => s.startsWith('if [ -e') && s.includes('demoapp/data/config.json');
+    // The runner drops while the config is read.
+    const shell = provider.execShell.bind(provider);
+    provider.execShell = async (ref: string, script: string) => {
+      if (readsConfig(script)) throw new Error('runner gone mid-call');
+      return shell(ref, script);
+    };
+    const gone = await update();
+    expect(gone.statusCode).toBe(400);
+    expect(gone.json()).toMatchObject({ unchanged: true });
+    expect(gone.json().error).toMatch(/^Could not read \S+demoapp\/data\/config\.json in the agent \(runner gone mid-call\), so whether the settings Hatchabot fills in it are up to date could not be told\. Nothing was changed/);
+    provider.execShell = shell;
+    // The read answers an error.
+    provider.breakScript = (s) => (readsConfig(s) ? 'echo "cat: config.json: Permission denied" >&2; exit 1' : s);
+    const refused = await update();
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error).toMatch(/\(cat: config\.json: Permission denied\)/);
+    provider.breakScript = (s) => s;
+    // Not JSON, or not an object of settings.
+    writeFileSync(file, '{ "telegram_account": ');
+    expect((await update()).json()).toMatchObject({ unchanged: true, error: expect.stringMatching(/config\.json in the agent is not valid JSON; fix or remove it\.$/) });
+    writeFileSync(file, '[]\n');
+    expect((await update()).json()).toMatchObject({ unchanged: true, error: expect.stringMatching(/config\.json in the agent is not a JSON object of settings; fix or remove it\.$/) });
+    // Read, and the same: nothing new, as before.
+    writeFileSync(file, bytes);
+    expect((await update()).json()).toMatchObject({ unchanged: true });
+    expect(readFileSync(file, 'utf8')).toBe(bytes);
+    expect(store.listOperations(['a1']).filter((o) => o.kind === 'app-update')).toEqual([]);
+  });
+
+  it('a config that is JSON but not an object of settings is refused by an install and by Update, new commit or not, and left as it is (HB-1016)', async () => {
+    const { f, store, provider } = await app();
+    const dir = repo();
+    const install = () => f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } });
+    const update = () => f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    expect((await install()).statusCode).toBe(200);
+    const first = store.getAgentApp('a1')!.sha;
+    const file = join(provider.root('mock://a1'), 'demoapp/data/config.json');
+    const bytes = readFileSync(file, 'utf8');
+    const refusal = /^\S+demoapp\/data\/config\.json in the agent is not a JSON object of settings; fix or remove it\.$/;
+    for (const text of ['[]\n', '5\n', 'null\n']) {
+      writeFileSync(file, text);
+      // Installed again, and Update on the commit it has.
+      for (const r of [await install(), await update()]) {
+        expect(r.statusCode, `${text.trim()}: ${r.body}`).toBe(400);
+        expect(r.json()).toMatchObject({ unchanged: true, error: expect.stringMatching(refusal) });
+        expect(readFileSync(file, 'utf8')).toBe(text);
+      }
+    }
+    // Update to a newer commit reads it as the install does.
+    commit(dir);
+    for (const text of ['[]\n', '5\n', 'null\n']) {
+      writeFileSync(file, text);
+      const r = await update();
+      expect(r.statusCode, `${text.trim()}: ${r.body}`).toBe(400);
+      expect(r.json()).toMatchObject({ unchanged: true, error: expect.stringMatching(refusal) });
+      expect(readFileSync(file, 'utf8')).toBe(text);
+      expect(store.getAgentApp('a1')!.sha).toBe(first);
+    }
+    // Put right, the update goes ahead.
+    writeFileSync(file, bytes);
+    expect((await update()).statusCode).toBe(200);
+    expect(store.getAgentApp('a1')!.sha).not.toBe(first);
+  });
+
+  it('Inspect, and an Update with nothing new or another app, read only the manifest; the code is packed for an install that goes ahead (HB-1017)', async () => {
+    const packed: string[] = [];
+    const appGit: typeof hostGit = async (args, cwd) => {
+      if (args.includes('archive')) packed.push(args.at(-1)!);
+      return hostGit(args, cwd);
+    };
+    const { f, store } = await app(appGit);
+    const dir = repo();
+    const ins = await f.inject({ method: 'POST', url: '/v1/apps/inspect', headers: as, payload: { source: dir } });
+    expect(ins.statusCode).toBe(200);
+    expect(ins.json().manifest.app).toBe('demoapp');
+    expect(packed).toEqual([]);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    const first = store.getAgentApp('a1')!.sha;
+    expect(packed).toEqual([first]);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} })).json()).toMatchObject({ unchanged: true });
+    expect(packed).toEqual([first]);
+    commit(dir);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} })).statusCode).toBe(200);
+    const second = store.getAgentApp('a1')!.sha;
+    expect(second).not.toBe(first);
+    expect(packed).toEqual([first, second]);
+    commit(dir, { ...MANIFEST, app: 'otherapp' });
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} })).statusCode).toBe(409);
+    expect(packed).toEqual([first, second]);
+  });
+
+  it('a linked worktree\'s repository attributes, kept in the folder it shares, count as its own: Inspect packs it to be sure (HB-1017)', async () => {
+    const main = repo();
+    writeFileSync(join(main, 'lines.txt'), '\n'.repeat(20_000));
+    gitIn(main, 'add', '-A');
+    gitIn(main, 'commit', '-q', '-m', 'lines');
+    mkdirSync(join(main, '.git', 'info'), { recursive: true });
+    writeFileSync(join(main, '.git', 'info', 'attributes'), '* text eol=crlf\n');
+    const wt = `${mkdtempSync(join(tmpdir(), 'hb-wt-'))}/tree`;
+    tmp.push(dirname(wt));
+    gitIn(main, 'worktree', 'add', '-q', '-b', 'side', wt);
+    const packed: string[] = [];
+    const recording: typeof hostGit = async (args, cwd) => { if (args.includes('archive')) packed.push(args.at(-1)!); return hostGit(args, cwd); };
+    for (const folder of [main, wt]) {
+      const at = await repoFor(hostGit, { kind: 'dir', path: folder }, '/nonexistent');
+      const { sha } = await manifestAt(hostGit, at, 'HEAD');
+      // Its line endings are packed as CRLF: no count of its file list holds it.
+      expect((await releaseTar(hostGit, at, sha)).length).toBeGreaterThan(40_000);
+      expect(await codeSizeBound(hostGit, at, sha), folder).toBeUndefined();
+      packed.length = 0;
+      await checkCodeSize(recording, at, sha);
+      expect(packed).toEqual([sha]);
+    }
+  });
+
+  it('a pack cut off by the time limit says it timed out, not the signal that stopped it (HB-1017)', async () => {
+    // A PATH of one shim git that never finishes: nothing else runs.
+    const shim = mkdtempSync(join(tmpdir(), 'hb-gitshim-'));
+    tmp.push(shim);
+    writeFileSync(join(shim, 'git'), '#!/bin/sh\nexec sleep 5\n', { mode: 0o755 });
+    const path = process.env.PATH;
+    try {
+      process.env.PATH = `${shim}:/usr/bin:/bin`;
+      const quick = gitOnHost(300);
+      expect(await quick(['archive'])).toMatchObject({ code: 1, stderr: '', noExit: 'timed out after 0.3 s' });
+      await expect(releaseTar(quick, '/nonexistent', 'a'.repeat(40))).rejects.toThrow(/^git archive failed: timed out after 0\.3 s$/);
+    } finally { process.env.PATH = path; }
+  });
+
+  it('a release is packed as the commit holds it, whatever this machine\'s git turns line endings into, and within the count Inspect makes (HB-1017)', async () => {
+    const dir = repo();
+    writeFileSync(join(dir, 'lines.txt'), '\n'.repeat(20_000));
+    gitIn(dir, 'add', '-A');
+    gitIn(dir, 'commit', '-q', '-m', 'lines');
+    const sha = gitIn(dir, 'rev-parse', 'HEAD').toString().trim();
+    const plain = execFileSync('git', ['--git-dir', gitOf(dir), 'archive', '--format=tar', sha],
+      { env: { PATH: '/usr/bin:/bin', HOME: mkdtempSync(join(tmpdir(), 'hb-home-')), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+    // A made-up home whose git turns every line ending into CRLF, by its config and by its attributes file; and a shim git on PATH saying what git is run with.
+    const home = mkdtempSync(join(tmpdir(), 'hb-home-'));
+    tmp.push(home);
+    mkdirSync(join(home, '.config', 'git'), { recursive: true });
+    writeFileSync(join(home, '.gitconfig'), '[core]\n\tautocrlf = true\n\teol = crlf\n');
+    writeFileSync(join(home, '.config', 'git', 'attributes'), '* text eol=crlf\n');
+    const shim = mkdtempSync(join(tmpdir(), 'hb-gitshim-'));
+    tmp.push(shim);
+    writeFileSync(join(shim, 'git'), '#!/bin/sh\nprintf "GIT_ATTR_NOSYSTEM=%s\\n" "$GIT_ATTR_NOSYSTEM"\n', { mode: 0o755 });
+    const names = ['HOME', 'XDG_CONFIG_HOME', 'GIT_CONFIG_GLOBAL', 'PATH'] as const;
+    const saved = Object.fromEntries(names.map((k) => [k, process.env[k]]));
+    try {
+      Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: join(home, '.config'), GIT_CONFIG_GLOBAL: join(home, '.gitconfig') });
+      // That home is what git reads: packed by plain git, the file comes out twice its size.
+      expect(execFileSync('git', ['--git-dir', gitOf(dir), 'archive', '--format=tar', sha]).length).toBeGreaterThan(plain.length);
+      const tar = await releaseTar(hostGit, gitOf(dir), sha);
+      expect(tar.equals(plain)).toBe(true);
+      expect(await codeSizeBound(hostGit, gitOf(dir), sha)).toBeGreaterThanOrEqual(tar.length);
+      // The machine's own attributes file is not read either.
+      process.env.PATH = `${shim}:/usr/bin:/bin`;
+      expect((await hostGit(['env'])).stdout.toString()).toBe('GIT_ATTR_NOSYSTEM=1\n');
+    } finally {
+      for (const k of names) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    }
+  });
+
+  it('Inspect refuses code over the size limit from its file listing, before anything is made for it; a listing that only looks too big is packed to be sure (HB-1017)', async () => {
+    const LIMIT = 100 * 1024 * 1024;
+    let listed = 0;
+    let inflate = 0;
+    let tarBytes: number | undefined;
+    const packed: string[] = [];
+    // The listing says one file holds `listed` bytes (or git's own listing, each file `inflate` bytes bigger); the tarball, when made, is `tarBytes` long,
+    // and over the buffer it ends as real git's does there: stopped at the buffer, with no word from git.
+    const appGit: typeof hostGit = async (args, cwd) => {
+      if (args.includes('ls-tree') && listed) return { code: 0, stdout: Buffer.from(`100644 blob ${'a'.repeat(40)} ${listed}\tdata/big.bin\0`), stderr: '' };
+      if (args.includes('ls-tree') && inflate) {
+        const r = await hostGit(args, cwd);
+        const entries = r.stdout.toString().split('\0').map((e) => e.replace(/^(100644 blob [0-9a-f]+ +)(\d+)\t/, (_, head: string, n: string) => `${head}${Number(n) + inflate}\t`));
+        return { ...r, stdout: Buffer.from(entries.join('\0')) };
+      }
+      if (args.includes('archive')) {
+        packed.push(args.at(-1)!);
+        if (tarBytes !== undefined && tarBytes > LIMIT + 1048576) return { code: 1, stdout: Buffer.allocUnsafe(LIMIT + 1048576), stderr: '', noExit: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' };
+        if (tarBytes !== undefined) return { code: 0, stdout: Buffer.allocUnsafe(tarBytes), stderr: '' };
+      }
+      return hostGit(args, cwd);
+    };
+    const { f, store, provider } = await app(appGit);
+    const dir = repo();
+    const inspect = () => f.inject({ method: 'POST', url: '/v1/apps/inspect', headers: as, payload: { source: dir } });
+    // Under the limit: listed, never packed.
+    expect((await inspect()).statusCode).toBe(200);
+    expect(packed).toEqual([]);
+    // Git's own listing is read: its two files made 60 MB each put it over, so it is packed to be sure.
+    inflate = 60 * 1048576;
+    expect((await inspect()).statusCode).toBe(200);
+    expect(packed).toHaveLength(1);
+    inflate = 0;
+    packed.length = 0;
+    // Listed over it, and the tarball is too: refused, in the words the install uses.
+    listed = LIMIT + 2 * 1048576;
+    tarBytes = LIMIT + 2 * 1048576;
+    const big = await inspect();
+    expect(big.statusCode).toBe(400);
+    expect(big.json().error).toBe('The code is over 100 MB; apps are limited to 100 MB.');
+    expect(packed).toHaveLength(1);
+    // Listed over it, but the tarball is not (its attributes leave the file out): shown as it is.
+    tarBytes = undefined;
+    expect((await inspect()).statusCode).toBe(200);
+    expect(packed).toHaveLength(2);
+    expect(store.getAgentApp('a1')).toBeUndefined();
+    expect(provider.calls).toEqual([]);
+  });
+
+  it('the most a commit\'s tarball can be is never under what git archive makes, for every shape of tree; with attributes it is packed to be sure (HB-1017)', async () => {
+    const LIMIT = 100 * 1024 * 1024;
+    const shape = (fill: (d: string) => void) => {
+      const d = mkdtempSync(join(tmpdir(), 'hb-appsize-'));
+      tmp.push(d);
+      gitIn(d, 'init', '-q', '-b', 'main');
+      fill(d);
+      gitIn(d, 'add', '-A');
+      gitIn(d, 'commit', '-q', '-m', 'made-up shape');
+      return { git: gitOf(d), sha: gitIn(d, 'rev-parse', 'HEAD').toString().trim() };
+    };
+    const shapes: Array<[string, (d: string) => void]> = [
+      ['a few files and a folder', (d) => { writeFileSync(join(d, 'x'), 'x'); mkdirSync(join(d, 's')); writeFileSync(join(d, 's', 'y'), 'y'.repeat(1000)); }],
+      ['names over 100 bytes', (d) => { mkdirSync(join(d, 'p')); for (let i = 0; i < 120; i++) writeFileSync(join(d, 'p', `${String(i).padStart(4, '0')}${'n'.repeat(146)}`), 'q'); }],
+      ['long paths of short names', (d) => { const deep = join(d, 'a'.repeat(60), 'b'.repeat(60)); mkdirSync(deep, { recursive: true }); for (let i = 0; i < 50; i++) writeFileSync(join(deep, `f${i}`), 'z'); }],
+      ['a 600-byte path', (d) => { let p = d; for (let i = 0; i < 3; i++) { p = join(p, String(i).repeat(200)); mkdirSync(p); } writeFileSync(join(p, 'f'), 'f'); }],
+      ['links with long and short targets', (d) => { writeFileSync(join(d, 'f'), 'f'); symlinkSync('f', join(d, 'short')); for (let i = 0; i < 30; i++) symlinkSync(`${'t'.repeat(200)}${i}`, join(d, `long${i}`)); symlinkSync('t'.repeat(150), join(d, 'n'.repeat(150))); }],
+      ['unicode names', (d) => { for (let i = 0; i < 20; i++) writeFileSync(join(d, `${'é'.repeat(40)}${i}`), 'u'); }],
+      ['a submodule with a long name', (d) => { writeFileSync(join(d, 'f'), 'f'); gitIn(d, 'add', 'f'); gitIn(d, 'update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},${'m'.repeat(120)}`); }],
+    ];
+    for (const [label, fill] of shapes) {
+      const { git, sha } = shape(fill);
+      const real = execFileSync('git', ['--git-dir', git, 'archive', '--format=tar', sha], { maxBuffer: 16 * 1024 * 1024 }).length;
+      const most = await codeSizeBound(hostGit, git, sha);
+      expect(most, label).toBeGreaterThanOrEqual(real);
+    }
+    // A file just under the limit makes a tarball over it: refused at the inspection, as at the install.
+    const edge = shape((d) => { writeFileSync(join(d, 'big'), ''); truncateSync(join(d, 'big'), LIMIT - 1024); });
+    expect(await codeSizeBound(hostGit, edge.git, edge.sha)).toBeGreaterThan(LIMIT);
+    await expect(checkCodeSize(hostGit, edge.git, edge.sha)).rejects.toThrow(/^The code is over 100 MB; apps are limited to 100 MB\.$/);
+    // Over the buffer git's output is held in, real git is stopped there with no word of its own: refused for its size all the same.
+    const over = shape((d) => { writeFileSync(join(d, 'big'), ''); truncateSync(join(d, 'big'), LIMIT + 3 * 1048576); });
+    const stopped = await hostGit(['--git-dir', over.git, 'archive', '--format=tar', over.sha]);
+    expect(stopped).toMatchObject({ code: 1, stderr: '', noExit: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+    await expect(releaseTar(hostGit, over.git, over.sha)).rejects.toThrow(/^The code is over 100 MB; apps are limited to 100 MB\.$/);
+    await expect(checkCodeSize(hostGit, over.git, over.sha)).rejects.toThrow(/^The code is over 100 MB; apps are limited to 100 MB\.$/);
+    // Attributes can make files bigger than they are stored: a .gitattributes at any depth, or the repository's own.
+    const packed: string[] = [];
+    const recording: typeof hostGit = async (args, cwd) => { if (args.includes('archive')) packed.push(args.at(-1)!); return hostGit(args, cwd); };
+    const deep = shape((d) => { mkdirSync(join(d, 'lib', 'sub'), { recursive: true }); writeFileSync(join(d, 'lib', 'sub', '.gitattributes'), '*.txt ident\n'); writeFileSync(join(d, 'lib', 'sub', 'a.txt'), '$Id$\n'.repeat(2000)); });
+    // Its 10 000 stored bytes are packed as over 90 000: no count of the list could hold it.
+    expect(execFileSync('git', ['--git-dir', deep.git, 'archive', '--format=tar', deep.sha]).length).toBeGreaterThan(90_000);
+    expect(await codeSizeBound(hostGit, deep.git, deep.sha)).toBeUndefined();
+    await checkCodeSize(recording, deep.git, deep.sha);
+    expect(packed).toEqual([deep.sha]);
+    const own = shape((d) => { writeFileSync(join(d, 'a.txt'), 'a'); });
+    writeFileSync(join(own.git, 'info', 'attributes'), '* export-subst\n');
+    expect(await codeSizeBound(hostGit, own.git, own.sha)).toBeUndefined();
+    await checkCodeSize(recording, own.git, own.sha);
+    expect(packed).toEqual([deep.sha, own.sha]);
+    // Without them, a tree within the limit is not packed.
+    const plain = shape((d) => { writeFileSync(join(d, 'a.txt'), 'a'); });
+    await checkCodeSize(recording, plain.git, plain.sha);
+    expect(packed).toHaveLength(2);
+  }, 120_000);
 
   it('a required field with nothing left to fill it says so at Update, and the app stays as it was (HB-0426)', async () => {
     const { f, store, provider } = await app();
@@ -1874,7 +2181,7 @@ describe('apps: what the 2026-10-10 workflow audit found', { timeout: INTEGRATIO
     expect(mergeConfig(TYPED, noTelegram, {}, { mailbox: 'demo@example.org' }).unfilled).toEqual(['owner_telegram (its owner has not linked a Telegram account (Settings → You))']);
     expect(mergeConfig(TYPED, FACTS, {}, { mailbox: 'demo@example.org' }).unfilled).toEqual([]);
     const agent = new FakeAgent();
-    const rel = await resolveRelease(hostGit, repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'owner_telegram', from: 'owner.telegram', required: true }] } }), 'HEAD');
+    const rel = await resolveRelease(hostGit, gitOf(repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'owner_telegram', from: 'owner.telegram', required: true }] } })), 'HEAD');
     await expect(installRelease({ ...d(agent), facts: noTelegram }, rel, { mailbox: 'demo@example.org' })).rejects.toThrow(/nothing to fill owner_telegram/);
     expect(agent.calls.some((c) => c.what.includes('unittest'))).toBe(false);
     expect(agent.live().config).toBeNull();
@@ -1895,7 +2202,7 @@ describe('apps: what the 2026-10-10 workflow audit found', { timeout: INTEGRATIO
   it('a job of the agent\'s own with no name does not block the app (#74)', async () => {
     const agent = new FakeAgent();
     agent.jobs = [{ id: 'own1' } as never, { id: 'keep', name: 'daily-brief' }];
-    const done = await installRelease(d(agent), await resolveRelease(hostGit, repo(), 'HEAD'), { mailbox: 'demo@example.org' });
+    const done = await installRelease(d(agent), await resolveRelease(hostGit, gitOf(repo()), 'HEAD'), { mailbox: 'demo@example.org' });
     expect(done.tasks).toEqual(['demoapp-tick']);
     expect(agent.jobs.map((j) => j.id)).toEqual(expect.arrayContaining(['own1', 'keep']));
     // One of the app's own without an id is still refused: it could not be taken off.
@@ -1917,7 +2224,7 @@ describe('apps: what the 2026-10-10 workflow audit found', { timeout: INTEGRATIO
     const dir = repo();
     const agent = new FakeAgent();
     agent.jobs = [];
-    const v1 = await resolveRelease(hostGit, dir, 'HEAD');
+    const v1 = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
     await installRelease(d(agent), v1, { mailbox: 'first@example.org' });
     const live = join(agent.root('x'), `demoapp/releases/${v1.sha.slice(0, 12)}`);
     writeFileSync(join(live, 'built-by-its-tests.txt'), 'kept');
@@ -1941,10 +2248,10 @@ describe('apps: what the 2026-10-10 workflow audit found', { timeout: INTEGRATIO
     const dir = repo();
     const agent = new FakeAgent();
     agent.jobs = [];
-    const v1 = await resolveRelease(hostGit, dir, 'HEAD');
+    const v1 = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
     await installRelease(d(agent), v1, { mailbox: 'first@example.org', mode: 'live' });
     commit(dir, { ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['python3', '-m', 'demo', 'tick'] }] });
-    return { agent, v1, v2: await resolveRelease(hostGit, dir, 'HEAD'), before: agent.live() };
+    return { agent, v1, v2: await resolveRelease(hostGit, gitOf(dir), 'HEAD'), before: agent.live() };
   }
 
   it('the live link that cannot be read is not "no release": nothing is changed, and `current` is never removed (#103)', async () => {
@@ -1998,7 +2305,7 @@ describe('apps: what the 2026-10-23 review found', { timeout: INTEGRATION_TIMEOU
     const agent = new FakeAgent();
     agent.jobs = [{ id: 'keep', name: 'daily-brief' }];
     agent.throwAdd = (name) => name === 'demoapp-two';
-    const rel = await resolveRelease(hostGit, repo({ ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['true'] }, { name: 'two', every: '1h', command: ['true'] }] }), 'HEAD');
+    const rel = await resolveRelease(hostGit, gitOf(repo({ ...MANIFEST, tasks: [{ name: 'tick', every: '5m', command: ['true'] }, { name: 'two', every: '1h', command: ['true'] }] })), 'HEAD');
     await expect(installRelease(d(agent), rel, { mailbox: 'demo@example.org' }))
       .rejects.toThrow(/Could not schedule demoapp-two: provider unavailable.*Its tasks are as they were/s);
     expect(agent.live()).toEqual({ current: null, config: null, tasks: [], staging: false });
@@ -2041,7 +2348,7 @@ describe('apps: what the 2026-10-22 review found', { timeout: INTEGRATION_TIMEOU
     const dir = repo();
     const agent = new FakeAgent();
     agent.jobs = [];
-    const v1 = await resolveRelease(hostGit, dir, 'HEAD');
+    const v1 = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
     await installRelease(d(agent), v1, { mailbox: 'first@example.org' });
     const live = join(agent.root('x'), `demoapp/releases/${v1.sha.slice(0, 12)}`);
     writeFileSync(join(live, 'built.txt'), 'before');
@@ -2075,6 +2382,233 @@ describe('apps: what the 2026-10-22 review found', { timeout: INTEGRATION_TIMEOU
     const now = await manifestAt(hostGit, mirror, 'HEAD');
     expect(now.sha).not.toBe(first.sha);
     expect(now.sha).toBe(gitIn(src, 'rev-parse', 'HEAD').toString().trim());
+  });
+
+  it('two reads of a new git address at once: the second waits for the first clone, never clones over it (HB-0946)', async () => {
+    const src = repo();
+    const cache = mkdtempSync(join(tmpdir(), 'hb-appcache-'));
+    tmp.push(cache);
+    const mirror = mirrorDir(cache, src);
+    // The first clone is held before it starts, so the second read looks for the mirror meanwhile.
+    let started!: () => void, letGo!: () => void;
+    const held = new Promise<void>((r) => { started = r; });
+    const gate = new Promise<void>((r) => { letGo = r; });
+    let first = true;
+    const seen: string[] = [];
+    const git: typeof hostGit = async (args, cwd) => {
+      seen.push(args.includes('clone') ? 'clone' : args.includes('fetch') ? 'fetch' : 'other');
+      if (args[0] === 'clone' && first) { first = false; started(); await gate; }
+      return hostGit(args, cwd);
+    };
+    const a = repoFor(git, { kind: 'git', url: src }, cache);
+    await held;
+    const b = repoFor(git, { kind: 'git', url: src }, cache);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(existsSync(mirror)).toBe(false);
+    letGo();
+    expect(await a).toBe(mirror);
+    expect(await b).toBe(mirror);
+    // One clone, then the second read's fetch from the finished mirror.
+    expect(seen.filter((s) => s !== 'other')).toEqual(['clone', 'fetch']);
+    expect((await manifestAt(hostGit, mirror, 'HEAD')).sha).toBe(gitIn(src, 'rev-parse', 'HEAD').toString().trim());
+  });
+
+  it('a clone cut off part way leaves no mirror, and the next read clones again (HB-0946)', async () => {
+    const src = repo();
+    const cache = mkdtempSync(join(tmpdir(), 'hb-appcache-'));
+    tmp.push(cache);
+    const mirror = mirrorDir(cache, src);
+    // The first clone leaves a half-made folder where it was cloning to, and fails.
+    let cut = true;
+    const git: typeof hostGit = async (args, cwd) => {
+      if (args[0] === 'clone' && cut) {
+        cut = false;
+        mkdirSync(args.at(-1)!, { recursive: true });
+        writeFileSync(join(args.at(-1)!, 'HEAD'), 'ref: refs/heads/main\n');
+        return { code: 128, stdout: Buffer.alloc(0), stderr: 'fatal: early EOF' };
+      }
+      return hostGit(args, cwd);
+    };
+    await expect(repoFor(git, { kind: 'git', url: src }, cache)).rejects.toThrow(/Could not fetch .*early EOF/);
+    expect(existsSync(mirror)).toBe(false);
+    expect(readdirSync(cache)).toEqual([]);
+    expect(await repoFor(git, { kind: 'git', url: src }, cache)).toBe(mirror);
+    expect((await manifestAt(hostGit, mirror, 'HEAD')).sha).toBe(gitIn(src, 'rev-parse', 'HEAD').toString().trim());
+  });
+
+  it('the clear-out of old releases removes only folders named as a release: a file with a blank line in its name never takes the live one (HB-1301)', async () => {
+    const agent = new FakeAgent();
+    const dir = repo();
+    const releases = join(agent.root('x'), 'demoapp', 'releases');
+    const install = async (values: Record<string, unknown> = {}) => installRelease(d(agent), await resolveRelease(hostGit, gitOf(dir), 'HEAD'), values);
+    const shas: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      if (i) commit(dir);
+      shas.push((await install(i ? {} : { mailbox: 'demo@example.org' })).sha.slice(0, 12));
+      // Each release older than the one after it, as the clock would have it.
+      const at = new Date(Date.now() - (10 - i) * 60_000);
+      utimesSync(join(releases, shas[i]!), at, at);
+    }
+    // What the app left beside its releases: a file whose name has a blank line in it, one whose name holds a release's on a line of its own, and a folder of notes.
+    writeFileSync(join(releases, 'x\n\ny'), 'made by the app');
+    writeFileSync(join(releases, `note\n${shas[1]}`), 'made by the app');
+    mkdirSync(join(releases, 'notes'));
+    commit(dir);
+    const last = (await install()).sha.slice(0, 12);
+    expect(agent.live().current).toBe(`releases/${last}`);
+    // The newest three releases, the live one and the one before it among them; the oldest is cleared; nothing else is touched.
+    expect(readdirSync(releases).sort()).toEqual([last, shas[3], shas[2], 'notes', `note\n${shas[1]}`, 'x\n\ny'].sort());
+    expect(readFileSync(join(releases, last, 'hatchabot.json'), 'utf8')).toContain('demoapp');
+  });
+
+  it('an unpack that fails takes its half-unpacked folder with it; the clear-out removes those left before, and a link named as a release never stops it (HB-1301)', async () => {
+    const agent = new FakeAgent();
+    const dir = repo();
+    const releases = join(agent.root('x'), 'demoapp', 'releases');
+    const install = async (values: Record<string, unknown> = {}) => installRelease(d(agent), await resolveRelease(hostGit, gitOf(dir), 'HEAD'), values);
+    const shas: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      if (i) commit(dir);
+      shas.push((await install(i ? {} : { mailbox: 'demo@example.org' })).sha.slice(0, 12));
+      const at = new Date(Date.now() - (10 - i) * 60_000);
+      utimesSync(join(releases, shas[i]!), at, at);
+    }
+    // The disk fills part way through unpacking the next release.
+    commit(dir);
+    const next = gitIn(dir, 'rev-parse', 'HEAD').toString().trim().slice(0, 12);
+    agent.breakScript = (s) => s.replace(/tar -x -C ('[^']*'\.tmp)/, '{ touch $1/half-written; echo "tar: write error: No space left on device" >&2; false; }');
+    await expect(install()).rejects.toThrow(/Could not unpack the code: .*No space left on device/);
+    agent.breakScript = (s) => s;
+    expect(existsSync(join(releases, `${next}.tmp`))).toBe(false);
+    expect(agent.live().current).toBe(`releases/${shas[3]}`);
+    // One an earlier release left behind; and a dangling link named as a release, which sorts first.
+    mkdirSync(join(releases, `${'e'.repeat(12)}.tmp`));
+    writeFileSync(join(releases, `${'e'.repeat(12)}.tmp`, 'half-written'), 'x');
+    symlinkSync('/nonexistent-target', join(releases, '0'.repeat(12)));
+    expect((await install()).sha.slice(0, 12)).toBe(next);
+    expect(readdirSync(releases).sort()).toEqual([next, shas[3], shas[2], '0'.repeat(12)].sort());
+  });
+
+  it('a mirror folder an earlier clone left half made is cloned again in the same read; a whole mirror out of reach is kept (HB-0946)', async () => {
+    const src = repo();
+    const cache = mkdtempSync(join(tmpdir(), 'hb-appcache-'));
+    tmp.push(cache);
+    const mirror = mirrorDir(cache, src);
+    const head = gitIn(src, 'rev-parse', 'HEAD').toString().trim();
+    const seen: string[] = [];
+    const git: typeof hostGit = async (args, cwd) => {
+      if (args.includes('clone') || args.includes('fetch')) seen.push(args.includes('clone') ? 'clone' : 'fetch');
+      return hostGit(args, cwd);
+    };
+    // Cut off before it was a repository (a folder with a HEAD file), or before it had its origin (an empty bare repo).
+    const halfMade = [
+      () => { mkdirSync(mirror, { recursive: true }); writeFileSync(join(mirror, 'HEAD'), 'ref: refs/heads/main\n'); },
+      () => { execFileSync('git', ['init', '-q', '--bare', mirror]); },
+    ];
+    for (const leave of halfMade) {
+      rmSync(mirror, { recursive: true, force: true });
+      leave();
+      seen.length = 0;
+      expect(await repoFor(git, { kind: 'git', url: src }, cache)).toBe(mirror);
+      expect(seen).toEqual(['fetch', 'clone']);
+      expect((await manifestAt(hostGit, mirror, 'HEAD')).sha).toBe(head);
+      expect(readdirSync(cache)).toEqual([mirror.split('/').pop()]);
+    }
+    // A whole mirror whose address cannot be reached for now: refused, and kept as it is.
+    const away = `${src}-away`;
+    execFileSync('mv', [src, away]);
+    try {
+      seen.length = 0;
+      await expect(repoFor(git, { kind: 'git', url: src }, cache)).rejects.toThrow(/^Could not fetch /);
+      expect(seen).toEqual(['fetch']);
+      expect((await manifestAt(hostGit, mirror, 'HEAD')).sha).toBe(head);
+    } finally { execFileSync('mv', [away, src]); }
+  });
+
+  it('git answers in English whatever the host\'s language, so a half-made mirror is told apart in any of them (HB-0946)', async () => {
+    // A PATH of one shim git, which says what it was run with: nothing else runs.
+    const shim = mkdtempSync(join(tmpdir(), 'hb-gitshim-'));
+    tmp.push(shim);
+    writeFileSync(join(shim, 'git'), '#!/bin/sh\nprintf "LC_ALL=%s\\n" "$LC_ALL"\n', { mode: 0o755 });
+    const names = ['PATH', 'LANG', 'LANGUAGE', 'LC_ALL'] as const;
+    const saved = Object.fromEntries(names.map((k) => [k, process.env[k]]));
+    const put = (env: Record<string, string | undefined>) => {
+      for (const [k, v] of Object.entries(env)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    };
+    try {
+      put({ PATH: `${shim}:/usr/bin:/bin`, LANG: 'de_DE.UTF-8', LANGUAGE: 'de', LC_ALL: undefined });
+      expect((await hostGit(['env'])).stdout.toString()).toBe('LC_ALL=C\n');
+      put({ PATH: saved.PATH });
+      // Where git's German messages are on the machine, a half-made folder is still told apart and cloned again.
+      const asked = spawnSync('git', ['--git-dir', join(shim, 'none'), 'rev-parse', '--git-dir'], { encoding: 'utf8' });
+      if (asked.status === 128 && !/not a git repository/.test(asked.stderr)) {
+        const src = repo();
+        const cache = mkdtempSync(join(tmpdir(), 'hb-appcache-'));
+        tmp.push(cache);
+        const mirror = mirrorDir(cache, src);
+        mkdirSync(mirror);
+        writeFileSync(join(mirror, 'HEAD'), 'ref: refs/heads/main\n');
+        expect(await repoFor(hostGit, { kind: 'git', url: src }, cache)).toBe(mirror);
+        expect((await manifestAt(hostGit, mirror, 'HEAD')).sha).toBe(gitIn(src, 'rev-parse', 'HEAD').toString().trim());
+      }
+    } finally { put(saved); }
+  });
+
+  it('a whole mirror whose check fails without git saying it is half made is kept, never removed (HB-0946)', async () => {
+    const src = repo();
+    const cache = mkdtempSync(join(tmpdir(), 'hb-appcache-'));
+    tmp.push(cache);
+    const mirror = await repoFor(hostGit, { kind: 'git', url: src }, cache);
+    const head = gitIn(src, 'rev-parse', 'HEAD').toString().trim();
+    // hostGit says when git gave no status of its own; a status git gave carries no such note.
+    expect(await hostGit(['--version'], join(cache, 'no-such-folder'))).toMatchObject({ code: 1, noExit: 'ENOENT' });
+    const notRepo = await hostGit(['--git-dir', join(cache, 'no-such-folder'), 'rev-parse', '--git-dir']);
+    expect(notRepo.code).toBe(128);
+    expect(notRepo.noExit).toBeUndefined();
+    const failures: Array<[string, Awaited<ReturnType<typeof hostGit>>]> = [
+      ['rev-parse', { code: 1, stdout: Buffer.alloc(0), stderr: '', noExit: 'EAGAIN' }],
+      ['rev-parse', { code: 128, stdout: Buffer.alloc(0), stderr: 'fatal: unable to read HEAD: Permission denied' }],
+      ['config', { code: 1, stdout: Buffer.alloc(0), stderr: '', noExit: 'SIGTERM' }],
+      ['config', { code: 3, stdout: Buffer.alloc(0), stderr: 'fatal: bad config line 1 in file config' }],
+    ];
+    const away = `${src}-away`;
+    execFileSync('mv', [src, away]);
+    try {
+      for (const [step, failure] of failures) {
+        const seen: string[] = [];
+        const git: typeof hostGit = async (args, cwd) => {
+          seen.push(args.includes('clone') ? 'clone' : args.includes('fetch') ? 'fetch' : args.includes('rev-parse') ? 'rev-parse' : args.includes('config') ? 'config' : 'other');
+          return args.includes(step) ? failure : hostGit(args, cwd);
+        };
+        await expect(repoFor(git, { kind: 'git', url: src }, cache), `${step} ${failure.noExit ?? failure.code}`).rejects.toThrow(/^Could not fetch /);
+        expect(seen).not.toContain('clone');
+        expect((await manifestAt(hostGit, mirror, 'HEAD')).sha).toBe(head);
+      }
+    } finally { execFileSync('mv', [away, src]); }
+  });
+
+  it('a half-made mirror folder inside another repository: neither its fetch nor its reads act on that repository, and it is cloned again (HB-0946)', async () => {
+    const src = repo();
+    // A checkout holding the cache (a dev run keeps it in the checkout's data folder), with an origin and a branch of its own.
+    const outer = repo({ ...MANIFEST, app: 'outerapp' });
+    gitIn(outer, 'branch', 'local-only');
+    gitIn(outer, 'remote', 'add', 'origin', src);
+    gitIn(outer, 'checkout', '-q', '--detach');
+    const cache = join(outer, 'data', 'app-sources');
+    mkdirSync(cache, { recursive: true });
+    const mirror = mirrorDir(cache, src);
+    mkdirSync(mirror);
+    writeFileSync(join(mirror, 'HEAD'), 'ref: refs/heads/main\n');
+    const refs = () => gitIn(outer, 'for-each-ref', '--format=%(refname) %(objectname)').toString();
+    const before = { refs: refs(), head: readFileSync(join(outer, '.git', 'HEAD'), 'utf8') };
+    // Read as it is (a start reading a waiting install's manifest): not the checkout's manifest.
+    await expect(manifestAt(hostGit, mirror, 'HEAD')).rejects.toThrow(/^No commit "HEAD"/);
+    // Read with a fetch: cloned again, the checkout as it was.
+    expect(await repoFor(hostGit, { kind: 'git', url: src }, cache)).toBe(mirror);
+    expect({ refs: refs(), head: readFileSync(join(outer, '.git', 'HEAD'), 'utf8') }).toEqual(before);
+    const read = await manifestAt(hostGit, mirror, 'HEAD');
+    expect(read.manifest.app).toBe('demoapp');
+    expect(read.sha).toBe(gitIn(src, 'rev-parse', 'HEAD').toString().trim());
   });
 
   it('waiting secret values are stored all or none (B29)', async () => {
@@ -2156,5 +2690,508 @@ describe('apps: what the 2026-10-29 audit found', () => {
     expect(jobs.map((j) => j.id)).toEqual(['personal', 'app-1']);
     await removeTasks({ provider: provider as any, runtimeRef: 'x', facts: FACTS }, 'demoapp', m);
     expect(jobs.map((j) => j.id)).toEqual(['personal']);
+  });
+});
+
+describe('apps: what the 2026-11-23 audit found', { timeout: INTEGRATION_TIMEOUT }, () => {
+  const OWNER = 'owner-1';
+  const hdr = { 'x-hatchabot-owner': OWNER };
+  afterEach(() => { setStepHookForTests(undefined); clearBusy('a1'); });
+  const until = async (ok: () => boolean) => {
+    for (let n = 0; n < 500; n++) { if (ok()) return; await new Promise((r) => setTimeout(r, 10)); }
+    throw new Error('did not settle');
+  };
+  async function world(o: { secrets?: { put(r: string, v: string): Promise<void>; get(r: string): Promise<string>; delete(r: string): Promise<void> }; appGit?: typeof hostGit } = {}) {
+    const store = new Store(new Database(':memory:'));
+    const provider = new FakeAgent();
+    provider.jobs = [];
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'p', ownerId: OWNER, name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/p', createdAt: 'now' } as never);
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Demo', slug: 'demo-agent', state: 'RUNNING', runtimeRef: 'mock://a1', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    const f = Fastify();
+    const secrets = o.secrets ?? { put: async () => {}, get: async () => 'x', delete: async () => {} };
+    const routes = await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false, availableCount: () => 0, list: () => [] } }, appGit: o.appGit } as never);
+    const post = (suffix: string, payload: Record<string, unknown>, agent = 'a1') => f.inject({ method: 'POST', url: `/v1/agents/${agent}/app${suffix}`, headers: hdr, payload });
+    /** The config files the installs wrote, in order. */
+    const configsWritten = () => provider.calls.filter((c) => c.kind === 'write' && c.what.includes('config.json')).map((c) => JSON.parse(c.input!) as Record<string, unknown>);
+    return { store, provider, f, routes, post, configsWritten };
+  }
+
+  it('a waiting install replaced while its secrets are read installs one request\'s values, never some of each (HB-0929)', async () => {
+    const kept = new Map<string, string>();
+    let hold: string | undefined;
+    let entered!: () => void, letGo!: () => void;
+    const inRead = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { letGo = r; });
+    const secrets = {
+      put: async (r: string, v: string) => { kept.set(r, v); },
+      get: async (r: string) => {
+        if (r === hold) { hold = undefined; entered(); await gate; }
+        const v = kept.get(r);
+        if (v === undefined) throw new Error('missing');
+        return v;
+      },
+      delete: async (r: string) => { kept.delete(r); },
+    };
+    // The replacement's repo is read: then it goes on to save its request.
+    let replacementRead!: () => void;
+    const readIt = new Promise<void>((r) => { replacementRead = r; });
+    let other = '';
+    const appGit: typeof hostGit = async (args, cwd) => {
+      const r = await hostGit(args, cwd);
+      if (other && args.includes(gitOf(other)) && args.includes('archive')) replacementRead();
+      return r;
+    };
+    const w = await world({ secrets, appGit });
+    const first = { key: 'first', type: 'text', secret: true };
+    const second = { key: 'second', type: 'text', secret: true };
+    const dir = repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, first, second] } });
+    other = repo({ ...MANIFEST, config: { fields: [...MANIFEST.config.fields, second, first] } });
+    w.store.setAgentState('a1', 'STOPPED');
+    expect((await w.post('/pending', { source: dir, values: { mailbox: 'demo@example.org', first: 'old first value', second: 'old second value' } })).statusCode).toBe(200);
+    w.store.setAgentState('a1', 'RUNNING');
+    // Its run reads `first`, then waits reading `second`.
+    hold = 'app-pending/a1/second';
+    expect((await w.post('/pending', {})).json()).toMatchObject({ retried: true });
+    await inRead;
+    // A replacement request is saved meanwhile, its secrets under the same refs.
+    const replaced = w.post('/pending', { source: other, values: { mailbox: 'demo@example.org', second: 'new second value', first: 'new first value' } });
+    await readIt;
+    await new Promise((r) => setTimeout(r, 100));
+    letGo();
+    expect((await replaced).statusCode).toBe(200);
+    await until(() => !w.store.getAppPending('a1') && w.configsWritten().length === 2);
+    const pairs = w.configsWritten().map((c) => [c.first, c.second]);
+    // Each install had one request's values: the old, then the new.
+    expect(pairs).toEqual([['old first value', 'old second value'], ['new first value', 'new second value']]);
+    expect(kept.size).toBe(0);
+    await w.f.close();
+  });
+
+  it('a mailbox shared with one agent, accepted, is not consent for another agent of the same name on another mailbox (HB-0961)', async () => {
+    const w = await world();
+    const helper = (id: string) => w.store.insertAgent({ id, ownerId: OWNER, name: 'Helper', slug: `helper-${id}`, state: 'RUNNING', runtimeRef: `mock://${id}`, aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    helper('a2');
+    helper('a3');
+    w.store.insertConnection({ id: 'c1', ownerId: OWNER, kind: 'google', email: 'first@example.org', services: ['gmail'], secretRef: 's/c1' });
+    w.store.insertConnection({ id: 'c2', ownerId: OWNER, kind: 'google', email: 'second@example.org', services: ['gmail'], secretRef: 's/c2' });
+    for (const [agentId, conn] of [['a1', 'c1'], ['a2', 'c1'], ['a1', 'c2'], ['a3', 'c2']]) w.store.attachConnection(agentId!, conn!, false);
+    const dir = repo();
+    // One Helper runs the app on the first mailbox, the other on the second.
+    expect((await w.post('', { source: dir, values: { mailbox: 'first@example.org' } }, 'a2')).statusCode).toBe(200);
+    expect((await w.post('', { source: dir, values: { mailbox: 'second@example.org' } }, 'a3')).statusCode).toBe(200);
+    // This agent shares the first mailbox with the first Helper, confirmed.
+    expect((await w.post('', { source: dir, values: { mailbox: 'first@example.org' } })).statusCode).toBe(409);
+    expect((await w.post('', { source: dir, values: { mailbox: 'first@example.org' }, allowShared: true })).statusCode).toBe(200);
+    // Moved to the second mailbox: the other Helper is asked about, not taken as the one accepted.
+    const moved = await w.post('/update', { values: { mailbox: 'second@example.org' } });
+    expect(moved.statusCode).toBe(409);
+    expect(moved.json()).toMatchObject({ conflict: ['Helper'], unchanged: true });
+    expect(JSON.parse(w.provider.live('mock://a1').config!)).toMatchObject({ mailbox: 'first@example.org' });
+    // Confirmed, it goes in.
+    expect((await w.post('/update', { values: { mailbox: 'second@example.org' }, allowShared: true })).statusCode).toBe(200);
+    expect(JSON.parse(w.provider.live('mock://a1').config!)).toMatchObject({ mailbox: 'second@example.org' });
+    await w.f.close();
+  });
+
+  const TWO_TASKS = { ...MANIFEST, tasks: [MANIFEST.tasks[0]!, { name: 'digest', every: '1h', command: ['python3', '-m', 'demo', 'digest'] }] };
+  const appTasks = (p: FakeAgent, app = 'demoapp') => p.jobs.filter((j) => j.name.startsWith(`${app}-`)).map((j) => j.name).sort();
+
+  it('replacing an App whose old tasks come off only in part puts them all back, or holds it to put them back (HB-1080)', async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    const other = repo({ ...MANIFEST, app: 'otherapp' });
+    // The first comes off, the second will not, once.
+    const digest = () => w.provider.jobs.find((j) => j.name === 'demoapp-digest')!.id;
+    const stuck = digest();
+    let refusals = 0;
+    w.provider.failRm = (id) => id === stuck && refusals++ === 0;
+    const once = await w.post('', { source: other, values: { mailbox: 'demo@example.org' } });
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(once.statusCode).toBe(400);
+    expect(once.json()).toMatchObject({ unchanged: true });
+    expect(once.json().error).toMatch(/Could not remove demoapp's scheduled tasks/);
+    expect(w.store.getAgentApp('a1')!.app).toBe('demoapp');
+    expect(appTasks(w.provider, 'otherapp')).toEqual([]);
+    expect(w.store.listOperations(['a1'])[0]).toMatchObject({ kind: 'app-install', status: 'failed' });
+    // It will not come off at all, so they cannot all go back: held for the owner, with the one way out.
+    const always = digest();
+    w.provider.failRm = (id) => id === always;
+    const held = await w.post('', { source: other, values: { mailbox: 'demo@example.org' } });
+    expect(held.json()).toMatchObject({ unchanged: false, held: true });
+    expect(held.json().error).toMatch(/demoapp's tasks could not be put back: demoapp-tick is not on the agent/);
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op).toMatchObject({ kind: 'app-install', status: 'held' });
+    expect(op.recovery!.actions).toEqual([{ action: 'put-tasks-back', label: 'Put its scheduled tasks back' }]);
+    expect((await w.post('', { source: other, values: { mailbox: 'demo@example.org' } })).statusCode).toBe(409);
+    w.provider.failRm = () => false;
+    const back = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json().operation.status).toBe('rolled_back');
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(w.store.getAgentApp('a1')!.app).toBe('demoapp');
+    await w.f.close();
+  });
+
+  it('a replacement left switched on whose old tasks cannot go back keeps its two choices, and going back puts them back (HB-1080)', async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    const other = repo({ ...MANIFEST, app: 'otherapp' });
+    const otherCurrent = () => { try { return readlinkSync(join(w.provider.root('mock://a1'), 'otherapp/current')); } catch { return null; } };
+    // The new App's tasks will not go on after its switch, its switch-back fails, and the old App's tasks will not go back on.
+    w.provider.failAdd = (name) => name.startsWith('otherapp-') || name.startsWith('demoapp-');
+    w.provider.breakScript = (s) => (s.startsWith('rc=0;') && s.includes('otherapp') ? 'exit 1' : s);
+    const r = await w.post('', { source: other, values: { mailbox: 'demo@example.org' } });
+    expect(r.json()).toMatchObject({ unchanged: false, held: true });
+    expect(r.json().error).toMatch(/use the new release, or go back to the previous one.*demoapp's tasks could not be put back either: .*Going back to the previous one puts them back\./s);
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op).toMatchObject({ kind: 'app-install', status: 'held' });
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+    expect(otherCurrent()).toMatch(/^releases\//);
+    w.provider.failAdd = () => false;
+    w.provider.breakScript = (s) => s;
+    // Held with only "Put its scheduled tasks back" (as this release's first fix did): never "as it was" while it is switched on.
+    w.store.updateOperation(op.id, { recovery: { actions: [{ action: 'put-tasks-back', label: 'Put its scheduled tasks back' }], recommended: 'put-tasks-back' } });
+    const tasksOnly = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(tasksOnly.json().operation).toMatchObject({ status: 'held', outcome: expect.stringMatching(/^otherapp [0-9a-f]{12} is switched on in the agent/) });
+    expect(w.store.getOperation(op.id)!.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+    expect(otherCurrent()).toMatch(/^releases\//);
+    expect(appTasks(w.provider)).toEqual([]);
+    const back = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json().operation.status).toBe('rolled_back');
+    expect(otherCurrent()).toBeNull();
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(appTasks(w.provider, 'otherapp')).toEqual([]);
+    expect(w.store.getAgentApp('a1')!.app).toBe('demoapp');
+    await w.f.close();
+  });
+
+  it('a replacement whose own tasks could not be confirmed off fails as before when the old tasks cannot go back, never "as it was" (HB-1080)', async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    const other = repo({ ...MANIFEST, app: 'otherapp' });
+    const named = (id: string) => w.provider.jobs.find((j) => j.id === id)?.name ?? '';
+    const exec = w.provider.exec.bind(w.provider);
+    // The new App's task goes on but its answer is lost, and it will not come off again; the old App's will not go back on.
+    w.provider.exec = async (ref, argv) => {
+      if (argv[0] === 'cron' && argv[1] === 'enable' && named(argv[2]!).startsWith('otherapp-')) { await exec(ref, argv); return { code: 1, stdout: '', stderr: 'gateway timed out' }; }
+      if (argv[0] === 'cron' && (argv[1] === 'disable' || argv[1] === 'rm') && named(argv[2]!).startsWith('otherapp-')) return { code: 1, stdout: '', stderr: 'gateway timed out' };
+      if (argv[0] === 'cron' && argv[1] === 'add' && argv[argv.indexOf('--name') + 1]!.startsWith('demoapp-')) return { code: 1, stdout: '', stderr: 'gateway refused the job' };
+      return exec(ref, argv);
+    };
+    const r = await w.post('', { source: other, values: { mailbox: 'demo@example.org' } });
+    expect(r.json()).toMatchObject({ unchanged: false });
+    expect(r.json().held).toBeUndefined();
+    expect(r.json().error).toMatch(/demoapp's tasks could not be put back: /);
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op).toMatchObject({ kind: 'app-install', status: 'failed' });
+    expect(op.recovery).toBeFalsy();
+    expect(appTasks(w.provider, 'otherapp')).toEqual(['otherapp-tick']);
+    await w.f.close();
+  });
+
+  it('"Put its scheduled tasks back" after a reinstall that failed before its switch is not held again over a link a replacement left (HB-1080)', async () => {
+    const w = await world();
+    const first = repo(TWO_TASKS);
+    expect((await w.post('', { source: first, values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    expect((await w.post('', { source: repo({ ...MANIFEST, app: 'otherapp' }), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    // demoapp's link stays on the volume at the commit about to be installed again.
+    expect(w.provider.live('mock://a1').current).toMatch(/^releases\//);
+    w.provider.testCode = 1;
+    w.provider.failAdd = (name) => name.startsWith('otherapp-');
+    const r = await w.post('', { source: first, values: { mailbox: 'demo@example.org' } });
+    expect(r.json()).toMatchObject({ unchanged: false, held: true });
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['put-tasks-back']);
+    w.provider.testCode = 0;
+    w.provider.failAdd = () => false;
+    const back = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json().operation.status).toBe('rolled_back');
+    expect(appTasks(w.provider, 'otherapp')).toEqual(['otherapp-tick']);
+    expect(w.store.getAgentApp('a1')!.app).toBe('otherapp');
+    await w.f.close();
+  });
+
+  it('"Put its scheduled tasks back" is not "as it was" while the new App\'s own tasks are still on (HB-1080)', async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    const other = repo({ ...MANIFEST, app: 'otherapp' });
+    // Its tests fail and the old App's tasks will not go back on; a task of
+    // the new App is left on all the same. (A step after its tasks went on
+    // that fails no longer comes here: it is held with the two choices, HB-1192.)
+    w.provider.testCode = 1;
+    w.provider.failAdd = (name) => name.startsWith('demoapp-');
+    await w.post('', { source: other, values: { mailbox: 'demo@example.org' } });
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op.status).toBe('held');
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['put-tasks-back']);
+    w.provider.jobs.push({ id: 'left-on', name: 'otherapp-tick' });
+    expect(appTasks(w.provider, 'otherapp')).toEqual(['otherapp-tick']);
+    w.provider.testCode = 0;
+    w.provider.failAdd = () => false;
+    // Its own tasks cannot be read: nothing changes, and it waits as it was.
+    w.provider.failListAfter = w.provider.lists;
+    const unread = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: op.recovery!.recommended } });
+    expect(unread.statusCode).toBeGreaterThanOrEqual(400);
+    expect(unread.body).toMatch(/could not be checked/);
+    expect(w.store.getOperation(op.id)).toMatchObject({ status: 'held', recovery: op.recovery });
+    w.provider.failListAfter = Infinity;
+    const tasksOnly = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: op.recovery!.recommended } });
+    expect(tasksOnly.json().operation).toMatchObject({ status: 'held', outcome: expect.stringMatching(/^otherapp's scheduled tasks are on the agent, so it is not as it was before/) });
+    expect(w.store.getOperation(op.id)!.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+    expect(appTasks(w.provider)).toEqual([]);
+    const back = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+    expect(back.json().operation.status).toBe('rolled_back');
+    expect(appTasks(w.provider, 'otherapp')).toEqual([]);
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(w.store.getAgentApp('a1')!.app).toBe('demoapp');
+    await w.f.close();
+  });
+
+  it('"Put its scheduled tasks back" with the new release\'s manifest gone after its switch is held with the two choices, and going back settles it (HB-1080)', async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    // Its tasks go on and come off again (one is refused), it is switched back; the old App's will not go back on.
+    const other = repo({ ...MANIFEST, app: 'otherapp', tasks: [MANIFEST.tasks[0]!, { name: 'digest', every: '1h', command: ['python3', '-m', 'demo', 'digest'] }] });
+    w.provider.failAdd = (name) => name === 'otherapp-digest' || name.startsWith('demoapp-');
+    await w.post('', { source: other, values: { mailbox: 'demo@example.org' } });
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['put-tasks-back']);
+    w.provider.failAdd = () => false;
+    const releases = join(w.provider.root('mock://a1'), 'otherapp/releases');
+    for (const d of readdirSync(releases)) rmSync(join(releases, d, 'hatchabot.json'), { force: true });
+    const again = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(again.json().operation).toMatchObject({ status: 'held', outcome: expect.stringMatching(/^The hatchabot\.json of otherapp [0-9a-f]{12} cannot be read/) });
+    expect(w.store.getOperation(op.id)!.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+    const back = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json().operation.status).toBe('rolled_back');
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(appTasks(w.provider, 'otherapp')).toEqual([]);
+    expect(w.store.getAgentApp('a1')?.app).toBe('demoapp');
+    await w.f.close();
+  });
+
+  it('a task change of the new App left part way, with none of its tasks on, is said as that (HB-1080)', async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    const other = repo({ ...MANIFEST, app: 'otherapp' });
+    const named = (id: string) => w.provider.jobs.find((j) => j.id === id)?.name ?? '';
+    const exec = w.provider.exec.bind(w.provider);
+    let mode: 'unconfirmed' | 'old-refused' | 'ok' = 'unconfirmed';
+    w.provider.exec = async (ref, argv) => {
+      if (mode === 'unconfirmed' && argv[0] === 'cron' && argv[1] === 'enable' && named(argv[2]!).startsWith('otherapp-')) { await exec(ref, argv); return { code: 1, stdout: '', stderr: 'gateway timed out' }; }
+      if (mode === 'unconfirmed' && argv[0] === 'cron' && (argv[1] === 'disable' || argv[1] === 'rm') && named(argv[2]!).startsWith('otherapp-')) return { code: 1, stdout: '', stderr: 'gateway timed out' };
+      if (mode === 'old-refused' && argv[0] === 'cron' && argv[1] === 'add' && argv[argv.indexOf('--name') + 1]!.startsWith('demoapp-')) return { code: 1, stdout: '', stderr: 'gateway refused the job' };
+      return exec(ref, argv);
+    };
+    // The first try leaves its task journal; its stray task is taken off by hand.
+    await w.post('', { source: other, values: { mailbox: 'demo@example.org' } });
+    expect(existsSync(join(w.provider.root('mock://a1'), 'otherapp/.tasks-transition.json'))).toBe(true);
+    w.provider.jobs = w.provider.jobs.filter((j) => !j.name.startsWith('otherapp-'));
+    // The second fails its tests, and the old App's tasks will not go back on.
+    mode = 'old-refused';
+    w.provider.testCode = 1;
+    await w.post('', { source: other, values: { mailbox: 'demo@example.org' } });
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['put-tasks-back']);
+    mode = 'ok';
+    w.provider.testCode = 0;
+    const again = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(again.json().operation).toMatchObject({ status: 'held', outcome: expect.stringMatching(/^A change of otherapp's scheduled tasks was left part way, so it is not as it was before/) });
+    expect(w.store.getOperation(op.id)!.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+    const back = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json().operation.status).toBe('rolled_back');
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(appTasks(w.provider, 'otherapp')).toEqual([]);
+    expect(w.store.getAgentApp('a1')?.app).toBe('demoapp');
+    await w.f.close();
+  });
+
+  it('…and a restart while the old tasks come off puts them all back at the start (HB-1080)', async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    w.provider.jobs.find((j) => j.name === 'demoapp-digest')!.disabled = true;
+    const exec = w.provider.exec.bind(w.provider);
+    let crashed = false;
+    w.provider.exec = async (ref, argv) => {
+      const r = await exec(ref, argv);
+      if (!crashed && argv[0] === 'cron' && argv[1] === 'rm') { crashed = true; throw new SimulatedCrash(); }
+      return r;
+    };
+    const cut = await w.post('', { source: repo({ ...MANIFEST, app: 'otherapp' }), values: { mailbox: 'demo@example.org' } });
+    expect(cut.statusCode).toBeGreaterThanOrEqual(500);
+    expect(appTasks(w.provider)).toHaveLength(1);
+    w.provider.exec = exec;
+    clearBusy('a1');
+    newBootForTests();
+    await w.routes.resumeOperations();
+    expect(w.store.listOperations(['a1'])[0]).toMatchObject({ kind: 'app-install', status: 'rolled_back' });
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    // The one the owner had turned off goes back turned off.
+    expect(w.provider.jobs.find((j) => j.name === 'demoapp-digest')!.disabled).toBe(true);
+    expect(w.store.getAgentApp('a1')!.app).toBe('demoapp');
+    await w.f.close();
+  });
+
+  /** Recording the step after the tasks fails, once (the store refusing its write). */
+  const recordingFails = () => {
+    let armed = true;
+    setStepHookForTests((_op, k) => { if (armed && k === 'tasks') { armed = false; throw new Error('database is locked'); } });
+  };
+  /** The runner drops during the prune of old releases, for `app`'s. */
+  const pruneThrows = (p: FakeAgent, app = 'demoapp') => {
+    const shell = p.execShell.bind(p);
+    p.execShell = async (ref: string, script: string) => {
+      if (script.includes('ls -1td') && script.includes(`/${app}'`)) throw new Error('runner gone mid-call');
+      return shell(ref, script);
+    };
+    return () => { p.execShell = shell; };
+  };
+  const recover = (w: Awaited<ReturnType<typeof world>>, id: string, action: string) =>
+    w.f.inject({ method: 'POST', url: `/v1/operations/${id}/recover`, headers: hdr, payload: { action } });
+
+  it('an update whose step after its tasks fails is held with what went on, never "unchanged", and either choice settles it (HB-1192)', async () => {
+    const w = await world();
+    const dir = repo(TWO_TASKS);
+    expect((await w.post('', { source: dir, values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    const first = w.store.getAgentApp('a1')!.sha;
+    const before = w.provider.live('mock://a1');
+    commit(dir, { ...TWO_TASKS, tasks: [MANIFEST.tasks[0]!, { name: 'weekly', every: '7d', command: ['python3', '-m', 'demo', 'weekly'] }], config: { fields: [...MANIFEST.config.fields, { key: 'extra', default: 'on' }] } });
+    const second = gitIn(dir, 'rev-parse', 'HEAD').toString().trim();
+    for (const choice of ['go-back', 'use-new'] as const) {
+      recordingFails();
+      const r = await w.post('/update', {});
+      expect(r.json()).toMatchObject({ held: true, unchanged: false });
+      expect(r.json().error).toMatch(new RegExp(`demoapp ${second.slice(0, 12)} was switched on and its scheduled tasks went on \\(demoapp-tick, demoapp-weekly\\), then recording that its tasks are on failed: database is locked\\. Nothing was switched back, so it waits for your choice on its page`));
+      // All of it is the new release's: the code, its config and its tasks.
+      const now = w.provider.live('mock://a1');
+      expect(now.current).toBe(`releases/${second.slice(0, 12)}`);
+      expect(JSON.parse(now.config!)).toMatchObject({ extra: 'on' });
+      expect(appTasks(w.provider)).toEqual(['demoapp-tick', 'demoapp-weekly']);
+      expect(w.store.getAgentApp('a1')!.sha).toBe(first);
+      const op = w.store.listOperations(['a1'])[0]!;
+      expect(op).toMatchObject({ kind: 'app-update', status: 'held' });
+      expect(op.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+      const done = await recover(w, op.id, choice);
+      expect(done.statusCode, done.body).toBe(200);
+      if (choice === 'go-back') {
+        expect(done.json().operation.status).toBe('rolled_back');
+        expect(w.provider.live('mock://a1')).toMatchObject({ current: before.current, config: before.config, staging: false });
+        expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+        expect(w.store.getAgentApp('a1')!.sha).toBe(first);
+      } else {
+        expect(done.json().operation.status).toBe('succeeded');
+        expect(w.provider.live('mock://a1')).toMatchObject({ current: `releases/${second.slice(0, 12)}`, staging: false });
+        expect(appTasks(w.provider)).toEqual(['demoapp-tick', 'demoapp-weekly']);
+        expect(w.store.getAgentApp('a1')!.sha).toBe(second);
+      }
+    }
+    await w.f.close();
+  });
+
+  it("a replacement whose step after its tasks fails keeps the old App's tasks off beside them, and going back puts them back (HB-1192)", async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    recordingFails();
+    const r = await w.post('', { source: repo({ ...MANIFEST, app: 'otherapp' }), values: { mailbox: 'demo@example.org' } });
+    expect(r.json()).toMatchObject({ held: true, unchanged: false });
+    expect(r.json().error).toMatch(/otherapp [0-9a-f]{12} was switched on and its scheduled tasks went on \(otherapp-tick\), then recording that its tasks are on failed: database is locked\..* demoapp's tasks stay off while otherapp's are on; going back to the previous one puts them back\.$/s);
+    // Never both Apps' tasks on one mailbox.
+    expect(appTasks(w.provider)).toEqual([]);
+    expect(appTasks(w.provider, 'otherapp')).toEqual(['otherapp-tick']);
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op).toMatchObject({ kind: 'app-install', status: 'held' });
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+    const back = await recover(w, op.id, 'go-back');
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json().operation.status).toBe('rolled_back');
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(appTasks(w.provider, 'otherapp')).toEqual([]);
+    expect(w.store.getAgentApp('a1')!.app).toBe('demoapp');
+    await w.f.close();
+  });
+
+  it('a prune of old releases whose call is rejected is logged, and the install that finished stands (HB-1192)', async () => {
+    const w = await world();
+    const dir = repo(TWO_TASKS);
+    expect((await w.post('', { source: dir, values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    commit(dir);
+    const second = gitIn(dir, 'rev-parse', 'HEAD').toString().trim();
+    const restore = pruneThrows(w.provider);
+    const r = await w.post('/update', {});
+    restore();
+    expect(r.statusCode, r.body).toBe(200);
+    expect(w.store.getAgentApp('a1')!.sha).toBe(second);
+    expect(w.provider.live('mock://a1')).toMatchObject({ current: `releases/${second.slice(0, 12)}`, staging: false });
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(w.store.listOperations(['a1'])[0]).toMatchObject({ kind: 'app-update', status: 'succeeded' });
+    expect(w.store.listEvents(['a1'], 100).filter((e) => e.event === 'app.prune_failed').map((e) => e.detail)).toEqual([{ app: 'demoapp', error: 'runner gone mid-call' }]);
+    await w.f.close();
+  });
+
+  it('"Use the new release" after a held replacement whose old tasks went back takes them off again, as a replacement does (HB-1193)', async () => {
+    const w = await world();
+    expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    // The new App's tasks will not go on, and its switch-back fails; the old App's tasks do go back on.
+    w.provider.failAdd = (name) => name.startsWith('otherapp-');
+    w.provider.breakScript = (s) => (s.startsWith('rc=0;') && s.includes('otherapp') ? 'exit 1' : s);
+    const r = await w.post('', { source: repo({ ...MANIFEST, app: 'otherapp' }), values: { mailbox: 'demo@example.org' } });
+    expect(r.json()).toMatchObject({ unchanged: false, held: true });
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    const op = w.store.listOperations(['a1'])[0]!;
+    expect(op.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+    w.provider.failAdd = () => false;
+    w.provider.breakScript = (s) => s;
+    // The old tasks will not come off: it still waits, and the new App's are not put on beside them.
+    const digest = w.provider.jobs.find((j) => j.name === 'demoapp-digest')!.id;
+    w.provider.failRm = (id) => id === digest;
+    const stuck = await recover(w, op.id, 'use-new');
+    expect(stuck.statusCode).toBeGreaterThanOrEqual(400);
+    expect(stuck.body).toMatch(/Could not remove demoapp's scheduled tasks: demoapp-digest remain.*still waiting for your choice/);
+    expect(w.store.getOperation(op.id)!.status).toBe('held');
+    expect(appTasks(w.provider, 'otherapp')).toEqual([]);
+    w.provider.failRm = () => false;
+    const used = await recover(w, op.id, 'use-new');
+    expect(used.statusCode, used.body).toBe(200);
+    expect(used.json().operation).toMatchObject({ status: 'succeeded', outcome: expect.stringMatching(/^otherapp is on [0-9a-f]{12}, and demoapp's scheduled tasks are off\.$/) });
+    expect(appTasks(w.provider)).toEqual([]);
+    expect(appTasks(w.provider, 'otherapp')).toEqual(['otherapp-tick']);
+    expect(w.store.getAgentApp('a1')!.app).toBe('otherapp');
+    await w.f.close();
+  });
+
+  it('a secret kept in the config stays masked once a later release stops declaring it (HB-1081)', async () => {
+    const KEY = 'made-up-feed-code-7731';
+    const fields = MANIFEST.config.fields;
+    const dir = repo({ ...MANIFEST, config: { fields: [...fields, { key: 'feed_code', type: 'text', required: true, secret: true }] } });
+    const agent = new FakeAgent();
+    const install = async (values: Record<string, unknown> = {}) => installRelease({ provider: agent, runtimeRef: 'x', facts: FACTS }, await resolveRelease(hostGit, gitOf(dir), 'HEAD'), values)
+      .then(() => undefined, (e: unknown) => e as Error & { test?: { output: string } });
+    expect(await install({ mailbox: 'demo@example.org', feed_code: KEY })).toBeUndefined();
+    // The next release drops the field; the config keeps its value, and the tests print the config.
+    commit(dir, MANIFEST);
+    agent.testCode = 1;
+    agent.testOutput = `config: {"mailbox": "demo@example.org", "feed_code": "${KEY}"}\nFAILED (failures=1)`;
+    const failed = await install();
+    expect(failed!.message).toMatch(/tests failed/);
+    expect(failed!.test!.output).toContain('"feed_code": "••••••"');
+    expect(failed!.test!.output).not.toContain(KEY);
+    expect(failed!.message).not.toContain(KEY);
+    // Gone in, and then another release after it: the value is still kept, and still masked.
+    agent.testCode = 0;
+    expect(await install()).toBeUndefined();
+    expect(JSON.parse(agent.live('x').config!)).toMatchObject({ feed_code: KEY });
+    commit(dir, { ...MANIFEST, name: 'Demo App 2' });
+    agent.testCode = 1;
+    const later = await install();
+    expect(later!.test!.output).not.toContain(KEY);
+    expect(later!.message).not.toContain(KEY);
+    // A value under a field it still declares, not secret, is shown as it was.
+    expect(later!.test!.output).toContain('demo@example.org');
   });
 });

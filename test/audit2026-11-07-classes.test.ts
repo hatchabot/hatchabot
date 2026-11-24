@@ -11,10 +11,10 @@ import { makeWorld, seedRunningAgent, as, type World } from './support/world.js'
 import { Broker } from '../src/mgmt/broker.js';
 import { HttpApiClient } from '../src/mgmt/apiClient.js';
 import { PendingStore } from '../src/mgmt/pendingStore.js';
-import { markBusy, clearBusy, isBusy, busyWaiters } from '../src/orchestrator/busy.js';
-import { syncDataSourceDocs, syncMemoryBudget } from '../src/orchestrator/provision.js';
-import { memoryBudgetSection } from '../src/orchestrator/memoryCap.js';
-import { beginOperation } from '../src/orchestrator/operations.js';
+import { markBusy, clearBusy, isBusy, busyWaiters } from '../src/orchestrator/lifecycle/busy.js';
+import { syncDataSourceDocs, syncMemoryBudget } from '../src/orchestrator/lifecycle/provision.js';
+import { memoryBudgetSection } from '../src/domain/memoryCap.js';
+import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { ProviderError } from '../src/providers/provider.js';
@@ -1796,7 +1796,7 @@ describe('the class fixes, reviewed', () => {
       execShell: async (_ref: string, script: string) => { scripts.push(script); return { code: 0, stdout: '', stderr: '' }; },
     } as unknown as import('../src/providers/provider.js').RuntimeProvider;
     const sha = 'a'.repeat(64);
-    const { writeFileInAgent, ARGV_SAFE_B64 } = await import('../src/orchestrator/snapshots.js');
+    const { writeFileInAgent, ARGV_SAFE_B64 } = await import('../src/orchestrator/files/snapshots.js');
     // Without a turn: one shell, the content first, then the hash, then the rename.
     await writeFileInAgent(provider, 'mock://x', '/home/node/AGENTS.md', 'IyBIZWxsbwo=', {}, { sha256: sha });
     const one = scripts[0]!;

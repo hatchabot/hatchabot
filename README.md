@@ -402,7 +402,7 @@ src/
   mgmt/         the tool broker every management surface shares (the web chat
                 and the Hatchabot agent)
   cli.ts        The hatchabot command
-web/            The app and the invitee join page: single files, no build step
+web/            The app and the invitee join page (markup; their scripts in web/app/), no build step
 ```
 
 Four interfaces are load-bearing and were written before anything needed them:
@@ -465,13 +465,19 @@ directory under `HATCHABOT_BACKUP_DIR` holding the control-plane database
 (agent registry, memberships, encrypted credentials, memory snapshots), a copy
 of `HATCHABOT_SECRET_KEY` — without which those credentials can't be decrypted
 — and one tarball per agent volume (the agent's memory and OpenClaw state).
+The run tries the saved key on the copied credentials: if it reads none of
+them back, the set says incomplete and no older set is removed.
 Restoring the database alone brings back everything Hatchabot knows; restoring
 a volume brings back what an agent knows. Backups are as sensitive as the
 system itself: each dated set is a `0700` directory (a base directory that
 already exists, such as a shared NAS folder, keeps its own mode). Sets older
 than `HATCHABOT_BACKUP_KEEP_DAYS` are removed after a complete run, except one
 that holds the newest copy of an agent's volume (an agent on a runner that
-was asleep at backup time keeps its last copy). Each install needs its own
+was asleep at backup time keeps its last copy), or of a volume no agent here
+has had (another machine's sets, before its database is restored here): that
+one stays until a restored database names it, or you delete the set, and
+`hatchabot doctor` lists such sets with their size. A deleted agent's newest
+copy goes by age like the rest. Each install needs its own
 `HATCHABOT_BACKUP_DIR`: two installs under one user would write the same
 dated sets.
 

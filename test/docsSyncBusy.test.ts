@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
-import { isBusy } from '../src/orchestrator/busy.js';
+import { isBusy } from '../src/orchestrator/lifecycle/busy.js';
 import type { MockProvider } from '../src/providers/mockProvider.js';
 
 /**
@@ -171,7 +171,7 @@ describe('docs syncs run with the agent held (HB-0230)', () => {
   it('an agent already busy is skipped, not queued', async () => {
     const w = await makeWorld();
     const id = await seedRunningAgent(w);
-    const { markBusy, clearBusy } = await import('../src/orchestrator/busy.js');
+    const { markBusy, clearBusy } = await import('../src/orchestrator/lifecycle/busy.js');
     markBusy(id);
     try {
       const res = await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { memoryCap: '4g' } });

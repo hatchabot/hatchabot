@@ -10,8 +10,8 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { HOUR_FIELDS } from '../src/orchestrator/usage.js';
-import { isCostPeriod, isSpendRange, spendSeries, type SpendRange } from '../src/orchestrator/agentCosts.js';
+import { HOUR_FIELDS } from '../src/orchestrator/usage/usage.js';
+import { isCostPeriod, isSpendRange, spendSeries, type SpendRange } from '../src/orchestrator/usage/agentCosts.js';
 
 const HOUR = 3_600_000;
 const NOW = Date.parse('2026-10-20T12:30:00Z');

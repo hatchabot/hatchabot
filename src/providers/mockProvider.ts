@@ -1,13 +1,15 @@
 import type {
   ExecResult,
+  ImageTagInfo,
   RuntimeInfo,
   RuntimeProvider,
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
 import { readFile, writeFile } from 'node:fs/promises';
-import { ProviderError, VOLUME_GONE, VolumeGoneError } from './provider.js';
-import type { CompressedSwap } from '../orchestrator/swap.js';
+import { createHash } from 'node:crypto';
+import { ProviderError, VOLUME_GONE, VolumeGoneError, type ImageFacts } from './provider.js';
+import type { CompressedSwap } from '../domain/swap.js';
 import { PassThrough, Readable } from 'node:stream';
 
 interface MockRuntime {
@@ -29,6 +31,8 @@ export function importsTook(script: string): string {
  */
 export class MockProvider implements RuntimeProvider {
   readonly key = 'mock';
+  /** The default image; tests set another repository to see a fleet named otherwise. */
+  image = 'hatchabot-runtime:latest';
   readonly runtimes = new Map<string, MockRuntime>();
   /** Programmable responses for exec(), keyed by the joined argv prefix. */
   readonly execResponses = new Map<string, ExecResult>();
@@ -140,13 +144,13 @@ export class MockProvider implements RuntimeProvider {
   }
 
   /**
-   * What the usage reader (orchestrator/usage.ts) finds in each container's
+   * What the usage reader (orchestrator/usage/usage.ts) finds in each container's
    * transcripts, keyed by runtimeRef ('*' for any): tests set per-call usage
    * here. A value that is an ExecResult is answered as-is (a failed read).
    */
   usage = new Map<string, unknown>();
   /**
-   * What each web chat session holds (orchestrator/webChat.ts), keyed by the
+   * What each web chat session holds (orchestrator/conversation/webChat.ts), keyed by the
    * store key agent:<slug>:web:<hex>: the messages the history reader would
    * print, raw (prefix and all). An ExecResult answers as-is (a failed read).
    */
@@ -160,7 +164,7 @@ export class MockProvider implements RuntimeProvider {
     return { code: 0, stdout: JSON.stringify({ messages: v ?? [] }), stderr: '' };
   }
   /**
-   * Web chat turns (orchestrator/webChat.ts turnScript): each request as the
+   * Web chat turns (orchestrator/conversation/webChat.ts turnScript): each request as the
    * in-container client would get it, in order — and what it answers:
    * `webChatReply` (an ExecResult as-is, or a function of the request),
    * else the reply "ok".
@@ -262,12 +266,12 @@ export class MockProvider implements RuntimeProvider {
   cgroupStuck = new Set<string>();
   /** Every memoryLimitsLive call's refs, in order (tests). */
   liveReads: string[][] = [];
-  async memoryLimitsLive(runtimeRefs: string[]) {
+  async memoryLimitsLive(runtimeRefs: string[], opts: { missing?: Set<string> } = {}) {
     this.liveReads.push([...runtimeRefs]);
     const out = new Map<string, import('./provider.js').LiveMemoryLimits>();
     for (const ref of runtimeRefs) {
       const rt = this.runtimes.get(ref);
-      if (!rt || rt.purged) continue;
+      if (!rt || rt.purged) { opts.missing?.add(ref); continue; }
       const d = this.dockerLimits.get(ref) ?? { memory: 3 * 1024 ** 3, memorySwap: 3 * 1024 ** 3 };
       const c = this.cgroupLimits.get(ref);
       out.set(ref, { running: rt.phase === 'running', dockerMemory: d.memory, dockerMemorySwap: d.memorySwap, ...(c ? { cgroup: c } : {}) });
@@ -306,23 +310,64 @@ export class MockProvider implements RuntimeProvider {
     return { imageId: known?.imageId ?? 'mock-image', openclawVersion: known?.openclawVersion ?? this.imageOpenclawVersion, channels: this.imageChannels, embedEngine: this.imageEmbedEngine, plugins: this.imagePlugins, pluginInstall: this.imagePluginInstall };
   }
 
-  tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: 'baked' | 'none' }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];
+  tags: ImageTagInfo[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];
   /** Plain base tags a pull would find in the published registry. */
   publishedBases = new Set<string>();
+  /** What a published base carries once pulled (its labels and layers), by tag; tests set it. */
+  publishedInfo = new Map<string, Partial<ImageTagInfo>>();
   pulled: string[] = [];
   built: Array<{ tag: string; dockerfile: string; labels: Record<string, string> }> = [];
   buildFails = false;
+  /** The user the images it builds run as (a test sets "root" for a line that hid the USER node). */
+  buildRunsAs = 'node';
+  /** The layers the images it builds have, when a test says (one not built on its base); else its base's and one more. */
+  buildLayers: string[] | undefined = undefined;
+  /** Labels a line in the lines sets, as a LABEL hidden in an escape would (a test sets Hatchabot's own); the build's own --label ones go over them, as docker does. */
+  buildLabels: Record<string, string> = {};
+  /** Each image's whole layer chain, user and labels, as docker would say (inspectImage), apart from what its listing shows. */
+  #facts = new Map<string, { layers: string[]; user: string; labels: Record<string, string> }>();
+  #factsOf(t: ImageTagInfo): { layers: string[]; user: string; labels: Record<string, string> } {
+    return this.#facts.get(t.tag) ?? {
+      layers: t.layers ?? [`sha256:${createHash('sha256').update(t.imageId).digest('hex')}`], user: 'node',
+      // The labels its listing was read from.
+      labels: {
+        ...(t.buildInputs !== undefined ? { 'org.hatchabot.build-inputs': t.buildInputs } : {}),
+        ...(t.extraPackages !== undefined ? { 'org.hatchabot.extra-packages': t.extraPackages.join(' ') } : {}),
+        ...(t.derived !== undefined ? { 'org.hatchabot.derived': t.derived } : {}),
+        ...(t.recipe !== undefined ? { 'org.hatchabot.recipe': t.recipe } : {}),
+      },
+    };
+  }
+  async inspectImage(ref: string): Promise<ImageFacts> {
+    const t = this.tags.find((x) => x.tag === ref);
+    if (!t) throw new ProviderError(`no such image ${ref}`, `Docker could not say what ${ref} is: No such image`);
+    return { id: t.imageId, ...this.#factsOf(t) };
+  }
   async ensureBaseImage(tag: string): Promise<boolean> {
     if (this.tags.some((t) => t.tag === tag)) return true;
     if (!this.publishedBases.has(tag)) return false;
     this.pulled.push(tag);
-    this.tags.push({ tag, imageId: `pulled-${tag}` });
+    this.tags.push({ tag, imageId: `pulled-${tag}`, ...this.publishedInfo.get(tag) });
     return true;
   }
   async buildImage(tag: string, dockerfile: string, labels: Record<string, string>) {
     if (this.buildFails) return { ok: false, error: 'E: Unable to locate package' };
     this.built.push({ tag, dockerfile, labels });
-    this.tags.push({ tag, imageId: `built-${tag}` });
+    // As docker builds it: the base's labels and layers, its own labels over
+    // them, and one layer more.
+    const from = this.tags.find((t) => t.tag === /^FROM (\S+)/m.exec(dockerfile)?.[1]);
+    const extra = labels['org.hatchabot.extra-packages'];
+    const own = `sha256:${Buffer.from(tag).toString('hex').padEnd(64, '0').slice(0, 64)}`;
+    this.#facts.set(tag, { layers: this.buildLayers ?? [...(from ? this.#factsOf(from).layers : []), own], user: this.buildRunsAs, labels: { ...(from ? this.#factsOf(from).labels : {}), ...this.buildLabels, ...labels } });
+    this.tags = this.tags.filter((t) => t.tag !== tag);
+    this.tags.push({
+      tag, imageId: `built-${tag}`,
+      ...(from?.buildInputs ? { buildInputs: from.buildInputs } : {}),
+      ...(from?.layers ? { layers: [...from.layers, own] } : {}),
+      ...(extra !== undefined ? { extraPackages: extra.split(' ').filter(Boolean) } : {}),
+      ...(labels['org.hatchabot.derived'] ? { derived: labels['org.hatchabot.derived'] } : {}),
+      ...(labels['org.hatchabot.recipe'] ? { recipe: labels['org.hatchabot.recipe'] } : {}),
+    });
     return { ok: true };
   }
   tagged: [string, string][] = [];
@@ -332,7 +377,7 @@ export class MockProvider implements RuntimeProvider {
   async stats() { return this.statsRows; }
 
   /** The embedding service, as tests see it: a status the test can set, and what start/stop did. */
-  embedder: { embedder: 'running' | 'stopped' | 'absent'; door: 'running' | 'stopped' | 'absent'; doorAddress?: string } = { embedder: 'absent', door: 'absent' };
+  embedder: import('../embedder/embedder.js').EmbedderStatus = { embedder: 'absent', door: 'absent' };
   embedderSpecs: Array<import('../embedder/embedder.js').EmbedderSpec> = [];
   copyFromImageWorks = false;
   async copyFromImage(_image: string, _src: string, dest: string) {
@@ -343,26 +388,28 @@ export class MockProvider implements RuntimeProvider {
   }
   async ensureEmbedder(spec: import('../embedder/embedder.js').EmbedderSpec) {
     this.embedderSpecs.push(spec);
+    // An engine on another memory limit is replaced, as the real one's is.
+    const replaced = !!this.embedder.engineMemoryOff && this.embedder.embedder !== 'absent';
     this.embedder = { embedder: 'running', door: 'running', doorAddress: `${spec.doorBind}:${spec.doorPort}` };
-    return this.embedder;
+    return replaced ? { ...this.embedder, engineReplaced: true } : this.embedder;
   }
   async embedderStatus() { return this.embedder; }
   /** Each agent's browser, as tests see it: agent container → running. */
   browsers = new Map<string, boolean>();
-  browserSpecs: Array<import('../orchestrator/browser.js').BrowserSpec> = [];
+  browserSpecs: Array<import('./browserContainer.js').BrowserSpec> = [];
   /** The kept profile each browser runs on (Keep its logins), the volumes of them, and the browsers closed before they went. */
   browserLoginsOf = new Map<string, string>();
   loginVolumes = new Map<string, { agentContainer: string; agentId?: string; logins: string }>();
   browserCloses: string[] = [];
   profileBytes = new Map<string, number>();
-  async ensureBrowser(spec: import('../orchestrator/browser.js').BrowserSpec) {
+  async ensureBrowser(spec: import('./browserContainer.js').BrowserSpec) {
     this.browserSpecs.push(spec);
     const same = (this.browserLoginsOf.get(spec.agentContainer) ?? '') === (spec.logins ?? '');
     if (this.browsers.get(spec.agentContainer) && same) return 'running' as const;
     this.browsers.set(spec.agentContainer, true);
     if (spec.logins) {
       this.browserLoginsOf.set(spec.agentContainer, spec.logins);
-      const { browserLoginsVolume } = await import('../orchestrator/browser.js');
+      const { browserLoginsVolume } = await import('./browserContainer.js');
       const v = browserLoginsVolume(spec.agentContainer, spec.logins);
       if (!this.loginVolumes.has(v)) this.loginVolumes.set(v, { agentContainer: spec.agentContainer, ...(spec.agentId ? { agentId: spec.agentId } : {}), logins: spec.logins });
     } else this.browserLoginsOf.delete(spec.agentContainer);
@@ -387,7 +434,7 @@ export class MockProvider implements RuntimeProvider {
   async browserProfileBytes(agentContainer: string) { return this.browsers.get(agentContainer) ? this.profileBytes.get(agentContainer) ?? 31 * 1024 * 1024 : undefined; }
   /** Each sign-in panel's relay, as tests drive it: what was sent to it, and a way to answer or end it. */
   panelRelays: Array<{ agentContainer: string; sent: Array<{ id: number; method: string; params?: Record<string, unknown> }>; emit: (m: Record<string, unknown>) => void; end: (detail?: string) => void; closed: boolean }> = [];
-  openBrowserPanel(agentContainer: string): import('../orchestrator/browserPanel.js').BrowserPanelChannel {
+  openBrowserPanel(agentContainer: string): import('./browserPanelRelay.js').BrowserPanelChannel {
     let onMessage: (m: Record<string, unknown>) => void = () => {};
     let onClose: (detail: string) => void = () => {};
     const r = {
@@ -427,7 +474,15 @@ export class MockProvider implements RuntimeProvider {
   /** What docker stats would say about the engine (tests set it). */
   embedderStatsRow: import('./provider.js').ContainerStats | undefined = undefined;
   async embedderStats() { return this.embedderStatsRow; }
-  async tagImage(from: string, to: string) { this.tagged.push([from, to]); }
+  async tagImage(from: string, to: string) {
+    this.tagged.push([from, to]);
+    // As docker does: `to` now names the image `from` names (a name, or an image's id).
+    const src = this.tags.find((t) => t.tag === from) ?? this.tags.find((t) => t.imageId === from);
+    if (!src) return;
+    const facts = this.#facts.get(src.tag);
+    if (facts) this.#facts.set(to, facts); else this.#facts.delete(to);
+    this.tags = [...this.tags.filter((t) => t.tag !== to), { ...src, tag: to }];
+  }
   removed: string[] = [];
   async imageHistory() { return [{ step: 'RUN npm i -g openclaw@mock', size: '100MB' }]; }
   /** Containers on images, as `docker ps -a` has them; imagesInUseFails makes that many calls throw. */
@@ -438,12 +493,14 @@ export class MockProvider implements RuntimeProvider {
     return { containers: this.imageContainers, tags: this.tags.map((t) => ({ tag: t.tag, imageId: t.imageId })) };
   }
   async removeImageTag(ref: string) {
-    // As Docker does: a container holds an image's last tag, not one of several.
+    // As Docker does: a name it does not have is refused, and a container
+    // holds an image's last tag, not one of several.
+    if (!this.tags.some((t) => t.tag === ref)) throw new ProviderError(`rmi failed: Error response from daemon: No such image: ${ref}`, `Couldn't remove ${ref}.`);
     const id = this.tags.find((t) => t.tag === ref)?.imageId;
     if (this.imageContainers.some((c) => c.imageId === id) && this.tags.filter((t) => t.imageId === id).length === 1) {
       throw new ProviderError(`rmi failed: conflict on ${ref}`, 'A container (possibly stopped or archived) still runs on that image.');
     }
-    this.removed.push(ref); this.tags = this.tags.filter((t) => t.tag !== ref);
+    this.removed.push(ref); this.tags = this.tags.filter((t) => t.tag !== ref); this.#facts.delete(ref);
   }
 
   modelCallLines = '';

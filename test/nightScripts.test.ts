@@ -40,9 +40,9 @@ describe('deploy and upgrade', () => {
     // Every helper the two keep a copy of (eighth review: all of them, the
     // messages too; deploy-release.sh names its tree DIR and its tag TARGET,
     // and REDO what a person runs, so they can be the same text).
-    const fns = (s: string) => ['machine_short() {', 'free_mb() {', 'disk_words() {', 'proc_start() {', 'lock_left_over() {', 'take_lock() {', 'lock_short() {', 'lock_in_way() {',
+    const fns = (s: string) => ['machine_short() {', 'free_mb() {', 'disk_words() {', 'proc_start() {', 'proc_start_utc() {', 'started_as() {', 'lock_left_over() {', 'checkout_recorded() {', 'take_lock() {', 'lock_short() {', 'lock_in_way() {',
       'disk_short() {', 'run_step() {', 'put_rec() {', 'said_kind() {', 'said_path() {', 'step_tee() {', 'step_tail() {', 'new_step_log() {', 'own_place() {', 'step_short() {', 'change_failed() {',
-      'link_end() {', 'put_line() {', 'put_dir() {', 'put_failed() {'].map((f) => {
+      'link_end() {', 'put_line() {', 'put_dir() {', 'put_failed() {', 'deps_holder_gone() {', 'deps_lock() {', 'deps_unlock() {'].map((f) => {
       expect(s, f).toContain(f);
       const at = s.indexOf(f), line = s.slice(at, s.indexOf('\n', at));
       // A one-line helper ends on its own line; the others at the first "}" alone on a line.
@@ -53,6 +53,16 @@ describe('deploy and upgrade', () => {
     const disk = (s: string) => { const at = s.indexOf('disk_words() {'); expect(at).toBeGreaterThan(-1); return s.slice(at, s.indexOf('\n}\n', at)); };
     expect(disk(src('scripts/follow-latest.sh'))).toBe(disk(u));
     for (const s of [d, u]) expect(s).toContain('mkdir "$LOCK_PATH.clearing"');
+    // The dependencies' lock, ensure-deps.sh's, by the same name and holder line (review of HB-1212).
+    const deps = (s: string) => s.match(/^DEPS_LOCK=.*$/m)?.[0];
+    expect(deps(d)).toBe(deps(u));
+    expect(deps(u)).toBe('DEPS_LOCK="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d\' \' -f1).lock.d"');
+    expect(src('scripts/ensure-deps.sh')).toContain('DEPS_LOCK="$LOCKS/deps-$(printf %s "$PWD" | cksum | cut -d\' \' -f1).lock.d"');
+    // How long each waits for the lock: one line, the same in all three, half an hour unless a test says (HB-1382).
+    const wait = (t: string) => t.match(/^DEPS_WAIT=.*$/m)?.[0];
+    expect(wait(u)).toBe('DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"; case "$DEPS_WAIT" in \'\'|*[!0-9]*) DEPS_WAIT=1800 ;; esac');
+    expect(wait(src('scripts/deploy-release.sh'))).toBe(wait(u));
+    expect(wait(src('scripts/ensure-deps.sh'))).toBe(wait(u));
   });
   it('upgrade.sh installs through ensure-deps (it writes the stamp restart.sh checks)', () => {
     expect(src('scripts/upgrade.sh')).toMatch(/INSTALL="\$\{HATCHABOT_INSTALL_CMD:-\.\/scripts\/ensure-deps\.sh --quiet\}"/);

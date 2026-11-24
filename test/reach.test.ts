@@ -45,6 +45,12 @@ const start = async (env: Record<string, string> = {}, probes = {}) => {
   return { h, owner, call };
 };
 const envNow = () => activeValues(readFileSync(envFile, 'utf8'));
+/** Turned on, or the test fails saying which of the route's refusals it was (HB-0855). */
+const turnOn = async (call: Awaited<ReturnType<typeof start>>['call']) => {
+  const r = await call('POST', '/v1/public-access/on', { confirm: true });
+  expect(r.statusCode, r.body).toBe(200);
+  return r;
+};
 const changing = () => shim.calls().filter((c) => c[0] === 'funnel' && c[1] !== 'status');
 
 describe('reach on', () => {
@@ -181,7 +187,7 @@ describe('reach on', () => {
 
   it('cannot be turned on from the public address itself', async () => {
     const { h, call, owner } = await start();
-    expect((await call('POST', '/v1/public-access/on', { confirm: true })).statusCode).toBe(200);
+    await turnOn(call);
     const jar = await h.signIn('owner', owner.password, { totpSecret: owner.totpSecret });
     expect((await h.pub('/v1/public-access/on', { jar, body: { confirm: true } })).status).toBe(403);
     expect((await h.pub('/v1/tailscale', { jar })).status).toBe(403);
@@ -191,7 +197,7 @@ describe('reach on', () => {
     const { call } = await start();
     const serve = { TCP: { 443: { HTTPS: true } }, Web: { [`${SHIM_DNS}:443`]: { Handlers: { '/': { Proxy: 'http://127.0.0.1:8080' } } } } };
     shim.setConfig(serve);
-    expect((await call('POST', '/v1/public-access/on', { confirm: true })).statusCode).toBe(200);
+    await turnOn(call);
     expect(shim.config().Web![`${SHIM_DNS}:443`]).toEqual(serve.Web[`${SHIM_DNS}:443`]);
     expect(Object.keys(shim.config().AllowFunnel ?? {})).toEqual([`${SHIM_DNS}:8443`]); // 443 is not public
     expect((await call('POST', '/v1/public-access/off', {})).statusCode).toBe(200);
@@ -203,7 +209,7 @@ describe('reach on', () => {
 describe('reach off', () => {
   it('undoes all of it: Funnel\'s entry, the listener, the setting and the address', async () => {
     const { h, call } = await start();
-    await call('POST', '/v1/public-access/on', { confirm: true });
+    await turnOn(call);
     const port = h.port;
     expect((await h.pub('/healthz')).status).toBe(200);
     const r = await call('POST', '/v1/public-access/off', {});
@@ -222,7 +228,7 @@ describe('reach off', () => {
 
   it('when Tailscale will not let go, Hatchabot still stops serving and says what to run', async () => {
     const { h, call } = await start();
-    await call('POST', '/v1/public-access/on', { confirm: true });
+    await turnOn(call);
     shim.failOff(true);
     const r = (await call('POST', '/v1/public-access/off', {})).json();
     expect(r.on).toBe(false);
@@ -233,7 +239,7 @@ describe('reach off', () => {
 
   it('"only invited people" cannot be switched off while public access is on', async () => {
     const { call } = await start();
-    await call('POST', '/v1/public-access/on', { confirm: true });
+    await turnOn(call);
     expect((await call('POST', '/v1/public-access/invited-only', { on: false })).statusCode).toBe(409);
     await call('POST', '/v1/public-access/off', {});
     expect((await call('POST', '/v1/public-access/invited-only', { on: false })).statusCode).toBe(200);

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { registerMgmtChat } from '../src/api/mgmtChat.js';
 import { getOpsHandlers, setOpsHandlers } from '../src/ops/opsServer.js';
-import { grantVoiceNetwork, voiceNetworkHosts, voiceNetworkReady } from '../src/orchestrator/voiceNetwork.js';
+import { grantVoiceNetwork, voiceNetworkHosts, voiceNetworkReady } from '../src/orchestrator/voice/voiceNetwork.js';
 
 const databases: Database.Database[] = [];
 afterEach(() => {
@@ -112,6 +113,37 @@ describe('explicit manager voice network access', () => {
     db.exec(sql);
     expect(voiceNetworkHosts(store, original)).toEqual([]);
     expect(voiceNetworkHosts(store, agent())).toEqual([]);
+  });
+
+  it('keeps the grant when its source is chosen as the default for new agents or for the helper calls (HB-1105)', () => {
+    const { db, store, agent } = world();
+    db.prepare('UPDATE ai_profiles SET vendor = ? WHERE id = ?').run('openai', 'p1');
+    grantVoiceNetwork(store, agent(), 'OpenAI');
+    expect(voiceNetworkReady(store, agent(), 'OpenAI')).toBe(true);
+    store.setAIProfileDefault('p1');
+    expect(voiceNetworkHosts(store, agent())).toEqual(['api.openai.com', 'chatgpt.com']);
+    expect(voiceNetworkReady(store, agent(), 'OpenAI')).toBe(true);
+    store.setAIProfileDefault('p2');
+    store.setAIProfileDefault(null);
+    db.exec("UPDATE ai_profiles SET mgmt_llm = 1 WHERE id = 'p1'");
+    expect(voiceNetworkHosts(store, agent())).toEqual(['api.openai.com', 'chatgpt.com']);
+    // What the source is still binds it.
+    db.exec("UPDATE ai_profiles SET secret_ref = 'fixture/other' WHERE id = 'p1'");
+    expect(voiceNetworkHosts(store, agent())).toEqual([]);
+  });
+
+  it('a grant made before HB-1105 still holds while nothing changed, and is bound anew (HB-1105)', () => {
+    const { store, agent } = world();
+    const a = agent();
+    const legacy = createHash('sha256').update(JSON.stringify([
+      [a.id, a.ownerId, a.slug, a.runtimeRef, a.hostId, a.aiProfileId, a.appliedProfileId, a.appliedProfileAt],
+      store.getHost('h1'), store.getAIProfile('p1'), undefined,
+    ])).digest('hex');
+    store.setVoiceNetworkGrant('a1', JSON.stringify({ version: 1, provider: 'google', context: legacy }));
+    expect(voiceNetworkHosts(store, agent())).toEqual(['generativelanguage.googleapis.com']);
+    expect(JSON.parse(store.getVoiceNetworkGrant('a1')!).context).not.toBe(legacy);
+    store.setAIProfileDefault('p1');
+    expect(voiceNetworkHosts(store, agent())).toEqual(['generativelanguage.googleapis.com']);
   });
 
   it('cannot grant from a stale caller snapshot or an old owner preference moved to the new owner', () => {

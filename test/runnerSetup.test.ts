@@ -4,12 +4,13 @@
  * paste-on-the-runner snippet, and the image copy. Each of these automates a
  * step that silently broke the first live runner when done by hand.
  */
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import { describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { formatBuildInputs, type BuildInputs } from '../src/orchestrator/machines/buildInputs.js';
 import {
   ensureRunnerKey,
   ensureSshConfigBlock,
@@ -17,7 +18,7 @@ import {
   parseSshEndpoint,
   runnerSetupSnippet,
   sshConfigPath,
-} from '../src/orchestrator/runnerSetup.js';
+} from '../src/orchestrator/machines/runnerSetup.js';
 
 // A filesystem with no hard links, when set: link() fails with this code.
 const fsHooks = vi.hoisted(() => ({
@@ -336,6 +337,83 @@ exec "${real}" "$@" </dev/null
     expect(await ensureRunnerKey({ sshDir: dir })).toMatch(/^ssh-ed25519 /);
   });
 
+  it('an ssh-keygen stopped by a signal from elsewhere (killed false) while it reads a good key with no public half: could not be checked, try again — never called damaged (HB-0657)', async () => {
+    for (const signal of ['TERM', 'KILL']) {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+      const keys = join(dir, 'keys');
+      const pub = await ensureRunnerKey({ sshDir: keys });
+      rmSync(join(keys, 'agentclaw_runner.pub'));
+      const before = readFileSync(join(keys, 'agentclaw_runner'), 'utf8');
+      // A shim on PATH (sandboxed): its -y is stopped by the signal, as the OOM killer or a SIGTERM would.
+      const real = realKeygen();
+      const bin = join(dir, 'bin'); mkdirSync(bin);
+      writeFileSync(join(bin, 'ssh-keygen'), `#!/bin/sh\ncase "$*" in *"-y "*) [ -e "${join(dir, 'stop')}" ] && kill -${signal} $$ ;; esac\nexec "${real}" "$@" </dev/null\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'stop'), '');
+      const old = process.env.PATH;
+      process.env.PATH = `${bin}:${old}`;
+      try {
+        const err = await ensureRunnerKey({ sshDir: keys }).then(() => undefined, (e: Error) => e);
+        expect(err?.message, signal).toMatch(new RegExp(`^ssh-keygen was stopped \\(SIG${signal}\\) before it had read the runner key .*could not be checked \\(it is not known to be damaged\\): try again$`));
+        expect(err?.message, signal).not.toMatch(/cannot be read|remove /);
+        // The key is as it was, and once ssh-keygen runs to the end its public half is made from it.
+        expect(readFileSync(join(keys, 'agentclaw_runner'), 'utf8')).toBe(before);
+        rmSync(join(dir, 'stop'));
+        expect(keyPart(await ensureRunnerKey({ sshDir: keys }))).toBe(keyPart(pub));
+      } finally { process.env.PATH = old; }
+    }
+  });
+
+  it('a good key ssh-keygen will not open, with no public half: said as that, with the fix, never called damaged (review of HB-0657)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
+    const keys = join(dir, 'keys');
+    const key = join(keys, 'agentclaw_runner');
+    const pub = await ensureRunnerKey({ sshDir: keys });
+    rmSync(`${key}.pub`);
+    const before = readFileSync(key, 'utf8');
+    const failure = () => ensureRunnerKey({ sshDir: keys }).then(() => undefined, (e: Error) => e);
+    const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const keep = 'it is not known to be damaged, so keep it: runners set up with it go on working';
+    // Open to others: the real ssh-keygen refuses it ("UNPROTECTED PRIVATE KEY FILE", 255).
+    chmodSync(key, 0o644);
+    const open = await failure();
+    expect(open?.message).toBe(`ssh-keygen will not use the runner key ${key}: other accounts can read it. Run chmod 600 ${key}, then add the runner again; ${keep}`);
+    chmodSync(key, 0o600);
+    expect(keyPart(await ensureRunnerKey({ sshDir: keys }))).toBe(keyPart(pub));
+    rmSync(`${key}.pub`);
+    // What ssh-keygen says of one it cannot open, and when it crashes: a shim on PATH (sandboxed).
+    const real = realKeygen();
+    const bin = join(dir, 'bin'); mkdirSync(bin);
+    const said = join(dir, 'said');
+    writeFileSync(join(bin, 'ssh-keygen'), `#!/bin/sh\ncase "$*" in *"-y "*) case "$(cat "${said}" 2>/dev/null)" in\n  denied) echo "Load key \\"$3\\": Permission denied" >&2; exit 255 ;;\n  passphrase) echo "Load key \\"$3\\": incorrect passphrase supplied to decrypt private key" >&2; exit 255 ;;\n  invalid) echo "Load key \\"$3\\": invalid format" >&2; exit 255 ;;\n  incomplete) echo "Load key \\"$3\\": incomplete message" >&2; exit 255 ;;\n  large) echo "Load key \\"$3\\": string is too large" >&2; exit 255 ;;\n  keytype) echo "Load key \\"$3\\": unknown or unsupported key type" >&2; exit 255 ;;\n  crash) kill -SEGV $$ ;;\n  abort) kill -ABRT $$ ;;\nesac ;; esac\nexec "${real}" "$@" </dev/null\n`, { mode: 0o755 });
+    const old = process.env.PATH;
+    process.env.PATH = `${bin}:${old}`;
+    try {
+      writeFileSync(said, 'denied');
+      expect((await failure())?.message).toBe(`this account cannot read the runner key ${key} (Permission denied): it belongs to another account, or its mode keeps this one out. Make it the key of the account Hatchabot runs as (sudo chown), with chmod 600 ${key}, then add the runner again; ${keep}`);
+      // What it says of a good key in a form it does not take, and of some
+      // damaged ones (a character changed inside the armour): not known
+      // either way, and never "go on working", as ssh cannot use it either.
+      for (const [mode, text] of [['passphrase', 'incorrect passphrase supplied to decrypt private key'], ['keytype', 'unknown or unsupported key type']] as const) {
+        writeFileSync(said, mode);
+        expect((await failure())?.message, mode).toBe(`ssh-keygen could not read the runner key ${key} (Load key "${key}": ${text}), and there is no ${key}.pub beside it. It may be damaged, or in a form this ssh-keygen does not take, and ssh cannot use it either: see what ssh-keygen -y -f ${key} says. Only once you know it is damaged, remove ${key} and add the runner again, and a new key is made (runners set up with the old one need the new public key)`);
+      }
+      for (const [mode, signal] of [['crash', 'SIGSEGV'], ['abort', 'SIGABRT']] as const) {
+        writeFileSync(said, mode);
+        expect((await failure())?.message, mode).toBe(`ssh-keygen crashed (${signal}) reading the runner key ${key}, so the key could not be checked; ${keep}. What is wrong is ssh-keygen: see what ssh-keygen -y -f ${key} says`);
+      }
+      // Only a key it read and could not make out is called damaged ("invalid format", as older and LibreSSL builds say;
+      // "incomplete message" and "string is too large", OpenSSH's own of a key changed inside its armour: review of HB-0657).
+      for (const mode of ['invalid', 'incomplete', 'large']) {
+        writeFileSync(said, mode);
+        expect((await failure())?.message, mode).toMatch(new RegExp(`^the runner key ${esc(key)} cannot be read \\(it may have been cut short\\).*remove ${esc(key)} and add the runner again`));
+      }
+      // The key was never touched, and reads once ssh-keygen does.
+      expect(readFileSync(key, 'utf8')).toBe(before);
+      rmSync(said);
+      expect(keyPart(await ensureRunnerKey({ sshDir: keys }))).toBe(keyPart(pub));
+    } finally { process.env.PATH = old; }
+  });
+
   it('a keygen that fails leaves nothing behind, and the next setup makes the key (HB-0577)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'acl-sshdir-'));
     const keys = join(dir, 'keys');
@@ -350,10 +428,17 @@ exec "${real}" "$@" </dev/null
   });
 });
 
-/** What ssh itself makes of a config for a host (no connection is made), or '' where no ssh client is installed. */
-function sshResolve(dir: string, host: string): string {
+/**
+ * What ssh itself makes of a config for a host, or '' where no ssh client is
+ * installed. `-G` only prints the configuration and exits: it never connects.
+ * `-F` reads this file alone (not ~/.ssh/config, not /etc/ssh/ssh_config), and
+ * `-T` asks for no terminal: without it, ssh with no command and no terminal
+ * on stdin printed "Pseudo-terminal will not be allocated because stdin is
+ * not a terminal." into the test run, which read as a connection.
+ */
+function sshResolve(file: string, host: string): string {
   try {
-    return execFileSync('ssh', ['-G', '-F', join(dir, 'config'), host], { encoding: 'utf8', env: { PATH: process.env.PATH!, HOME: dir } });
+    return execFileSync('ssh', ['-G', '-T', '-F', file, host], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH!, HOME: dirname(file) } });
   } catch { return ''; }
 }
 
@@ -382,10 +467,7 @@ describe('ensureSshConfigBlock', () => {
     const cfg = readFileSync(join(dir, 'config'), 'utf8');
     expect(cfg).toContain(`IdentityFile "${dir.replace(/%/g, '%%')}/agentclaw_runner"`);
     // What ssh itself makes of it, where ssh is installed (no connection is made).
-    let resolved = '';
-    try {
-      resolved = execFileSync('ssh', ['-G', '-F', join(dir, 'config'), 'runner.example'], { encoding: 'utf8', env: { PATH: process.env.PATH!, HOME: dir } });
-    } catch { /* no ssh client here */ }
+    const resolved = sshResolve(join(dir, 'config'), 'runner.example');
     // (-G prints the value before ssh expands its %% token back to %.)
     if (resolved) expect(resolved).toContain(`identityfile ${dir.replace(/%/g, '%%')}/agentclaw_runner\n`);
     expect(() => sshConfigPath('/home/x"y/.ssh/key')).toThrow(/quote or line break/);
@@ -397,7 +479,7 @@ describe('ensureSshConfigBlock', () => {
     await ensureSshConfigBlock('ssh://runner.example', { sshDir: dir });
     const cfg = readFileSync(join(dir, 'config'), 'utf8');
     expect(cfg.match(/^Host runner\.example$/gm)).toHaveLength(1);
-    const resolved = sshResolve(dir, 'runner.example');
+    const resolved = sshResolve(join(dir, 'config'), 'runner.example');
     if (resolved) {
       expect(resolved).toMatch(/^port 22$/m);
       expect(resolved).not.toMatch(/^user bob$/m);
@@ -412,13 +494,13 @@ describe('ensureSshConfigBlock', () => {
     await ensureSshConfigBlock('ssh://second.example', { sshDir: dir });
     const cfg = readFileSync(join(dir, 'config'), 'utf8');
     expect(cfg.endsWith(mine)).toBe(true); // the person's own lines, untouched, after ours
-    const runner = sshResolve(dir, 'runner.example');
+    const runner = sshResolve(join(dir, 'config'), 'runner.example');
     if (runner) {
       expect(runner).toMatch(/^identitiesonly yes$/m);
       expect(runner).toMatch(/^stricthostkeychecking accept-new$/m);
       expect(runner).toMatch(/^serveraliveinterval 42$/m); // a top-level line still applies everywhere
-      expect(sshResolve(dir, 'second.example')).toMatch(/^identitiesonly yes$/m);
-      const other = sshResolve(dir, 'mine');
+      expect(sshResolve(join(dir, 'config'), 'second.example')).toMatch(/^identitiesonly yes$/m);
+      const other = sshResolve(join(dir, 'config'), 'mine');
       expect(other).toMatch(/^identitiesonly no$/m);
       expect(other).toMatch(/^stricthostkeychecking ask$/m);
       expect(other).toMatch(/^user me$/m);
@@ -722,10 +804,12 @@ describe('runnerSetupSnippet on a runner (in a sandbox: a temp HOME and a PATH o
 });
 
 describe('installRuntimeImage', () => {
-  const stub = (script: string) => {
+  /** A docker on both sides; both say they run on the same CPU unless the script answers `info` itself. */
+  const stub = (script: string, sameCpu = true) => {
     const dir = mkdtempSync(join(tmpdir(), 'acl-imgdocker-'));
     const bin = join(dir, 'docker');
-    writeFileSync(bin, `#!/usr/bin/env bash\n${script}`, { mode: 0o755 });
+    const cpu = sameCpu ? 'if [ "$1" = info ] || { [ "$1" = -H ] && [ "$3" = info ]; }; then echo x86_64; exit 0; fi\n' : '';
+    writeFileSync(bin, `#!/usr/bin/env bash\n${cpu}${script}`, { mode: 0o755 });
     return bin;
   };
 
@@ -827,7 +911,7 @@ if [ "$1" = -H ] && [ "$3" = info ]; then echo x86_64; exit 0; fi
 ${extra}
 if [ "$1" = save ]; then echo image-bytes; exit 0; fi
 cat > /dev/null; exit 0
-`);
+`, false);
     it('is not sent this machine\'s image (it would not run there)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
       const res = await installRuntimeImage('ssh://r@x', { docker: archStub(dir) });
@@ -853,6 +937,96 @@ cat > /dev/null; exit 0
       expect(res.error).toMatch(/carries OpenClaw 2026\.7\.1/);
       expect(readFileSync(join(dir, 'calls'), 'utf8')).not.toMatch(/ tag /);
     });
+    it('this machine\'s extra packages are built onto the published image there, under the image\'s name (HB-1062)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const built = `if [ "$3" = build ]; then cat "\${@: -1}/Dockerfile" >> ${JSON.stringify(join(dir, 'calls'))}; exit 0; fi`;
+      const docker = archStub(dir, `if [ "$3" = image ] && [ "$4" = inspect ]; then echo 2026.9.8; exit 0; fi\n${built}`);
+      const published = { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' };
+      const res = await installRuntimeImage('ssh://r@x', { docker, published, extraPackages: ['jq', 'g++'] });
+      expect(res).toEqual({ ok: true, pulled: 'registry.example.org/runtime:2026.9.8' });
+      const calls = readFileSync(join(dir, 'calls'), 'utf8');
+      expect(calls).toContain('-H ssh://r@x pull --quiet registry.example.org/runtime:2026.9.8');
+      expect(calls).toMatch(/^-H ssh:\/\/r@x build -t hatchabot-runtime:latest --label org\.hatchabot\.extra-packages=jq g\+\+ --label org\.hatchabot\.rebuilt-from-recipe=1 \S+$/m);
+      expect(calls).toContain('FROM registry.example.org/runtime:2026.9.8\nUSER root\nRUN apt-get update && apt-get install -y --no-install-recommends jq g++');
+      // Built under the name, never the stock image tagged as it first.
+      expect(calls).not.toMatch(/ tag /);
+      // A build that fails there leaves the runner's image as it was, and says so.
+      const failing = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const no = await installRuntimeImage('ssh://r@x', {
+        docker: archStub(failing, `if [ "$3" = image ] && [ "$4" = inspect ]; then echo 2026.9.8; exit 0; fi\nif [ "$3" = build ]; then echo 'E: Unable to locate package jq' >&2; exit 1; fi`),
+        published, extraPackages: ['jq'],
+      });
+      expect(no.ok).toBe(false);
+      expect(no.error).toMatch(/adding this machine's extra packages \(jq\) to it there failed, and the runner keeps the image it had: E: Unable to locate package jq/);
+      expect(readFileSync(join(failing, 'calls'), 'utf8')).not.toMatch(/ tag /);
+      // A recorded name that is not one never reaches a RUN line.
+      const odd = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const bad = await installRuntimeImage('ssh://r@x', { docker: archStub(odd), published, extraPackages: ['jq;reboot'] });
+      expect(bad.error).toMatch(/records an extra package "jq;reboot" that is not a package name/);
+      expect(readFileSync(join(odd, 'calls'), 'utf8')).not.toMatch(/pull|build| tag /);
+    });
+    it('says how the published image is not built as this machine\'s is, beyond the packages laid on, and installs it (HB-1189)', async () => {
+      const label = (o: Partial<BuildInputs> = {}) => formatBuildInputs({
+        openclaw: '2026.9.8', engine: 'baked', packages: [], node: 'node:24-slim', channels: ['slack', 'discord'], channelPlugins: '2026.9.8',
+        plugins: [], pluginInstall: 'npm', embedPlugin: '2026.7.1', claudeCode: '2.1.224', byHand: [], release: '2.190.0', ...o,
+      });
+      const published = { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' };
+      const at = (theirs: string) => {
+        const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+        return archStub(dir, `if [ "$3" = image ] && [ "$4" = inspect ]; then echo '2026.9.8|${theirs}'; exit 0; fi`);
+      };
+      // This machine's image is engine-free, with jq; the published one has the engine.
+      const lite = label({ engine: 'none', packages: ['jq'] });
+      expect(await installRuntimeImage('ssh://r@x', { docker: at(label()), published, extraPackages: ['jq'], buildInputs: lite })).toEqual({
+        ok: true, pulled: published.ref, differs: "the published image has its own memory search engine, and this machine's image is engine-free",
+      });
+      // Messaging plugins built in here and not in the published image.
+      expect((await installRuntimeImage('ssh://r@x', { docker: at(label({ channels: [] })), published, buildInputs: label() })).differs)
+        .toBe("the published image has none built in, and this machine's image has slack and discord");
+      // Only what may differ (the release, the Node's digest, the packages laid on): nothing said.
+      expect(await installRuntimeImage('ssh://r@x', { docker: at(label({ release: '2.191.0', node: `node:24-slim@sha256:${'e'.repeat(64)}` })), published, extraPackages: ['jq'], buildInputs: label({ packages: ['jq'] }) }))
+        .toEqual({ ok: true, pulled: published.ref });
+      // Either side from before the label: nothing to compare, as before.
+      expect(await installRuntimeImage('ssh://r@x', { docker: at('<no value>'), published, buildInputs: lite })).toEqual({ ok: true, pulled: published.ref });
+      expect(await installRuntimeImage('ssh://r@x', { docker: at(label()), published })).toEqual({ ok: true, pulled: published.ref });
+    });
+    it('pulls nothing when this machine\'s extra packages could not be read: the stock image would lack them (HB-1062)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const published = { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' };
+      const res = await installRuntimeImage('ssh://r@x', { docker: archStub(dir, 'if [ "$3" = image ] && [ "$4" = inspect ]; then echo 2026.9.8; exit 0; fi'), published, extrasUnread: "this machine's images could not be read" });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/which extra packages this machine's image has could not be read just now \(this machine's images could not be read\)/);
+      expect(readFileSync(join(dir, 'calls'), 'utf8')).not.toMatch(/pull|build| tag /);
+      // The same CPU: the copy carries everything the image has, so it goes ahead.
+      const same = stub(`
+if [ "$1" = save ]; then echo image-bytes; exit 0; fi
+cat > /dev/null; exit 0
+`);
+      expect(await installRuntimeImage('ssh://r@x', { docker: same, extrasUnread: "this machine's images could not be read" })).toEqual({ ok: true });
+    });
+  });
+
+  it('copies nothing when either side\'s CPU cannot be read: it might be another kind (HB-0976)', async () => {
+    for (const [local, remote, who] of [
+      ['echo x86_64', 'echo "Cannot connect to the Docker daemon" >&2; exit 1', 'that runner runs'],
+      ['echo x86_64', 'echo "x86 64 (unknown)"', 'that runner runs'],
+      ['exit 1', 'echo x86_64', 'this machine runs'],
+      ['exit 1', 'exit 1', 'this machine or that runner runs'],
+    ] as const) {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const docker = stub(`
+echo "$*" >> ${JSON.stringify(join(dir, 'calls'))}
+if [ "$1" = info ]; then ${local}; exit 0; fi
+if [ "$1" = -H ] && [ "$3" = info ]; then ${remote}; exit 0; fi
+if [ "$1" = save ]; then echo image-bytes; exit 0; fi
+cat > /dev/null; exit 0
+`, false);
+      const res = await installRuntimeImage('ssh://r@x', { docker, published: { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' } });
+      expect(res.ok, `${local} / ${remote}`).toBe(false);
+      expect(res.error).toBe(`Could not tell which CPU ${who} on (docker info did not say), so nothing was copied: an image for another kind of CPU would not run there. Try again in a moment.`);
+      const calls = readFileSync(join(dir, 'calls'), 'utf8');
+      expect(calls).not.toMatch(/^save |load|pull| tag /m);
+    }
   });
 });
 

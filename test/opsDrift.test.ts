@@ -43,6 +43,60 @@ describe('checkOpsDrift', () => {
   });
 });
 
+describe('a lockdown check that a rebuild overtakes (HB-0915)', () => {
+  it('a result read from the retired config does not revoke the key the rebuild minted', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertAgent({ id: 'm4', ownerId: 'o', name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', runtimeRef: 'r', ops: true, aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    store.setOpsToken('m4', 'o', 'old-key');
+    // The check reads a loosened config, and its answer waits while the rebuild finishes.
+    let answer!: (v: { code: number; stdout: string }) => void;
+    const providerFor = () => ({ execShell: () => new Promise((r) => { answer = r; }) }) as any;
+    const check = checkOpsDrift({ store, providerFor });
+    await new Promise((r) => setImmediate(r));
+    // What the rebuild does (provision.ts buildRuntimeSpec): a new key, the lockdown written again.
+    store.setOpsToken('m4', 'o', 'new-key');
+    clearOpsDrift('m4');
+    answer({ code: 0, stdout: JSON.stringify({ tools: { ...good, allow: [...good.allow, 'exec'] }, mcp: servers }) });
+    await check;
+    expect(store.opsAgentForToken('new-key')?.id).toBe('m4');
+    expect(opsDriftOf('m4')).toBeUndefined();
+    // The next check reads the new config: a drift found there revokes the new key.
+    const drifted = () => ({ execShell: async () => ({ code: 0, stdout: JSON.stringify({ tools: { ...good, allow: [...good.allow, 'exec'] }, mcp: servers }) }) }) as any;
+    await checkOpsDrift({ store, providerFor: drifted });
+    expect(store.opsAgentForToken('new-key')).toBeUndefined();
+    expect(opsDriftOf('m4')).toMatch(/exec/);
+    clearOpsDrift('m4');
+  });
+});
+
+describe('a lockdown key revocation that failed (HB-0916)', () => {
+  it('is tried again at the next check, and the drift is said only once the key is gone', async () => {
+    const db = new Database(':memory:');
+    const store = new Store(db);
+    store.insertAgent({ id: 'm3', ownerId: 'o', name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', runtimeRef: 'r', ops: true, aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    store.setOpsToken('m3', 'o', 'key3');
+    // The first revocation's write fails (a busy database, say); every later one works.
+    const prepare = db.prepare.bind(db);
+    let failures = 1;
+    (db as any).prepare = (sql: string) => {
+      if (failures > 0 && /DELETE FROM ops_tokens/.test(sql)) { failures--; throw new Error('database is locked (made up)'); }
+      return prepare(sql);
+    };
+    const providerFor = () => ({ execShell: async () => ({ code: 0, stdout: JSON.stringify({ tools: { ...good, allow: [...good.allow, 'exec'] }, mcp: servers }) }) }) as any;
+    const logged: string[] = [];
+    await checkOpsDrift({ store, providerFor, log: (e) => logged.push(e) });
+    expect(store.opsAgentForToken('key3')?.id).toBe('m3');
+    expect(opsDriftOf('m3')).toBeUndefined();
+    expect(logged).toEqual(['ops.lockdown_revoke_failed']);
+    await checkOpsDrift({ store, providerFor, log: (e) => logged.push(e) });
+    expect(store.opsAgentForToken('key3')).toBeUndefined();
+    expect(opsDriftOf('m3')).toMatch(/exec/);
+    await checkOpsDrift({ store, providerFor, log: (e) => logged.push(e) });
+    expect(logged).toEqual(['ops.lockdown_revoke_failed', 'ops.lockdown_drift']);
+    clearOpsDrift('m3');
+  });
+});
+
 describe('the lockdown read from the config file (HB-0058)', () => {
   const store = () => {
     const st = new Store(new Database(':memory:'));

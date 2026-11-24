@@ -5,13 +5,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exportAgent, importAgent, MAX_RAW_STATE_BYTES, MAX_STATE_BYTES, peekFormat, stateAllowance, tooLarge, TransferError } from '../src/orchestrator/transfer.js';
+import { exportAgent, importAgent, MAX_RAW_STATE_BYTES, MAX_STATE_BYTES, packExport, peekFormat, stateAllowance, tooLarge, TransferError, type ExportManifest } from '../src/orchestrator/transfer/transfer.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 import { TelegramUnavailableError } from '../src/channels/telegramManual.js';
-import { clearBusy, isBusy } from '../src/orchestrator/busy.js';
+import { clearBusy, isBusy } from '../src/orchestrator/lifecycle/busy.js';
 
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -196,7 +196,7 @@ describe('export failure handling', () => {
       src.store.insertAgentEnv({ id: `big-${i}`, agentId: 'a1', name: `MADE_UP_${i}`, secretRef: `agent-env/big-${i}`, createdAt: 'now' });
     }
     let size = 1000;
-    src.provider.exportState = async () => ({ length: size, toString: () => '' } as any);
+    src.provider.exportState = async () => ({ length: size, toString: () => '', subarray: () => Buffer.alloc(0) } as any);
     src.provider.execResponses.set('sh-volume', { code: 0, stdout: '1000\n', stderr: '' });
     await exportAgent(src.deps, 'a1');
     const threshold = () => Number(/-le (\d+)/.exec(src.provider.execLog.filter(([k]) => k === 'sh-volume').at(-1)![1]!)![1]);
@@ -321,6 +321,61 @@ describe('the state a manifest can carry (HB-0582)', () => {
       const state = randomBytes(n).toString('base64');
       expect(Buffer.byteLength(JSON.stringify({ ...manifest, state }))).toBe(meta + Math.ceil(n / 3) * 4);
     }
+  });
+});
+
+describe('a full copy made and read off the event loop (HB-0925)', () => {
+  /** Other work on the loop: how many turns it has had since `start()`, until `stop()`. */
+  function otherWork() {
+    let turns = 0;
+    let on = false;
+    const turn = () => { if (!on) return; turns++; setImmediate(turn); };
+    return { start: () => { on = true; setImmediate(turn); }, stop: () => { on = false; return turns; } };
+  }
+
+  it('the file is the same bytes the whole-buffer gzip made, the state a piece at a time', async () => {
+    const meta = { format: 'hatchabot-export', version: 1, agent: { name: 'Kitchen', slug: 'kitchen' }, envVars: [{ name: 'A', value: 'made-up "quoted" ✓' }], state: '' } as unknown as ExportManifest;
+    // Empty, one byte, around a piece's edge (768 KiB), and several pieces of compressible and random bytes.
+    for (const state of [Buffer.alloc(0), Buffer.from([7]), randomBytes(786_431), randomBytes(786_432), randomBytes(786_433), Buffer.alloc(3_000_000, 'ab'), randomBytes(2_500_001)]) {
+      const whole = gzipSync(Buffer.from(JSON.stringify({ ...meta, state: state.toString('base64') }), 'utf8'));
+      expect((await packExport(meta, state)).equals(whole), `${state.length} bytes`).toBe(true);
+    }
+  });
+
+  it('a manifest whose state is not its last key is still written whole and right', async () => {
+    const meta = { state: '', format: 'hatchabot-export', agent: { name: 'Kitchen' } } as unknown as ExportManifest;
+    const state = randomBytes(1000);
+    expect(JSON.parse(gunzipSync(await packExport(meta, state)).toString('utf8'))).toEqual({ ...meta, state: state.toString('base64') });
+  });
+
+  it('an export and an import of a large state let other work run meanwhile', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    const memory = randomBytes(4 * 1024 * 1024);
+    src.provider.stateStore.set(ref, memory);
+    // Counted from the moment its state is taken: what comes before (stopping
+    // it, reading its volume) waits on the runtime anyway, and the file is
+    // made after. Made in one go on the loop, nothing else had a turn then.
+    const others = otherWork();
+    const take = src.provider.exportState.bind(src.provider);
+    src.provider.exportState = async (r) => { const state = await take(r); others.start(); return state; };
+    const { data } = await exportAgent(src.deps, 'a1');
+    expect(others.stop()).toBeGreaterThan(5);
+    expect(Buffer.from(JSON.parse(gunzipSync(data).toString('utf8')).state, 'base64').equals(memory)).toBe(true);
+    const dst = await installation('importer');
+    // Only the inflate is timed here: the import's own steps wait on the mock's promises too.
+    let inflated = false;
+    const parse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation(((text: string, r?: never) => { if (text.length > memory.length) inflated = true; return parse(text, r); }) as typeof JSON.parse);
+    let ran = false;
+    setImmediate(() => { ran = true; });
+    const importing = importAgent(dst.deps, data, { ownerId: 'importer' });
+    await vi.waitFor(() => { if (!inflated) throw new Error('not read yet'); });
+    // The file was read (its JSON parsed) only after other work had its turn: it was inflated off the loop.
+    expect(ran).toBe(true);
+    spy.mockRestore();
+    const agent = await importing;
+    expect(dst.provider.stateStore.get(agent.runtimeRef!)!.equals(memory)).toBe(true);
   });
 });
 
@@ -637,25 +692,25 @@ describe('peekFormat — the one-Import router', () => {
     const src = await installation();
     await seedSourceAgent(src);
     const { data } = await exportAgent(src.deps, 'a1');
-    expect(peekFormat(data)).toBe('hatchabot-export');
+    expect(await peekFormat(data)).toBe('hatchabot-export');
   });
 
-  it('returns undefined for anything it cannot read, so a template/garbage never restores', () => {
-    expect(peekFormat(Buffer.from('not an archive'))).toBeUndefined();
-    expect(peekFormat(gzipSync(Buffer.from('{}')))).toBeUndefined();
-    expect(peekFormat(gzipSync(Buffer.from(JSON.stringify({ format: 'hatchabot-template' }))))).toBe(
+  it('returns undefined for anything it cannot read, so a template/garbage never restores', async () => {
+    expect(await peekFormat(Buffer.from('not an archive'))).toBeUndefined();
+    expect(await peekFormat(gzipSync(Buffer.from('{}')))).toBeUndefined();
+    expect(await peekFormat(gzipSync(Buffer.from(JSON.stringify({ format: 'hatchabot-template' }))))).toBe(
       'hatchabot-template',
     );
   });
 
-  it('reads only the head of the archive, not the whole volume a second time (HB-0075)', () => {
+  it('reads only the head of the archive, not the whole volume a second time (HB-0075)', async () => {
     // A copy with a large volume: the format comes from its first few KB, so a
     // file cut short after them still routes (the old peek inflated it whole).
     const big = gzipSync(Buffer.from(JSON.stringify({ format: 'hatchabot-export', version: 1, state: randomBytes(600_000).toString('base64') })));
     expect(big.length).toBeGreaterThan(64 * 1024);
-    expect(peekFormat(big.subarray(0, 64 * 1024))).toBe('hatchabot-export');
+    expect(await peekFormat(big.subarray(0, 64 * 1024))).toBe('hatchabot-export');
     // A file whose manifest does not begin with `format` is still read whole.
-    expect(peekFormat(gzipSync(Buffer.from(JSON.stringify({ version: 1, format: 'hatchabot-template' }))))).toBe('hatchabot-template');
+    expect(await peekFormat(gzipSync(Buffer.from(JSON.stringify({ version: 1, format: 'hatchabot-template' }))))).toBe('hatchabot-template');
   });
 });
 

@@ -75,7 +75,7 @@ One table, `operations`, beside `agent_events` (which stays the narrative):
 | `id` | `op_…` |
 | `agent_id` | the agent (null for a machine-level operation: image copy, backup run) |
 | `host_id` | the machine it acts on, when that is not the agent's |
-| `kind` | `move-host`, `migrate`, `import`, `restore-backup`, `restore-snapshot`, `provision`, `rebuild`, `archive`, `unarchive`, `app-install`, `app-update`, `app-rollback`, `install-image` |
+| `kind` | `move-host`, `migrate`, `import`, `restore-backup`, `restore-snapshot`, `provision`, `rebuild`, `archive`, `unarchive`, `app-install`, `app-update`, `app-rollback`, `install-image`, `adopt-workspace` |
 | `requested_by`, `requested_at` | owner id and how (web, CLI, the Hatchabot agent, a sweep) |
 | `params` | JSON, never a secret: target host, date, peer, app ref, wasRunning… |
 | `step`, `step_at` | the last step **confirmed done** (a key from the kind's step list) |
@@ -89,7 +89,7 @@ Kept 90 days, and at least the last 50 per agent.
 
 ### The code
 
-A small module, `src/orchestrator/operations.ts`:
+A small module, `src/orchestrator/lifecycle/operations.ts`:
 
 ```ts
 const op = ops.begin('move-host', agent.id, { to: target.id, wasRunning });
@@ -128,6 +128,7 @@ row from an earlier boot it applies the kind's rule for the last step done:
 | import | anything before RUNNING | **Undo, automatically**: delete the half-made agent, its secrets and bot lease; outcome "Import interrupted — import the file again" | A half-imported volume must never start (today's Retry starts one) |
 | restore-backup | the safety copy taken | The safety copy is now **written to `restore-safety-<install's mark>/` before** the volume is replaced (today it is in memory); **hold**: "[Finish the restore] [Put back the copy from before]" | Either is correct; only the owner knows which they wanted |
 | restore-snapshot | some files written | **Hold**: "[Finish] [Revert to the copy taken before]" (that snapshot is already saved) | |
+| adopt-workspace | stopped for the copy, the copy not whole | **Hold**, stopped: "[Adopt again]" (every file in the folder copied in again, whole, over what is there: the folder is OpenClaw's own too, so it is not cleared, and a file the cut-off copy wrote that the folder no longer has stays as it was left, as the hold says); "[Start it as it is]" only while the folder cannot be copied from (gone, or no longer one an adopt takes), started as the Start button starts it (a rebuild it is owed is that start); for an agent stopped before the adopt it is "[Keep it as it is]", and it stays stopped. A Delete goes through this hold and ends it. The same hold follows a copy that fails part way. Before the stop: started again if it ran; after the copy: finished, and started if it ran. Every such start, Adopt again's too, is a Start (the rebuild it is owed is that start), owed on the record until it has run, so a restart before it or during it leaves it to the next boot, unless its owner starts or stops it first, or a budget pauses it (the record says so). A start a restart makes is the machine's, not the owner's: peers changed meanwhile wait for the owner's Start or a Rebuild, as a wake's do | The extract is not atomic, and a half-copied workspace must not start as if whole (HB-0980). No snapshot or volume copy is offered: the pre-adopt snapshot holds only the core files |
 | provision / rebuild | as today's reconcile rules | Reconcile's rules stay; the row records the outcome; a `queued` rebuild is **re-queued**. A setup whose gateway already answers has its **steps run again** (as Retry runs them): up is not set up (v2.168.0) | Health says the gateway answers, not that its sources, hook and schedules went in |
 | archive | the bot released | **Finish, automatically**: park its Discord and Slack bots, mark ARCHIVED, rebuild-free (the container stays stopped) | The bot is already gone; going back would need a new one |
 | app-install / update / rollback | the switch | Compare the volume's `current` with the record; differ → **hold**: "[Use the new release] [Go back to the previous one]"; clear `staging` | |
@@ -239,8 +240,8 @@ updates:
 - docs: `docs/features.md`, `README.md`, `docs/architecture-map.md`,
   `docs/tailscale.md`, `docs/use-cases.md`.
 
-`scripts/check-web.mjs` already fails if an `onclick` names a function that is
-gone, and the knowledge-pack test if the map does.
+`scripts/check-web.mjs` already fails if an element's action (`data-on-click`)
+names a function that is gone, and the knowledge-pack test if the map does.
 
 ### Order of work
 

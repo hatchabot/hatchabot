@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeWorld, seedRunningAgent, as, OWNER, type World } from './support/world.js';
-import { agentArchiveName } from '../src/orchestrator/backups.js';
+import { agentArchiveName } from '../src/orchestrator/backups/backupFiles.js';
 
 const base = mkdtempSync(join(tmpdir(), 'acl-bkflow-'));
 const prevEnv = process.env.HATCHABOT_BACKUP_DIR;
@@ -142,6 +142,23 @@ describe('Backups restore — POST /v1/backups/restore', () => {
     // A live model change records what is applied: not the never-accepted build's memory-search choice.
     expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/model', headers: as(), payload: { model: null } })).json().live).toBe(true);
     expect(w.store.getAgent('a1')!.appliedEmbedMode).toBeUndefined();
+  });
+
+  it('a body of the wrong shape is a 400, after the machine-owner check (HB-0814)', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w, { id: 'a1' });
+    writeSet('2026-08-20', w, ['a1']);
+    const post = (payload: unknown, who?: string) => w.f.inject({ method: 'POST', url: '/v1/backups/restore?wait=1', headers: { ...as(who), 'content-type': 'application/json' }, payload: JSON.stringify(payload) });
+    // Not the machine's owner: still the 403 first.
+    expect((await post({ agentId: 1, date: '2026-08-20' }, 'someone-else')).statusCode).toBe(403);
+    for (const bad of [{ agentId: 1, date: '2026-08-20' }, { agentId: 'a1', date: ['2026-08-20'] }, { agentId: 'a1', date: '2026-08-20', otherKey: 'yes' }, 'a1']) {
+      const res = await post(bad);
+      expect(res.statusCode, JSON.stringify(bad)).toBe(400);
+      expect(res.json().error).toMatch(/expected/);
+    }
+    // Missing fields keep their words; nothing was restored meanwhile.
+    expect((await post({ agentId: 'a1' })).json()).toEqual({ error: 'agentId and date are required.' });
+    expect(w.store.listOperations(['a1'], 10).filter((o) => o.kind === 'restore-backup')).toEqual([]);
   });
 
   it('404s when the set has no tarball for that agent', async () => {

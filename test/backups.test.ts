@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { DROP_CHAT_ACCOUNTS_SCRIPT } from '../src/orchestrator/members.js';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync, lstatSync, readdirSync, symlinkSync } from 'node:fs';
+import { DROP_CHAT_ACCOUNTS_SCRIPT } from '../src/orchestrator/members/members.js';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync, lstatSync, readdirSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -13,9 +13,11 @@ import {
   restoreAgentFromBackup,
   restoreSafetyDir,
   RestoreError,
-} from '../src/orchestrator/backups.js';
+} from '../src/orchestrator/backups/backupFiles.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
+import { removeQueuedNow, syncConnections } from '../src/orchestrator/google/googleConnections.js';
+import { MemSecrets } from './support/world.js';
 
 const base = mkdtempSync(join(tmpdir(), 'acl-bk-'));
 
@@ -200,6 +202,93 @@ describe('restoreAgentFromBackup', () => {
     // …and what a Start runs (Google accounts matched to today's) ran once it was up.
     expect(started).toEqual(['a1']);
     expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('that-night');
+  });
+
+  describe('a Google account deleted since that night stays off it, though another owner\'s grant of it keeps its token alive (HB-1085)', () => {
+    const SAM = 'sam@example.com';
+    /** A running agent whose volume is its gog keyring alone: gog lists and removes what the volume holds. */
+    async function withKeyring() {
+      const w = await runningAgent();
+      const { store, provider, runtimeRef } = w;
+      const keyring = () => (JSON.parse(provider.stateStore.get(runtimeRef)!.toString()) as { gog: string[] }).gog;
+      const put = (gog: string[]) => provider.stateStore.set(runtimeRef, Buffer.from(JSON.stringify({ gog })));
+      const exec = provider.execShell.bind(provider);
+      provider.execShell = async (ref, script, o) => {
+        if (script.startsWith('gog auth list')) return { code: 0, stdout: JSON.stringify({ accounts: keyring().map((email) => ({ email })) }), stderr: '' };
+        const rm = /gog auth remove --force -- "([^"]+)"/.exec(script);
+        if (rm) { put(keyring().filter((e) => e !== rm[1])); return { code: 0, stdout: '', stderr: '' }; }
+        return exec(ref, script, o);
+      };
+      put([SAM]);
+      const deps = { store, secrets: new MemSecrets(), provider };
+      // Its owner's connection of the account, attached; another owner here holds the same account.
+      store.insertConnection({ id: 'c1', ownerId: 'o', kind: 'google', email: SAM, services: ['gmail'], secretRef: 'connection/c1' });
+      store.insertConnection({ id: 'c2', ownerId: 'o-two', kind: 'google', email: SAM, services: ['gmail'], secretRef: 'connection/c2' });
+      store.attachConnection('a1', 'c1', false);
+      /** The owner deletes it, as the vault does: the removal recorded, taken off and verified, the row gone. */
+      const deleteIt = async () => {
+        store.addConnectionRemoval('a1', SAM);
+        store.detachConnection('a1', 'c1');
+        expect(await removeQueuedNow(deps, store.getAgent('a1')!, SAM)).toBe(true);
+        store.deleteConnection('c1');
+        expect(keyring()).toEqual([]);
+        expect(store.connectionRemovals('a1')).toEqual([]);
+      };
+      /**
+       * Restore `date`: once up, the sync a Start runs (the app's afterStart). Its archive
+       * written now unless `madeAt` says when (a set copied here has today's times), and
+       * its run's start recorded when `runStarted` says.
+       */
+      const restore = async (date: string, gog: string[], o: { madeAt?: Date; runStarted?: Date } = {}) => {
+        mkdirSync(join(rbase, date), { recursive: true });
+        const file = join(rbase, date, agentArchiveName(runtimeRef));
+        writeFileSync(file, JSON.stringify({ gog }));
+        if (o.madeAt) utimesSync(file, o.madeAt, o.madeAt);
+        if (o.runStarted) writeFileSync(join(rbase, date, 'backup-status.json'), JSON.stringify({ state: 'complete', startedAt: o.runStarted.toISOString() }));
+        let synced: Promise<void> | undefined;
+        await restoreAgentFromBackup({ store, provider, afterStart: (id) => { synced = syncConnections(deps, id, runtimeRef); } }, 'a1', date);
+        await synced;
+      };
+      return { ...w, keyring, deleteIt, restore };
+    }
+
+    it('a copy from before it was deleted: the account is taken off again when it starts', async () => {
+      const w = await withKeyring();
+      await w.deleteIt();
+      await w.restore('2026-08-26', [SAM]);
+      expect(w.keyring()).toEqual([]);
+      expect(w.store.connectionRemovals('a1')).toEqual([]); // taken off, and verified
+    });
+
+    it('a copy made that day, after it was deleted that morning, holds what the agent connected itself between: it stays (review of HB-1085)', async () => {
+      const w = await withKeyring();
+      await w.deleteIt();
+      // Taken off at ten; the agent signed in to it itself at eleven; the night's copy made at noon.
+      w.store.noteConnectionRemoved('a1', SAM, new Date(2026, 7, 26, 10, 0).toISOString());
+      await w.restore('2026-08-26', [SAM], { madeAt: new Date(2026, 7, 26, 12, 0) });
+      expect(w.keyring()).toEqual([SAM]);
+    });
+
+    it('a copy made that day, before it was deleted: taken off again, counted from when its run began, not when the file was last written (review of HB-1085)', async () => {
+      for (const [removed, runStarted] of [[13, undefined], [11, 10]] as const) {
+        const w = await withKeyring();
+        await w.deleteIt();
+        // The run began at ten (when said); the archive was written to the end by noon; taken off at `removed`.
+        w.store.noteConnectionRemoved('a1', SAM, new Date(2026, 7, 26, removed, 0).toISOString());
+        await w.restore('2026-08-26', [SAM], { madeAt: new Date(2026, 7, 26, 12, 0), ...(runStarted ? { runStarted: new Date(2026, 7, 26, runStarted, 0) } : {}) });
+        expect(w.keyring(), `taken off at ${removed}`).toEqual([]);
+      }
+    });
+
+    it('a copy made after it was deleted holds what the agent connected itself: it stays', async () => {
+      const w = await withKeyring();
+      await w.deleteIt();
+      // Dated tomorrow: made after the removal, so the account in it is the agent's own.
+      const t = new Date(Date.now() + 86_400_000);
+      const date = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+      await w.restore(date, [SAM]);
+      expect(w.keyring()).toEqual([SAM]);
+    });
   });
 
   it("the fallback's Slack and Discord script empties both channels' accounts and turns them off (B023)", () => {

@@ -1,0 +1,169 @@
+/**
+ * The CLI's requests to this install's own listener when Hatchabot serves
+ * TLS itself (HB-1375). setup-host.sh saves https://<bind or localhost>:<port>
+ * for it, but a plain fetch trusts only Node's bundled authorities and checks
+ * the name: a self-signed or mkcert certificate, or one naming the machine's
+ * real name while the address says localhost, failed every command.
+ *
+ * So, for this install's own address only (loopback, or its HATCHABOT_BIND),
+ * the certificate the server serves (the first in HATCHABOT_TLS_CERT, from
+ * the install's .env) is trusted beside the bundled authorities, as itself
+ * and nothing more: the listener's certificate passes without its name
+ * checked only when it is that very certificate (its fingerprint). Any other
+ * certificate there is checked as fetch checks it: the rest of the file (a
+ * chain, a local authority) is not trusted, nor is a certificate the pinned
+ * one signed. Any other address is a plain fetch. Certificate checks are
+ * never turned off.
+ */
+import { X509Certificate } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import type { IncomingMessage } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
+import { checkServerIdentity, rootCertificates, type DetailedPeerCertificate, type PeerCertificate } from 'node:tls';
+import { activeValues, envValue } from './envFile.js';
+
+export interface OwnTls {
+  /** The bundled authorities and the install's own certificate (the file's first, alone). */
+  ca: string[];
+  /** The install's own certificate (the file's first), as a peer certificate gives it. */
+  fingerprint256: string;
+}
+
+/** HATCHABOT_TLS_CERT and HATCHABOT_BIND from the install's .env, as the service reads them (AGENTCLAW_* for an unset one). */
+export function installTlsSettings(envFile: string): { cert?: string; bind?: string } {
+  let text: string;
+  try { text = readFileSync(envFile, 'utf8'); } catch { return {}; }
+  const m = activeValues(text);
+  const get = (name: string) => {
+    const v = m.get(`HATCHABOT_${name}`) ?? m.get(`AGENTCLAW_${name}`);
+    return v === undefined ? undefined : envValue(v) || undefined;
+  };
+  return { cert: get('TLS_CERT'), bind: get('BIND') };
+}
+
+const bare = (h: string) => h.trim().replace(/^\[|\]$/g, '').toLowerCase();
+
+/**
+ * What a request to `url` trusts, when `url` is this install's own https
+ * address and its certificate file reads; undefined for anything else.
+ */
+export function ownTls(url: string, settings: { cert?: string; bind?: string }, read: (file: string) => string = (f) => readFileSync(f, 'utf8')): OwnTls | undefined {
+  if (!settings.cert) return undefined;
+  let u: URL;
+  try { u = new URL(url); } catch { return undefined; }
+  if (u.protocol !== 'https:') return undefined;
+  const host = bare(u.hostname);
+  const bind = settings.bind ? bare(settings.bind) : '';
+  const own = host === 'localhost' || host === '::1' || /^127\.\d+\.\d+\.\d+$/.test(host) || (bind !== '' && host === bind);
+  if (!own) return undefined;
+  try {
+    // The first certificate alone: with every one in the file trusted, a
+    // local authority beside the leaf signed for any server at the address
+    // (review of HB-1375).
+    const leaf = new X509Certificate(read(settings.cert));
+    return { ca: [...rootCertificates, leaf.toString()], fingerprint256: leaf.fingerprint256 };
+  } catch { return undefined; }
+}
+
+/**
+ * A fetch over node:https with `tls`, for the bodies the CLI sends (none, a
+ * string, bytes), answered as a Response (status, headers, a streamed body).
+ * Its own connection each time, as doctor's probe: a TLS session kept from a
+ * pinned handshake is never reused elsewhere. It fails as fetch fails: a
+ * TypeError "fetch failed" with the socket's error as its cause, or the
+ * signal's reason (before the answer, or while its body streams), so the
+ * CLI's retries read it as they read fetch's (noAnswer: a hand-over whose
+ * connection dropped is sent again). It has fetch's own bounds (undici's):
+ * a connection within 10 seconds, the answer's headers within 300, and its
+ * body never 300 without a byte (review of HB-1375). It follows no
+ * redirect: the install's own address has none to give, and one fails,
+ * saying where it pointed.
+ */
+export function pinnedFetch(url: string, init: RequestInit, tls: OwnTls, bounds: Partial<PinnedBounds> = {}): Promise<Response> {
+  const limit = { ...FETCH_BOUNDS, ...bounds };
+  return new Promise((resolve, reject) => {
+    const body = init.body;
+    if (body != null && typeof body !== 'string' && !(body instanceof Uint8Array)) {
+      reject(new TypeError('this request body cannot be sent to the install\'s own https address'));
+      return;
+    }
+    const signal = init.signal ?? undefined;
+    if (signal?.aborted) { reject(signal.reason); return; }
+    const headers: Record<string, string> = {};
+    new Headers(init.headers).forEach((v, k) => { headers[k] = v; });
+    const method = (init.method ?? 'GET').toUpperCase();
+    const late = (what: string, ms: number, code: string) => Object.assign(new Error(`${what} within ${ms / 1000} seconds`), { code });
+    let answer: IncomingMessage | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = () => { if (answer) answer.destroy(signal!.reason); else req.destroy(signal!.reason); };
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
+    const req = httpsRequest(url, {
+      method, headers, agent: false,
+      ca: tls.ca,
+      // A certificate a local authority signed (mkcert's), whose authority is
+      // not in the file, is trusted as the file names it.
+      allowPartialTrustChain: true,
+      checkServerIdentity: (host, cert) => pinnedIdentity(host, cert, tls),
+    }, (res) => {
+      answer = res;
+      clearTimeout(timer);
+      const status = res.statusCode ?? 0;
+      if (REDIRECTS.has(status)) {
+        res.resume();
+        done();
+        reject(new Error(`${url} answered ${status}, a redirect to ${res.headers.location ?? 'nowhere'}: a request to the install's own https address follows none`));
+        return;
+      }
+      // Never that long without a byte of the body, as fetch's bodyTimeout.
+      res.socket.setTimeout(limit.body, () => res.destroy(new TypeError('terminated', { cause: late('the rest of the answer did not come', limit.body, 'UND_ERR_BODY_TIMEOUT') })));
+      res.on('close', done);
+      const h = new Headers();
+      for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) h.append(res.rawHeaders[i]!, res.rawHeaders[i + 1]!);
+      const empty = method === 'HEAD' || [101, 204, 205, 304].includes(status);
+      if (empty) res.resume();
+      try {
+        resolve(new Response(empty ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>), { status, statusText: res.statusMessage ?? '', headers: h }));
+      } catch (err) { res.destroy(); reject(err); }
+    });
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // Connected (TLS and all) within its bound; then the answer's headers within theirs.
+    timer = setTimeout(() => req.destroy(late('no connection was made', limit.connect, 'UND_ERR_CONNECT_TIMEOUT')), limit.connect);
+    req.on('socket', (socket) => socket.once('secureConnect', () => {
+      clearTimeout(timer);
+      if (!answer) timer = setTimeout(() => req.destroy(late('no answer came', limit.headers, 'UND_ERR_HEADERS_TIMEOUT')), limit.headers);
+    }));
+    req.on('error', (err) => { done(); reject(signal?.aborted ? signal.reason : new TypeError('fetch failed', { cause: err })); });
+    req.end(body ?? undefined);
+  });
+}
+
+/** How long a pinned request waits, as undici's fetch does by default: its connection, its answer's headers, the time between bytes of its body. */
+export interface PinnedBounds { connect: number; headers: number; body: number }
+const FETCH_BOUNDS: PinnedBounds = { connect: 10_000, headers: 300_000, body: 300_000 };
+/** What fetch follows by default. */
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * The pinned certificate passes as itself. Any other must not lean on it:
+ * the pin is in `ca` (so the handshake takes a certificate no authority
+ * signed), and a pinned certificate that is also an authority (openssl
+ * req -x509 makes one) would vouch for any certificate its key signed.
+ * The rest is fetch's own name check.
+ */
+function pinnedIdentity(host: string, cert: PeerCertificate, tls: OwnTls): Error | undefined {
+  if (cert.fingerprint256 === tls.fingerprint256) return undefined;
+  // The handshake gives the whole chain (getPeerCertificate(true)); a self-signed one points at itself.
+  for (let c = (cert as Partial<DetailedPeerCertificate>).issuerCertificate, n = 0; c && n < 16; c = c.issuerCertificate === c ? undefined : c.issuerCertificate, n++) {
+    if (c.fingerprint256 === tls.fingerprint256) {
+      return new Error(`the certificate at ${host} is not the install's own (HATCHABOT_TLS_CERT), and is signed by it: that one is trusted as itself only`);
+    }
+  }
+  return checkServerIdentity(host, cert);
+}
+
+/** A request from the CLI to the install it belongs to: pinned for its own https address, a plain fetch otherwise. */
+export function installFetch(url: string, init: RequestInit, envFile: string): Promise<Response> {
+  const tls = ownTls(url, installTlsSettings(envFile));
+  return tls ? pinnedFetch(url, init, tls) : fetch(url, init);
+}

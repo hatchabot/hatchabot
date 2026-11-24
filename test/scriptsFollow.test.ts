@@ -79,10 +79,13 @@ describe('scripts/follow-channel.sh', () => {
     mkdirSync(w.state, { recursive: true }); writeFileSync(join(w.state, `upgrade-${key}.from`), 'from v1.0.0\n');
     expect(w.run(0).status).toBe(0);
     expect(lines(w.log)).toEqual(['upgrade stable timer=1 target=v1.1.0']);
-    // A release set aside earlier: the repair still runs (it puts the earlier release back).
+    // A release set aside earlier: the repair still runs (it puts the earlier
+    // release back), and only the repair: no target (review of HB-0637).
     writeFileSync(join(w.state, `follow-channel-failed-${key}`), 'v1.1.0\n');
-    expect(w.run(0).status).toBe(0);
-    expect(lines(w.log)).toEqual(['upgrade stable timer=1 target=v1.1.0', 'upgrade stable timer=1 target=v1.1.0']);
+    const aside = w.run(0);
+    expect(aside.status).toBe(0);
+    expect(aside.stdout).toContain('v1.1.0 was set aside, so it is not tried again; the channel\'s next release will be. This tick repairs the upgrade that was cut off, and only that.');
+    expect(lines(w.log)).toEqual(['upgrade stable timer=1 target=v1.1.0', 'upgrade stable timer=1 target=']);
   });
 
   it('follows its own install\'s channel, not another install\'s choice; the user\'s one file only when it has none (HB-0235)', () => {
@@ -189,7 +192,7 @@ describe('scripts/follow-channel.sh', () => {
     expect(full.stdout).toContain('does not count against v1.1.0');
     expect(existsSync(w.failed)).toBe(false);
     expect(readFileSync(w.tries, 'utf8')).toMatch(/^v1\.1\.0 8 \d+\n$/);
-    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toBe('v1.1.0 1\n'); // the disk's, counted beside the record (tenth review)
+    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/); // the disk's, counted beside the record (tenth review)
     // A disk that stays full for days: still not set aside, and the wait is a day at most.
     writeFileSync(w.tries, 'v1.1.0 30 0\n'); writeFileSync(`${w.tries}.disk`, 'v1.1.0 30\n');
     expect(w.run(5).status).toBe(1);
@@ -200,7 +203,7 @@ describe('scripts/follow-channel.sh', () => {
     expect(after.stdout).toContain('tried again later (1 of 8)');
     expect(existsSync(w.failed)).toBe(false);
     expect(readFileSync(w.tries, 'utf8')).toMatch(/^v1\.1\.0 32 \d+\n$/);
-    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toBe('v1.1.0 31\n');
+    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 31 \d+\n$/);
     expect(lines(w.log)).toHaveLength(3);
   });
 
@@ -222,7 +225,7 @@ describe('scripts/follow-channel.sh', () => {
       expect(r.stdout).toContain('Could not record this try');
       expect(r.stdout).toContain('does not count against v1.1.0'); // the run went on to say it
       expect(readFileSync(held, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
-      expect(readFileSync(`${held}.disk`, 'utf8')).toBe('v1.1.0 1\n');
+      expect(readFileSync(`${held}.disk`, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
       // The next tick waits, as it would on the record it could not write.
       expect(tick(5, { XDG_RUNTIME_DIR: runtime }).status).toBe(0);
       expect(lines(w.log)).toHaveLength(1);
@@ -237,7 +240,7 @@ describe('scripts/follow-channel.sh', () => {
     writeFileSync(held, 'v1.1.0 1 0\n'); writeFileSync(`${held}.disk`, 'v1.1.0 1\n');
     expect(tick(5, { XDG_RUNTIME_DIR: runtime }).status).toBe(1);
     expect(readFileSync(w.tries, 'utf8')).toMatch(/^v1\.1\.0 2 \d+\n$/);
-    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toBe('v1.1.0 2\n');
+    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 2 \d+\n$/);
     expect(existsSync(held)).toBe(false);
     expect(existsSync(`${held}.disk`)).toBe(false);
   });
@@ -396,7 +399,7 @@ describe('scripts/follow-channel.sh', () => {
     writeFileSync(w.tries, 'v1.1.0 3 0\n'); writeFileSync(`${w.tries}.disk`, 'v1.1.0 3\n');
     expect(w.run(5).status).toBe(1);
     expect(older(w.tries)).toBe('v1.1.0 4');
-    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toBe('v1.1.0 4\n');
+    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 4 \d+\n$/);
     // An older timer counted on without the count beside it, or it names another release: never more than the failures.
     writeFileSync(w.tries, 'v1.1.0 7 0\n'); writeFileSync(`${w.tries}.disk`, 'v1.0.9 7\n');
     expect(w.run(3).stdout).toContain('did not complete 8 times in a row');
@@ -416,7 +419,7 @@ describe('scripts/follow-channel.sh', () => {
     expect(full.status, full.stdout + full.stderr).toBe(1);
     expect(full.stdout).toContain('does not count against v1.1.0');
     expect(readFileSync(w.tries, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/); // a disk try: waited on, not counted against it
-    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toBe('v1.1.0 1\n');
+    expect(readFileSync(`${w.tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
     // Offline, with a cut-off upgrade to repair: the same.
     const v = world();
     const app = join(v.root, 'app');
@@ -706,6 +709,9 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
     expect(w.at()).toBe('v1.0.0');
     expect(existsSync(join(w.prod, 'node_modules', 'marker'))).toBe(true);
     expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toHaveLength(2);
+    // The old one did not restart either, so the rollback did not finish: what to run next is said, and the record stays (review of HB-1212).
+    expect(r.stdout).toContain('Then run scripts/deploy-release.sh v1.1.0: it puts v1.0.0 back first, from its record.');
+    expect(readdirSync(join(w.home, '.local', 'state', 'hatchabot')).filter((n) => n.endsWith('.from'))).toHaveLength(1);
   });
 
   it('a service that takes the connection and never answers: each request ends, the wait ends, and it rolls back (HB-0553)', () => {
@@ -729,6 +735,97 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
     expect(r.status, r.stdout + r.stderr).toBe(3);
     expect(existsSync(join(w.prod, 'node_modules', 'marker'))).toBe(true);
     expect(existsSync(join(w.prod, 'node_modules.prev'))).toBe(false);
+  });
+
+  describe('moves node_modules only under the dependencies\' lock, as upgrade.sh does (review of HB-1212)', () => {
+    // Half an hour of one-second waits, made instant: only `sleep 1`, the lock's.
+    const fastSleep = (bin: string) => writeFileSync(join(bin, 'sleep'), '#!/bin/bash\n[ "$1" = 1 ] && exit 0\nexec /bin/sleep "$@"\n', { mode: 0o755 });
+    // Another npm at work, holding the lock: this test's own process stands for it, alive throughout.
+    const start = () => spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    const holdLine = () => `${process.pid} ${start()}`;
+    const take = (home: string, dir: string) => {
+      const sum = spawnSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', dir], { encoding: 'utf8' }).stdout.trim();
+      const lock = join(home, '.local', 'state', 'hatchabot', `deps-${sum}.lock.d`);
+      mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, 'owner'), `${holdLine()}\n`);
+      return lock;
+    };
+    const state = (w: ReturnType<typeof prodWorld>) => join(w.home, '.local', 'state', 'hatchabot');
+
+    it('held by another npm before anything moved: the deploy waits, nothing moved meanwhile, then goes on once it is free', async () => {
+      const w = prodWorld();
+      expect(start()).not.toBe('');
+      const lock = take(w.home, w.prod);
+      const p = spawn('bash', [join(w.prod, 'scripts', 'deploy-release.sh'), 'v1.1.0'], { env: { ...w.env, HATCHABOT_PROD_DIR: w.prod, HATCHABOT_FOLLOW_KNOWS_5: '1' } });
+      let out = '', ended = false;
+      p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { out += d; });
+      const done = new Promise<number | null>((res) => p.on('close', (code) => { ended = true; res(code); }));
+      try {
+        // Waiting, or (as before the lock) deployed already.
+        for (const end = Date.now() + 30_000; !out.includes('Waiting for an install of the dependencies') && !ended && Date.now() < end;) await new Promise((res) => setTimeout(res, 50));
+        expect(out).toContain('Waiting for an install of the dependencies in');
+        await new Promise((res) => setTimeout(res, 300));
+        expect(w.at()).toBe('v1.0.0');
+        expect(readdirSync(join(w.prod, 'node_modules'))).toEqual(['marker']);
+        expect(lines(w.log)).toEqual([]); // no install, no restart yet
+      } finally {
+        rmSync(lock, { recursive: true, force: true }); // the npm done
+      }
+      expect(await done, out).toBe(0);
+      expect(out).toContain('Serving 1.1.0.');
+      expect(readdirSync(state(w)).filter((n) => n.startsWith('deps-'))).toEqual([]); // let go
+    }, 60_000);
+
+    it('taken by another npm while the install ran: the rollback leaves the old dependencies aside, says so, keeps the record; the next deploy puts them back', () => {
+      const w = prodWorld({
+        // The new release's install: fails, and (HOLD_DEPS) with another npm holding the lock meanwhile.
+        'scripts/ensure-deps.sh': `#!/usr/bin/env bash
+if [ -n "\${HOLD_DEPS:-}" ]; then
+  L="$HOME/.local/state/hatchabot/deps-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
+  mkdir -p "$L"; printf '%s\\n' "$HOLD_DEPS" > "$L/owner"
+fi
+mkdir -p node_modules; echo x > node_modules/half
+exit 1
+`,
+      });
+      fastSleep(w.bin);
+      const r = w.deploy({ HOLD_DEPS: holdLine(), HATCHABOT_DEPS_WAIT_SECS: '3' });
+      expect(r.status, r.stdout + r.stderr).toBe(3);
+      expect(r.stdout).toContain("for half an hour, so v1.0.0's were left in node_modules.prev, not put back.");
+      expect(r.stdout).toContain('Then run scripts/deploy-release.sh v1.1.0: it puts v1.0.0 back first, from its record.');
+      expect(readdirSync(join(w.prod, 'node_modules.prev'))).toEqual(['marker']);
+      expect(readdirSync(state(w)).filter((n) => n.endsWith('.from'))).toHaveLength(1);
+      expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toEqual([]);
+      // The npm gone, its lock with it: the next deploy puts them back first.
+      for (const n of readdirSync(state(w)).filter((x) => x.startsWith('deps-'))) rmSync(join(state(w), n), { recursive: true });
+      const next = w.deploy();
+      expect(next.stdout).toContain('was cut off part-way — putting v1.0.0 back first');
+      expect(next.status, next.stdout + next.stderr).toBe(3);
+      expect(w.at()).toBe('v1.0.0');
+      expect(readdirSync(join(w.prod, 'node_modules'))).toEqual(['marker']);
+    }, 120_000);
+
+    it('taken by another npm once the service restarted: a rollback after a health check that failed says what to run next, still 1, and keeps the record (review of HB-1212)', () => {
+      const w = prodWorld();
+      // The restart onto the new release: another npm takes the lock meanwhile (HOLD_DEPS).
+      writeFileSync(join(w.bin, 'systemctl'), `#!/usr/bin/env bash
+echo "systemctl $*" >> ${JSON.stringify(w.log)}
+if [ "$2" = restart ] && [ -n "\${HOLD_DEPS:-}" ]; then
+  L="$HOME/.local/state/hatchabot/deps-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
+  mkdir -p "$L"; printf '%s\\n' "$HOLD_DEPS" > "$L/owner"
+fi
+exit 0
+`, { mode: 0o755 });
+      // Every wait instant: the lock's one-second ones and the health check's.
+      writeFileSync(join(w.bin, 'sleep'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+      writeFileSync(join(w.bin, 'curl'), '#!/usr/bin/env bash\nexit 7\n', { mode: 0o755 });
+      const r = w.deploy({ HOLD_DEPS: holdLine(), HATCHABOT_DEPS_WAIT_SECS: '3' });
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(r.stdout).toContain('is not serving 1.1.0');
+      expect(r.stdout).toContain("for half an hour, so v1.0.0's were left in node_modules.prev, not put back.");
+      expect(r.stdout).toContain('Then run scripts/deploy-release.sh v1.1.0: it puts v1.0.0 back first, from its record.');
+      expect(readdirSync(state(w)).filter((n) => n.endsWith('.from'))).toHaveLength(1);
+      expect(readdirSync(join(w.prod, 'node_modules.prev'))).toEqual(['marker']);
+    }, 200_000);
   });
 
   describe('asks the listener the service is configured with (audit #030, #031)', () => {
@@ -859,7 +956,7 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
       expect(next.stdout).toBe('');
     });
 
-    it('killed in a hand deploy of a tag the timer had set aside: follow-latest still repairs it', async () => {
+    it('killed in a hand deploy of a tag the timer had set aside: follow-latest still repairs it, and the tag stays aside (review of HB-0637)', async () => {
       const w = prodWorld();
       for (const f of ['follow-latest.sh', 'follow-tries.sh']) writeFileSync(join(w.root, f), readFileSync(join('scripts', f)), { mode: 0o755 });
       const follow = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
@@ -867,10 +964,17 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
       mkdirSync(state, { recursive: true }); writeFileSync(join(state, 'follow-latest-failed'), 'v1.1.0\n');
       expect((await cutOff(w, 'SIGKILL')).code).toBe(null);
       expect(w.at()).toBe('v1.1.0');
+      // The old release, once back, answers as itself.
+      writeFileSync(join(w.bin, 'curl'), '#!/usr/bin/env bash\necho \'<script>window.HATCHABOT_VERSION="1.0.0"</script>\'\n', { mode: 0o755 });
       const r = follow();
       expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toContain('v1.1.0 was set aside, so it is not tried again; the next tag will be. This tick repairs the deploy that was cut off, and only that.');
       expect(r.stdout).toMatch(/cut off part-way — putting v1\.0\.0 back first/);
+      expect(r.stdout).not.toContain('Following latest');
+      expect(w.at()).toBe('v1.0.0');
       expect(existsSync(join(w.prod, 'node_modules', 'half-installed'))).toBe(false);
+      expect(readFileSync(join(state, 'follow-latest-failed'), 'utf8').trim()).toBe('v1.1.0');
+      expect(follow().stdout).toBe(''); // set aside, and nothing left to repair
     });
   });
 
@@ -1297,7 +1401,7 @@ describe('scripts/follow-latest.sh (review, 2026-10-09)', () => {
       expect(r.status, `${when}: ${r.stdout}${r.stderr}`).toBe(1);
       expect(r.stdout, when).toContain(`(a full disk?), so this tick stops before changing anything. This does not count against v1.1.0; the next ticks wait.`);
       expect(readFileSync(join(state, 'follow-latest-tries'), 'utf8'), when).toMatch(/^v1\.1\.0 1 \d+\n$/);
-      expect(readFileSync(join(state, 'follow-latest-tries.disk'), 'utf8'), when).toBe('v1.1.0 1\n');
+      expect(readFileSync(join(state, 'follow-latest-tries.disk'), 'utf8'), when).toMatch(/^v1\.1\.0 1 \d+\n$/);
       expect(follow().status, when).toBe(0); // waits
       expect(lines(deploys), when).toEqual([]);
     }
@@ -1374,7 +1478,7 @@ describe('scripts/follow-latest.sh (review, 2026-10-09)', () => {
     expect(full.stdout).toContain('does not count against v1.1.0');
     expect(existsSync(failed)).toBe(false);
     expect(readFileSync(tries, 'utf8')).toMatch(/^v1\.1\.0 8 \d+\n$/);
-    expect(readFileSync(`${tries}.disk`, 'utf8')).toBe('v1.1.0 1\n');
+    expect(readFileSync(`${tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
     // Once the disk is freed, a failure of the tag's own is its first.
     writeFileSync(tries, 'v1.1.0 31 0\n'); writeFileSync(`${tries}.disk`, 'v1.1.0 31\n');
     expect(follow(3).stdout).toContain('tried again later (1 of 8)');
@@ -1513,7 +1617,9 @@ describe('scripts/follow-latest.sh runs only a release the workflow published (#
       // The old release, once back, answers as itself.
       writeFileSync(join(w.bin, 'curl'), realCurl.replace('#!/usr/bin/env bash\n', `#!/usr/bin/env bash\ncase "$*" in *127.0.0.1*) echo '<script>window.HATCHABOT_VERSION="1.0.0"</script>'; exit 0 ;; esac\n`));
       const r = w.follow();
-      expect(r.stdout, r.stdout + r.stderr).toContain('Not deploying v2.160.0');
+      // Set aside, it is not looked at again: the repair alone (review of HB-0637).
+      expect(r.stdout, r.stdout + r.stderr).toContain('v2.160.0 was set aside, so it is not tried again; the next tag will be. This tick repairs the deploy that was cut off, and only that.');
+      expect(w.urls()).toEqual([]);
       expect(r.stdout).toMatch(/cut off part-way — putting v2\.159\.1 back first/);
       expect(lines(w.ran)).toEqual([]); // the refused tag's deploy script never ran
       expect(w.at()).toBe('v2.159.1');
@@ -1772,10 +1878,12 @@ describe('scripts/follow-latest.sh, fifteenth review: a repair the disk stopped 
     expect(full.status, full.stdout + full.stderr).toBe(1);
     expect(full.stdout).toContain('Putting v1.1.0 back could not go ahead on this machine\'s disk (see above); it will be tried again later. This does not count against v1.1.0.');
     expect(readFileSync(tries, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
-    expect(readFileSync(`${tries}.disk`, 'utf8')).toBe('v1.1.0 1\n');
+    expect(readFileSync(`${tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
     expect(follow(5).status).toBe(0); // waits
     expect(lines(deploys)).toHaveLength(1);
-    writeFileSync(tries, `v1.1.0 1 ${ago(10)}\n`);
+    // The repair was no try of the tag: its wait runs on the disk's clock (review of HB-0637).
+    expect(readFileSync(tries, 'utf8')).toBe('v1.1.0 1 0\n');
+    writeFileSync(`${tries}.disk`, `v1.1.0 1 ${ago(10)}\n`);
     expect(follow(0).status).toBe(0);
     expect(lines(deploys)).toHaveLength(2);
   });
@@ -1785,7 +1893,7 @@ describe('scripts/follow-latest.sh, fifteenth review: a repair the disk stopped 
     cut('from v1.0.0\nto v1.1.0\n');
     const full = follow(5);
     expect(full.status, full.stdout + full.stderr).toBe(1);
-    expect(readFileSync(`${tries}.disk`, 'utf8')).toBe('v1.1.0 1\n');
+    expect(readFileSync(`${tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
     expect(follow(5).status).toBe(0); // waits
     expect(lines(deploys)).toEqual(['deploy v1.1.0']);
   });
@@ -1797,8 +1905,244 @@ describe('scripts/follow-latest.sh, fifteenth review: a repair the disk stopped 
       const r = follow(0);
       expect(r.status, said + ': ' + r.stdout + r.stderr).toBe(1);
       expect(r.stdout, said).toContain(`(${said}) (a full disk?), so this tick stops before changing anything. This does not count against v1.1.0; the next ticks wait.`);
-      expect(readFileSync(`${tries}.disk`, 'utf8'), said).toBe('v1.1.0 1\n');
+      expect(readFileSync(`${tries}.disk`, 'utf8'), said).toMatch(/^v1\.1\.0 1 \d+\n$/);
       expect(lines(deploys)).toEqual([]);
     }
+  });
+});
+
+describe('the timers count each try once, and an unpublished tag waits during a repair (HB-0637)', () => {
+  it('note_try twice in one tick adds on: the second no longer writes over the first from the counts read at the start', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-follow-tries-')); dirs.push(root);
+    // Only what follow-tries.sh runs: date, mv, rm.
+    const bin = join(root, 'bin'); mkdirSync(bin);
+    for (const tool of ['date', 'mv', 'rm']) {
+      const real = execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
+      writeFileSync(join(bin, tool), `#!/bin/sh\nexec ${real} "$@"\n`, { mode: 0o755 });
+    }
+    const tries = join(root, 'tries');
+    writeFileSync(tries, 'v1.1.0 2 0\n');
+    const bash = execFileSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).trim();
+    const r = spawnSync(bash, ['-c', '. "$1"; tries_open "$2" made-up-name v1.1.0; note_try 1; note_try 0; echo "$T_COUNT $T_DISK"', '_', join(process.cwd(), 'scripts', 'follow-tries.sh'), tries], {
+      encoding: 'utf8', env: scriptEnv(root, bin),
+    });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe('4 1');
+    expect(readFileSync(tries, 'utf8')).toMatch(/^v1\.1\.0 4 \d+\n$/);
+    expect(Number(readFileSync(tries, 'utf8').split(' ')[2])).toBeGreaterThan(0);
+    expect(readFileSync(`${tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
+  });
+
+  it('with a killed deploy whose repair keeps failing, a tag not yet published is counted once per wait, not on every tick; between, only the repair runs', () => {
+    const w = prodWorld({}, ['v2.159.1', 'v2.160.0']);
+    for (const f of ['follow-latest.sh', 'follow-tries.sh']) writeFileSync(join(w.root, f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    // GitHub, by a shim: no release for any tag (404), so verify_release says 20.
+    const urls = join(w.root, 'urls.log');
+    writeFileSync(join(w.bin, 'curl'), [
+      '#!/usr/bin/env bash',
+      'out=""; fmt=""; url=""',
+      'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; -w) fmt="$2"; shift ;; -H|--max-time|--max-filesize) shift ;; http*) url="$1" ;; esac; shift; done',
+      `echo "$url" >> ${JSON.stringify(urls)}`,
+      'echo "Not Found" > "$out"; printf "%s" "${fmt//%\\{http_code\\}/404}"',
+    ].join('\n') + '\n', { mode: 0o755 });
+    const state = join(w.home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+    // Killed while deploying v2.160.0, from a release whose deploy script is not
+    // here (no such tag): the repair fails on every tick, and the record stays.
+    const record = join(state, `upgrade-${key}.from`);
+    w.git(w.prod, 'checkout', '-q', 'v2.160.0');
+    writeFileSync(record, 'from v2.159.0\nto v2.160.0\n');
+    const tries = join(state, 'follow-latest-tries'), failed = join(state, 'follow-latest-failed');
+    const follow = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+    const first = follow();
+    expect(first.stdout, first.stdout + first.stderr).toContain('Looking again later (1 of 8)');
+    // Nine ticks at once, all within the first wait (five minutes): the
+    // repair alone, and GitHub is not asked again (review of HB-0637).
+    for (let i = 0; i < 9; i++) {
+      const r = follow();
+      expect(r.stdout, r.stdout + r.stderr).toContain('v2.160.0 is tried again later. This tick repairs the deploy that was cut off, and only that.');
+      expect(r.stdout).toContain('Could not read that release\'s deploy script');
+      expect(r.stdout).toContain('The repair did not finish (above); it will be tried again.');
+    }
+    expect(lines(urls)).toHaveLength(1);
+    expect(readFileSync(tries, 'utf8')).toMatch(/^v2\.160\.0 1 \d+\n$/);
+    expect(existsSync(failed)).toBe(false);
+    expect(existsSync(record)).toBe(true);
+    // Once the wait is over, the next look counts, and the eighth still sets it aside.
+    writeFileSync(tries, 'v2.160.0 1 0\n');
+    expect(follow().stdout).toContain('Looking again later (2 of 8)');
+    expect(readFileSync(tries, 'utf8')).toMatch(/^v2\.160\.0 2 \d+\n$/);
+    writeFileSync(tries, 'v2.160.0 7 0\n');
+    expect(follow().stdout).toContain('8 times in a row. It will not be looked at again');
+    expect(readFileSync(failed, 'utf8').trim()).toBe('v2.160.0');
+    expect(lines(urls).every((u) => u.includes('/releases/tags/v2.160.0'))).toBe(true);
+    // Aside, it is not looked at again; the repair still runs.
+    const looks = lines(urls).length;
+    expect(follow().stdout).toContain('v2.160.0 was set aside, so it is not tried again; the next tag will be. This tick repairs the deploy that was cut off, and only that.');
+    expect(lines(urls)).toHaveLength(looks);
+  });
+
+  it('a published tag whose deploy keeps failing, with a killed deploy\'s record left: tried once per wait, set aside after eight, and aside it stays; the repair runs on every tick (review of HB-0637)', () => {
+    const w = prodWorld();
+    for (const f of ['follow-latest.sh', 'follow-tries.sh']) writeFileSync(join(w.root, f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    const state = join(w.home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+    // Killed while deploying v1.1.0, and an index.lock nothing shows is that
+    // deploy's own is in the way: every deploy, and every repair, stops at it (3).
+    const record = join(state, `upgrade-${key}.from`);
+    w.git(w.prod, 'checkout', '-q', 'v1.1.0');
+    writeFileSync(record, 'from v1.0.0\nto v1.1.0\n');
+    const lock = join(w.prod, '.git', 'index.lock');
+    writeFileSync(lock, '');
+    const tries = join(state, 'follow-latest-tries'), failed = join(state, 'follow-latest-failed');
+    const follow = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+    const deployed = (r: { stdout: string }) => r.stdout.includes('Following latest: ');
+    const first = follow();
+    expect(deployed(first), first.stdout + first.stderr).toBe(true);
+    expect(first.stdout).toContain('Deploying v1.1.0 did not complete (see above); it will be tried again later (1 of 8).');
+    // Ticks within its wait: the repair alone, which stops at the lock too.
+    for (let i = 0; i < 5; i++) {
+      const r = follow();
+      expect(r.status).toBe(1);
+      expect(deployed(r), r.stdout + r.stderr).toBe(false);
+      expect(r.stdout).toContain('v1.1.0 is tried again later. This tick repairs the deploy that was cut off, and only that.');
+      expect(r.stdout).toContain('index.lock is in the way');
+      expect(r.stdout).toContain('The repair did not finish (above); it will be tried again.');
+    }
+    expect(readFileSync(tries, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
+    // Its wait over, with seven counted: the eighth sets it aside.
+    writeFileSync(tries, 'v1.1.0 7 0\n');
+    const eighth = follow();
+    expect(deployed(eighth)).toBe(true);
+    expect(eighth.stdout).toContain('Deploying v1.1.0 did not complete 8 times in a row. It will not be retried; the next tag will be.');
+    expect(readFileSync(failed, 'utf8').trim()).toBe('v1.1.0');
+    // And aside it stays: the repair alone, nothing counted.
+    for (let i = 0; i < 4; i++) {
+      const r = follow();
+      expect(deployed(r), r.stdout + r.stderr).toBe(false);
+      expect(r.stdout).toContain('v1.1.0 was set aside, so it is not tried again; the next tag will be. This tick repairs the deploy that was cut off, and only that.');
+    }
+    expect(existsSync(tries)).toBe(false);
+    // The lock gone, the repair puts v1.0.0 back, and the tag stays aside.
+    rmSync(lock);
+    writeFileSync(join(w.bin, 'curl'), '#!/usr/bin/env bash\necho \'<script>window.HATCHABOT_VERSION="1.0.0"</script>\'\n', { mode: 0o755 });
+    const fixed = follow();
+    expect(fixed.status, fixed.stdout + fixed.stderr).toBe(0);
+    expect(deployed(fixed)).toBe(false);
+    expect(w.at()).toBe('v1.0.0');
+    expect(existsSync(record)).toBe(false);
+    expect(follow().stdout).toBe('');
+  });
+
+  it('with a killed deploy whose repair the disk stops every hour, a tag not yet published still waits by its own tries, on its own clock, and is set aside after eight (review of HB-0637)', () => {
+    // v2.160.0, the release the deploy was killed from, has a deploy script the disk stops (5).
+    const w = prodWorld({ 'scripts/deploy-release.sh': '#!/usr/bin/env bash\necho "No space left on device" >&2\nexit 5\n' }, ['v2.159.1', 'v2.160.0']);
+    for (const f of ['follow-latest.sh', 'follow-tries.sh']) writeFileSync(join(w.root, f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    w.git(w.prod, 'tag', 'v2.161.0', 'v2.160.0');
+    w.git(w.prod, 'checkout', '-q', 'v2.161.0');
+    // GitHub, by a shim: no release for any tag (404), so verify_release says 20.
+    writeFileSync(join(w.bin, 'curl'), [
+      '#!/usr/bin/env bash',
+      'out=""; fmt=""',
+      'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; -w) fmt="$2"; shift ;; -H|--max-time|--max-filesize) shift ;; esac; shift; done',
+      'echo "Not Found" > "$out"; printf "%s" "${fmt//%\\{http_code\\}/404}"',
+    ].join('\n') + '\n', { mode: 0o755 });
+    // A clock the test moves: an hour a tick, past the disk's longest wait (55 minutes).
+    const clock = join(w.root, 'clock');
+    const realDate = execFileSync('sh', ['-c', 'command -v date'], { encoding: 'utf8' }).trim();
+    writeFileSync(join(w.bin, 'date'), `#!/bin/sh\nif [ "$1" = "+%s" ]; then cat ${JSON.stringify(clock)}; else exec ${realDate} "$@"; fi\n`, { mode: 0o755 });
+    const state = join(w.home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+    writeFileSync(join(state, `upgrade-${key}.from`), 'from v2.160.0\nto v2.161.0\n');
+    const follow = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+    const counted: number[] = [];
+    let asideAt = -1;
+    for (let hour = 0; hour < 48 && asideAt < 0; hour++) {
+      writeFileSync(clock, String(1_800_000_000 + hour * 3600));
+      const r = follow();
+      expect(r.stdout, r.stdout + r.stderr).toContain('could not go ahead on this machine\'s disk');
+      if (r.stdout.includes('8 times in a row')) asideAt = hour;
+      else if (/Looking again later \(\d of 8\)/.test(r.stdout)) counted.push(hour);
+    }
+    // Looked at when each doubling wait is over (5, 15, 35, 75, 155, 315, 635
+    // minutes), on the hour ticks after: the repair's hourly failures no
+    // longer start its wait again.
+    expect(counted).toEqual([0, 1, 2, 3, 5, 8, 14]);
+    expect(asideAt).toBe(25);
+    expect(readFileSync(join(state, 'follow-latest-failed'), 'utf8').trim()).toBe('v2.161.0');
+  });
+
+  it('follow-channel: with an upgrade cut off, a release set aside or within its wait gets the repair alone, nothing counted; one that is due gets the full upgrade (review of HB-0637)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-follow-channel-cut-')); dirs.push(root);
+    const home = join(root, 'home'); mkdirSync(home, { recursive: true });
+    const bin = join(root, 'bin'); mkdirSync(bin);
+    for (const t of ['systemctl', 'node', 'docker']) writeFileSync(join(bin, t), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const app = join(root, 'app'); mkdirSync(join(app, 'scripts'), { recursive: true });
+    for (const f of ['follow-channel.sh', 'systemd-quote.sh', 'follow-tries.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    writeFileSync(join(app, 'scripts', 'release-target.sh'), '#!/usr/bin/env bash\necho v1.1.0\n', { mode: 0o755 });
+    const log = join(root, 'upgrades.log');
+    // An upgrade that does not complete (3), the cut left as it was.
+    writeFileSync(join(app, 'scripts', 'upgrade.sh'), `#!/usr/bin/env bash\necho "upgrade $* repair=\${HATCHABOT_UPGRADE_REPAIR_ONLY:-} target=\${HATCHABOT_UPGRADE_TARGET:-}" >> ${JSON.stringify(log)}\nexit 3\n`, { mode: 0o755 });
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
+    const state = join(home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, `upgrade-${key}.from`), 'from v1.0.0\n');
+    const tries = join(state, `follow-channel-tries-${key}`), failed = join(state, `follow-channel-failed-${key}`);
+    const follow = () => spawnSync('bash', [join(app, 'scripts', 'follow-channel.sh'), 'stable'], { encoding: 'utf8', env: scriptEnv(home, `${bin}:/usr/bin:/bin`) });
+    const first = follow();
+    expect(first.stdout, first.stdout + first.stderr).toContain('it will be tried again later (1 of 8)');
+    for (let i = 0; i < 4; i++) {
+      const r = follow();
+      expect(r.status).toBe(1);
+      expect(r.stdout, r.stdout + r.stderr).toContain('v1.1.0 is tried again later. This tick repairs the upgrade that was cut off, and only that.');
+    }
+    expect(lines(log)).toEqual(['upgrade stable repair= target=v1.1.0', ...Array(4).fill('upgrade stable repair=1 target=')]);
+    expect(readFileSync(tries, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
+    writeFileSync(tries, 'v1.1.0 7 0\n');
+    expect(follow().stdout).toContain('did not complete 8 times in a row. It will not be retried');
+    expect(readFileSync(failed, 'utf8').trim()).toBe('v1.1.0');
+    const before = lines(log).length;
+    for (let i = 0; i < 3; i++) expect(follow().stdout).toContain('v1.1.0 was set aside, so it is not tried again; the channel\'s next release will be. This tick repairs the upgrade that was cut off, and only that.');
+    expect(lines(log).slice(before)).toEqual(Array(3).fill('upgrade stable repair=1 target='));
+    expect(existsSync(tries)).toBe(false);
+  });
+
+  it('follow-channel: a repair the disk stops waits the disk\'s wait, counted the disk\'s, the release\'s clock left alone (review of HB-0637)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-follow-channel-cutdisk-')); dirs.push(root);
+    const home = join(root, 'home'); mkdirSync(home, { recursive: true });
+    const bin = join(root, 'bin'); mkdirSync(bin);
+    for (const t of ['systemctl', 'node', 'docker']) writeFileSync(join(bin, t), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const app = join(root, 'app'); mkdirSync(join(app, 'scripts'), { recursive: true });
+    for (const f of ['follow-channel.sh', 'systemd-quote.sh', 'follow-tries.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    writeFileSync(join(app, 'scripts', 'release-target.sh'), '#!/usr/bin/env bash\necho v1.1.0\n', { mode: 0o755 });
+    const log = join(root, 'upgrades.log');
+    // The repair stopped by a full disk (5), the cut left as it was.
+    writeFileSync(join(app, 'scripts', 'upgrade.sh'), `#!/usr/bin/env bash\necho "upgrade $* repair=\${HATCHABOT_UPGRADE_REPAIR_ONLY:-}" >> ${JSON.stringify(log)}\nexit 5\n`, { mode: 0o755 });
+    const key = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', app], { encoding: 'utf8' }).trim();
+    const state = join(home, '.local', 'state', 'hatchabot'); mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, `upgrade-${key}.from`), 'from v1.0.0\n');
+    const tries = join(state, `follow-channel-tries-${key}`);
+    const follow = () => spawnSync('bash', [join(app, 'scripts', 'follow-channel.sh'), 'stable'], { encoding: 'utf8', env: scriptEnv(home, `${bin}:/usr/bin:/bin`) });
+    // The release within its wait after two failures of its own, the last a minute ago.
+    const ago = Math.floor(Date.now() / 1000) - 60;
+    writeFileSync(tries, `v1.1.0 2 ${ago}\n`);
+    const first = follow();
+    expect(first.status, first.stdout + first.stderr).toBe(1);
+    expect(first.stdout).toContain('v1.1.0 is tried again later. This tick repairs the upgrade that was cut off, and only that.\nRepairing the upgrade that was cut off could not go ahead on this machine\'s disk (see above); it will be tried again later. This does not count against v1.1.0.');
+    // Counted the disk's; the release's own two and its clock as they were.
+    expect(readFileSync(tries, 'utf8')).toBe(`v1.1.0 3 ${ago}\n`);
+    expect(readFileSync(`${tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 1 \d+\n$/);
+    // Within the disk's wait (five minutes): quiet, no repair.
+    for (let i = 0; i < 3; i++) {
+      const r = follow();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toBe('');
+    }
+    expect(lines(log)).toEqual(['upgrade stable repair=1']);
+    // Once it has passed, the repair runs again, and the disk's wait doubles.
+    writeFileSync(`${tries}.disk`, `v1.1.0 1 ${Math.floor(Date.now() / 1000) - 6 * 60}\n`);
+    expect(follow().stdout).toContain('could not go ahead on this machine\'s disk');
+    expect(lines(log)).toEqual(['upgrade stable repair=1', 'upgrade stable repair=1']);
+    expect(readFileSync(tries, 'utf8')).toBe(`v1.1.0 4 ${ago}\n`);
+    expect(readFileSync(`${tries}.disk`, 'utf8')).toMatch(/^v1\.1\.0 2 \d+\n$/);
   });
 });

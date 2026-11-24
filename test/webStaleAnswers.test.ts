@@ -8,18 +8,19 @@
  * real browser. Agents and sources are the invented household's.
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { inlineScripts } from '../scripts/inline-scripts.mjs';
-import { resolveParamValues, type TemplateParam } from '../src/orchestrator/template.js';
+import { readPage, readPageScripts } from '../scripts/page-source.mjs';
+import { resolveParamValues, type TemplateParam } from '../src/orchestrator/transfer/template.js';
 
-const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
-const js = inlineScripts(html).join('\n');
+const html = readPage(new URL('../web/index.html', import.meta.url).pathname); // with its scripts (web/app/, HB-0811)
+const js = readPageScripts(new URL('../web/index.html', import.meta.url).pathname).map((s) => s.code).join('\n');
 function source(name: string): string {
   const m = new RegExp(`^(?:async )?function ${name}\\([^\\n]*\\) \\{\\n[\\s\\S]*?^\\}`, 'm').exec(js);
   if (!m) throw new Error(`no function ${name} in web/index.html`);
   return m[0];
 }
+/** The page's own onAction (its event-action attributes), with esc as the sandboxes stub it. */
+const onAction = vm.runInNewContext(`(${source('onAction')})`, { esc: (v: unknown) => String(v ?? '') });
 
 type El = {
   value: string; textContent: string; innerHTML: string; hidden: boolean; disabled: boolean; checked: boolean; title: string;
@@ -73,7 +74,7 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
     api: async (url: string, init?: { method?: string; body?: Record<string, unknown> }) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, prompt: () => '', toast: noop, refresh: async () => {},
     editDlg: { open: false, close: () => closed.push('edit') }, v2AgentDlg: { open: false }, v2AgentId: null, editParamsFills: 0, searchTests: new Set(), inviteDlg: { open: false, showModal() { this.open = true; } }, proposalsDlg: { showModal: noop },
-    esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), ago: () => 'just now',
+    esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), onAction, ago: () => 'just now',
     sourceOptionLabel: (p: { name: string }) => p.name, localClashWarning: () => '', confirmRebuild: () => true,
     showEditTab: noop, populateImagePicker: async () => {}, embedModeText: () => '', renderSetupValues: noop, renderBotWho: noop,
     renderEditMembers: async () => {}, renderParamList: noop, renderDataList: noop, renderEnvList: noop, renderClassList: noop,

@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { claimFirstContact } from '../src/orchestrator/claim.js';
+import { claimFirstContact } from '../src/orchestrator/members/claim.js';
 
 /** Join requests on Slack and Discord: listed, approved, turned away, and claimed per channel. */
 
@@ -130,5 +130,26 @@ describe('joining through a Slack invite', () => {
     const { store, id, f } = await setup(FILES);
     invite(store, id, 'JOINBAD001');
     expect((await f.inject({ method: 'POST', url: '/v1/join', payload: { code: 'JOINBAD001', channel: 'sms' } })).statusCode).toBe(400);
+  });
+});
+
+describe('a body of the wrong shape (HB-0814)', () => {
+  it('approve and deny: a code or channel that is not text, or "That\'s me" that is not true or false, is a 400 that names it', async () => {
+    const { store, provider, id, inject } = await setup(FILES);
+    for (const body of [{ code: 12345678 }, { code: 'SLCODE01', kind: 7 }, { code: 'SLCODE01', asSelf: 'yes' }, ['SLCODE01']]) {
+      const r = await inject('POST', `/v1/agents/${id}/pairing/approve`, body);
+      expect(r.statusCode, JSON.stringify(body)).toBe(400);
+      expect(r.json().error).toMatch(/expected/i);
+    }
+    for (const body of [{ code: 12345678 }, { code: 'SLCODE01', kind: null }]) {
+      const r = await inject('POST', `/v1/agents/${id}/pairing/deny`, body);
+      expect(r.statusCode, JSON.stringify(body)).toBe(400);
+      expect(r.json().error).toMatch(/expected/i);
+    }
+    expect(provider.execLog.some((a) => a.join(' ').startsWith('pairing approve'))).toBe(false);
+    expect(store.getMemberByIdentity(id, 'slack', 'U0SIS')).toBeUndefined();
+    // As before: no code is "code required", and a channel by another name is unknown.
+    expect((await inject('POST', `/v1/agents/${id}/pairing/approve`, {})).json()).toEqual({ error: 'code required' });
+    expect((await inject('POST', `/v1/agents/${id}/pairing/deny`, { code: 'SLCODE01', kind: 'sms' })).json()).toEqual({ error: 'Unknown channel.' });
   });
 });

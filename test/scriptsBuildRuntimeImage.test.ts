@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
 import { regexpEscape } from '../src/domain/regexpEscape.js';
+import { baseBuildRepo, baseBuildTag, posixCksum } from '../src/orchestrator/machines/runtimeImages.js';
+import { imageRepository } from '../src/domain/imageRepository.js';
 
 // Every test here runs real shell scripts in a sandbox; vitest's 5 s is not
 // enough under load on the self-hosted runner (2026-10-23).
@@ -117,6 +119,142 @@ describe('scripts/build-runtime-image.sh (audit, 2026-10-29)', () => {
     expect(tag(prefix + 'curl')).toBe(a);
     expect(tag('tcpdump')).toBe(`${w.openclaw}-plus-tcpdump`);
     expect(tag('jq curl')).toBe(`${w.openclaw}-plus-jq-curl`);
+  });
+
+  it('each package list gets a tag of its own: a name with a - in it no longer meets the same names apart; names without one keep their tag (HB-1346)', () => {
+    const w = world();
+    const tag = (packages: string, env: Record<string, string> = {}) => /would build hatchabot-runtime:(\S+)/.exec(w.run({ EXTRA_PACKAGES: packages, ...env, DRYRUN: '1' }).stdout)?.[1];
+    // As today: names without a - of their own.
+    expect(tag('python3 pip')).toBe(`${w.openclaw}-plus-python3-pip`);
+    expect(tag('jq curl')).toBe(`${w.openclaw}-plus-jq-curl`);
+    expect(tag('tcpdump')).toBe(`${w.openclaw}-plus-tcpdump`);
+    // One whose name holds a -: the names, then the list's checksum, as a long list has.
+    const one = tag('python3-pip');
+    expect(one).toMatch(new RegExp(`^${regexpEscape(w.openclaw)}-plus-python3-pip-\\d+$`));
+    expect(one).toBe(`${w.openclaw}-plus-python3-pip-${posixCksum('python3-pip')}`);
+    const lists = ['python3 pip', 'python3-pip', 'a b-c', 'a-b c', 'a b c', 'a-b-c', 'curl-lite', 'curl lite'];
+    expect(new Set(lists.map((l) => tag(l))).size).toBe(lists.length);
+    // The same list, the same tag, and -lite stays apart from the packages' names.
+    expect(tag('python3-pip')).toBe(one);
+    expect(tag('python3-pip', { OPENCLAW_VERSION: '2026.7.1', EMBED_ENGINE: 'none' })).toBe(`2026.7.1-lite-plus-python3-pip-${posixCksum('python3-pip')}`);
+    // A long list's tag is as it was: one checksum, not two.
+    const long = 'libicu-dev libssl-dev libsqlite3-dev build-essential curl';
+    expect(tag(long)).toBe(`${w.openclaw}-plus-${long.split(' ').join('-').slice(0, 40)}-${posixCksum(long)}`);
+    // The app names each as the script does.
+    for (const l of [...lists, long]) expect(baseBuildTag({ EXTRA_PACKAGES: l }, w.openclaw), l).toBe(tag(l));
+  });
+
+  it('a package name with a + gives a tag docker takes, of its own: the + written p, and the checksum (review of HB-1346)', () => {
+    const w = world();
+    const tag = (packages: string) => /would build hatchabot-runtime:(\S+)/.exec(w.run({ EXTRA_PACKAGES: packages, DRYRUN: '1' }).stdout)?.[1];
+    // Docker's tag grammar, which the app's image name check (IMAGE_REF_RE) holds a tag to.
+    const TAG = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+    const lists = ['g++', 'libstdc++6', 'g++ x', 'gpp', 'libstdcpp6', 'gpp x', 'c++ c', 'c c++'];
+    const tags = lists.map((l) => tag(l));
+    for (const [i, t] of tags.entries()) {
+      expect(t, lists[i]).toMatch(TAG);
+      expect(baseBuildTag({ EXTRA_PACKAGES: lists[i] }, w.openclaw), lists[i]).toBe(t);
+    }
+    expect(new Set(tags).size).toBe(lists.length);
+    expect(tag('g++')).toBe(`${w.openclaw}-plus-gpp-${posixCksum('g++')}`);
+    // Names of a-z, 0-9 and . alone keep the tag they had.
+    expect(tag('gpp')).toBe(`${w.openclaw}-plus-gpp`);
+    expect(tag('libstdcpp6')).toBe(`${w.openclaw}-plus-libstdcpp6`);
+  });
+
+  it('a build with packages and no engine of its own gets another tag than the same packages with one (HB-1120)', () => {
+    const w = world();
+    const tag = (env: Record<string, string>) => /would build hatchabot-runtime:(\S+)/.exec(w.run({ OPENCLAW_VERSION: '2026.7.1', ...env, DRYRUN: '1' }).stdout)?.[1];
+    expect(tag({ EXTRA_PACKAGES: 'curl' })).toBe('2026.7.1-plus-curl');
+    expect(tag({ EXTRA_PACKAGES: 'curl', EMBED_ENGINE: 'none' })).toBe('2026.7.1-lite-plus-curl');
+    expect(tag({ EMBED_ENGINE: 'none' })).toBe('2026.7.1-lite');
+    // A long list keeps its checksum; a package whose name ends in -lite meets neither.
+    const long = 'libicu-dev libssl-dev libsqlite3-dev build-essential curl';
+    expect(tag({ EXTRA_PACKAGES: long, EMBED_ENGINE: 'none' })).toBe(`2026.7.1-lite-${tag({ EXTRA_PACKAGES: long })!.slice('2026.7.1-'.length)}`);
+    expect(new Set([tag({ EXTRA_PACKAGES: 'curl-lite' }), tag({ EXTRA_PACKAGES: 'curl', EMBED_ENGINE: 'none' }), tag({ EXTRA_PACKAGES: 'curl' })]).size).toBe(3);
+    // A tag given is the tag; an OpenClaw with no engine to bake keeps its packages' tag.
+    expect(tag({ EXTRA_PACKAGES: 'curl', EMBED_ENGINE: 'none', IMAGE_TAG: 'trial-1' })).toBe('trial-1');
+    expect(tag({ OPENCLAW_VERSION: w.openclaw, EXTRA_PACKAGES: 'curl' })).toBe(`${w.openclaw}-plus-curl`);
+  });
+
+  it('builds into the repository of a default pinned by digest, as the app reads it (review of HB-1182)', () => {
+    const w = world();
+    const digest = `sha256:${'cd'.repeat(32)}`;
+    for (const [image, repo] of [
+      [`hatchabot-runtime@${digest}`, 'hatchabot-runtime'],
+      [`example-runtime:2026.9.8@${digest}`, 'example-runtime'],
+      [`registry.example:5000/team/runtime@${digest}`, 'registry.example:5000/team/runtime'],
+      ['registry.example:5000/team/runtime', 'registry.example:5000/team/runtime'],
+      ['example-runtime:latest', 'example-runtime'],
+    ] as const) {
+      const r = w.run({ HATCHABOT_IMAGE: image, DRYRUN: '1' });
+      expect(r.status, image + r.stderr).toBe(0);
+      expect(r.stdout, image).toContain(`would build ${repo}:${w.openclaw} `);
+      expect(baseBuildRepo(image, {}), image).toBe(repo);
+    }
+  });
+
+  it("an install without HATCHABOT_IMAGE_REPO builds into the repository it always did when the app names the fleet's for the script (HB-1352)", () => {
+    const w = world();
+    const digest = `sha256:${'ef'.repeat(32)}`;
+    for (const image of [undefined, 'hatchabot-runtime:latest', 'hatchabot-runtime:2026.9.4', `hatchabot-runtime@${digest}`, 'example-runtime:2026.9.8', `registry.example:5000/team/runtime:2026.9.8@${digest}`, 'registry.example:5000/team/runtime']) {
+      const base: Record<string, string> = image ? { HATCHABOT_IMAGE: image } : {};
+      const today = w.run({ ...base, DRYRUN: '1' });
+      expect(today.status, String(image) + today.stderr).toBe(0);
+      // The repository the app reads the fleet's images in (RUNTIME_REPO), from the default as the routes take it.
+      const named = w.run({ ...base, HATCHABOT_IMAGE_REPO: imageRepository(image ?? 'hatchabot-runtime:latest'), DRYRUN: '1' });
+      expect(named.stdout, String(image)).toBe(today.stdout);
+      expect(today.stdout, String(image)).toMatch(new RegExp(`would build ${regexpEscape(imageRepository(image ?? 'hatchabot-runtime:latest'))}:`));
+    }
+  });
+
+  it('the app names the tag a build writes exactly as the script does, so it can guard what pins it (HB-1074)', () => {
+    const w = world();
+    const long = 'libicu-dev libssl-dev libsqlite3-dev build-essential curl';
+    for (const env of [
+      {}, { EXTRA_PACKAGES: 'jq curl' }, { EXTRA_PACKAGES: long }, { EXTRA_PACKAGES: 'g++ x' },
+      { OPENCLAW_VERSION: '2026.7.1-2' }, { OPENCLAW_VERSION: '2026.7.1-2', EMBED_ENGINE: 'none' }, { OPENCLAW_VERSION: '2026.7.1-2', EMBED_ENGINE: 'none', EXTRA_PACKAGES: 'jq' },
+      { OPENCLAW_VERSION: '2026.7.1-2', EMBED_ENGINE: 'none', EXTRA_PACKAGES: long }, { OPENCLAW_VERSION: '2026.7.1-2', EMBED_ENGINE: 'none', IMAGE_TAG: '2026.7.1-2', EXTRA_PACKAGES: 'jq' },
+      { OPENCLAW_VERSION: '2026.9.6', EMBED_ENGINE: 'none' }, { NODE_IMAGE: 'node:26-slim' }, { NODE_IMAGE: 'node:26-slim', EXTRA_PACKAGES: 'tcpdump' },
+      { NODE_IMAGE: 'node:26-slim', OPENCLAW_VERSION: '2026.10.1' }, { IMAGE_TAG: 'trial-1', EXTRA_PACKAGES: 'jq' }, { BAKED_PLUGINS: 'fixture=fixture-plugin', PLUGIN_INSTALL: 'npm' },
+    ] as Array<Record<string, string>>) {
+      const r = w.run({ ...env, DRYRUN: '1' });
+      expect(r.status, JSON.stringify(env) + r.stderr).toBe(0);
+      const script = /would build hatchabot-runtime:(\S+)/.exec(r.stdout)?.[1];
+      expect(baseBuildTag(env, w.openclaw), JSON.stringify(env)).toBe(script);
+    }
+  });
+
+  it('says which settings it was given by hand, in its dry run and in the image it builds, named or not (HB-0986)', () => {
+    const w = world();
+    const dry = (env: Record<string, string>) => w.run({ ...env, DRYRUN: '1' }).stdout;
+    expect(dry({ NODE_IMAGE: 'node:26-slim' })).toMatch(/, set by hand: node\n$/);
+    // A tag given hides nothing of how it was built.
+    expect(dry({ NODE_IMAGE: 'node:26-slim', IMAGE_TAG: `${w.openclaw}` })).toMatch(new RegExp(`would build hatchabot-runtime:${regexpEscape(w.openclaw)} .*, set by hand: node\\n$`));
+    expect(dry({ BAKED_PLUGINS: 'fixture=fixture-plugin', PLUGIN_INSTALL: 'npm', CHANNEL_PLUGIN_VERSION: '2026.9.9' })).toMatch(/, set by hand: channel-plugins,plugins,plugin-install\n$/);
+    expect(dry({ EXTRA_PACKAGES: 'jq' })).not.toContain('set by hand');
+    // The build passes them to the image's build-inputs label.
+    const r = w.run({ NODE_IMAGE: 'node:26-slim', BUILD_LOCAL: '1', NO_LATEST: '1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.calls()).toContain('--build-arg SET_BY_HAND=node ');
+    const plain = world();
+    expect(plain.run({ BUILD_LOCAL: '1', NO_LATEST: '1' }).status).toBe(0);
+    expect(plain.calls()).toContain('--build-arg SET_BY_HAND= ');
+  });
+
+  it('refuses an extra package ending in "-", which apt reads as "remove", before anything is built (HB-0972)', () => {
+    const w = world();
+    for (const packages of ['curl-', 'jq git-']) {
+      const r = w.run({ EXTRA_PACKAGES: packages, DRYRUN: '1' });
+      expect(r.status, packages + r.stdout + r.stderr).toBe(1);
+      expect(r.stderr).toContain('EXTRA_PACKAGES must be space-separated apt package names');
+    }
+    expect(w.calls()).toBe('');
+    const ok = w.run({ EXTRA_PACKAGES: 'g++ build-essential x', DRYRUN: '1' });
+    expect(ok.status, ok.stdout + ok.stderr).toBe(0);
+    // A name with a - or a + of its own: its tag ends in the list's checksum,
+    // and a + is written p: docker takes no + in a tag (HB-1346 and its review).
+    expect(ok.stdout).toContain(`would build hatchabot-runtime:${w.openclaw}-plus-gpp-build-essential-x-${posixCksum('g++ build-essential x')} `);
   });
 
   it('works from an install whose path has a space: the pins tool answers there too (HB-0342)', () => {

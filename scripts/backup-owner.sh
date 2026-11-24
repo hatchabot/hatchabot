@@ -1,6 +1,6 @@
 # The mark an install's backup sets carry in .backup-owner, and its drill
 # records in "owner": a fingerprint of its HATCHABOT_SECRET_KEY, never the key
-# (ownerMark in src/orchestrator/backups.ts makes the same), and whose a set is
+# (ownerMark in src/orchestrator/backups/backupFiles.ts makes the same), and whose a set is
 # (foreignSet there). Sourced by backup-volumes.sh, restore-drill.sh and
 # uninstall.sh, never run on its own: one copy, where there were four (second
 # and third reviews of HB-0540).

@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 /**
  * Does this install upgrade itself from the stable channel? A Hatchabot whose
@@ -17,7 +17,9 @@ import { join } from 'node:path';
  * beta` switches it): its data/channel, else ~/.config/hatchabot/channel (one
  * for every install of the user's, before v2.169.0; HB-0235), else the one its
  * service was installed with; vX.Y.Z there is a pin, which pauses the timer's
- * upgrades.
+ * upgrades. And the install the timer runs is this one: two installs of one
+ * user share the one timer, and its upgrades of the other left this one where
+ * it was, public and passed (HB-0919).
  *
  * A Mac has no timer (follow-channel.sh needs systemd), so the answer there
  * is no, and public access stays off.
@@ -30,6 +32,10 @@ export interface AutoUpgradeProbes {
   systemctl(args: string[]): Promise<string | undefined>;
   readFile(path: string): Promise<string | undefined>;
   home: string;
+  /** This install's folder: the one whose code is running, and whose address would be public. */
+  installDir: string;
+  /** A folder with its links resolved, or undefined when it is not there. */
+  realpath(path: string): Promise<string | undefined>;
 }
 
 const TIMER = 'hatchabot-follow-channel.timer';
@@ -42,6 +48,8 @@ export const realProbes = (): AutoUpgradeProbes => ({
   }),
   readFile: (path) => readFile(path, 'utf8').catch(() => undefined),
   home: homedir(),
+  installDir: resolve(import.meta.dirname, '..', '..'), // src/ops/ → the install
+  realpath: (path) => realpath(path).catch(() => undefined),
 });
 
 export async function autoUpgradeStatus(p: AutoUpgradeProbes = realProbes()): Promise<AutoUpgradeStatus> {
@@ -55,14 +63,24 @@ export async function autoUpgradeStatus(p: AutoUpgradeProbes = realProbes()): Pr
   const unit = await p.readFile(join(p.home, '.config/systemd/user/hatchabot-follow-channel.service'));
   // The install the timer runs, from its ExecStart (follow-channel.sh --install
   // writes it quoted, a \ or " escaped and % and $ doubled, as systemd reads it).
-  const dir = /^ExecStart=.*?"((?:[^"\\]|\\.)+)\/scripts\/follow-channel\.sh"/m.exec(unit ?? '')?.[1]
-    ?.replace(/\\(.)/g, '$1').replace(/%%/g, '%').replace(/\$\$/g, '$');
+  // Unquoted, as v2.38.0 wrote it. Read from the ExecStart line alone: \s
+  // crossed into the next line, and a commented-out ExecStart after the one
+  // that runs named the install (HB-0919).
+  const dir = (/^ExecStart=.*?"((?:[^"\\\n]|\\.)+)\/scripts\/follow-channel\.sh"/m.exec(unit ?? '')?.[1]
+    ?.replace(/\\(.)/g, '$1').replace(/%%/g, '%').replace(/\$\$/g, '$'))
+    ?? /^ExecStart=\S+(?:[ \t]+\S+)*?[ \t]+(\/\S+)\/scripts\/follow-channel\.sh(?=[ \t]|$)/m.exec(unit ?? '')?.[1];
   const pin = ((dir ? await p.readFile(join(dir, 'data', 'channel')) : undefined) ?? await p.readFile(join(p.home, '.config/hatchabot/channel')))?.trim();
   // As follow-channel.sh decides it on each tick (audit #043).
-  const channel = pin && /^(stable|beta|latest)$/.test(pin) ? pin : /^ExecStart=.*follow-channel\.sh"?\s+(\S+)\s*$/m.exec(unit ?? '')?.[1];
+  const channel = pin && /^(stable|beta|latest)$/.test(pin) ? pin : /^ExecStart=.*follow-channel\.sh"?[ \t]+(\S+)[ \t]*$/m.exec(unit ?? '')?.[1];
   if (channel !== 'stable') {
     return { ok: false, channel, why: channel ? `The channel timer follows "${channel}", not stable.` : 'The channel timer\'s service could not be read, so the channel it follows is unknown.' };
   }
   if (pin && /^v[0-9]/.test(pin)) return { ok: false, channel, why: `This machine is pinned to ${pin}: automatic upgrades are paused.` };
+  if (!dir) return { ok: false, channel, why: 'The channel timer\'s service does not say which install it upgrades, so it may not be this one.' };
+  // The same folder by any path to it (a link to the install is the install).
+  const [theirs, mine] = await Promise.all([p.realpath(dir), p.realpath(p.installDir)]);
+  if (!theirs || theirs !== (mine ?? p.installDir)) {
+    return { ok: false, channel, why: `The channel timer upgrades the install in ${dir}, not this one in ${p.installDir}: this install upgrades only when someone runs \`hatchabot upgrade\` in it.` };
+  }
   return { ok: true, channel };
 }

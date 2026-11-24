@@ -11,6 +11,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
+import { readPage } from './page-source.mjs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,8 @@ const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).ver
 // The app's own icon, inlined: the page asks the server for it, and these
 // shots have no server.
 const icon = `data:image/png;base64,${readFileSync(join(root, 'web', 'icons', 'icon-192.png')).toString('base64')}`;
-const page = readFileSync(join(root, 'web', 'index.html'), 'utf8')
+// With its scripts (web/app/, HB-0811) in place: the shots open it as a file.
+const page = readPage(join(root, 'web', 'index.html'))
   .replaceAll('src="/icons/icon-192.png"', `src="${icon}"`);
 const work = mkdtempSync(join(tmpdir(), 'hb-shots-'));
 

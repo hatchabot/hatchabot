@@ -34,6 +34,15 @@ const IDLE_RENAME_DELAY_MS = Number(process.env.HATCHABOT_IDLE_RENAME_MS ?? 15 *
  */
 const FAREWELL_WAIT_MS = 30_000;
 
+/**
+ * How long a farewell may take in all, its sends included. Each send may
+ * take five seconds, one member after another: with Telegram timing out, 64
+ * members held a delete or archive (and its lifecycle lock) for over five
+ * minutes, and a longer list had no bound at all (HB-0989). Members it has
+ * no time left for are counted as not told.
+ */
+const FAREWELL_DEADLINE_MS = 60_000;
+
 /** Telegram errors that no retry can fix: the token is not a token any more. */
 export function permanentTelegramFailure(error: unknown): boolean {
   return /unauthorized|bot was deleted|not found|invalid token/i.test(String(error ?? ''));
@@ -53,6 +62,8 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       renameBackoffMs?: readonly number[];
       /** The wait a farewell honours on a 429; tests pass an instant one. */
       sleep?: (ms: number) => Promise<void>;
+      /** The clock a farewell's deadline is read on; tests pass a fake one. */
+      now?: () => number;
     } = {},
   ) {
     this.db.exec(`
@@ -175,20 +186,33 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   }
 
   /** Bots leasable BY THIS USER: their own plus shared house bots. Without an
-   *  ownerId (admin script), counts everything unleased. */
+   *  ownerId (admin script), counts everything unleased. A bot still saying
+   *  goodbye is not leasable yet, so not counted. */
   availableCount(ownerId?: string, ownOnly = false): number {
-    const row = (ownerId === undefined
-      ? this.db.prepare(`SELECT COUNT(*) AS n FROM telegram_pool WHERE leased_to IS NULL`).get()
+    const rows = (ownerId === undefined
+      ? this.db.prepare(`SELECT username FROM telegram_pool WHERE leased_to IS NULL`).all()
       : ownOnly
-        ? this.db.prepare(`SELECT COUNT(*) AS n FROM telegram_pool WHERE leased_to IS NULL AND owner_id = ?`).get(ownerId)
+        ? this.db.prepare(`SELECT username FROM telegram_pool WHERE leased_to IS NULL AND owner_id = ?`).all(ownerId)
         : this.db
           .prepare(
-            `SELECT COUNT(*) AS n FROM telegram_pool
+            `SELECT username FROM telegram_pool
              WHERE leased_to IS NULL AND (owner_id IS NULL OR owner_id = ?)`,
           )
-          .get(ownerId)) as { n: number };
-    return row.n;
+          .all(ownerId)) as Array<{ username: string }>;
+    return rows.filter((r) => !this.#sayingGoodbye.has(r.username.toLowerCase())).length;
   }
+
+  /**
+   * The bots saying goodbye for the agent they served, by lower-cased
+   * @handle: free, but not leased until the farewell is out. Leased again
+   * first, the new agent's "this bot is now …" came before the farewell,
+   * which then told the same chats it would not reply any more (HB-1048).
+   * Held here, not on the lease: held on the lease, a restart part way left
+   * the bot the departing agent's, and an archive's finish read that as a bot
+   * never given back and undid the archive. A new process has no farewell
+   * under way, and the bot is free as the release left it.
+   */
+  readonly #sayingGoodbye = new Set<string>();
 
   /**
    * Remove an UNLEASED bot from the pool, scrubbing its stored token. A leased
@@ -254,7 +278,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
                     (owner_id IS NULL) ASC, username`,
         )
         .all(req.ownerId ?? '', new Date().toISOString()) as Array<{ username: string; secret_ref: string }>
-    ).find((r) => !excluded.has(r.username.toLowerCase()));
+    ).find((r) => !excluded.has(r.username.toLowerCase()) && !this.#sayingGoodbye.has(r.username.toLowerCase()));
     if (!free) {
       throw new PoolExhaustedError();
     }
@@ -302,13 +326,38 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    * cosmetic and must not cost anyone their agent.
    */
   /** Record the name this bot SHOULD have, and the earliest we may try. */
-  #park(username: string, name: string, delayMs: number, onlyIfFree = false, onlyIf?: string): void {
+  #park(username: string, name: string, delayMs: number, onlyIf?: string): void {
     this.db
-      .prepare(`UPDATE telegram_pool SET desired_name = ?, rename_after = ? WHERE username = ? COLLATE NOCASE${onlyIfFree ? ' AND leased_to IS NULL' : ''} AND (? IS NULL OR desired_name IS ?)`)
+      .prepare(`UPDATE telegram_pool SET desired_name = ?, rename_after = ? WHERE username = ? COLLATE NOCASE AND (? IS NULL OR desired_name IS ?)`)
       .run(name, new Date(Date.now() + delayMs).toISOString(), username, onlyIf ?? null, onlyIf ?? null);
   }
 
-  async #applyDisplayName(secretRef: string, username: string, name: string, fromSweep = false): Promise<void> {
+  /**
+   * One name write per bot at a time, in the order they were asked for: the
+   * sweep's idle name, still waiting on Telegram when an agent took the bot,
+   * landed after the agent's name and left the serving bot called
+   * "unassigned" with nothing queued to put it right (HB-1035). Keyed by the
+   * lower-cased @handle; an entry goes once its last write ends.
+   */
+  readonly #nameTurns = new Map<string, Promise<void>>();
+
+  #applyDisplayName(secretRef: string, username: string, name: string, fromSweep = false): Promise<void> {
+    const key = username.toLowerCase();
+    const run = (this.#nameTurns.get(key) ?? Promise.resolve()).then(() => this.#writeDisplayName(secretRef, username, name, fromSweep));
+    const tail: Promise<void> = run.then(() => {}, () => {}).then(() => { if (this.#nameTurns.get(key) === tail) this.#nameTurns.delete(key); });
+    this.#nameTurns.set(key, tail);
+    return run;
+  }
+
+  /** From the sweep: is `name` still the one queued for this bot? A lease or a sync may have queued its own while it waited. */
+  #stillQueued(username: string, name: string): boolean {
+    const row = this.db.prepare(`SELECT desired_name FROM telegram_pool WHERE username = ? COLLATE NOCASE`).get(username) as { desired_name: string | null } | undefined;
+    return row?.desired_name === name;
+  }
+
+  async #writeDisplayName(secretRef: string, username: string, name: string, fromSweep: boolean): Promise<void> {
+    // Its turn came after a lease's: that one named the bot, and this is stale.
+    if (fromSweep && !this.#stillQueued(username, name)) return;
     let res: { ok: boolean; error?: string; retryAfter?: number };
     try {
       const token = await this.secrets.get(secretRef);
@@ -327,6 +376,9 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
         this.#clearParked(username, fromSweep ? name : undefined);
         return;
       }
+      // Asked again after the wait on getMe: a lease meanwhile queued the
+      // agent's name, and writes it once this turn ends (HB-1035).
+      if (fromSweep && !this.#stillQueued(username, name)) return;
       res = await setTelegramDisplayName(token, name, fetchImpl, this.opts.renameBackoffMs);
     } catch (err) {
       res = { ok: false, error: String(err) };
@@ -354,7 +406,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // sweep, only while it is still the name queued: a lease meanwhile queued
     // its own, and the failed old one replaced it (review R15, 2026-10-23).
     const waitMs = (res.retryAfter ?? 300) * 1000;
-    this.#park(username, name, waitMs, false, fromSweep ? name : undefined);
+    this.#park(username, name, waitMs, fromSweep ? name : undefined);
   }
 
   /**
@@ -595,7 +647,15 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // A moved bot is live on the other machine under the same agent: no
     // farewell, and no idle name queued for it (the caller retires the row).
     if (opts.reason === 'moved') return;
-    if (departing && opts.reason !== 'swapped' && opts.reason !== 'setup-failed') await this.#farewell(row.secret_ref, departing, opts.reason ?? 'deleted');
+    if (departing && opts.reason !== 'swapped' && opts.reason !== 'setup-failed') {
+      // Not offered to another agent until it is out, a pasted bot parked a
+      // moment ago included (#sayingGoodbye, HB-1048). Set in the same step
+      // as the lease is let go, so no lease comes between.
+      const key = accountId.toLowerCase();
+      this.#sayingGoodbye.add(key);
+      try { await this.#farewell(row.secret_ref, departing, opts.reason ?? 'deleted'); }
+      finally { this.#sayingGoodbye.delete(key); }
+    }
     // The idle name is PARKED, not applied now. Renames are the scarce thing
     // here — Telegram grants roughly one per bot every few hours — and an
     // archive followed by a restore used to spend two of them: one to
@@ -603,11 +663,27 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // ended up called "Hatchabot (unassigned)" for three hours. Deferring means
     // a bot re-leased before the sweep runs spends NONE, while one that really
     // is sitting free still stops advertising a departed agent.
-    // Only while it is still free: the farewell above awaits Telegram, and a
-    // lease taken meanwhile named the bot for its new agent — parking the
-    // idle name over that renamed a serving bot "unassigned" at the next
-    // sweep (concurrency review, 2026-10-09).
-    this.#park(accountId, TelegramPoolProvisioner.IDLE_NAME, IDLE_RENAME_DELAY_MS, true);
+    // The bot is free here: no lease was given while its farewell went out,
+    // and none can come between that and this, the same step. (A lease taken
+    // during the farewell once had its new name parked over, concurrency
+    // review 2026-10-09; the farewell's hold is what stops that now.)
+    this.#park(accountId, TelegramPoolProvisioner.IDLE_NAME, IDLE_RENAME_DELAY_MS);
+  }
+
+  /**
+   * A lease taken for an agent that then did not connect the bot (refused as
+   * busy, or gone meanwhile), handed back: free again, its idle name queued
+   * (the lease named the bot for that agent), and no farewell, since it
+   * served nobody there. Whom it wrote to before stays its list: release()
+   * put the refused agent's people there, and the next lease told them, not
+   * the bot's own chats, that it had changed hands (HB-1131 review). Only
+   * while the lease is that agent's, or nobody's.
+   */
+  returnUnused(username: string, agentId: string): void {
+    const freed = this.db
+      .prepare(`UPDATE telegram_pool SET leased_to = NULL, leased_at = NULL WHERE username = ? COLLATE NOCASE AND (leased_to IS NULL OR leased_to = ?)`)
+      .run(username, agentId);
+    if (freed.changes) this.#park(username, TelegramPoolProvisioner.IDLE_NAME, IDLE_RENAME_DELAY_MS);
   }
 
   /**
@@ -654,29 +730,35 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       // again, up to FAREWELL_WAIT_MS in all: sent in a plain loop, a large
       // membership ran into the rate limit and the rest were never told
       // where the agent went (HB-0039).
+      // And all of it within FAREWELL_DEADLINE_MS, sends included (HB-0989).
       const send = this.opts.fetchImpl ?? fetch;
       const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-      let sent = 0, failed = 0, waitLeft = FAREWELL_WAIT_MS;
+      const now = this.opts.now ?? Date.now;
+      const deadline = now() + FAREWELL_DEADLINE_MS;
+      let sent = 0, failed = 0, outOfTime = 0, waitLeft = FAREWELL_WAIT_MS;
       for (const { id } of ids) {
         if (!/^\d{1,32}$/.test(id)) continue;
+        if (deadline - now() <= 0) { failed++; outOfTime++; continue; }
         let ok = false;
         for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+          const left = deadline - now();
+          if (left <= 0) break;
           const res = await send(`https://api.telegram.org/bot${token}/sendMessage`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ chat_id: id, text }),
-            signal: AbortSignal.timeout(5000),
+            signal: AbortSignal.timeout(Math.min(5000, left)),
           }).catch(() => undefined);
           const body = (await res?.json().catch(() => ({}))) as { ok?: boolean; parameters?: { retry_after?: unknown } } | undefined;
           ok = body?.ok === true;
           const wait = res?.status === 429 ? Number(body?.parameters?.retry_after) * 1000 : NaN;
-          if (ok || !(wait >= 0) || wait > waitLeft) break;
+          if (ok || !(wait >= 0) || wait > waitLeft || wait >= deadline - now()) break;
           waitLeft -= wait;
           await sleep(wait);
         }
         if (ok) sent++; else failed++;
       }
-      this.opts.log?.('pool.farewell', { agentId, reason, sent, failed });
+      this.opts.log?.('pool.farewell', { agentId, reason, sent, failed, ...(outOfTime ? { outOfTime } : {}) });
     } catch {
       /* cosmetic — never blocks a release */
     }

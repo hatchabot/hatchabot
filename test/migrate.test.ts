@@ -1,9 +1,9 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { isDefiniteRefusal, migrateAgent, MigrateError, moveIdFrom, moveState, preflight, receiveMove, resumeMigrate } from '../src/orchestrator/migrate.js';
-import { importAgent } from '../src/orchestrator/transfer.js';
-import { beginOperation, newBootForTests } from '../src/orchestrator/operations.js';
-import { isBusy } from '../src/orchestrator/busy.js';
+import { isDefiniteRefusal, migrateAgent, MigrateError, moveIdFrom, moveState, preflight, receiveMove, resumeMigrate } from '../src/orchestrator/transfer/migrate.js';
+import { importAgent } from '../src/orchestrator/transfer/transfer.js';
+import { beginOperation, newBootForTests } from '../src/orchestrator/lifecycle/operations.js';
+import { isBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
@@ -641,7 +641,8 @@ describe('review, 2026-09-29: a failed move of a sleeping agent', () => {
 // answer is lost to a proxy 504 while the import is still waiting.
 describe('issue #19: an empty agent list is not proof the import aborted', () => {
   const DEST_OWNER = 'dest-owner';
-  const PIN = 'hatchabot-derived:test';
+  // In this fleet's repository: docker lists only that one, so a pin outside it is never found there (HB-1183 review).
+  const PIN = 'hatchabot-runtime:test';
 
   async function destination() {
     const store = new Store(new Database(':memory:'));
@@ -773,6 +774,9 @@ describe('issue #19: an empty agent list is not proof the import aborted', () =>
     const wired = (globalThis.fetch as any).getMockImplementation();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) =>
       String(url).endsWith('/preflight') ? new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 }) : wired(url, init));
+    // The source waits between its questions, as it does for real: by the
+    // first, the import has read its file (off the event loop, HB-0925) and refused.
+    (w.deps as any).sleep = async () => { await seen.importing?.catch(() => {}); };
     await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/Your agent is unchanged/);
     await expect(seen.importing).rejects.toThrow(/already wired/);
     expect(w.store.getAgent('a1')!.state).toBe('RUNNING');

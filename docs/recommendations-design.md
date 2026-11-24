@@ -120,7 +120,7 @@ messages you set keep coming.
 
 ## As built (v2.158.0)
 
-- **Code:** `src/orchestrator/recommendations.ts` — `buildRecommendations`
+- **Code:** `src/orchestrator/usage/recommendations.ts` — `buildRecommendations`
   calls each check as it is (`tokenHealth`/`tokenWatch` incidents,
   `budgetView`, the recorded spikes, `summarizeSourceUsage`, the guard's
   cards, `buildScorecard` + `assessModelChange`, `buildTokenHealth` flags,
@@ -152,8 +152,9 @@ messages you set keep coming.
   cleared too.
 - **Actions:** the page calls the item's route with
   `x-hatchabot-recommendation: <id>`; `ledgerMeta` then records `via:
-  "recommendation"` (model changes and token actions), and an `onResponse`
-  hook writes a `recommendation.acted` line on the agent's timeline. A card's
+  "recommendation"` (model changes and token actions), and an `onSend`
+  hook writes a `recommendation.acted` line on the agent's timeline, even
+  when the page hung up before the answer. A card's
   item confirms through `/v1/proposals/:id/confirm` (still step-up at the
   public address); the ledger then says the card's `via`.
 - **Messages:** the background pass runs the loop watcher before the spike

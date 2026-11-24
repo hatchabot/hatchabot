@@ -1,9 +1,10 @@
 # Hatchabot: notes for AI assistants
 
 Hatchabot runs a household's AI agents (OpenClaw in Docker) from one web app
-on a machine you own. It is Node 22 and TypeScript (`src/`), with one
-single-file web app (`web/index.html`) and shell scripts for install,
-upgrade and backups (`install.sh`, `scripts/`).
+on a machine you own. It is Node 22 and TypeScript (`src/`), with a web app
+with no build step (`web/index.html` for markup and styles, its scripts in
+`web/app/`) and shell scripts for install, upgrade and backups
+(`install.sh`, `scripts/`).
 
 Codex, Claude Code, Gemini CLI, Cursor and Copilot read this file.
 
@@ -22,8 +23,10 @@ there before reading code:
 
    Confirm with the entry's Check before you rely on it.
 2. **`docs/architecture-map.md`: where each feature's code is.**
-   `src/api/routes.ts` and `web/index.html` are each over 10,000 lines, so
-   search them for the route strings and function names the map gives.
+   Each feature's routes are a file in `src/api/` and its rules a service
+   in `src/orchestrator/` (`src/api/routes.ts` only builds them), and the
+   web app's code is spread over `web/app/`, so search for the route
+   strings and function names the map gives.
 3. **Settings** are explained in `README.md`, `docs/features.md` (the tour),
    the other files in `docs/`, and `.env.example`.
 4. **Their version** is in `package.json`. On their machine,
@@ -62,6 +65,14 @@ key that expired), not a bug. Say which it is.
   vulnerable pins in `package-lock.json` and unsafe code patterns. Locally,
   `python3 -I scripts/kit_checks.py`. Fix a hit rather than except it
   (docs/releasing.md, "The kit checks").
+- **A change to a public-access guard** (the sign-in and its limits in
+  `src/api/auth.ts` and `src/api/accountsAuth.ts`, `src/api/publicAccess.ts`,
+  `src/api/safeguards.ts`, `src/api/reachRoutes.ts`, `src/api/publicRoutes.ts`,
+  the second factor, or any file `scripts/public-access-mutants.mjs` names):
+  run `node scripts/public-access-mutants.mjs --check` (each mutant's text
+  is still there, once), then the whole run, `node
+  scripts/public-access-mutants.mjs` (every mutant killed; about a minute
+  per ten mutants). A new guard gets a mutant there.
 - **Live tests, before promoting:** the gates and CI fake Docker, OpenClaw
   and the machines. After a release deploys to the main machine, run
   `node scripts/live.mjs due` and then `node scripts/live.mjs run <name>` for
@@ -79,8 +90,24 @@ key that expired), not a bug. Say which it is.
     coverage ledger (`src/mgmt/coverage.ts`);
   - a new `HATCHABOT_*` setting goes in `src/config/envCatalog.ts` and
     `.env.example`;
+  - a column added to a table that already exists is a step appended to
+    `SCHEMA_STEPS` in `src/store/schemaVersion.ts`, and only there, not in
+    the table's `CREATE TABLE`: a new database runs every step too, and
+    `test/schemaVersion.test.ts` holds it to the schema an older one comes
+    to. A new table is a `CREATE TABLE IF NOT EXISTS` in `Store`, needs no
+    step, and is named in that test's `TABLES_SINCE_2_190`. A step that is
+    there is never edited, moved or removed: the test holds each one's
+    fingerprint, and prints the line to add for a new one. Mark a step
+    `additive: false` when an older release cannot run on a database that
+    has had it;
   - a `void` call handles a rejection, or `test/floatingPromises.test.ts` lists
-    why it cannot reject (Node ends the process on an unhandled one).
+    why it cannot reject (Node ends the process on an unhandled one);
+  - a Map or Set that outlives a request has a row in
+    `docs/architecture.md` ("In-memory state, sorted"): a lock or a
+    cache (`test/inMemoryState.test.ts`). What a restart may not lose is
+    never one of those alone: it goes in the store (`agent_holds`,
+    `Store.setAgentHold`) or the start makes up for it, with a test that
+    restarts in the middle, as `test/holdsAcrossRestart.test.ts` does.
 - **Tests that run real scripts stay in a sandbox:** a temp HOME, a PATH of
   shims, and git hooks off. A script under test must never reach the real
   machine.

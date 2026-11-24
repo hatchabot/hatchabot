@@ -12,29 +12,48 @@ import { isIP } from 'node:net';
 import { homedir, hostname, networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 import { applyLegacyEnv, defaultBackupsDir, defaultDbPath } from './envCompat.js';
-import { activeValues, envValue } from './config/envFile.js';
-import { foreignSet, ownerMark, readSetStatus } from './orchestrator/backups.js';
-import { setAgeDays } from './orchestrator/recoveryReadiness.js';
+import { activeValues, envValue, inlineComments } from './config/envFile.js';
+import { foreignSet, ownerMark, readSetStatus } from './orchestrator/backups/backupFiles.js';
+import { setAgeDays } from './orchestrator/backups/recoveryReadiness.js';
 import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
 import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
 import { adminAccounts, evaluateSafeguards, hostOf, publicConfig, type SafeguardCheck } from './api/safeguards.js';
 import { autoUpgradeStatus } from './ops/autoUpgrade.js';
-import { browserImage, browserRefreshDate } from './orchestrator/browser.js';
-import { COMPRESSED_SWAP_FIX, type LimitsCheckSummary, describeCompressedSwap, effectiveSwapAllowance, formatSwapAllowance, parseSwapAllowance, parseSwapProbe, SWAP_PROBE_SCRIPT, type CompressedSwap } from './orchestrator/swap.js';
+import { browserImage, browserRefreshDate } from './orchestrator/console/browser.js';
+import { schemaInstallAdvice, schemaStanding, stepsText, type SchemaStanding } from './store/schemaVersion.js';
+import { COMPRESSED_SWAP_FIX, type LimitsCheckSummary, describeCompressedSwap, effectiveSwapAllowance, formatSwapAllowance, parseSwapAllowance, parseSwapProbe, SWAP_PROBE_SCRIPT, type CompressedSwap } from './domain/swap.js';
 
 export interface DoctorFacts {
   nodeVersion: string;
   dockerCli: boolean;
   dockerDaemon: { ok: boolean; arch?: string; version?: string; error?: string; rootless?: boolean };
   runtimeImage?: { openclawVersion?: string; sizeGb?: number };
-  envFile: { present: boolean; secretKey: boolean; password: boolean; authMode: string; publicUrl?: string };
-  db: { path: string; present: boolean; sizeMb?: number };
+  envFile: { present: boolean; secretKey: boolean; password: boolean; authMode: string; publicUrl?: string;
+    /** Settings in force with a ` # note` after the value, which systemd keeps and a shell drops (HB-0634). */
+    inlineComments?: string[] };
+  db: { path: string; present: boolean; sizeMb?: number;
+    /** Its schema number against this release's (store/schemaVersion.ts). undefined: it could not be read. */
+    schema?: SchemaStanding };
   service: { manager: 'systemd' | 'launchd' | 'none'; active?: boolean; enabled?: boolean;
     /** Linux: the RUNNING service process is not in the docker group, though the user is. */
     dockerDenied?: boolean };
-  controlPlane: { url: string; ok: boolean; version?: string; error?: string };
+  /**
+   * `other`: something answered, but not Hatchabot (its page has no version marker): another program on the port, or a proxy sending the address elsewhere (HB-1111).
+   * `status`: the answer was not a 2xx, Hatchabot's (with its version) or not.
+   */
+  controlPlane: { url: string; ok: boolean; version?: string; error?: string; other?: true; status?: number };
   diskFreeGb?: number;
-  backups: { dir: string; lastSet?: string; ageDays?: number; complete?: boolean; failed?: number };
+  /**
+   * `unreadable`: date-named folders newer than `lastSet` (or any, with none) that this user cannot read, newest first.
+   * `keptUnlisted`: the sets the last run whose retention ran kept only for volumes no agent here has had (HB-1380), still there, with their size.
+   */
+  backups: { dir: string; lastSet?: string; ageDays?: number; complete?: boolean; failed?: number; unreadable?: string[]; keptUnlisted?: KeptUnlisted[] };
+  /**
+   * A `timeout` (or Homebrew's `gtimeout`) on this PATH: the backup and the
+   * restore drill bound each Docker call with it. false: neither, so a call
+   * that never answers holds the nightly run for good (HB-1208).
+   */
+  timeLimit?: boolean;
   tailscale?: { installed: boolean; up?: boolean; dns?: string; serving?: boolean; reachable?: boolean; url?: string; appOnly?: boolean };
   containers?: { running: number; total: number;
     /** RUNNING agent containers still on docker's shared bridge network (made before v1.16's isolation). */
@@ -51,7 +70,7 @@ export interface DoctorFacts {
    * this machine has seen. `pinned`: a version named by hand instead of a channel.
    */
   checkout?: { tag?: string; channel?: string; channelTarget?: string; pinned?: string; dirty?: string[] };
-  /** Compressed swap (orchestrator/swap.ts): what the machine has, and who is set to use it. */
+  /** Compressed swap (domain/swap.ts): what the machine has, and who is set to use it. */
   swap?: {
     state: CompressedSwap;
     /** HATCHABOT_AGENT_SWAP as set ("off" when unset). */
@@ -138,6 +157,10 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   }
   if (!f.envFile.present) out.push({ level: 'fail', text: '.env is missing', fix: './scripts/setup-host.sh writes it (secret key, password, port)' });
   else {
+    // The same line is two settings: the Linux service (systemd) keeps the
+    // note in the value, the Mac's service and restart.sh drop it (HB-0634).
+    const notes = f.envFile.inlineComments ?? [];
+    if (notes.length) out.push({ level: 'warn', text: `.env has a # comment after the value of ${notes.join(', ')}: systemd (the service on Linux) reads it as part of the value, while the Mac's service and restart.sh drop it, so they use different settings`, fix: `Put each comment on a line of its own above its setting in .env (or quote the value whole if the # belongs to it), then ./scripts/restart.sh` });
     if (!f.envFile.secretKey) out.push({ level: 'fail', text: '.env has no HATCHABOT_SECRET_KEY — credentials cannot be stored', fix: 'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))" → HATCHABOT_SECRET_KEY=… in .env' });
     // Only the shared-password mode needs HATCHABOT_PASSWORD: accounts mode
     // holds a password per person, identity mode uses Google. Warning about it
@@ -150,11 +173,21 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
     else out.push({ level: 'warn', text: 'HATCHABOT_PUBLIC_URL not set — invite links and OAuth redirects use localhost', fix: 'Set it to the address others use (with Tailscale: https://<machine>.<tailnet>.ts.net)' });
   }
   out.push(f.db.present ? { level: 'ok', text: `Database ${f.db.path}${f.db.sizeMb !== undefined ? ` (${f.db.sizeMb.toFixed(1)} MB)` : ''}` } : { level: 'warn', text: `Database not created yet at ${f.db.path}`, fix: 'It appears on first start' });
+  if (f.db.present && f.db.schema) out.push(schemaLine(f.db.schema));
   if (f.service.manager === 'none') out.push({ level: 'warn', text: 'No background service installed — Hatchabot will not start with the machine', fix: './scripts/install-service.sh' });
   else if (!f.service.active) out.push({ level: 'fail', text: `Service is installed (${f.service.manager}) but not running`, fix: f.service.manager === 'systemd' ? 'systemctl --user start hatchabot; journalctl --user -u hatchabot -n 50' : './scripts/restart.sh' });
   else if (f.service.dockerDenied) out.push({ level: 'fail', text: 'Service running, but it cannot use Docker — it started before your user joined the docker group, so agents fail to start (your terminal has the group, which is why the rest looks fine)', fix: 'sudo systemctl restart user@$(id -u)   (or reboot)' });
   else out.push({ level: f.service.enabled === false ? 'warn' : 'ok', text: `Service running (${f.service.manager})${f.service.enabled === false ? ' — but not enabled at boot' : ''}`, ...(f.service.enabled === false ? { fix: 'systemctl --user enable hatchabot' } : {}) });
-  out.push(f.controlPlane.ok ? { level: 'ok', text: `Control plane answering at ${f.controlPlane.url}${f.controlPlane.version ? ` (v${f.controlPlane.version})` : ''}` } : { level: 'fail', text: `Control plane not answering at ${f.controlPlane.url}${f.controlPlane.error ? ` (${f.controlPlane.error})` : ''}`, fix: 'journalctl --user -u hatchabot -n 50 (Linux) · ./scripts/restart.sh' });
+  const cp = f.controlPlane;
+  const otherFix = 'Another program has the port, or a proxy sends this address elsewhere: see who listens (ss -ltnp on Linux · lsof -nP -iTCP -sTCP:LISTEN on macOS) and check PORT in .env · journalctl --user -u hatchabot -n 50 (Linux)';
+  const logsFix = 'journalctl --user -u hatchabot -n 50 (Linux) · ./scripts/restart.sh';
+  out.push(cp.ok ? { level: 'ok', text: `Control plane answering at ${cp.url}${cp.version ? ` (v${cp.version})` : ''}` }
+    // An answer that is not a 2xx is an answer: its status, Hatchabot's or not (review of HB-1111).
+    : cp.status !== undefined ? (cp.version
+      ? { level: 'fail', text: `Control plane answers ${cp.status} at ${cp.url} (v${cp.version})`, fix: logsFix }
+      : { level: 'fail', text: `Something answers ${cp.status} at ${cp.url}, and its page does not name a Hatchabot version`, fix: otherFix })
+    : cp.other ? { level: 'fail', text: `Something other than Hatchabot answers at ${cp.url}: its page does not name a Hatchabot version`, fix: otherFix }
+    : { level: 'fail', text: `Control plane not answering at ${cp.url}${cp.error ? ` (${cp.error})` : ''}`, fix: logsFix });
   if (f.diskFreeGb !== undefined) out.push(f.diskFreeGb < 10 ? { level: f.diskFreeGb < 3 ? 'fail' : 'warn', text: `Only ${f.diskFreeGb.toFixed(1)} GB free — each agent volume grows; the image is ~2 GB`, fix: 'docker system prune; remove old backup sets; move backups to a NAS (HATCHABOT_BACKUP_DIR)' } : { level: 'ok', text: `${f.diskFreeGb.toFixed(0)} GB free` });
   if (!f.backups.lastSet) out.push({ level: 'warn', text: `No backup set in ${f.backups.dir} yet`, fix: 'systemctl --user start hatchabot-backup (or wait for 03:30); scripts/restore-drill.sh proves a set restores' });
   else if ((f.backups.ageDays ?? 0) > 2) out.push({ level: 'warn', text: `Last backup set is ${f.backups.ageDays} days old (${f.backups.lastSet})`, fix: 'journalctl --user -u hatchabot-backup -n 30' });
@@ -162,6 +195,25 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   // not the directory (review, 2026-09-29).
   else if (f.backups.complete === false) out.push({ level: 'warn', text: `Last backup set ${f.backups.lastSet} is incomplete${f.backups.failed ? ` (${f.backups.failed} volume${f.backups.failed === 1 ? '' : 's'} failed)` : ' (the run did not finish)'}`, fix: 'journalctl --user -u hatchabot-backup -n 30' });
   else out.push({ level: 'ok', text: `Backups: last set ${f.backups.lastSet}` });
+  const unread = f.backups.unreadable ?? [];
+  if (unread.length) {
+    out.push({
+      level: 'warn',
+      text: `Backup set${unread.length === 1 ? '' : 's'} ${unread.slice(0, 3).join(', ')}${unread.length > 3 ? ` and ${unread.length - 3} more` : ''} in ${f.backups.dir} could not be read${f.backups.lastSet ? `: newer than the last set read (${f.backups.lastSet})` : ''}`,
+      fix: `ls -ld ${shellPath(`${f.backups.dir}/${unread[0]}`)} — one made by another user (a backup run with sudo) is theirs: sudo chown -R $(id -un) ${shellPath(`${f.backups.dir}/${unread[0]}`)}`,
+    });
+  }
+  const kept = f.backups.keptUnlisted ?? [];
+  if (kept.length) {
+    const total = kept.reduce((n, k) => n + k.bytes, 0);
+    const shown = kept.slice(0, 3).map((k) => `${k.set} (${sizeWords(k.bytes)}${k.volumes.length ? `: ${k.volumes.join(', ')}` : ''})`).join('; ');
+    out.push({
+      level: 'warn',
+      text: `${kept.length === 1 ? 'A backup set is' : `${kept.length} backup sets are`} kept past HATCHABOT_BACKUP_KEEP_DAYS only for volumes no agent here has had, ${sizeWords(total)} in all: ${shown}${kept.length > 3 ? ` and ${kept.length - 3} more` : ''}. Another machine's agents, or a database not restored yet: they stay until a restored database names them, or you remove them`,
+      fix: `Restore the database they belong to (README.md, "Restoring from backup"), and they go by age as usual; or remove one you do not need: rm -r ${shellPath(`${f.backups.dir}/${kept[0]!.set}`)}`,
+    });
+  }
+  if (f.timeLimit === false) out.push({ level: 'warn', text: 'No timeout command (timeout or gtimeout): the nightly backup and the restore drill have no time limit on a Docker call that never answers', fix: 'brew install coreutils (a Mac: it adds gtimeout); on Linux, install coreutils' });
   if (f.tailscale) {
     const t = f.tailscale;
     out.push(!t.installed ? { level: 'warn', text: 'Tailscale not installed — the app is reachable on your LAN only', fix: 'docs/tailscale.md — private access from anywhere, nothing opened to the internet' }
@@ -177,6 +229,31 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
 }
 
 /** One line on compressed swap: the machine's state, and a warning when agents are set to swap and cannot. */
+/**
+ * The database's schema number against this release's (HB-0813). Newer by a
+ * step that is not additive is the one a start refuses, so it is a failure
+ * here too, with the same release to install.
+ */
+export function schemaLine(s: SchemaStanding): DoctorLine {
+  if (s.kind === 'current') return { level: 'ok', text: `Database schema ${s.db} (this release's)` };
+  if (s.kind === 'behind') return { level: 'ok', text: s.db ? `Database schema ${s.db}; this release's is ${s.code}, and the next start brings it up` : `Database schema not numbered yet; the next start numbers it (${s.code})` };
+  const by = s.writtenBy && /^\d/.test(s.writtenBy) ? ` (written by v${s.writtenBy})` : '';
+  const past = Array.from({ length: s.db - s.code }, (_, i) => s.code + 1 + i);
+  if (!s.refused) return { level: 'warn', text: `Database schema ${s.db}${by} is newer than this release's ${s.code}: ${stepsText(past)} only add${past.length === 1 ? 's' : ''} to it, so this release runs, and what was added goes unused`, fix: `${schemaInstallAdvice(s)} to use it` };
+  const why = s.notAdditive?.length ? `${stepsText(s.notAdditive)} changed it in a way this release cannot work with` : `nothing in it records what ${stepsText(s.unrecorded?.length ? s.unrecorded : past)} did`;
+  return { level: 'fail', text: `Database schema ${s.db}${by} is newer than this release's ${s.code}, and ${why}: Hatchabot does not start on it`, fix: `${schemaInstallAdvice(s)}; or restore a backup of the database made before that upgrade (docs/troubleshooting.md)` };
+}
+
+/** The database's schema standing, read without changing it; undefined when it cannot be read. */
+export async function schemaFacts(dbPath: string): Promise<SchemaStanding | undefined> {
+  if (!existsSync(dbPath)) return undefined;
+  try {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try { return schemaStanding(db); } finally { db.close(); }
+  } catch { return undefined; /* not a database, or locked: the Database line still names the file */ }
+}
+
 /** The agents' browsers: which Chromium runs, and whether it is current (HB-0677). */
 export function browserLines(b: NonNullable<DoctorFacts['browsers']>): DoctorLine[] {
   const out: DoctorLine[] = [{ level: 'ok', text: `Agents' browsers: ${b.running} running · Chromium ${b.versions.join(', ') || '?'}${b.refreshed ? ` (image of ${b.refreshed})` : ''}` }];
@@ -222,9 +299,19 @@ export function limitsCheckLine(c: LimitsCheckSummary): DoctorLine {
   const when = c.at.slice(0, 16).replace('T', ' ');
   const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
   const uncovered = c.notCovered ? `; ${n(c.notCovered, 'running agent', 'running agents')} on a runner whose cgroup could not be read (docker's record only)` : '';
-  if (c.failed) return { level: 'warn', text: `Limits check ${when}: ${n(c.failed, 'agent\'s', 'agents\'')} memory or swap limits had drifted and could NOT be restored${uncovered}`, fix: 'hatchabot events <agent> (runtime.swap_reassert_failed); a rebuild makes the container anew' };
-  if (c.cgroupDrifted) return { level: 'warn', text: `Limits check ${when}: ${n(c.cgroupDrifted, 'agent\'s', 'agents\'')} swap limits had drifted (systemd reload) and were restored${c.reasserted > c.cgroupDrifted ? `, ${c.reasserted - c.cgroupDrifted} more brought up to date` : ''}${uncovered}`, fix: 'Nothing to do: the app checks every ten minutes. A reload (snap refresh, package upgrade) causes it; docker\'s systemd driver leaves a zero swap limit out of systemd\'s record' };
-  return { level: 'ok', text: `Limits check ${when}: ${n(c.checked, 'agent', 'agents')} checked${c.reasserted ? `, ${c.reasserted} brought up to date` : ', none drifted'}${uncovered}` };
+  // Agents it could not read at all were not checked: never "none drifted" for them (HB-1106).
+  const unread = c.unread ? `; the limits of ${n(c.unread, 'agent', 'agents')} could not be read, so ${c.unread === 1 ? 'it was' : 'they were'} not checked` : '';
+  const unreadFix = 'Is the runner they are on up, and its Docker answering? The app reads them again every ten minutes';
+  // Not checked for a normal reason: said, never a warning.
+  const aside = [
+    c.away ? `${n(c.away, 'agent', 'agents')} on a machine that is not answering (asleep or offline)` : '',
+    c.noContainer ? `${n(c.noContainer, 'stopped agent', 'stopped agents')} with no container yet (made when it starts)` : '',
+  ].filter(Boolean);
+  const notNow = aside.length ? `; not checked now: ${aside.join(', ')}` : '';
+  if (c.failed) return { level: 'warn', text: `Limits check ${when}: ${n(c.failed, 'agent\'s', 'agents\'')} memory or swap limits had drifted and could NOT be restored${uncovered}${unread}${notNow}`, fix: 'hatchabot events <agent> (runtime.swap_reassert_failed); a rebuild makes the container anew' };
+  if (c.cgroupDrifted) return { level: 'warn', text: `Limits check ${when}: ${n(c.cgroupDrifted, 'agent\'s', 'agents\'')} swap limits had drifted (systemd reload) and were restored${c.reasserted > c.cgroupDrifted ? `, ${c.reasserted - c.cgroupDrifted} more brought up to date` : ''}${uncovered}${unread}${notNow}`, fix: c.unread ? unreadFix : 'Nothing to do: the app checks every ten minutes. A reload (snap refresh, package upgrade) causes it; docker\'s systemd driver leaves a zero swap limit out of systemd\'s record' };
+  if (c.unread) return { level: 'warn', text: `Limits check ${when}: ${n(c.checked, 'agent', 'agents')} checked${c.reasserted ? `, ${c.reasserted} brought up to date` : c.checked ? ', none drifted' : ''}${uncovered}${unread}${notNow}`, fix: unreadFix };
+  return { level: 'ok', text: `Limits check ${when}: ${n(c.checked, 'agent', 'agents')} checked${c.reasserted ? `, ${c.reasserted} brought up to date` : c.checked || !aside.length ? ', none drifted' : ''}${uncovered}${notNow}` };
 }
 
 /** The machine's swap and who is set to use it; best-effort, never throws. */
@@ -533,7 +620,7 @@ export async function probeControlPlane(url: string, certFile?: string, bind?: s
   try {
     if (!home.startsWith('https:')) {
       const res = await fetch(home, { signal: AbortSignal.timeout(5000) });
-      return { url, ok: res.ok, version: versionMarker(await res.text()) };
+      return answered(url, res.status, await cappedText(res), res.headers.get('x-hatchabot-version') ?? undefined);
     }
     const u = new URL(home);
     const cert = certFile && existsSync(certFile) ? readFileSync(certFile) : undefined;
@@ -541,14 +628,14 @@ export async function probeControlPlane(url: string, certFile?: string, bind?: s
     // The bind only when it is an address: a name may resolve anywhere, and
     // a certificate can name it, so it is checked like any other name.
     const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname) || (!!bind && isIP(bare(bind)) !== 0 && bare(u.hostname) === bare(bind));
-    const { status, body } = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const { status, body, header } = await new Promise<{ status: number; body: string; header?: string }>((resolve, reject) => {
       // One deadline for the whole answer, and every way an answer can end:
       // one cut off in its body (aborted, then closed) left this waiting for
       // good, and doctor never printed its report (HB-0551).
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let req: ClientRequest | undefined;
-      const done = (v: { status: number; body: string }) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
+      const done = (v: { status: number; body: string; header?: string }) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
       const fail = (err: Error) => { if (settled) return; settled = true; clearTimeout(timer); req?.destroy(); reject(err); };
       try {
         req = httpsRequest(u, {
@@ -564,7 +651,8 @@ export async function probeControlPlane(url: string, certFile?: string, bind?: s
           let text = '';
           res.setEncoding('utf8');
           res.on('data', (c: string) => { if (text.length < 1_000_000) text += c; });
-          res.on('end', () => done({ status: res.statusCode ?? 0, body: text }));
+          const named = res.headers['x-hatchabot-version'];
+          res.on('end', () => done({ status: res.statusCode ?? 0, body: text, header: Array.isArray(named) ? named[0] : named }));
           res.on('aborted', () => fail(new Error('the answer was cut off')));
           res.on('error', fail);
           res.on('close', () => { if (!res.complete) fail(new Error('the connection closed before the answer ended')); });
@@ -584,12 +672,79 @@ export async function probeControlPlane(url: string, certFile?: string, bind?: s
       r.on('error', fail);
       r.end();
     });
-    return { url, ok: status >= 200 && status < 300, version: versionMarker(body) };
+    return answered(url, status, body, header);
   } catch (err) {
     return { url, ok: false, error: String((err as Error).cause ?? (err as Error).message).slice(0, 80) };
   }
 }
-const versionMarker = (html: string) => /HATCHABOT_VERSION="([^"]+)"/.exec(html)?.[1];
+/** The version a served page names (`HATCHABOT_VERSION="X"`, versionMarkup in src/api/pageRoutes.ts). */
+export const versionMarker = (html: string) => /HATCHABOT_VERSION="([^"]+)"/.exec(html)?.[1];
+/** A version doctor shows: a semantic version's characters (pageRoutes' versionWord), forty at most. */
+const VERSION_WORD = /^[\w.+-]{1,40}$/;
+/** How much of a page the meta tag is looked for in, and the longest tag read. */
+const META_SCAN_CHARS = 256 * 1024;
+const META_TAG_CHARS = 2048;
+/**
+ * The version in the page's `<meta name="hatchabot-version" content="X">`,
+ * which the page's own code reads (versionMarkup). In its head, and its first
+ * META_SCAN_CHARS at most, tag by tag: the page can be anyone's. Each search
+ * goes on from the end of the tag before, as a browser reads a `<meta` inside
+ * a tag as that tag's text, and a tag longer than META_TAG_CHARS is passed
+ * over: each `<meta` looked to the end of the page for its `>`, and a page
+ * of them took minutes (review of HB-1111).
+ */
+export function metaVersion(page: string): string | undefined {
+  let html = page.slice(0, META_SCAN_CHARS);
+  const head = html.search(/<\/head\b/i);
+  if (head >= 0) html = html.slice(0, head);
+  for (let at = html.indexOf('<meta'); at >= 0;) {
+    const end = html.indexOf('>', at);
+    if (end < 0) return undefined;
+    const tag = end - at <= META_TAG_CHARS ? html.slice(at, end) : '';
+    if (/\bname=["']?hatchabot-version["'\s]/i.test(`${tag} `)) {
+      // A quoted value is the whole of it: its first word alone made "9.9.9 (yes)" read as 9.9.9.
+      const m = /\bcontent=(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(tag);
+      return m ? (m[1] ?? m[2] ?? m[3]) : undefined;
+    }
+    at = html.indexOf('<meta', end);
+  }
+  return undefined;
+}
+
+/**
+ * A response's body, its first `limit` characters: the rest is not read.
+ * The HTTPS probe kept as much; the plain one read the whole of whatever
+ * answered (review of HB-1111).
+ */
+async function cappedText(res: Response, limit = 1_000_000): Promise<string> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    text += decoder.decode(value, { stream: true });
+    if (text.length >= limit) { await reader.cancel().catch(() => undefined); return text.slice(0, limit); }
+  }
+}
+/**
+ * What an answer says of the control plane. Hatchabot names its version on
+ * its page (every release's does: the comment marker and the meta tag) and in
+ * its `x-hatchabot-version` header, so a 2xx with none of them is another
+ * program's, as after a port taken by something else or a proxy's stale
+ * route: any 2xx was "answering" (HB-1111). Any of the three will do: a proxy
+ * that strips comments, or rewrites the page, leaves the others (review of
+ * HB-1111). An answer that is not a 2xx says its status.
+ */
+function answered(url: string, status: number, body: string, header?: string): DoctorFacts['controlPlane'] {
+  // The first that is a version as Hatchabot writes one (versionWord): any
+  // other text is the page's, and it was printed as it was, terminal escapes
+  // and all (review of HB-1111). What is no version is no mark.
+  const version = [versionMarker(body), metaVersion(body), header?.trim()].find((v) => !!v && VERSION_WORD.test(v));
+  if (status < 200 || status >= 300) return { url, ok: false, status, ...(version ? { version } : {}) };
+  return version ? { url, ok: true, version } : { url, ok: false, other: true };
+}
 /** The longest the HTTPS probe waits for a whole answer. */
 const PROBE_DEADLINE_MS = 10_000;
 
@@ -612,17 +767,91 @@ export function serviceBackupMark(env: Record<string, string | undefined>): stri
   return ownerMark(env.HATCHABOT_SECRET_KEY ?? '');
 }
 
+/** A set the nightly retention keeps only for volumes no agent here has had: whose, how big. */
+export interface KeptUnlisted { set: string; volumes: string[]; bytes: number }
+
+/**
+ * The sets the run that wrote `set` kept past HATCHABOT_BACKUP_KEEP_DAYS
+ * only for volumes this registry never listed (backup-volumes.sh writes
+ * them as keptUnlisted in its backup-status.json): another machine's, or a
+ * database not restored yet. Kept until one is restored or the owner deletes
+ * the set, they had no bound and nothing said so (review of HB-1380). Those
+ * still there, newest first, each with its size; undefined when that run's
+ * record has no such list (its retention did not run, or it is older).
+ */
+export function keptUnlistedSets(bdir: string, set: string): KeptUnlisted[] | undefined {
+  let raw: unknown;
+  try { raw = (JSON.parse(readFileSync(join(bdir, set, 'backup-status.json'), 'utf8')) as { keptUnlisted?: unknown }).keptUnlisted; } catch { return undefined; }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: KeptUnlisted[] = [];
+  for (const [name, vols] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(name)) continue;
+    const bytes = treeBytes(join(bdir, name));
+    if (bytes === undefined) continue; // deleted since
+    out.push({ set: name, volumes: Array.isArray(vols) ? vols.filter((v): v is string => typeof v === 'string').slice(0, 20) : [], bytes });
+  }
+  return out.sort((a, b) => (a.set < b.set ? 1 : -1));
+}
+/** What a folder's files take, links not followed; undefined when it is not a folder there. */
+function treeBytes(dir: string, depth = 0): number | undefined {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return undefined; }
+  let sum = 0;
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) sum += depth < 4 ? (treeBytes(p, depth + 1) ?? 0) : 0;
+    else if (e.isFile()) { try { sum += statSync(p).size; } catch { /* gone meanwhile */ } }
+  }
+  return sum;
+}
+/**
+ * A path in a command doctor prints, as a shell reads it back whole: as it
+ * is when plain, else in single quotes. A HATCHABOT_BACKUP_DIR with a space
+ * in it printed rm -r /home/u/backups 2/2026-10-01, which, pasted, removes
+ * /home/u/backups and a relative 2/2026-10-01 (review of HB-1380).
+ */
+const shellPath = (p: string) => (/^[\w@%+=:,./-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`);
+const sizeWords = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : bytes < 1e6 ? 'under 1 MB' : `${Math.round(bytes / 1e6)} MB`);
+
 export function backupFacts(bdir: string, now: number, mark: string | undefined): DoctorFacts['backups'] {
+  // Each entry on its own: the one readdir that threw (a file named like a
+  // date, or a set this user cannot read) ended the scan, so doctor said
+  // there was no backup beside good sets (HB-1118). A file is no set, and is
+  // passed over, as the app's list (listBackups) passes over what it cannot
+  // read; a folder that cannot be read and is newer than the last set read
+  // is named, not passed over in silence: the age doctor gives is then an
+  // older set's (review of HB-1118). Doctor still counts a set as the
+  // listing does not: by any .sqlite in it.
+  const unreadable: string[] = [];
+  const hasDb = (d: string) => {
+    try { return readdirSync(join(bdir, d)).some((f) => f.endsWith('.sqlite')); } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOTDIR' && code !== 'ENOENT') unreadable.push(d);
+      return false;
+    }
+  };
   try {
-    const sets = readdirSync(bdir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && readdirSync(join(bdir, d)).some((f) => f.endsWith('.sqlite'))).sort().reverse();
+    const sets = readdirSync(bdir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && hasDb(d)).sort().reverse();
     // No mark, no check: foreignSet given undefined reads this process's key (the shell's here).
     const last = sets.find((d) => !(mark && foreignSet(join(bdir, d), mark)));
-    if (!last) return { dir: bdir };
+    const newer = unreadable.filter((d) => !last || d > last).sort().reverse();
+    const named = newer.length ? { unreadable: newer } : {};
+    if (!last) return { dir: bdir, ...named };
     const st = readSetStatus(join(bdir, last));
+    // From the newest of this install's runs whose retention ran: one that
+    // failed pruned nothing, and its record names none.
+    let kept: KeptUnlisted[] = [];
+    for (const d of sets) {
+      if (mark && foreignSet(join(bdir, d), mark)) continue;
+      const k = keptUnlistedSets(bdir, d);
+      if (k) { kept = k; break; }
+    }
     return {
       dir: bdir, lastSet: last, ageDays: setAgeDays(last, now),
       ...(st.complete !== undefined ? { complete: st.complete } : {}),
       ...(st.failedVolumes?.length ? { failed: st.failedVolumes.length } : {}),
+      ...named,
+      ...(kept.length ? { keptUnlisted: kept } : {}),
     };
   } catch { return { dir: bdir }; /* no dir */ }
 }
@@ -682,9 +911,11 @@ export async function gatherFacts(urlIn?: string, envIn?: Record<string, string>
   const tailscale: DoctorFacts['tailscale'] = { installed: ti.installed, appOnly: ti.appOnly, up: ti.up, dns: ti.dns, serving: ti.serving, reachable: ti.reachable, url: ti.url };
   return {
     nodeVersion: process.version, dockerCli, dockerDaemon, runtimeImage,
-    envFile: { present: existsSync('.env'), secretKey: !!env.HATCHABOT_SECRET_KEY, password: !!env.HATCHABOT_PASSWORD, authMode: env.HATCHABOT_AUTH ?? 'password', publicUrl: env.HATCHABOT_PUBLIC_URL || undefined },
-    db: { path: dbPath, present: existsSync(dbPath), sizeMb: existsSync(dbPath) ? statSync(dbPath).size / 1e6 : undefined },
+    envFile: { present: existsSync('.env'), secretKey: !!env.HATCHABOT_SECRET_KEY, password: !!env.HATCHABOT_PASSWORD, authMode: env.HATCHABOT_AUTH ?? 'password', publicUrl: env.HATCHABOT_PUBLIC_URL || undefined,
+      inlineComments: (() => { try { return inlineComments(readFileSync('.env', 'utf8')); } catch { return []; } })() },
+    db: { path: dbPath, present: existsSync(dbPath), sizeMb: existsSync(dbPath) ? statSync(dbPath).size / 1e6 : undefined, schema: await schemaFacts(dbPath) },
     service, controlPlane, diskFreeGb, backups, tailscale,
+    timeLimit: !!sh('sh', ['-c', 'command -v timeout || command -v gtimeout']),
     containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length, sharedNetwork },
     // A doctor that cannot read the image file still reports the rest.
     browsers: dockerDaemon.ok ? (() => { try { return browserFacts(docker, prefix); } catch { return undefined; } })() : undefined,

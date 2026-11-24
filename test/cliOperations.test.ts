@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { opsTable, opStepLine, startedOperation } from '../src/cli.js';
 
-type Handler = (req: IncomingMessage, body: string) => { status?: number; json: unknown } | undefined;
+/** `stall`: the fake takes the request and then never finishes: no answer at all, or an answer whose body never ends. */
+type Handler = (req: IncomingMessage, body: string) => { status?: number; json?: unknown; stall?: 'answer' | 'body' } | undefined;
 let handler: Handler = () => undefined;
 const seen: Array<{ method: string; url: string; body: string }> = [];
 let server: Server;
@@ -27,6 +28,8 @@ beforeAll(async () => {
     req.on('end', () => {
       seen.push({ method: req.method!, url: req.url!, body });
       const out = common(req) ?? handler(req, body);
+      if (out?.stall === 'answer') return;
+      if (out?.stall === 'body') { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"state":'); return; }
       res.writeHead(out?.status ?? (out ? 200 : 404), { 'content-type': 'application/json' });
       res.end(JSON.stringify(out?.json ?? { error: `no fake for ${req.method} ${req.url}` }));
     });
@@ -34,27 +37,33 @@ beforeAll(async () => {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
-afterAll(() => { server.close(); rmSync(home, { recursive: true, force: true }); });
+afterAll(() => { server.closeAllConnections(); server.close(); rmSync(home, { recursive: true, force: true }); });
 
 const AGENT = { id: 'agent-0001-test', name: 'Test Agent', slug: 'test-agent', hostId: 'h1', state: 'RUNNING', runtimeRef: 'fixture-runtime-1' };
 /** What GET /v1/agents lists, when a test needs another agent than AGENT. */
 let listed: unknown[] | undefined;
+/** What GET /v1/hosts lists, when a test needs other machines. */
+let machines: unknown[] | undefined;
 function common(req: IncomingMessage): ReturnType<Handler> {
   if (req.url === '/v1/config') return { json: { authMode: 'accounts' } };
   if (req.method === 'GET' && (req.url === '/v1/agents' || req.url === '/v1/agents?all=1')) return { json: listed ?? [AGENT] };
   if (req.method === 'GET' && req.url === '/v1/hosts') {
-    return { json: [{ id: 'h1', name: 'box', kind: 'local' }, { id: 'h2', name: 'Test Runner', kind: 'cloud' }] };
+    return { json: machines ?? [{ id: 'h1', name: 'box', kind: 'local' }, { id: 'h2', name: 'Test Runner', kind: 'cloud' }] };
   }
   return undefined;
 }
 
 /** The real CLI, sandboxed. */
 function cli(...args: string[]): Promise<{ code: number; out: string; err: string }> {
+  return cliWithin(60_000, ...args);
+}
+/** The same, killed after `ms`. */
+function cliWithin(ms: number, ...args: string[]): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve) => {
     execFile(process.execPath, ['--import', 'tsx', 'src/cli.ts', ...args], {
       cwd: join(__dirname, '..'),
       env: { HOME: home, PATH: dirname(process.execPath), HATCHABOT_URL: base, HATCHABOT_TOKEN: 'made-up-cli-credential', NO_COLOR: '1' },
-      timeout: 60_000,
+      timeout: ms,
     }, (err, stdout, stderr) => resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, out: String(stdout), err: String(stderr) }));
   });
 }
@@ -102,6 +111,49 @@ describe('hatchabot move', () => {
     expect(undone.code).toBe(1);
     expect(undone.err).toMatch(/undone: The runner stopped answering/);
   }, 60_000);
+
+  it('a name two machines share is refused with their ids, and nothing is moved; an id picks one (HB-1079)', async () => {
+    machines = [{ id: 'h1', name: 'box', kind: 'local' }, { id: 'h2', name: 'Runner', kind: 'cloud' }, { id: 'h3', name: 'runner', kind: 'cloud' }];
+    try {
+      seen.length = 0;
+      handler = (req) => (req.method === 'POST' ? { status: 202, json: { operation: running(1, 'both machines answered') } } : undefined);
+      const shared = await cli('move', 'Test Agent', 'RUNNER', '--no-wait');
+      expect(shared.code).toBe(1);
+      expect(shared.err).toMatch(/"RUNNER" names 2 machines — use its id: h2 \(Runner\), h3 \(runner\)/);
+      expect(seen.some((s) => s.method === 'POST')).toBe(false);
+      // Its exact name, or its id, is one machine.
+      const exact = await cli('move', 'Test Agent', 'runner', '--no-wait');
+      expect(exact.code, exact.err).toBe(0);
+      expect(JSON.parse(seen.find((s) => s.method === 'POST')!.body)).toEqual({ hostId: 'h3' });
+      seen.length = 0;
+      const byId = await cli('move', 'Test Agent', 'h2', '--no-wait');
+      expect(byId.code, byId.err).toBe(0);
+      expect(JSON.parse(seen.find((s) => s.method === 'POST')!.body)).toEqual({ hostId: 'h2' });
+      // "this machine" still means the local one.
+      machines = [{ id: 'h0', name: 'box', kind: 'local' }, { id: 'h2', name: 'Runner', kind: 'cloud' }];
+      seen.length = 0;
+      const here = await cli('move', 'Test Agent', 'here', '--no-wait');
+      expect(here.code, here.err).toBe(0);
+      expect(JSON.parse(seen.find((s) => s.method === 'POST')!.body)).toEqual({ hostId: 'h0' });
+    } finally { machines = undefined; }
+  }, 120_000);
+});
+
+describe('hatchabot embedder --host (HB-1079)', () => {
+  it('a name two machines share is refused with their ids, and no service is stopped', async () => {
+    machines = [{ id: 'h1', name: 'box', kind: 'local' }, { id: 'h2', name: 'Runner', kind: 'cloud' }, { id: 'h3', name: 'runner', kind: 'cloud' }];
+    try {
+      seen.length = 0;
+      handler = (req) => (req.method === 'POST' && req.url === '/v1/embedder/stop' ? { json: { enabled: false, embedder: 'none', door: 'closed' } } : undefined);
+      const shared = await cli('embedder', 'stop', '--host', 'RUNNER', '--yes');
+      expect(shared.code).toBe(1);
+      expect(shared.err).toMatch(/"RUNNER" names 2 machines — use its id: h2 \(Runner\), h3 \(runner\)/);
+      expect(seen.some((s) => s.method === 'POST')).toBe(false);
+      const byId = await cli('embedder', 'stop', '--host', 'h3', '--yes');
+      expect(byId.code, byId.err).toBe(0);
+      expect(JSON.parse(seen.find((s) => s.method === 'POST')!.body)).toEqual({ host: 'h3' });
+    } finally { machines = undefined; }
+  }, 120_000);
 });
 
 describe('hatchabot ops', () => {
@@ -284,6 +336,90 @@ describe('commands an older server answers the old way', () => {
     expect(r.code, r.err).toBe(0);
     expect(r.out).toMatch(/"Test Agent" is RUNNING\./);
   }, 60_000);
+});
+
+describe('--timeout bounds a look the server never answers (HB-1068)', () => {
+  // 0.05 min is 3 s: each command must be done well inside the 30 s it is given.
+  const NEW = 'agent-0002-new';
+  it('an operation: a look whose body never ends is cut off, and it says the operation goes on', async () => {
+    handler = (req) => {
+      if (req.method === 'POST') return { status: 202, json: { operation: running(1, 'both machines answered') } };
+      if (req.url === '/v1/operations/op_move1') return { stall: 'body' };
+      return undefined;
+    };
+    const r = await cliWithin(30_000, 'move', 'Test Agent', 'Test Runner', '--timeout', '0.05');
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/still under way after 0\.05 min — it goes on; follow it with: hatchabot ops "Test Agent"/);
+  }, 60_000);
+  it('a new agent: a look never answered ends the wait, saying it may yet finish', async () => {
+    handler = (req) => {
+      if (req.url === '/v1/ai-profiles') return { json: [{ id: 'p1', name: 'Fixture Source', defaultSource: true }] };
+      if (req.method === 'POST' && req.url === '/v1/agents') return { status: 201, json: { id: NEW, name: 'Garden Helper', state: 'PROVISIONING' } };
+      if (req.url === `/v1/agents/${NEW}`) return { stall: 'answer' };
+      return undefined;
+    };
+    const r = await cliWithin(30_000, 'create', 'Garden Helper', '--no-telegram', '--timeout', '0.05');
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/still setting up after 0\.05 min — it may yet finish; check: hatchabot list/);
+  }, 60_000);
+  it('rebuild --wait on an older server: the state look is cut off, and it says the server did not answer', async () => {
+    handler = (req) => {
+      if (req.method === 'POST' && req.url === `/v1/agents/${AGENT.id}/rebuild`) return { status: 202, json: { rebuilding: true } };
+      if (req.method === 'GET' && req.url === `/v1/agents/${AGENT.id}`) return { stall: 'body' };
+      return undefined;
+    };
+    const r = await cliWithin(30_000, 'rebuild', 'Test Agent', '--wait', '--timeout', '0.05');
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/"Test Agent" is not RUNNING yet after 0\.05 min \(the server did not answer in time\)/);
+  }, 60_000);
+  it('tasks run --wait: the look for its run is cut off, and it says none finished in time', async () => {
+    const task = { id: 'task-0001-fixture', name: 'Watering', lastRunAtMs: 1000 };
+    let looks = 0;
+    handler = (req) => {
+      const runs = `/v1/agents/${AGENT.id}/crons/${task.id}/runs?limit=1`;
+      if (req.method === 'GET' && req.url === `/v1/agents/${AGENT.id}/crons`) return { json: { crons: [task] } };
+      if (req.method === 'POST' && req.url === `/v1/agents/${AGENT.id}/crons/${task.id}/run`) return { json: { ok: true } };
+      // The look before it is posted answers; every look after it stalls.
+      if (req.url === runs) return looks++ === 0 ? { json: { runs: [] } } : { stall: 'answer' };
+      return undefined;
+    };
+    const r = await cliWithin(30_000, 'tasks', 'Test Agent', 'run', 'Watering', '--wait', '--timeout', '0.05');
+    expect(r.code).toBe(1);
+    expect(r.err).toMatch(/no finished run of "Watering" within 0\.05 min/);
+  }, 60_000);
+});
+
+describe('a --timeout past what a timer holds still waits (HB-1068 review)', () => {
+  // 40000 min is past 2^31-1 ms, where Node fires a timer at once; 99999 min
+  // is past where it refuses one. Each wait must end on what the server says.
+  for (const minutes of ['40000', '99999']) {
+    it(`move --timeout ${minutes}: followed to its outcome`, async () => {
+      let looks = 0;
+      handler = (req) => {
+        if (req.method === 'POST') return { status: 202, json: { operation: running(1, 'both machines answered') } };
+        if (req.url === '/v1/operations/op_move1') return { json: ++looks >= 2 ? { ...running(10, 'the old copy removed'), status: 'succeeded', outcome: 'Moved to Test Runner.' } : running(4, 'made on the other machine') };
+        return undefined;
+      };
+      const r = await cliWithin(30_000, 'move', 'Test Agent', 'Test Runner', '--timeout', minutes);
+      expect(r.code, r.err).toBe(0);
+      expect(r.out).toMatch(/✓ Moved to Test Runner\./);
+      expect(r.err).not.toMatch(/TimeoutOverflowWarning|ERR_OUT_OF_RANGE/);
+    }, 60_000);
+    it(`tasks run --wait --timeout ${minutes}: the run is printed once it is there`, async () => {
+      const task = { id: 'task-0001-fixture', name: 'Watering', lastRunAtMs: 1000 };
+      let looks = 0;
+      handler = (req) => {
+        const runs = `/v1/agents/${AGENT.id}/crons/${task.id}/runs?limit=1`;
+        if (req.method === 'GET' && req.url === `/v1/agents/${AGENT.id}/crons`) return { json: { crons: [task] } };
+        if (req.method === 'POST') return { json: { ok: true } };
+        if (req.url === runs) return { json: { runs: looks++ >= 1 ? [{ runAtMs: Date.now(), status: 'ok', summary: 'all watered' }] : [] } };
+        return undefined;
+      };
+      const r = await cliWithin(30_000, 'tasks', 'Test Agent', 'run', 'Watering', '--wait', '--timeout', minutes);
+      expect(r.code, r.err).toBe(0);
+      expect(r.out).toMatch(/all watered/);
+    }, 60_000);
+  }
 });
 
 describe('the pieces', () => {

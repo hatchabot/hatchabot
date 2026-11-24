@@ -94,10 +94,30 @@ ENV_DIR="$REPO"
 #    expansion, nothing runs, and a # inside a value is part of it.
 #  - a Mac: the launchd job sources .env (launchd-plist.sh), so it is sourced
 #    here too. That runs nothing the service does not run at every start.
-# A backup run by hand reads .env with Node's parser (backup-volumes.sh), so a
-# set may carry that reading's key: kept as ENV_ALT_*, and also tried for a path
-# not found the other way. With no node (the service cannot have run on this
+# A backup run by hand read .env with Node's parser (backup-volumes.sh, until
+# HB-1065 made it read .env as this does), so an older set may carry that
+# reading's key: kept as ENV_ALT_*, and also tried for a path not found the
+# other way. With no node (the service cannot have run on this
 # either) it is sourced, for the folders; the key has no use then.
+# Every setting is .env's or its default, never the shell's: the service gets
+# its settings from .env alone (neither the unit nor the launchd job sets one).
+# What this goes by to delete or keep (the key, HATCHABOT_DB,
+# HATCHABOT_BACKUP_DIR, the prefix, image and network) was taken from the
+# shell that ran it whenever .env had no line for it: another install's key
+# marked that install's backup sets as this one's, and --backups deleted them
+# (HB-1066 review), and another install's HATCHABOT_DB was the database
+# --purge deleted, its agents with it (HB-1052's harm). So every HATCHABOT_*
+# and AGENTCLAW_* name is cleared first, and the ones it would have gone by
+# are named.
+IGNORED=""
+# The database the shell names, kept to be asked about below (HB-1236).
+SHELL_DB=""; SHELL_DB_NAME=""
+for v in $(compgen -A variable HATCHABOT_ 2>/dev/null) $(compgen -A variable AGENTCLAW_ 2>/dev/null); do
+  case "${v#*_}" in SECRET_KEY|DB|BACKUP_DIR|PREFIX|IMAGE|AGENT_NETWORK) IGNORED="$IGNORED $v" ;; esac
+  case "$v" in HATCHABOT_DB|AGENTCLAW_DB) [ -n "$SHELL_DB" ] || { SHELL_DB="${!v}"; SHELL_DB_NAME="$v"; } ;; esac
+  unset "$v"
+done
+[ -z "$IGNORED" ] || printf 'Note: not using%s from this shell — %s and its defaults decide, as they do for the service.\n' "$IGNORED" "$ENV_DIR/.env"
 ENV_READ=0; ENV_ALT_KEY=""; ENV_ALT_DB=""; ENV_ALT_BACKUP_DIR=""
 ENV_HOW=systemd; [ "$(uname -s)" = "Darwin" ] && ENV_HOW=shell
 if [ -f "$ENV_DIR/.env" ] && command -v node >/dev/null 2>&1; then
@@ -107,8 +127,10 @@ if [ -f "$ENV_DIR/.env" ] && command -v node >/dev/null 2>&1; then
     const text = require("node:fs").readFileSync(process.env.ENV_FILE, "utf8");
     // EnvironmentFile, state by state as systemd reads it (parse_env_file).
     const systemd = (t) => {
-      const out = {}; let st = "prekey", k = "", v = "";
-      const done = () => { if (k) out[k] = st === "value" ? v.replace(/[ \t\r]+$/, "") : v; k = ""; v = ""; st = "prekey"; };
+      const out = {}; let st = "prekey", k = "", v = "", lw = -1;
+      // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
+      // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
+      const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
       for (const c of t + "\n") {
         const nl = c === "\n" || c === "\r", ws = /\s/.test(c);
         if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
@@ -116,8 +138,8 @@ if [ -f "$ENV_DIR/.env" ] && command -v node >/dev/null 2>&1; then
         else if (st === "commentesc") st = "comment";
         else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.trimEnd(); st = "prevalue"; } else k += c; }
         else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
-        else if (st === "value") { if (nl) done(); else if (c === "\\") st = "esc"; else v += c; }
-        else if (st === "esc") { st = "value"; if (c !== "\n") v += c; }
+        else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
+        else if (st === "esc") { st = "value"; if (!nl) v += c; }
         else if (st === "single") { if (c === "\x27") st = "prevalue"; else v += c; }
         else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
         else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
@@ -161,6 +183,30 @@ in_install() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s' "$ENV_DIR/$1"
 if [ ! -f "$DB_PATH" ] && [ -n "$ENV_ALT_DB" ] && [ -f "$(in_install "$ENV_ALT_DB")" ]; then DB_PATH="$(in_install "$ENV_ALT_DB")"; fi
 if [ ! -d "$BACKUP_DIR" ] && [ -n "$ENV_ALT_BACKUP_DIR" ] && [ -d "$(in_install "$ENV_ALT_BACKUP_DIR")" ]; then BACKUP_DIR="$(in_install "$ENV_ALT_BACKUP_DIR")"; fi
 DATA_DIR="$(dirname "$DB_PATH")"
+# The shell's HATCHABOT_DB is not the service's, and is not gone by (above).
+# But an install run by hand as `HATCHABOT_DB=/x npm start`, with no such line
+# in .env, has its database there and its key in .env: a purge found no
+# database at .env's path, deleted .env, and left that database and the
+# agents' volumes behind, unreadable for good (HB-1236). So when .env's
+# reading finds no database and the shell's names one that is there, --purge
+# refuses, and says how to go on either way.
+if [ "$PURGE" = 1 ] && [ ! -f "$DB_PATH" ] && [ -n "$SHELL_DB" ] && [ -f "$(in_install "$SHELL_DB")" ]; then
+  if [ -f "$ENV_DIR/.env" ]; then
+    echo "This shell sets $SHELL_DB_NAME=$SHELL_DB, a database that is there, but $ENV_DIR/.env names none and there is none at $DB_PATH."
+    echo "If this install was started with that setting, that is its database, and $ENV_DIR/.env holds its key: --purge would delete the key and leave the database and its agents behind, unreadable. Refusing."
+    echo "  It is this install's:     add the line HATCHABOT_DB=$SHELL_DB to $ENV_DIR/.env, then run this again."
+  else
+    # No .env at all: its key came from the shell too, and is no file's here.
+    echo "This shell sets $SHELL_DB_NAME=$SHELL_DB, a database that is there, but there is no $ENV_DIR/.env and no database at $DB_PATH."
+    # With no database read it knows none of its agents and removes none; while
+    # their containers are there it takes them for another install's, and
+    # keeps the network and images too (other_installs).
+    echo "If this install was started with that setting, that is its database, and --purge would not read it: it would remove the service but none of its agents. Their containers and volumes would stay (and, while those containers are there, the network and images they run on), and so would the database. Refusing."
+    echo "  It is this install's:     put the line HATCHABOT_DB=$SHELL_DB in $ENV_DIR/.env, with the key it was started with (HATCHABOT_SECRET_KEY), then run this again."
+  fi
+  echo "  It is another install's:  run this again from a shell without it (unset HATCHABOT_DB AGENTCLAW_DB)."
+  exit 2
+fi
 
 PREFIX="${HATCHABOT_PREFIX:-hatchabot}"
 # Containers and volumes belong to Hatchabot by name: agentclaw- is the old
@@ -192,6 +238,9 @@ agent_names() {
 # — "none running" with agents still up, or a purge that orphaned every
 # volume (night review, 2026-09-28).
 if AGENT_REFS="$(agent_names)"; then DB_READ=1; else DB_READ=0; AGENT_REFS=""; fi
+# Whether there was a database to name the agents at all: with none, a purge
+# removes none of them, and must not end by saying they are gone.
+if [ -f "$DB_PATH" ]; then DB_FOUND=1; else DB_FOUND=0; fi
 NAMES="$(printf '%s\n' "$AGENT_REFS" | cut -s -d' ' -f1)"
 VOL_NAMES="$(printf '%s\n' "$AGENT_REFS" | cut -s -d' ' -f2)"
 if [ "$DB_READ" = 0 ]; then
@@ -665,15 +714,24 @@ if [ "$PURGE" = 1 ]; then
     # Nor another install's sets, when two share the folder: a set names the
     # install that made it (.backup-owner), or an older one the key it saved,
     # fingerprinted by key_owner (set_owner, scripts/backup-owner.sh; HB-0280).
-    SETS=0; THEIRS=0
+    # A set that says whose it is goes only when that is this install, by
+    # either reading of its key. With no key here nothing can match, so every
+    # set that says whose it is stays: another install's mark was ignored
+    # then, and its sets deleted (HB-1066). A set that says nothing goes, as
+    # before.
+    SETS=0; THEIRS=0; UNTOLD=0
     for d in "$BACKUP_DIR"/20??-??-??; do
       is_set "$d" || continue
-      so="$(set_owner "$d" "$OWNER")"
-      if [ -n "$OWNER" ] && [ -n "$so" ] && [ "$so" != "$OWNER" ] && [ "$so" != "$ALT_OWNER" ]; then THEIRS=$((THEIRS + 1)); continue; fi
+      so="$(set_owner "$d")"
+      if [ -n "$so" ] && ! is_mine "$so"; then
+        if [ -n "$OWNER$ALT_OWNER" ]; then THEIRS=$((THEIRS + 1)); else UNTOLD=$((UNTOLD + 1)); fi
+        continue
+      fi
       rm -rf "$d" && SETS=$((SETS + 1))
     done
     echo "  removed $SETS backup sets from $BACKUP_DIR"
     [ "$THEIRS" = 0 ] || echo "  kept $THEIRS sets another Hatchabot install made there"
+    [ "$UNTOLD" = 0 ] || echo "  kept $UNTOLD sets that say which install made them: with no HATCHABOT_SECRET_KEY in $ENV_DIR/.env, this one cannot tell whether that is itself. Delete those that are yours by hand"
     if rmdir "$BACKUP_DIR" 2>/dev/null; then echo "  removed $BACKUP_DIR (empty now)"
     else echo "  kept $BACKUP_DIR itself: it still holds $(ls -A "$BACKUP_DIR" 2>/dev/null | sed -n '1,6p' | tr '\n' ' ')"; fi
   fi
@@ -698,16 +756,124 @@ if [ "$PURGE" = 1 ]; then
       echo "  kept $d: its move copies cannot be attributed to this database. They hold agents' tokens, unencrypted: delete the folder if it is yours"
     fi
   done
+  # Nor another database (HB-1052). Installs may keep their databases side by
+  # side in one folder (why a move's copies are kept per database, above), and
+  # the folder's name alone said all of it was this one's: purging one install
+  # took the other's database, and its members, settings and keys with it.
+  # A database is a file by a database's name (*.sqlite, *.sqlite3, *.db), what
+  # SQLite keeps beside one (-wal, -shm, -journal), or a file that begins as an
+  # SQLite file does, under any name, here or in a folder below. Not looked in:
+  # the backups (their sets hold copies of this database, and they stay anyway)
+  # and what the app keeps beside its database (BESIDE_DB, from src/: images'
+  # build logs, release manifests, the memory search service, its model, app
+  # sources, the management chat's CLI home, the limits check).
+  BESIDE_DB="app-sources derived-builds embed embed-hosts limits-check.json mgmt-cli-home models release-manifests"
+  DB_NAME="$(basename "$DB_PATH")"
+  # 0: a database; 1: not one; 2: it cannot be read, so it may be one.
+  is_database() {
+    case "${1##*/}" in *.sqlite|*.sqlite3|*.db|*-wal|*-shm|*-journal) return 0 ;; esac
+    [ -f "$1" ] || return 1
+    [ -r "$1" ] || return 2
+    # Its NULs dropped before the $( ): bash 4.4 and later warn of each one.
+    # In the C locale, or a Mac's tr stops at a byte that is not UTF-8.
+    [ "$(head -c 15 "$1" 2>/dev/null | LC_ALL=C tr -d '\000')" = "SQLite format 3" ]
+  }
+  # A line for each: "=<path>" a database, "?<path>" a file or folder that
+  # cannot be read, so may be or hold one.
+  found_db() {
+    is_database "$1"
+    case $? in 0) printf '=%s\n' "$1" ;; 2) printf '?%s\n' "$1" ;; esac
+  }
+  readable_dir() { [ -r "$1" ] && [ -x "$1" ]; }
+  other_databases() {
+    local e n f
+    readable_dir "$DATA_DIR" || { printf '?%s\n' "$DATA_DIR"; return 0; }
+    for e in "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?*; do
+      { [ -e "$e" ] || [ -L "$e" ]; } || continue
+      n="${e##*/}"
+      case "$n" in "$DB_NAME"|"$DB_NAME-wal"|"$DB_NAME-shm"|"$DB_NAME-journal"|"$DB_NAME.lock") continue ;; esac
+      [ "$n" = "$KEEP_TOP" ] && continue
+      case " $BESIDE_DB " in *" $n "*) continue ;; esac
+      if [ -L "$e" ]; then continue   # removing the folder takes the link, not what it leads to
+      elif [ -d "$e" ]; then
+        # A folder below that cannot be read was passed over in silence, and
+        # rm -rf then took what it could around it, keys and all. Each folder
+        # find names is tested (a Mac's find has no -readable).
+        while IFS= read -r -d '' f; do readable_dir "$f" || printf '?%s\n' "$f"; done < <(find "$e" -type d -print0 2>/dev/null)
+        while IFS= read -r -d '' f; do found_db "$f"; done < <(find "$e" -type f -print0 2>/dev/null)
+      else found_db "$e"; fi
+    done
+  }
+  # What other_databases found ($1), each named once (a -wal beside its
+  # database is not a second one), six at most. A function, not a $( ): bash
+  # before 4.0 ends a $( ) at the ) of a case pattern (scriptsBash32.test.ts).
+  say_other_databases() {
+    local l shown=0 more=0
+    while IFS= read -r l; do
+      case "$l" in =*-wal|=*-shm|=*-journal) grep -qxF -- "${l%-*}" <<<"$1" && continue ;; esac
+      if [ "$shown" -ge 6 ]; then more=$((more + 1)); continue; fi
+      shown=$((shown + 1))
+      case "$l" in
+        "?"*) if [ -d "${l#?}" ]; then echo "  kept ${l#?}: it cannot be read, so it may hold another database"
+              else echo "  kept ${l#?}: it cannot be read, so it may be another database"; fi ;;
+        *) echo "  kept ${l#?}: another database, not this install's (another install's, or a copy of one)" ;;
+      esac
+    done <<<"$1"
+    [ "$more" = 0 ] || echo "  …and $more more in $DATA_DIR"
+  }
+  # This install's own: its database, what SQLite keeps beside it, and the
+  # server's lock (an empty file: src/store/instanceLock.ts), which is no
+  # database: left alone by a server that ran, it goes unsaid.
+  rm_db() {
+    local f had=0 left=""
+    for f in "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" "$DB_PATH-journal"; do
+      { [ -e "$f" ] || [ -L "$f" ]; } || continue
+      had=1; rm -f "$f" 2>/dev/null || left="$left $f"
+    done
+    if [ -e "$DB_PATH.lock" ] || [ -L "$DB_PATH.lock" ]; then rm -f "$DB_PATH.lock" 2>/dev/null || left="$left $DB_PATH.lock"; fi
+    if [ -n "$left" ]; then echo "  could NOT remove$left"
+    elif [ "$had" = 1 ]; then echo "  removed the database in $DATA_DIR ($1)"
+    else echo "  no database of this install's was left in $DATA_DIR ($1)"; fi
+  }
+  # What the app keeps beside its database says nothing of which install's it
+  # is: where Hatchabot's own folder stays, it stays too, and is named, with
+  # the keys in it. In a folder that is not Hatchabot's it is never removed (a
+  # models/ there may be the household's), but named all the same: it went
+  # unsaid, the memory search service's key with it (HB-1152). $1: why it
+  # stays, when not that it names no install; $2: what to do about it.
+  say_beside() {
+    local n left="" keys="" verb=holds
+    local why="nothing in them says which install's they are" todo="Delete them if no other install keeps its database there"
+    [ -z "${1:-}" ] || why="$1"; [ -z "${2:-}" ] || todo="$2"
+    for n in $BESIDE_DB; do
+      { [ -e "$DATA_DIR/$n" ] || [ -L "$DATA_DIR/$n" ]; } || continue
+      if [ -d "$DATA_DIR/$n" ] && [ ! -L "$DATA_DIR/$n" ]; then n="$n/"; fi
+      left="$left $n"
+      case "$n" in embed/|embed-hosts/) [ -z "$keys" ] || { keys="$keys and "; verb=hold; }; keys="$keys$n" ;; esac
+    done
+    [ -n "$left" ] || return 0
+    [ -z "$keys" ] || keys=" $keys $verb the memory search service's keys."
+    echo "  kept$left in $DATA_DIR: the app keeps them beside its database, and $why.$keys $todo"
+  }
   # The whole directory only when it is Hatchabot's own (the install's data/
-  # or a folder named hatchabot-data, as docs/releasing.md sets one up); a
-  # database placed elsewhere (a home directory, a NAS folder) loses only its
-  # own files (26th audit). By the folder's own name, not anywhere in its
-  # path: a database in .../hatchabot-data-old/shared/ took the whole shared
-  # folder with it (audit #025).
+  # or a folder named hatchabot-data, as docs/releasing.md sets one up), and
+  # no other database is in it; a database placed elsewhere (a home
+  # directory, a NAS folder) loses only its own files (26th audit). By the
+  # folder's own name, not anywhere in its path: a database in
+  # .../hatchabot-data-old/shared/ took the whole shared folder with it
+  # (audit #025).
   case "$DATA_DIR" in
     "$ENV_DIR/data"|*/hatchabot-data|*/agentclaw-data)
+      OTHER_DBS=""
+      [ "$DB_ONLY" = 1 ] || [ ! -d "$DATA_DIR" ] || OTHER_DBS="$(other_databases)"
+      if [ -n "$OTHER_DBS" ]; then
+        DB_ONLY=1
+        if grep -q '^=' <<<"$OTHER_DBS"; then KEEP_DATA_WHY="another database shares the folder, so the folder stays"
+        else KEEP_DATA_WHY="part of it cannot be read, and may be another install's, so the folder stays"; fi
+        say_other_databases "$OTHER_DBS"
+      fi
       if [ "$DB_ONLY" = 1 ]; then
-        rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" && echo "  removed the database in $DATA_DIR ($KEEP_DATA_WHY)"
+        rm_db "$KEEP_DATA_WHY"; say_beside
       elif [ -n "$KEEP_TOP" ]; then
         for e in "$D"/* "$D"/.[!.]* "$D"/..?*; do
           { [ -e "$e" ] || [ -L "$e" ]; } && [ "$e" != "$D/$KEEP_TOP" ] && rm -rf "$e"
@@ -716,7 +882,8 @@ if [ "$PURGE" = 1 ]; then
       else
         rm -rf "$DATA_DIR" && echo "  removed $DATA_DIR"
       fi ;;
-    *) rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" && echo "  removed the database in $DATA_DIR (the folder is not Hatchabot's own, so it stays)" ;;
+    *) rm_db "the folder is not Hatchabot's own, so it stays"
+       say_beside "the folder is not Hatchabot's own, so they may be yours too" "Delete those that are Hatchabot's if no other install keeps its database there" ;;
   esac
   [ -f "$ENV_DIR/.env" ] && rm -f "$ENV_DIR/.env" && echo "  removed $ENV_DIR/.env"
   if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then
@@ -741,6 +908,9 @@ elif [ "$PURGE" = 1 ] && [ -n "$RUNNERS" ]; then
   echo "Its agents on this machine, their volumes and the database are gone. These still run on their runners (--forget-runners), no longer managed from anywhere:"
   printf '%s\n' "$RUNNERS" | sed 's/^/  · /'
   echo "On each runner: docker ps -a, then docker rm -f <container> and docker volume rm <container>-vol."
+elif [ "$PURGE" = 1 ] && [ "$DB_FOUND" = 0 ]; then
+  echo "There was no database at $DB_PATH, so none of this install's agents were found, and none were removed. Any still here: docker ps -a, and docker volume ls."
+  if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then echo "Backups remain in $BACKUP_DIR (--backups removes them)."; fi
 elif [ "$PURGE" = 1 ]; then
   echo "Its agents, volumes and database are gone."
   if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then echo "Backups remain in $BACKUP_DIR (--backups removes them)."; fi

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -79,8 +79,63 @@ describe('putting a .env in order', () => {
   // Audit, 2026-10-29 (HB-0292, HB-0293): what a shell sourcing the file ends with, before and after.
   const sourced = (text: string, name: string) => {
     const home = mkdtempSync(join(tmpdir(), 'hb-env-sh-'));
-    return execFileSync('/bin/bash', ['--noprofile', '--norc', '-c', `${text}\nprintf %s "$${name}"`], { env: { HOME: home, PATH: home }, encoding: 'utf8' });
+    try {
+      return execFileSync('/bin/bash', ['--noprofile', '--norc', '-c', `${text}\nprintf %s "$${name}"`], { env: { HOME: home, PATH: home }, encoding: 'utf8' });
+    } finally { rmSync(home, { recursive: true, force: true }); }
   };
+
+  /**
+   * The same for many texts in one bash, each sourced in a subshell of its own: undefined where bash refused
+   * one, or it ended the subshell (`${NAME:?}`, an `exit`). Each writes its value to a file named for it, so
+   * one that ends before it writes moves no other.
+   */
+  const sourcedEach = (texts: string[], name: string): Array<string | undefined> => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-env-sh-'));
+    try {
+      texts.forEach((t, i) => writeFileSync(join(home, `${i}.env`), t));
+      const script = 'cd "$HOME"; for f in ' + texts.map((_, i) => i).join(' ') + '; do ( unset ' + name + '; . "./$f.env" >/dev/null 2>&1 </dev/null && printf "%s" "${' + name + '-}" > "./$f.out" ); done';
+      execFileSync('/bin/bash', ['--noprofile', '--norc', '-c', script], { env: { HOME: home, PATH: home }, encoding: 'utf8' });
+      return texts.map((_, i) => (existsSync(join(home, `${i}.out`)) ? readFileSync(join(home, `${i}.out`), 'utf8') : undefined));
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  };
+
+  // Review of HB-1241: a file whose sourcing ends its subshell (`${NAME:?}` unset, an `exit`) printed no record, and
+  // every record after it moved up one, so each later value was read against the text before it. Nor were its folders removed.
+  it('the helpers read each text as its own, one bash refuses or ends among them, and leave no folder behind', () => {
+    const folders = () => readdirSync(tmpdir()).filter((n) => n.startsWith('hb-env-sh-')).length;
+    const had = folders();
+    expect(sourcedEach(['HATCHABOT_PASSWORD=first\n', 'HATCHABOT_PASSWORD=${UNSET_FOR_THE_TEST:?}\n', 'HATCHABOT_PASSWORD=third\n', 'exit 3\n',
+      'HATCHABOT_PASSWORD=${BAD\n', 'false\n', 'HATCHABOT_PASSWORD="seventh\n"\n'], 'HATCHABOT_PASSWORD'))
+      .toEqual(['first', undefined, 'third', undefined, undefined, undefined, 'seventh\n']);
+    expect(sourced('HATCHABOT_PASSWORD=made-up\n', 'HATCHABOT_PASSWORD')).toBe('made-up');
+    expect(folders()).toBe(had);
+  });
+
+  it('reads a setting named just before a single-quoted part as ending there (HB-1054)', () => {
+    // Taken out with nothing in its place, the quoted part joined what came after it to the name:
+    // `$CUSTOM_SUFFIX''x` read as `$CUSTOM_SUFFIXx`, and the tidy moved the password above CUSTOM_SUFFIX.
+    const forms = [`$CUSTOM_SUFFIX''x`, `$CUSTOM_SUFFIX'$'x`, `$CUSTOM_SUFFIX'"'x`, `$CUSTOM_SUFFIX'\\'x`, `$CUSTOM_SUFFIX'$CUSTOM_SUFFIX'x`, `$CUSTOM_SUFFIX' 'x`, `x$CUSTOM_SUFFIX'$'x`, `}$CUSTOM_SUFFIX''x`];
+    const read = sourcedEach(forms.map((v) => `CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=${v}\n`), 'HATCHABOT_PASSWORD');
+    forms.forEach((v, i) => {
+      expect(read[i], v).toMatch(/fixture/);
+      expect(syncEnvText(`CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=${v}\n`).ok, v).toBe(false);
+    });
+  });
+
+  it('a tidy it takes reads the same to a shell: every value of up to four shell pieces that names a setting (HB-1054)', () => {
+    const PIECES = ['"', "'", "$'", '\\', '$CUSTOM_SUFFIX', 'x', '}', ' #', ' '];
+    const values: string[] = [];
+    const walk = (v: string, n: number) => { if (v.includes('$CUSTOM_SUFFIX')) values.push(v); if (n < 4) for (const p of PIECES) walk(v + p, n + 1); };
+    walk('', 0);
+    const taken = values.flatMap((v) => {
+      const text = `CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=${v}\n`;
+      const r = syncEnvText(text);
+      return r.ok && r.changed ? [{ v, text, tidied: r.text }] : [];
+    });
+    expect(taken.length).toBeGreaterThan(50); // it still tidies the files it can
+    const read = sourcedEach(taken.flatMap((t) => [t.text, t.tidied]), 'HATCHABOT_PASSWORD');
+    expect(taken.filter((t, i) => read[2 * i] !== undefined && read[2 * i] !== read[2 * i + 1]).map((t) => t.v)).toEqual([]);
+  });
 
   it('leaves a file alone when a value names a lowercase setting or one inside $((…)) that the tidy would move', () => {
     for (const text of ['custom_port=8123\nPORT=$custom_port\n', 'CUSTOM_PORT=8123\nPORT=$((CUSTOM_PORT+1))\n', 'CUSTOM_PORT=8123\nPORT=${#CUSTOM_PORT}\n']) {
@@ -93,6 +148,63 @@ describe('putting a .env in order', () => {
       const r = syncEnvText(text);
       expect(r.ok && r.changed, text).toBe(true);
       expect(sourced((r as { text: string }).text, 'PORT'), text).toBe(sourced(text, 'PORT'));
+    }
+  });
+
+  it('leaves a file alone when a value names a setting between single quotes that sit inside double quotes, where a shell expands it (HB-1054)', () => {
+    const text = `CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD="prefix'$CUSTOM_SUFFIX'"\n`;
+    expect(sourced(text, 'HATCHABOT_PASSWORD')).toBe("prefix'fixture'");
+    const r = syncEnvText(text);
+    expect(r.ok).toBe(false);
+    expect((r as { error: string }).error).toBe('HATCHABOT_PASSWORD uses a $ that would be read in another order — left as it was');
+    // Single quotes of their own, or a double quote inside them, still keep a $ a character: tidied, and reads the same.
+    for (const t of [`CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD='prefix"$CUSTOM_SUFFIX"'\n`, `CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD="pre"'$CUSTOM_SUFFIX'\n`]) {
+      const ok = syncEnvText(t);
+      expect(ok.ok && ok.changed, t).toBe(true);
+      expect(sourced((ok as { text: string }).text, 'HATCHABOT_PASSWORD'), t).toBe(sourced(t, 'HATCHABOT_PASSWORD'));
+    }
+    // An escaped quote opens nothing: the $ after it is still seen.
+    expect(syncEnvText(`CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=pre\\'$CUSTOM_SUFFIX\n`).ok).toBe(false);
+  });
+
+  // HB-1241: inside double quotes, `${…}`, `$(…)` and backticks open quotes of their own, which
+  // the walk does not follow: it took the inner `"…"` for the outer's end, and the `'…'` in it for
+  // single quotes, so the setting named there was not seen and the tidy moved the value above it.
+  it('leaves a file alone when a value names a setting in quotes nested inside ${…}, $(…) or backticks within double quotes (HB-1241)', () => {
+    const forms = [`"\${U:-"'$CUSTOM_SUFFIX'"}"`, `"$(echo "'$CUSTOM_SUFFIX'")"`, `"\`echo "'$CUSTOM_SUFFIX'"\`"`, `"\${U:-"$CUSTOM_SUFFIX"}"`, `"pre\${U:+x}'$CUSTOM_SUFFIX'"`];
+    const texts = forms.map((v) => `CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=${v}\n`);
+    const read = sourcedEach(texts, 'HATCHABOT_PASSWORD');
+    forms.forEach((v, i) => {
+      expect(read[i], v).toMatch(/fixture/);
+      const r = syncEnvText(texts[i]!);
+      expect(r, v).toEqual({ ok: false, error: 'HATCHABOT_PASSWORD uses a $ that would be read in another order — left as it was' });
+    });
+    // One that names no setting of the file reads the same in any order: tidied, and reads the same.
+    for (const value of [`"\${U:-made-up}/x"`, `"$(printf made-up)"`, `"\${U:-"'made-up'"}"`]) {
+      const t = `CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=${value}\n`;
+      const r = syncEnvText(t);
+      expect(r.ok && r.changed, value).toBe(true);
+      expect(sourced((r as { text: string }).text, 'HATCHABOT_PASSWORD'), value).toBe(sourced(t, 'HATCHABOT_PASSWORD'));
+    }
+  });
+
+  it("leaves a file alone when a value uses bash's $'…' quoting, where \\' does not end the quote (HB-1054)", () => {
+    const text = `CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=$'\\'\\''$CUSTOM_SUFFIX\\'\n`;
+    expect(sourced(text, 'HATCHABOT_PASSWORD')).toBe("''fixture'");
+    const r = syncEnvText(text);
+    expect(r).toEqual({ ok: false, error: "HATCHABOT_PASSWORD uses $'…' quoting, which this tidy does not read — left as it was" });
+    // One that names no setting is refused as well: what it names is not read.
+    expect(syncEnvText(`CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=$'it\\'s'\n`).ok).toBe(false);
+    // A file that is tidy already is no change, and no warning at every start.
+    const tidy = renderEnv(text);
+    expect(renderEnv(tidy)).toBe(tidy);
+    expect(syncEnvText(tidy)).toEqual({ ok: true, changed: false });
+    // A $ before a ' that is not that quoting (in quotes, or escaped): tidied as any value, and read the same.
+    for (const value of [`'made-up-secret$'`, `"made-up$'secret"`, `made-up\\$'secret'`]) {
+      const t = `CUSTOM_SUFFIX=fixture\nHATCHABOT_PASSWORD=${value}\n`;
+      const r2 = syncEnvText(t);
+      expect(r2.ok && r2.changed, value).toBe(true);
+      expect(sourced((r2 as { text: string }).text, 'HATCHABOT_PASSWORD'), value).toBe(sourced(t, 'HATCHABOT_PASSWORD'));
     }
   });
 

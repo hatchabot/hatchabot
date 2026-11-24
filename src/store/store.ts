@@ -17,9 +17,46 @@ import type {
   Membership,
   MemberRole,
   ChannelKind,
+  DiscordBotRow,
 } from '../domain/types.js';
-import type { DiscordBotRow } from '../orchestrator/discordPool.js';
 import { assertTransition } from '../domain/stateMachine.js';
+import { applySchemaSteps, checkSchemaVersion } from './schemaVersion.js';
+
+/**
+ * What is kept for an agent across a restart (the `agent_holds` table,
+ * HB-0809; docs/architecture.md, "In-memory state, sorted"):
+ *  - `class-detach`: the class (its id) it may leave once that class's edit
+ *    is done, decided at the next start when a restart came first
+ *    (lifecycle/classChanges.ts, HB-0820);
+ *  - `model-waits-image`: the class's model it runs only once the image
+ *    that can run it is on (classChanges.ts);
+ *  - `model-apply`: a model stored for it that its runtime has still to be
+ *    told; the value names the ask (lifecycle/modelRuntime.ts);
+ *  - `embed-reindex`: the memory index to rebuild after a build that changed
+ *    its memory search engine, as JSON (provision.ts, reindexMemoryIfSwitched);
+ *  - `skip-pool`: a new agent whose owner declined a pool bot, until its
+ *    channel step is parked for a token or has its bot (provision.ts);
+ *  - `pending-joins`: the people who joined it by an invite, each waiting
+ *    for their first message, with the up-time their window had left, as
+ *    JSON (members/invitations.ts; HB-0992, and one to a running agent too,
+ *    HB-0838);
+ *  - `budget-pause`: a budget's pause whose stop is under way, until its
+ *    pause is recorded or the stop did not take, as JSON (the month, the
+ *    budget's scope, when): a restart between the stop and the record left a
+ *    stopped agent the next pass read as stopped by hand (usage/budgets.ts,
+ *    HB-0835);
+ *  - `docs-sync`: a sync of its managed AGENTS.md sections that is owed, from
+ *    the change that asked for it until the sections are on the file (a
+ *    sync refused because the agent was busy, or that failed, leaves it
+ *    owed); the value names the ask (routes.ts `syncDocsHeld`, and the
+ *    operator profile's push to every running agent, ops/hatchabotAgent.ts,
+ *    HB-0834);
+ *  - `first-contact`: each watch for a first message under way, with what
+ *    its window needs that its `pairing_windows` row does not say, as JSON
+ *    (members/claim.ts `claimFirstContact`, watched again at the next start
+ *    by `resumeFirstContacts`, HB-0838).
+ */
+export type AgentHoldKind = 'class-detach' | 'model-waits-image' | 'model-apply' | 'embed-reindex' | 'skip-pool' | 'pending-joins' | 'budget-pause' | 'docs-sync' | 'first-contact';
 
 /** How a group section sorts itself: A→Z by name, or newest first. */
 export type SectionSort = 'name' | 'time' | 'activity';
@@ -134,7 +171,7 @@ export function tokenRise(prev: number, next: number): number {
   return next > prev ? next - prev : 0;
 }
 
-/** An app installed in an agent (orchestrator/apps.ts). */
+/** An app installed in an agent (orchestrator/apps/apps.ts). */
 export interface AgentApp {
   agentId: string; app: string; source: string; ref: string; sha: string; manifest: unknown;
   previousSha?: string; previousManifest?: unknown; installedAt: string; testOk?: boolean;
@@ -197,6 +234,8 @@ export const OWNER_COLUMNS: ReadonlyArray<{
   { table: 'agent_todos', column: 'owner_id', how: 'move' },
   // Google connections vanished from the vault; parked pool bots could not be leased.
   { table: 'connections', column: 'owner_id', how: 'move', usedBy: { table: 'agent_connections', column: 'connection_id', agent: 'agent_id' } },
+  // A deleted connection's token still to end: tried in its owner's vault turn, so with the account's own links (HB-0901).
+  { table: 'connection_cleanups', column: 'owner_id', how: 'move' },
   // Made by the pool module when it first starts.
   { table: 'telegram_pool', column: 'owner_id', how: 'move', agent: 'leased_to' },
   { table: 'usage_snapshots', column: 'owner_id', how: 'keep-new-drop' },
@@ -247,6 +286,10 @@ export class Store {
   }
 
   #migrate(): void {
+    // Before anything here touches it: a database a newer release changed in
+    // a way this one cannot work with stops the start (SchemaTooNewError);
+    // one newer by additive steps only is warned of once (schemaVersion.ts).
+    const schema = checkSchemaVersion(this.db);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
 
@@ -366,6 +409,22 @@ export class Store {
       CREATE TABLE IF NOT EXISTS connection_removals (
         agent_id TEXT NOT NULL, email TEXT NOT NULL, PRIMARY KEY (agent_id, email)
       );
+      -- An account taken off an agent and verified gone, and when: a backup
+      -- restored puts back a volume as it was, and one made before then
+      -- holds the account again, with nothing left that names it (HB-1085).
+      CREATE TABLE IF NOT EXISTS connection_removed (
+        agent_id TEXT NOT NULL, email TEXT NOT NULL, removed_at TEXT NOT NULL, PRIMARY KEY (agent_id, email)
+      );
+      -- A deleted connection's refresh token still to end (HB-0901): its
+      -- row went and this came in one step. It is revoked at Google unless
+      -- a connection still here shares its grant, then deleted from the
+      -- secret store; the row goes once both are done. Until then the
+      -- vault's pass tries again (tries, tried_at, error: the last try).
+      CREATE TABLE IF NOT EXISTS connection_cleanups (
+        secret_ref TEXT PRIMARY KEY, kind TEXT NOT NULL, owner_id TEXT NOT NULL,
+        email TEXT NOT NULL, client_id TEXT, created_at TEXT NOT NULL,
+        tries INTEGER NOT NULL DEFAULT 0, tried_at TEXT, error TEXT
+      );
       -- What Hatchabot last found inside a running agent, per thing it can
       -- reach (docs/access-overview-design.md): present 1/0, NULL = could not
       -- check. The newest result only; checked_at says when.
@@ -462,6 +521,12 @@ export class Store {
       CREATE TABLE IF NOT EXISTS token_samples (
         agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, total INTEGER NOT NULL,
         PRIMARY KEY (agent_id, at)
+      );
+      -- A deleted AI source, as its readings above still name it: how its
+      -- tokens were paid for (a plan's stay included, not billed API), its
+      -- name and model (HB-0931; formerAIProfile).
+      CREATE TABLE IF NOT EXISTS ai_profile_tombstones (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, vendor TEXT NOT NULL, kind TEXT NOT NULL, model TEXT, deleted_at TEXT NOT NULL
       );
       -- Which reading token_samples holds. Before 2026-09-28 it was each
       -- session's context size (OpenClaw's totalTokens), not usage: those
@@ -695,6 +760,15 @@ export class Store {
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
         mount_name TEXT, secret_ref TEXT, created_at TEXT NOT NULL
       );
+      -- What a restart may not lose for an agent (HB-0809; AgentHoldKind): a
+      -- step one process has still to take, or a fact only it knew, kept
+      -- here so the next process takes it up (the agent settings service at
+      -- its start, a resumed rebuild). One row per agent and kind; the value
+      -- is the kind's own. Never a secret.
+      CREATE TABLE IF NOT EXISTS agent_holds (
+        agent_id TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, kind)
+      );
       CREATE TABLE IF NOT EXISTS agent_env (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
         name TEXT NOT NULL, secret_ref TEXT NOT NULL,
@@ -836,6 +910,50 @@ export class Store {
         built_at TEXT
       );
     `);
+
+    this.db.exec(`
+      -- The scheduled tasks an adopt gave an agent (HB-0985): each by the
+      -- OpenClaw agent it came from and its id in that store, and the copy it
+      -- became here (NULL: the gateway did not say). A later adopt or retry
+      -- knows a task it carried by this, not by what the copy looks like now:
+      -- the sweep re-points a carried copy, and OpenClaw gives one with no
+      -- delivery its own. The row ('*', '*') says an adopt's copies may be on
+      -- the agent unrecorded: an older release made it (or adopted into it),
+      -- or an adopt carried tasks from a store that gives them no ids. The
+      -- row ('+', '+') says this release made it (Store.insertAgent).
+      CREATE TABLE IF NOT EXISTS adopt_carried_tasks (
+        agent_id TEXT NOT NULL, source_agent TEXT NOT NULL, source_id TEXT NOT NULL,
+        copy_id TEXT, at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, source_agent, source_id)
+      );
+      -- What each skill Practice spent (HB-0933), per model, read before its
+      -- temporary folder was removed: its calls were in that folder's
+      -- transcript (or, when no transcript held them, are what the run
+      -- reported), which nothing else reads, so the usage, spike and source
+      -- rollups and the budget totals add these rows. usd and unpriced_tokens
+      -- are priced when written, as a cost day is. Numbers only, kept as
+      -- long as cost days (budgets.ts KEEP_DAYS), and kept for a deleted
+      -- agent, whose spend still counts on its days.
+      CREATE TABLE IF NOT EXISTS practice_usage (
+        agent_id TEXT NOT NULL, run TEXT NOT NULL, model TEXT NOT NULL,
+        profile_id TEXT, at TEXT NOT NULL, day TEXT NOT NULL,
+        skill TEXT NOT NULL, status TEXT NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0, input REAL NOT NULL DEFAULT 0, output REAL NOT NULL DEFAULT 0,
+        cache_read REAL NOT NULL DEFAULT 0, cache_write REAL NOT NULL DEFAULT 0,
+        usd REAL NOT NULL DEFAULT 0, unpriced_tokens REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (agent_id, run, model)
+      );
+      CREATE INDEX IF NOT EXISTS practice_usage_day ON practice_usage (day);
+    `);
+    // Checked at every start, not once (HB-0985): a live agent with no row
+    // at all was made by an older release, before this table or since (an
+    // upgrade rolled back: an additive change, so the older release runs),
+    // and an adopt there kept no record of what it carried. Marked, a task
+    // with no record is matched on it the old way (cronImport.ts migrateCrons).
+    this.db.prepare(`INSERT OR IGNORE INTO adopt_carried_tasks (agent_id, source_agent, source_id, copy_id, at)
+      SELECT id, '*', '*', NULL, ? FROM agents
+       WHERE state != 'DELETED' AND NOT EXISTS (SELECT 1 FROM adopt_carried_tasks c WHERE c.agent_id = agents.id)`)
+      .run(new Date().toISOString());
     // Management proposals: a change the assistant prepared, waiting for its
     // owner's Confirm. In the database so they survive a restart, show on the
     // home screen, and (later) can be filed by a propose-only agent.
@@ -1054,7 +1172,7 @@ export class Store {
       );
     `);
     // Windows that were open when this version arrived move to the per-seat
-    // table once; the old table is then left empty (its ALTER below still runs).
+    // table once; the old table is then left empty (its schema step still applies to it).
     try {
       const old = this.db.prepare(`SELECT agent_id, until, opened_for, expect FROM pairing_window`).all() as Array<{ agent_id: string; until: string; opened_for: string | null; expect: string | null }>;
       for (const r of old) {
@@ -1062,255 +1180,12 @@ export class Store {
           .run(r.agent_id, `telegram:${r.opened_for ?? 'owner'}`, r.until, r.opened_for, r.expect);
       }
       if (old.length) this.db.prepare(`DELETE FROM pairing_window`).run();
-    } catch { /* a database from before the expect column: the ALTER below adds it and the next boot moves the rows */ }
-    // Additive dev migrations for databases created before these columns
-    // existed. Harmless when the column is already there.
-    for (const alter of [
-      `ALTER TABLE pairing_windows ADD COLUMN generation TEXT`,
-      `ALTER TABLE agents ADD COLUMN shared_memory INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE agent_cost_days ADD COLUMN unpriced_tokens REAL NOT NULL DEFAULT 0`,
-      // When a removal was first recorded: one pending for over a day is an Alerts line (access overview).
-      `ALTER TABLE connection_removals ADD COLUMN created_at TEXT`,
-      `ALTER TABLE agents ADD COLUMN pending_action TEXT`,
-      `ALTER TABLE memberships ADD COLUMN display_name TEXT`,
-      `ALTER TABLE ai_profiles ADD COLUMN models TEXT`,
-      `ALTER TABLE ai_profiles ADD COLUMN base_url TEXT`,
-      `ALTER TABLE cli_tokens ADD COLUMN expires_at TEXT`,
-      `ALTER TABLE cli_tokens ADD COLUMN scope TEXT`,
-      `ALTER TABLE agents ADD COLUMN applied_profile_id TEXT`,
-      `ALTER TABLE agents ADD COLUMN applied_model TEXT`,
-      // When the applied source last changed, and from which: usage before
-      // that instant is the old source's (sourceUsage.ts).
-      `ALTER TABLE agents ADD COLUMN applied_profile_prev TEXT`,
-      `ALTER TABLE agents ADD COLUMN applied_profile_at TEXT`,
-      `ALTER TABLE agents ADD COLUMN migrated_to TEXT`,
-      `ALTER TABLE agents ADD COLUMN shared_paths TEXT`,
-      `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
-      `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
-      `ALTER TABLE ai_profiles ADD COLUMN shared INTEGER NOT NULL DEFAULT 0`,
-      // The management bot's LLM rides this source (single-select per owner).
-      `ALTER TABLE ai_profiles ADD COLUMN mgmt_llm INTEGER NOT NULL DEFAULT 0`,
-      // Optional per-agent model override (cloud only). NULL = follow the
-      // profile's default model.
-      `ALTER TABLE agents ADD COLUMN model TEXT`,
-      // Owner-defined organization: an optional group label and a manual order.
-      `ALTER TABLE agents ADD COLUMN group_name TEXT`,
-      `ALTER TABLE agents ADD COLUMN image TEXT`,
-      `ALTER TABLE agents ADD COLUMN sort_order INTEGER`,
-      // Bind an adopted agent's folder at its original host path, so existing
-      // absolute-path references resolve unchanged.
-      `ALTER TABLE data_sources ADD COLUMN mount_at_host_path INTEGER NOT NULL DEFAULT 0`,
-      // Last git clone/refresh result, so a repo that never cloned (usually its
-      // deploy key isn't on the host yet) is visible on the card instead of
-      // only in the audit log.
-      `ALTER TABLE data_sources ADD COLUMN sync_error TEXT`,
-      `ALTER TABLE data_sources ADD COLUMN synced_at TEXT`,
-      // Setup fields this agent's shares/templates ask the importer to fill
-      // (JSON array of TemplateParam; sharing Phase 2a).
-      `ALTER TABLE agents ADD COLUMN params TEXT`,
-      // A configured template copy's editable state: the values applied and
-      // the raw placeholder-bearing layer they render into (JSON) — what lets
-      // setup values be edited or reset later without a re-import.
-      `ALTER TABLE agents ADD COLUMN param_values TEXT`,
-      `ALTER TABLE agents ADD COLUMN param_files TEXT`,
-      // Telegram group-chat access (domain/types.ts GroupAccess), JSON.
-      `ALTER TABLE agents ADD COLUMN group_access TEXT`,
-      // Lineage: the master this agent was derived from (same installation).
-      `ALTER TABLE agents ADD COLUMN parent_agent_id TEXT`,
-      // Telegram rich formatting: NULL = managed default (on), 0 = opt-out.
-      `ALTER TABLE agents ADD COLUMN rich_messages INTEGER`,
-      `ALTER TABLE agents ADD COLUMN files_max_mb INTEGER`,
-      `ALTER TABLE agents ADD COLUMN cron_triggers INTEGER`,
-      `ALTER TABLE agents ADD COLUMN curated_skills TEXT`,
-      `ALTER TABLE agents ADD COLUMN applied_curated_skills TEXT`,
-      // Its own browser (src/orchestrator/browser.ts): off unless switched on.
-      `ALTER TABLE agents ADD COLUMN browser INTEGER`,
-      // Memory search engine: baked (NULL) or the machine's shared service.
-      `ALTER TABLE agents ADD COLUMN embed_mode TEXT`,
-      `ALTER TABLE agents ADD COLUMN applied_embed_mode TEXT`,
-      `ALTER TABLE agents ADD COLUMN embed_indexed_at TEXT`,
-      `ALTER TABLE agents ADD COLUMN embed_index_error TEXT`,
-      // The key a build re-mints joins the old one until the build is accepted.
-      `ALTER TABLE embed_tokens ADD COLUMN prev_token_hash TEXT`,
-      // The machine whose memory search service the key is for (null: this one, minted before runners had one).
-      `ALTER TABLE embed_tokens ADD COLUMN host_id TEXT`,
-      // An "application" class = model + source + runtime image.
-      `ALTER TABLE agent_classes ADD COLUMN image TEXT`,
-      // Template-carried schedules awaiting the gateway (applied on RUNNING).
-      `ALTER TABLE agents ADD COLUMN pending_schedules TEXT`,
-      // Which agent a share was cut from — lets an accepted copy record lineage.
-      `ALTER TABLE agent_shares ADD COLUMN source_agent_id TEXT`,
-      // Per-agent and per-class memory cap (memoryCap.ts); the baseline hides cap hits from before the last change.
-      `ALTER TABLE agents ADD COLUMN memory_cap TEXT`,
-      `ALTER TABLE agents ADD COLUMN memory_cap_baseline INTEGER`,
-      // …and when the container it was read from started: a later start is a new counter (HB-0234).
-      `ALTER TABLE agents ADD COLUMN memory_cap_baseline_started TEXT`,
-      // "Clear peaks" on Status → Resources: the peak the kernel keeps is
-      // since the container started and root's to reset, so the app keeps
-      // its own high-water mark from when the owner last cleared it.
-      `ALTER TABLE agents ADD COLUMN memory_peak_since INTEGER`,
-      `ALTER TABLE agents ADD COLUMN memory_peak_cleared_at TEXT`,
-      // Hibernation (hibernate.ts): when the idle sweep put it to sleep, and an agent's opt-out.
-      `ALTER TABLE agents ADD COLUMN hibernated_at TEXT`,
-      `ALTER TABLE agents ADD COLUMN hibernate TEXT`,
-      // The wake time and the bedtime mark must survive a restart: kept in memory,
-      // a deploy forgot every wake and the next sweep put woken agents straight back (2026-09-26).
-      `ALTER TABLE agents ADD COLUMN woken_at TEXT`,
-      // A copy of the agent was downloaded while it stood stopped (transfer.ts): cleared when it runs again.
-      `ALTER TABLE agents ADD COLUMN exported_at TEXT`,
-      // Moved while stopped: its rebuild hook runs at its next start (moveHost.ts), set when that became due.
-      `ALTER TABLE agents ADD COLUMN rebuild_hook_due TEXT`,
-      // A change only a new container picks up, made while it stood stopped or asleep: its next start is a rebuild (HB-0411).
-      `ALTER TABLE agents ADD COLUMN rebuild_on_start TEXT`,
-      // A restore, clone, child or import: with no bot free it goes on web-only, at a Retry too (HB-0415). Cleared once it runs.
-      `ALTER TABLE agents ADD COLUMN web_only_if_no_bot INTEGER`,
-      `ALTER TABLE agents ADD COLUMN hibernate_mark INTEGER`,
-      `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
-      // Compressed swap (swap.ts): an agent's or a class's allowance on top of its memory cap; "off" or a size, NULL = inherit.
-      `ALTER TABLE agents ADD COLUMN swap_allowance TEXT`,
-      `ALTER TABLE agent_classes ADD COLUMN swap_allowance TEXT`,
-      // "Clear from Alerts": the fingerprint of what was flagged when the owner cleared it.
-      `ALTER TABLE agents ADD COLUMN attention_ack TEXT`,
-      // The message a managed task was made with, so a new release's wording reaches it (modelReview.ts).
-      `ALTER TABLE managed_crons ADD COLUMN message_hash TEXT`,
-      // Installation-wide default AI source for NEW agents (single-select):
-      // preselected in the create form and preferred by importTemplate's
-      // silent fallback — the "household default" once per-member profiles
-      // are retired. Only applies where the profile is visible (own/shared).
-      `ALTER TABLE ai_profiles ADD COLUMN default_source INTEGER NOT NULL DEFAULT 0`,
-      // The order the owner put their sources in (⚙ Settings → AI, ▲▼). A
-      // local model that is rarely picked belongs at the bottom of every list
-      // it appears in, and the default belongs at the top. Nullable like
-      // agents.sort_order, so the backfill below runs once.
-      `ALTER TABLE ai_profiles ADD COLUMN sort_order INTEGER`,
-      // Who may reach this agent on a messaging app: 0 (the default, fleet-wide)
-      // admits only people you invited or already know; 1 lets anyone who finds
-      // the bot knock and wait for approval, which is how every agent behaved
-      // before 2026-09-20.
-      `ALTER TABLE agents ADD COLUMN allow_knocks INTEGER NOT NULL DEFAULT 0`,
-      // Who an invite is FOR, when the owner said so: a Telegram @handle. The
-      // claim window it opens then admits only that person.
-      `ALTER TABLE invites ADD COLUMN expect_handle TEXT`,
-      // Chat on the web (2026-09-29): a member the owner trusts to talk to the
-      // agent from this app, and the invite that grants it. Off by default —
-      // a web turn runs as the owner, so it is given, never assumed.
-      `ALTER TABLE memberships ADD COLUMN web_chat INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE invites ADD COLUMN web_chat INTEGER NOT NULL DEFAULT 0`,
-      // The app a redeemed invite was used for (2026-09-30): "Let them in
-      // again" reopens that one only. It opened a window on every app they
-      // were not linked on, and on a big Slack or Discord without a named
-      // handle the first stranger to message took the seat.
-      `ALTER TABLE invites ADD COLUMN redeemed_via TEXT`,
-      // …and the window the redeemed invite opens carries it. CREATE TABLE IF
-      // NOT EXISTS does nothing to a table that already exists, so a column
-      // added to one after it shipped needs this line or every read of it
-      // throws on an upgraded install (it did: v2.14.0, caught 2026-09-21).
-      `ALTER TABLE pairing_window ADD COLUMN expect TEXT`,
-      // The day's own use, summed from counter rises (a lifetime total that
-      // came back after an agent was away counted as that day's use; night review).
-      `ALTER TABLE usage_snapshots ADD COLUMN used_tokens INTEGER`,
-      // The doorman's own key, beside the manager's (30th audit).
-      `ALTER TABLE ops_tokens ADD COLUMN doorman_key TEXT`,
-      // A parked Discord bot: whom it last wrote to (told "this bot is now X"
-      // when reused), and which archived agent it is kept for (restore takes
-      // it back if nobody else did).
-      `ALTER TABLE discord_bots ADD COLUMN prior_chat_ids TEXT`,
-      `ALTER TABLE discord_bots ADD COLUMN archived_for TEXT`,
-      // The same pool holds parked Slack apps (their two tokens in one secret).
-      `ALTER TABLE discord_bots ADD COLUMN kind TEXT NOT NULL DEFAULT 'discord'`,
-      // The account's linked Telegram identity ("That's me" on a pairing card):
-      // the durable, account-level form of what knownChannelUserId used to
-      // infer from membership rows — survives deleting every agent, and lets a
-      // FRESH account link on its very first approval.
-      `ALTER TABLE accounts ADD COLUMN telegram_user_id TEXT`,
-      // Connection health/provenance: when an agent was first attached to a
-      // connection, and when it last materialized (pulled) that connection's
-      // token into its container. materialized_at < the connection's
-      // created_at (last consent) means the agent is running a STALE token —
-      // e.g. the account was reconnected but the agent never re-attached.
-      // Which Google OAuth client issued a connection's refresh token: a
-      // token only works with the client that issued it, so replacing the
-      // installation's client breaks every connection made with the old one.
-      // NULL = made before this was recorded.
-      `ALTER TABLE connections ADD COLUMN client_id TEXT`,
-      `ALTER TABLE connections ADD COLUMN client_secret_at TEXT`,
-      `ALTER TABLE agent_connections ADD COLUMN attached_at TEXT`,
-      `ALTER TABLE agent_connections ADD COLUMN materialized_at TEXT`,
-      // An agent-scoped cli-token: when set, this token authenticates a CALLER
-      // AGENT (not a user) to the agent-to-agent /message endpoint.
-      `ALTER TABLE cli_tokens ADD COLUMN agent_id TEXT`,
-      // The peer set (sorted csv of peer ids) that was live when this agent was
-      // last provisioned/rebuilt — the call-agent tool is installed on rebuild,
-      // so a grant that differs from this needs a rebuild to take effect.
-      `ALTER TABLE agents ADD COLUMN applied_peers TEXT`,
-      // The agent class (model/source tier) this agent belongs to, if any.
-      `ALTER TABLE local_accounts ADD COLUMN claim_code TEXT`,
-      `ALTER TABLE local_accounts ADD COLUMN claim_expires TEXT`,
-      // A recovery code: the way back in for someone with no Telegram and no
-      // one else to send them a reset link — the host owner, above all.
-      `ALTER TABLE local_accounts ADD COLUMN recovery_hash TEXT`,
-      `ALTER TABLE local_accounts ADD COLUMN recovery_salt TEXT`,
-      `ALTER TABLE local_accounts ADD COLUMN recovery_created TEXT`,
-      `ALTER TABLE agent_peers ADD COLUMN allow_actions INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE agents ADD COLUMN class_id TEXT`,
-      // Home-screen icon: an emoji and a #rrggbb tint (ui v2). Cosmetic.
-      `ALTER TABLE agents ADD COLUMN icon TEXT`,
-      `ALTER TABLE agents ADD COLUMN icon_color TEXT`,
-      // No Telegram bot: reached only through Hatchabot itself.
-      `ALTER TABLE agents ADD COLUMN web_only INTEGER NOT NULL DEFAULT 0`,
-      `ALTER TABLE agents ADD COLUMN ops INTEGER NOT NULL DEFAULT 0`,
-      // Slack/Discord: room access and display details, as JSON.
-      `ALTER TABLE channels ADD COLUMN settings TEXT`,
-      // The Hatchabot version this agent's runtime was last built against. A
-      // management agent reads its tool list once, when its gateway starts, so
-      // an upgrade that adds a tool needs it restarted before it can see one.
-      `ALTER TABLE agents ADD COLUMN applied_app_version TEXT`,
-      // Whose Brave key its container was built with: own, fleet or none
-      // (HB-0578 review). NULL: built before it was recorded.
-      `ALTER TABLE agents ADD COLUMN applied_search_key TEXT`,
-      // Budgets (v2.124.0): "switch to a cheaper model" at the limit, and the
-      // one reply a paused agent's bot sends each chat.
-      `ALTER TABLE budget_pauses ADD COLUMN kind TEXT NOT NULL DEFAULT 'pause'`,
-      `ALTER TABLE budget_pauses ADD COLUMN from_model TEXT`,
-      `ALTER TABLE budget_pauses ADD COLUMN to_model TEXT`,
-      `ALTER TABLE budget_pauses ADD COLUMN replies TEXT`,
-      // A spike warning the owner cleared from Usage (v2.125.1): kept, not shown.
-      `ALTER TABLE usage_alerts ADD COLUMN dismissed_at TEXT`,
-      // A spike whose message a loop's message covered (v2.158.0): one cause, one message.
-      `ALTER TABLE usage_alerts ADD COLUMN covered TEXT`,
-      // Which source last_ok was a success on (v2.160.0): an agent's success
-      // before a source switch is not one on its new source.
-      `ALTER TABLE usage_cursor ADD COLUMN last_ok_profile TEXT`,
-      // A snapshot's setup-values layer (v2.160.0, JSON; the text 'null' = the
-      // agent had none, NULL = taken before it was recorded): a restore puts
-      // it back with the files, or the next value edit re-renders what was undone.
-      `ALTER TABLE snapshots ADD COLUMN params TEXT`,
-      // A pause recorded on an agent the budget did NOT stop (stopped by hand when the
-      // limit came, v2.166.0): it closes on the 1st or a raise, and the budget never
-      // starts the agent — before, it started every hand-stopped agent on the 1st.
-      `ALTER TABLE budget_pauses ADD COLUMN already_stopped INTEGER NOT NULL DEFAULT 0`,
-      // The removed git source's address (v2.167.0): its clone is deleted only
-      // when the folder still holds that repo. NULL (older removals): key only.
-      `ALTER TABLE data_source_removals ADD COLUMN repo_url TEXT`,
-      // Which request a waiting app install is (v2.170.0): the run that finishes
-      // drops or marks only the one it ran, never a newer one saved meanwhile
-      // (HB-0256). NULL: saved before it was recorded.
-      `ALTER TABLE agent_app_pending ADD COLUMN gen TEXT`,
-      // Keep its logins (HB-0680, docs/browser.md): the id of the browser
-      // profile it keeps, NULL when it keeps none. Forget gives it a new one,
-      // so a profile forgotten is never mounted again; the sweep removes it.
-      `ALTER TABLE agents ADD COLUMN browser_logins TEXT`,
-      // The sites opened in its sign-in panel while it keeps that profile, JSON.
-      `ALTER TABLE agents ADD COLUMN browser_sites TEXT`,
-    ]) {
-      try {
-        this.db.exec(alter);
-      } catch (e) {
-        // Swallow only "column already exists" — a genuinely malformed ALTER
-        // (typo, missing table) must surface, not run against a broken schema.
-        if (!/duplicate column name/i.test(String((e as Error)?.message ?? e))) throw e;
-      }
-    }
+    } catch { /* a database from before the expect column: its schema step below adds it and the next boot moves the rows */ }
+    // Columns added to tables that already existed: the numbered steps in
+    // schemaVersion.ts, each run once (HB-0813). A new column gets a step
+    // there, appended; before, they were a list of ALTERs here that ran on
+    // every start.
+    if (schema.kind === 'behind') applySchemaSteps(this.db);
     // token_samples held context sizes until 2026-09-28: dropped once, so the
     // first real reading does not count the whole history as that moment's use.
     // 'transcripts-archives' (v2.104.0): the counter also holds deleted and
@@ -1423,7 +1298,7 @@ export class Store {
       })();
     }
 
-    // Indexes on ALTER-added columns must come AFTER the additive loop — on a
+    // Indexes on columns a schema step adds must come AFTER the steps — on a
     // fresh DB the CREATE TABLE block doesn't have the column yet.
     this.db.exec(`CREATE INDEX IF NOT EXISTS agents_image ON agents (image)`);
     // One channel of each kind per agent. Guarded: a database that somehow holds
@@ -1566,7 +1441,7 @@ export class Store {
     // kept counting a deleted agent for days), claim windows (they carry an
     // invitee's @handle) and the lost-context note. Tables that may not exist
     // yet on an old database are skipped.
-    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'access_checks', 'data_source_removals', 'applied_source_changes', 'cron_notes'] as const) {
+    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals', 'connection_removed', 'access_checks', 'data_source_removals', 'applied_source_changes', 'cron_notes', 'agent_holds', 'adopt_carried_tasks'] as const) {
       try { this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId); }
       catch (err) { if (!/no such table/.test(String(err))) throw err; }
     }
@@ -1628,7 +1503,8 @@ export class Store {
 
   /**
    * The agent-scoped secrets nothing references any more: env values and
-   * deploy keys whose row is gone, and call tokens of agents that are gone.
+   * deploy keys whose row is gone, and call tokens of agents that are gone;
+   * and a deleted Google connection's token nothing names.
    * A failed delete (an agent's removal, an import's rollback, a source's
    * removal) left these with nothing to retry them; at boot they go. A
    * removed source's key still waiting in data_source_removals goes too —
@@ -1647,7 +1523,11 @@ export class Store {
               OR (s.ref LIKE 'telegram/pending/%' AND substr(s.ref, ${'telegram/pending/'.length + 1}) NOT IN (SELECT id FROM agents WHERE state != 'DELETED'))
               -- A waiting app's secret values no waiting row names (a delete that
               -- failed when it went in or was dropped; review, 2026-10-22).
-              OR (s.ref LIKE 'app-pending/%' AND NOT EXISTS (SELECT 1 FROM agent_app_pending p WHERE instr(p.vals, '"' || s.ref || '"') > 0))`,
+              OR (s.ref LIKE 'app-pending/%' AND NOT EXISTS (SELECT 1 FROM agent_app_pending p WHERE instr(p.vals, '"' || s.ref || '"') > 0))
+              -- A deleted Google connection's token that no connection and no
+              -- cleanup names: one an older release failed to delete (HB-0901).
+              -- Whose grant it was is not known, so it is deleted, not revoked.
+              OR (s.ref LIKE 'connection/%' AND s.ref NOT IN (SELECT secret_ref FROM connections) AND s.ref NOT IN (SELECT secret_ref FROM connection_cleanups))`,
         )
         .all() as Array<{ ref: string }>;
       const del = this.db.prepare(`DELETE FROM secrets WHERE ref = ?`);
@@ -1751,9 +1631,20 @@ export class Store {
   }
 
   deleteAIProfile(id: string): void {
-    this.db.prepare(`DELETE FROM ai_profiles WHERE id = ?`).run(id);
-    // A class naming it keeps its agents' own sources (night review).
-    this.db.prepare(`UPDATE agent_classes SET ai_profile_id = NULL WHERE ai_profile_id = ?`).run(id);
+    this.db.transaction(() => {
+      // Its readings still name it: kept as they were paid for (HB-0931).
+      this.db.prepare(`INSERT OR REPLACE INTO ai_profile_tombstones (id, name, vendor, kind, model, deleted_at)
+        SELECT id, name, vendor, kind, model, ? FROM ai_profiles WHERE id = ?`).run(new Date().toISOString(), id);
+      this.db.prepare(`DELETE FROM ai_profiles WHERE id = ?`).run(id);
+      // A class naming it keeps its agents' own sources (night review).
+      this.db.prepare(`UPDATE agent_classes SET ai_profile_id = NULL WHERE ai_profile_id = ?`).run(id);
+    })();
+  }
+
+  /** A deleted AI source, as it was: what its readings were paid by (usage, HB-0931). Never a source to use. */
+  formerAIProfile(id: string): Pick<AIProfile, 'id' | 'name' | 'vendor' | 'kind' | 'model'> | undefined {
+    const r = this.db.prepare(`SELECT id, name, vendor, kind, model FROM ai_profile_tombstones WHERE id = ?`).get(id) as { id: string; name: string; vendor: AIProfile['vendor']; kind: AIProfile['kind']; model: string | null } | undefined;
+    return r ? { id: r.id, name: r.name, vendor: r.vendor, kind: r.kind, model: r.model ?? '' } : undefined;
   }
 
   setAIProfileModels(id: string, models: string[] | undefined): void {
@@ -1923,6 +1814,10 @@ export class Store {
   }
 
   insertAgent(a: Agent): void {
+    this.db.transaction(() => this.#insertAgentRow(a))();
+  }
+
+  #insertAgentRow(a: Agent): void {
     this.db
       .prepare(
         `INSERT INTO agents (id, owner_id, name, slug, state, state_reason, ai_profile_id,
@@ -1951,6 +1846,10 @@ export class Store {
         curatedSkills: a.curatedSkills === undefined ? null : JSON.stringify(a.curatedSkills),
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
       });
+    // Made by this release, which records what an adopt into it carries: the
+    // start does not take it for an older release's (HB-0985).
+    this.db.prepare(`INSERT OR IGNORE INTO adopt_carried_tasks (agent_id, source_agent, source_id, copy_id, at) VALUES (?, '+', '+', NULL, ?)`)
+      .run(a.id, new Date().toISOString());
   }
 
   /**
@@ -2718,6 +2617,34 @@ export class Store {
     this.db.prepare(`DELETE FROM rate_hits WHERE at < ?`).run(at - keepMs);
     this.db.prepare(`INSERT INTO rate_hits (bucket, at) VALUES (?, ?)`).run(bucket, at);
   }
+  /**
+   * The sign-in lockouts (auth.ts, HB-0836) keep their counts in rate_hits
+   * too, each as `n` rows of its bucket whose `at` is when the count ends,
+   * not when one was made: a lock lasts up to a day, and the hour's pruning
+   * above (every bucket's rows an hour past their `at`) then keeps a live
+   * count whole and drops one an hour after it ended. Set in one
+   * transaction; 0 forgets it. The prune runs once a minute at most, by
+   * `at`'s index (step 114): run on every miss, with no index, it read the
+   * whole table each time a sign-in failed (HB-0836).
+   */
+  setRateCount(bucket: string, n: number, untilMs: number, nowMs = Date.now()): void {
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM rate_hits WHERE bucket = ?`).run(bucket);
+      if (Math.abs(nowMs - this.#ratePrunedAt) >= 60_000) {
+        this.#ratePrunedAt = nowMs;
+        this.db.prepare(`DELETE FROM rate_hits WHERE at < ?`).run(nowMs - 3_600_000);
+      }
+      const add = this.db.prepare(`INSERT INTO rate_hits (bucket, at) VALUES (?, ?)`);
+      for (let i = 0; i < n; i++) add.run(bucket, untilMs);
+    })();
+  }
+  #ratePrunedAt = 0;
+  /** Every count set by setRateCount under `prefix` that has not ended: its bucket, how many, and until when. */
+  rateCounts(prefix: string, nowMs = Date.now()): Array<{ bucket: string; n: number; until: number }> {
+    return this.db.prepare(
+      `SELECT bucket, COUNT(*) AS n, MAX(at) AS until FROM rate_hits WHERE substr(bucket, 1, length(?)) = ? AND at >= ? GROUP BY bucket`,
+    ).all(prefix, prefix, nowMs) as Array<{ bucket: string; n: number; until: number }>;
+  }
 
   /**
    * Spend a sign-in link's nonce: true the first time, false ever after (a
@@ -2862,37 +2789,56 @@ export class Store {
     createdAt: string;
     /** Lineage: which agent this share was cut from (same installation). */
     sourceAgentId?: string;
+    /** Its template's setup fields, as its file reads (HB-0960); left out, the inbox reads them once from the file. */
+    parameters?: TemplateParam[];
   }): void {
     this.db
       .prepare(
         `INSERT INTO agent_shares
-           (id, from_owner, from_email, to_email, to_owner, agent_name, message, blob, status, created_at, source_agent_id)
-         VALUES (@id, @fromOwner, @fromEmail, @toEmail, @toOwner, @agentName, @message, @blob, 'pending', @createdAt, @sourceAgentId)`,
+           (id, from_owner, from_email, to_email, to_owner, agent_name, message, blob, status, created_at, source_agent_id, parameters)
+         VALUES (@id, @fromOwner, @fromEmail, @toEmail, @toOwner, @agentName, @message, @blob, 'pending', @createdAt, @sourceAgentId, @parameters)`,
       )
       .run({
         id: s.id, fromOwner: s.fromOwner, fromEmail: s.fromEmail ?? null,
         toEmail: s.toEmail, toOwner: s.toOwner ?? null, agentName: s.agentName,
         message: s.message ?? null, blob: s.blob, createdAt: s.createdAt,
         sourceAgentId: s.sourceAgentId ?? null,
+        parameters: s.parameters ? JSON.stringify(s.parameters) : null,
       });
   }
 
-  /** Pending shares addressed to this owner (by bound owner OR their email). */
+  /** A share's template's setup fields, kept once read from its file (the inbox's list, HB-0960). */
+  setShareParameters(id: string, parameters: TemplateParam[]): void {
+    this.db.prepare(`UPDATE agent_shares SET parameters = ? WHERE id = ?`).run(JSON.stringify(parameters), id);
+  }
+
+  /**
+   * Pending shares addressed to this owner (by bound owner OR their email).
+   * `parameters`: its template's setup fields where they were kept (none
+   * kept, or unreadable: undefined). Never the file.
+   */
   listInbox(ownerId: string, email?: string): Array<{
-    id: string; fromEmail?: string; agentName: string; message?: string; createdAt: string;
+    id: string; fromEmail?: string; agentName: string; message?: string; createdAt: string; parameters?: TemplateParam[];
   }> {
     if (!ownerId.startsWith('user-')) return [];
     const rows = this.db
       .prepare(
-        `SELECT id, from_email, agent_name, message, created_at FROM agent_shares
+        `SELECT id, from_email, agent_name, message, created_at, parameters FROM agent_shares
          WHERE status = 'pending' AND (to_owner = ? OR (to_owner IS NULL AND to_email = ? COLLATE NOCASE))
          ORDER BY created_at DESC`,
       )
       .all(ownerId, email ?? '\u0000') as Array<any>;
-    return rows.map((r) => ({
-      id: r.id, fromEmail: r.from_email ?? undefined, agentName: r.agent_name,
-      message: r.message ?? undefined, createdAt: r.created_at,
-    }));
+    const kept = (text: string | null): TemplateParam[] | undefined => {
+      if (text == null) return undefined;
+      try { const v: unknown = JSON.parse(text); return Array.isArray(v) ? v as TemplateParam[] : undefined; } catch { return undefined; }
+    };
+    return rows.map((r) => {
+      const parameters = kept(r.parameters);
+      return {
+        id: r.id, fromEmail: r.from_email ?? undefined, agentName: r.agent_name,
+        message: r.message ?? undefined, createdAt: r.created_at, ...(parameters ? { parameters } : {}),
+      };
+    });
   }
 
   /** A share the given owner may act on (theirs by owner or unclaimed email). */
@@ -3342,7 +3288,7 @@ export class Store {
    * out an operation's own lines (op.started, op.step… — operations.ts), which
    * the Activity list shows as one row per operation instead.
    */
-  listEvents(agentIds: string[], limit = 60, opts: { withoutOps?: boolean } = {}): Array<{
+  listEvents(agentIds: string[], limit = 60, opts: { withoutOps?: boolean; eventLike?: readonly string[] } = {}): Array<{
     agentId: string;
     at: string;
     event: string;
@@ -3350,13 +3296,18 @@ export class Store {
   }> {
     if (agentIds.length === 0) return [];
     const marks = agentIds.map(() => '?').join(',');
+    // Only events whose name is LIKE one of these, chosen before the limit
+    // (a report's failures were the failures among the newest 400 of
+    // anything, so routine lines crowded them out; HB-1100).
+    const like = opts.eventLike ?? [];
+    const likeSql = like.length ? ` AND (${like.map(() => 'event LIKE ?').join(' OR ')})` : '';
     return (
       this.db
         .prepare(
           `SELECT agent_id, at, event, detail FROM agent_events
-           WHERE agent_id IN (${marks})${opts.withoutOps ? ` AND event NOT LIKE 'op.%'` : ''} ORDER BY id DESC LIMIT ?`,
+           WHERE agent_id IN (${marks})${opts.withoutOps ? ` AND event NOT LIKE 'op.%'` : ''}${likeSql} ORDER BY id DESC LIMIT ?`,
         )
-        .all(...agentIds, limit) as any[]
+        .all(...agentIds, ...like, limit) as any[]
     ).map((r) => ({
       agentId: r.agent_id,
       at: r.at,
@@ -3391,7 +3342,7 @@ export class Store {
     this.db.prepare(`DELETE FROM agent_events WHERE agent_id = ?`).run(agentId);
   }
 
-  // ---- Operations (orchestrator/operations.ts) ----------------------------
+  // ---- Operations (orchestrator/lifecycle/operations.ts) ----------------------------
 
   insertOperation(op: OperationRow): void {
     this.db
@@ -3437,14 +3388,28 @@ export class Store {
     return r ? operationFromRow(r) : undefined;
   }
 
-  /** Newest first: one agent's, or those of these agents. */
-  listOperations(agentIds: string[], limit = 50): OperationRow[] {
+  /**
+   * Newest first: one agent's, or those of these agents. `exceptKinds` are
+   * left out before the limit, not after: Activity dropping its background
+   * kinds from the newest 20 left none when 20 rebuilds were newer than a
+   * move (HB-1012).
+   */
+  listOperations(agentIds: string[], limit = 50, opts: { exceptKinds?: readonly string[] } = {}): OperationRow[] {
     if (!agentIds.length) return [];
     const marks = agentIds.map(() => '?').join(',');
+    const except = opts.exceptKinds ?? [];
+    const notKind = except.length ? ` AND kind NOT IN (${except.map(() => '?').join(',')})` : '';
     return (
       this.db
-        .prepare(`SELECT * FROM operations WHERE agent_id IN (${marks}) ORDER BY requested_at DESC, rowid DESC LIMIT ?`)
-        .all(...agentIds, limit) as unknown[]
+        .prepare(`SELECT * FROM operations WHERE agent_id IN (${marks})${notKind} ORDER BY requested_at DESC, rowid DESC LIMIT ?`)
+        .all(...agentIds, ...except, limit) as unknown[]
+    ).map(operationFromRow);
+  }
+
+  /** Operations whose record says a start is owed after them (operations.ts oweStart), oldest first. */
+  operationsOwingStart(): OperationRow[] {
+    return (
+      this.db.prepare(`SELECT * FROM operations WHERE json_valid(params) AND json_extract(params, '$.startOwed') IS NOT NULL ORDER BY requested_at, rowid`).all() as unknown[]
     ).map(operationFromRow);
   }
 
@@ -3931,14 +3896,18 @@ export class Store {
     };
   }
 
-  /** Atomically claims a single-use invite. Returns false if already used. */
-  markInviteRedeemed(code: string, redeemedBy: string): boolean {
+  /**
+   * Atomically claims a single-use invite. Returns false if already used.
+   * `at`: the redemption's time, which the seat's joined_at shares
+   * (redeemInvite; inviteJoinFor reads them together).
+   */
+  markInviteRedeemed(code: string, redeemedBy: string, at = new Date().toISOString()): boolean {
     const res = this.db
       .prepare(
         `UPDATE invites SET redeemed_at = ?, redeemed_by = ?
          WHERE code = ? AND redeemed_at IS NULL`,
       )
-      .run(new Date().toISOString(), redeemedBy, code);
+      .run(at, redeemedBy, code);
     return res.changes === 1;
   }
 
@@ -4256,12 +4225,33 @@ export class Store {
     ).map((r) => ({ id: r.id, childAgentId: r.child_agent_id, childName: r.child_name, text: r.text, createdAt: r.created_at }));
   }
 
-  resolveProposal(masterAgentId: string, id: string, status: 'merged' | 'dismissed'): boolean {
+  /**
+   * A pending proposal resolved: dismissed, or claimed for a merge
+   * ('merging'), which `finishProposalMerge` makes 'merged' once its text is
+   * in the master's playbook. True when it was pending.
+   */
+  resolveProposal(masterAgentId: string, id: string, status: 'merging' | 'dismissed'): boolean {
     return (
       this.db
         .prepare(`UPDATE agent_proposals SET status = ? WHERE id = ? AND master_agent_id = ? AND status = 'pending'`)
         .run(status, id, masterAgentId).changes === 1
     );
+  }
+
+  /** A merge's text is in the master's playbook: 'merging' becomes 'merged'. */
+  finishProposalMerge(masterAgentId: string, id: string): void {
+    this.db
+      .prepare(`UPDATE agent_proposals SET status = 'merged' WHERE id = ? AND master_agent_id = ? AND status = 'merging'`)
+      .run(id, masterAgentId);
+  }
+
+  /**
+   * At the start: a merge a restart cut off before it finished is waiting
+   * again (HB-0888). Its text may have landed; the merge's mark in the
+   * playbook keeps a retry from appending it twice. How many there were.
+   */
+  reopenInterruptedMerges(): number {
+    return this.db.prepare(`UPDATE agent_proposals SET status = 'pending' WHERE status = 'merging'`).run().changes;
   }
 
   // ---- usage snapshots (fleet cost/usage trend) ---------------------------
@@ -4303,8 +4293,7 @@ export class Store {
    * have been any source's.
    */
   lastOkOn(agentId: string, profileId: string, strict = false): string | undefined {
-    const c = this.usageCursor(agentId);
-    return c?.lastOk && (c.lastOkProfile ? c.lastOkProfile === profileId : !strict) ? c.lastOk : undefined;
+    return lastOkFrom(this.usageCursor(agentId), profileId, strict);
   }
   setUsageCursor(agentId: string, lastTs: string, lastOk?: string, lastLimited?: string, profileId?: string): void {
     this.db.prepare(
@@ -4409,7 +4398,14 @@ export class Store {
       }
       prev = r;
     }
-    return out;
+    // Its practice runs, which its transcripts do not hold (HB-0933): spent at the run's time, on its source.
+    const practice = this.practiceUsageFor(agentIds, fromIso);
+    if (!practice.length) return out;
+    for (const p of practice) {
+      const d = p.input + p.output + p.cacheRead + p.cacheWrite;
+      if (d > 0) out.push({ agentId: p.agentId, at: p.at, delta: d, prevAt: p.at, ...(p.profileId ? { profileId: p.profileId } : {}) });
+    }
+    return out.sort((x, y) => (x.agentId < y.agentId ? -1 : x.agentId > y.agentId ? 1 : x.at < y.at ? -1 : x.at > y.at ? 1 : 0));
   }
   setAgentTokenRate(agentId: string, usdPerToken: number, partial: boolean, at: string): void {
     this.db.prepare(`INSERT INTO agent_token_rates (agent_id, usd_per_token, partial, at) VALUES (?, ?, ?, ?)
@@ -4438,9 +4434,15 @@ export class Store {
     ).run(c.id, c.agentId, c.ownerId, c.from ?? null, c.to, c.profileId ?? null, c.at, c.by, c.via, c.source, c.why ?? null, c.proposalId ?? null,
       c.approx ? 1 : 0, c.before ? JSON.stringify(c.before) : null).changes === 1;
   }
-  /** One owner's changes (newest first), or every owner's with ownerId undefined. */
-  listModelChanges(opts: { ownerId?: string; agentId?: string; outcomes?: string[]; sinceIso?: string; limit?: number } = {}): ModelChangeRow[] {
+  /**
+   * One owner's changes (newest first), or every owner's with ownerId undefined.
+   * `unguarded`: only those the quality guard has still to look at (an old
+   * model, no claim yet), picked before the limit so the ones it is done with
+   * cannot fill it (HB-1001).
+   */
+  listModelChanges(opts: { ownerId?: string; agentId?: string; outcomes?: string[]; sinceIso?: string; unguarded?: boolean; limit?: number } = {}): ModelChangeRow[] {
     const where: string[] = []; const args: unknown[] = [];
+    if (opts.unguarded) where.push('guard_proposal_id IS NULL AND from_model IS NOT NULL');
     if (opts.ownerId !== undefined) { where.push('owner_id = ?'); args.push(opts.ownerId); }
     if (opts.agentId !== undefined) { where.push('agent_id = ?'); args.push(opts.agentId); }
     if (opts.outcomes?.length) { where.push(`outcome IN (SELECT value FROM json_each(?))`); args.push(JSON.stringify(opts.outcomes)); }
@@ -4451,6 +4453,14 @@ export class Store {
   }
   getModelChange(id: string): ModelChangeRow | undefined {
     const r = this.db.prepare(`SELECT * FROM model_changes WHERE id = ?`).get(id) as any;
+    return r ? rowToModelChange(r) : undefined;
+  }
+  /** The agent's change right after this one (by time, then as recorded), whatever the ledger holds of it (HB-1013). */
+  nextModelChange(id: string): ModelChangeRow | undefined {
+    const r = this.db.prepare(
+      `SELECT n.* FROM model_changes c JOIN model_changes n ON n.agent_id = c.agent_id AND (n.at > c.at OR (n.at = c.at AND n.rowid > c.rowid))
+       WHERE c.id = ? ORDER BY n.at, n.rowid LIMIT 1`,
+    ).get(id) as any;
     return r ? rowToModelChange(r) : undefined;
   }
   /** Any change of this agent's from a proposal: a backfill's "already recorded". */
@@ -4495,6 +4505,27 @@ export class Store {
   setManagedCron(agentId: string, name: string, jobId: string | undefined, at: string, messageHash?: string): void {
     this.db.prepare(`INSERT INTO managed_crons (agent_id, name, job_id, at, message_hash) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(agent_id, name) DO UPDATE SET job_id = excluded.job_id, at = excluded.at, message_hash = excluded.message_hash`).run(agentId, name, jobId ?? null, at, messageHash ?? null);
+  }
+  /**
+   * Its volume was replaced by a copy made at `copiedAt` (ms): its tasks are
+   * the copy's now. One recorded after the copy was made cannot be in it, so
+   * its record goes and the next build makes it again (or finds it by its
+   * name). One recorded before keeps its record, so one the owner deleted by
+   * hand before the copy stays deleted, but not its wording mark: the copy's
+   * may be older, and the next build writes it again. Before, the records
+   * stayed as they were and the next build kept a task the restore had taken
+   * away, or its old wording, for good (HB-1123).
+   */
+  matchManagedCronsToCopy(agentId: string, copiedAt: number): { dropped: string[]; rewritten: string[] } {
+    const rows = this.db.prepare(`SELECT name, at FROM managed_crons WHERE agent_id = ?`).all(agentId) as Array<{ name: string; at: string }>;
+    const after = (at: string) => { const t = Date.parse(at); return !Number.isFinite(t) || t > copiedAt; };
+    const dropped = rows.filter((r) => after(r.at)).map((r) => r.name);
+    const rewritten = rows.filter((r) => !after(r.at)).map((r) => r.name);
+    this.db.transaction(() => {
+      for (const name of dropped) this.db.prepare(`DELETE FROM managed_crons WHERE agent_id = ? AND name = ?`).run(agentId, name);
+      this.db.prepare(`UPDATE managed_crons SET message_hash = NULL WHERE agent_id = ?`).run(agentId);
+    })();
+    return { dropped, rewritten };
   }
 
   /** An adopt to re-point once its agent is running; the newest adopt replaces an older one. */
@@ -4624,11 +4655,12 @@ export class Store {
     if (opts.sinceIso) { where.push('(cleared_at IS NULL OR cleared_at >= ? OR opened_at >= ?)'); args.push(opts.sinceIso, opts.sinceIso); }
     const rows = this.db.prepare(`SELECT * FROM token_incidents ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY opened_at DESC LIMIT ?`)
       .all(...args, Math.min(Math.max(1, opts.limit ?? 200), 2000)) as any[];
-    return rows.map((r) => ({
-      id: r.id, agentId: r.agent_id, ownerId: r.owner_id, kind: r.kind, key: r.key, openedAt: r.opened_at, updatedAt: r.updated_at,
-      ...(r.cleared_at ? { clearedAt: r.cleared_at } : {}), ...(r.told_at ? { toldAt: r.told_at } : {}),
-      count: r.count, ...(r.first_at ? { firstAt: r.first_at } : {}), ...(r.last_at ? { lastAt: r.last_at } : {}), text: r.text, ...(r.fix ? { fix: r.fix } : {}),
-    }));
+    return rows.map(rowToIncident);
+  }
+  /** One incident by its id, open or cleared, however many came after it (HB-1004). */
+  getTokenIncident(id: string): TokenIncidentRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM token_incidents WHERE id = ?`).get(id) as any;
+    return r ? rowToIncident(r) : undefined;
   }
   /** Incidents told to this owner since a time (the watcher's hourly cap). */
   tokenIncidentsToldSince(ownerId: string, sinceIso: string): number {
@@ -4694,22 +4726,52 @@ export class Store {
     const max = this.db.prepare(`INSERT INTO agent_cost_days (agent_id, day, usd, unpriced_tokens) VALUES (?, ?, ?, ?) ON CONFLICT(agent_id, day) DO UPDATE SET usd = MAX(usd, excluded.usd), unpriced_tokens = MAX(unpriced_tokens, excluded.unpriced_tokens)`);
     this.db.transaction(() => { for (const [day, usd] of days) (day === partialDay ? max : put).run(agentId, day, usd, unpriced?.get(day) ?? 0); })();
   }
-  /** Each agent's tokens over [fromDay, toDay] on models with no known price; only agents that have any. */
+  /**
+   * Each agent's tokens over [fromDay, toDay] on models with no known price;
+   * only agents that have any. Its practice runs' count too (HB-0933).
+   */
   unpricedBetween(fromDay: string, toDay: string, agentIds?: string[]): Map<string, number> {
+    const days = `(SELECT agent_id, day, unpriced_tokens FROM agent_cost_days UNION ALL SELECT agent_id, day, unpriced_tokens FROM practice_usage)`;
     const rows = (agentIds
-      ? this.db.prepare(`SELECT agent_id, SUM(unpriced_tokens) AS tokens FROM agent_cost_days WHERE day >= ? AND day <= ? AND agent_id IN (SELECT value FROM json_each(?)) GROUP BY agent_id HAVING tokens > 0`).all(fromDay, toDay, JSON.stringify(agentIds))
-      : this.db.prepare(`SELECT agent_id, SUM(unpriced_tokens) AS tokens FROM agent_cost_days WHERE day >= ? AND day <= ? GROUP BY agent_id HAVING tokens > 0`).all(fromDay, toDay)) as Array<{ agent_id: string; tokens: number }>;
+      ? this.db.prepare(`SELECT agent_id, SUM(unpriced_tokens) AS tokens FROM ${days} WHERE day >= ? AND day <= ? AND agent_id IN (SELECT value FROM json_each(?)) GROUP BY agent_id HAVING tokens > 0`).all(fromDay, toDay, JSON.stringify(agentIds))
+      : this.db.prepare(`SELECT agent_id, SUM(unpriced_tokens) AS tokens FROM ${days} WHERE day >= ? AND day <= ? GROUP BY agent_id HAVING tokens > 0`).all(fromDay, toDay)) as Array<{ agent_id: string; tokens: number }>;
     return new Map(rows.map((r) => [r.agent_id, r.tokens]));
   }
-  /** Each agent's spend over [fromDay, toDay] (inclusive "YYYY-MM-DD"); every agent when agentIds is omitted. */
+  /**
+   * Each agent's spend over [fromDay, toDay] (inclusive "YYYY-MM-DD"); every
+   * agent when agentIds is omitted. Its practice runs' count too: the
+   * budgets' totals are these (HB-0933).
+   */
   costBetween(fromDay: string, toDay: string, agentIds?: string[]): Map<string, number> {
+    const days = `(SELECT agent_id, day, usd FROM agent_cost_days UNION ALL SELECT agent_id, day, usd FROM practice_usage)`;
     const rows = (agentIds
-      ? this.db.prepare(`SELECT agent_id, SUM(usd) AS usd FROM agent_cost_days WHERE day >= ? AND day <= ? AND agent_id IN (SELECT value FROM json_each(?)) GROUP BY agent_id`).all(fromDay, toDay, JSON.stringify(agentIds))
-      : this.db.prepare(`SELECT agent_id, SUM(usd) AS usd FROM agent_cost_days WHERE day >= ? AND day <= ? GROUP BY agent_id`).all(fromDay, toDay)) as Array<{ agent_id: string; usd: number }>;
+      ? this.db.prepare(`SELECT agent_id, SUM(usd) AS usd FROM ${days} WHERE day >= ? AND day <= ? AND agent_id IN (SELECT value FROM json_each(?)) GROUP BY agent_id`).all(fromDay, toDay, JSON.stringify(agentIds))
+      : this.db.prepare(`SELECT agent_id, SUM(usd) AS usd FROM ${days} WHERE day >= ? AND day <= ? GROUP BY agent_id`).all(fromDay, toDay)) as Array<{ agent_id: string; usd: number }>;
     return new Map(rows.map((r) => [r.agent_id, r.usd]));
   }
+  /** Cost days, and practice runs, from before `beforeDay` go. */
   pruneCostDays(beforeDay: string): number {
-    return this.db.prepare(`DELETE FROM agent_cost_days WHERE day < ?`).run(beforeDay).changes;
+    return this.db.prepare(`DELETE FROM agent_cost_days WHERE day < ?`).run(beforeDay).changes
+      + this.db.prepare(`DELETE FROM practice_usage WHERE day < ?`).run(beforeDay).changes;
+  }
+  // ---- what skill practice spent (practice_usage, HB-0933) ----------------
+  /** One practice run's calls, a row per model; a run written twice keeps its first. */
+  addPracticeUsage(rows: PracticeUsageRow[]): void {
+    const put = this.db.prepare(`INSERT OR IGNORE INTO practice_usage (agent_id, run, model, profile_id, at, day, skill, status, calls, input, output, cache_read, cache_write, usd, unpriced_tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    this.db.transaction(() => {
+      for (const r of rows) put.run(r.agentId, r.run, r.model, r.profileId ?? null, r.at, r.day, r.skill, r.status, r.calls, r.input, r.output, r.cacheRead, r.cacheWrite, r.usd, r.unpricedTokens);
+    })();
+  }
+  /** Practice runs' rows for these agents from `fromIso` (every one kept, when omitted), oldest first. */
+  practiceUsageFor(agentIds: Iterable<string>, fromIso = ''): PracticeUsageRow[] {
+    const ids = [...agentIds];
+    if (!ids.length) return [];
+    return (this.db.prepare(`SELECT * FROM practice_usage WHERE at >= ? AND agent_id IN (SELECT value FROM json_each(?)) ORDER BY agent_id, at, run, model`).all(fromIso, JSON.stringify(ids)) as Array<{
+      agent_id: string; run: string; model: string; profile_id: string | null; at: string; day: string; skill: string; status: string;
+      calls: number; input: number; output: number; cache_read: number; cache_write: number; usd: number; unpriced_tokens: number;
+    }>).map((r) => ({ agentId: r.agent_id, run: r.run, model: r.model, ...(r.profile_id ? { profileId: r.profile_id } : {}), at: r.at, day: r.day, skill: r.skill, status: r.status,
+      calls: r.calls, input: r.input, output: r.output, cacheRead: r.cache_read, cacheWrite: r.cache_write, usd: r.usd, unpricedTokens: r.unpriced_tokens }));
   }
   /** True when the mark is new. */
   addBudgetMark(scope: string, month: string, level: number, usd: number, at: string): boolean {
@@ -4746,6 +4808,11 @@ export class Store {
   }
   getBudgetPause(agentId: string, month: string): BudgetPauseRow | undefined {
     return this.listBudgetPauses({ month }).find((p) => p.agentId === agentId);
+  }
+  /** Its open pauses and switches, of any month, oldest first: one stays open until a pass (or Start) ends it (HB-1011). */
+  openBudgetPauses(agentId: string): BudgetPauseRow[] {
+    return (this.db.prepare(`SELECT * FROM budget_pauses WHERE agent_id = ? AND resumed_at IS NULL ORDER BY month, paused_at`).all(agentId) as any[])
+      .map((r) => this.#pauseRow(r));
   }
   /**
    * Paused (again) this month: an earlier resume that was not the owner's own is replaced.
@@ -4849,6 +4916,15 @@ export class Store {
       detail: ((r.detail ? safeParse(r.detail) : undefined) ?? {}) as Record<string, unknown>, outcome: r.outcome,
     }));
   }
+  /** The compactions the ledger has as running (at the start, those a restart cut off: compaction.ts). */
+  runningCompactions(): TokenActionRow[] {
+    const rows = this.db.prepare(`SELECT * FROM token_actions WHERE kind = 'compaction' AND outcome = 'running' ORDER BY at`).all() as any[];
+    return rows.map((r) => ({
+      id: r.id, agentId: r.agent_id, ownerId: r.owner_id, kind: r.kind, at: r.at, by: r.by, via: r.via,
+      ...(r.why ? { why: r.why } : {}), ...(r.proposal_id ? { proposalId: r.proposal_id } : {}),
+      detail: ((r.detail ? safeParse(r.detail) : undefined) ?? {}) as Record<string, unknown>, outcome: r.outcome,
+    }));
+  }
   /** Each agent's latest compaction of its main conversation (the ledger's newest row), for the health view. */
   lastMainCompactions(agentIds: string[]): Map<string, TokenActionRow> {
     const out = new Map<string, TokenActionRow>();
@@ -4881,9 +4957,13 @@ export class Store {
     this.db.prepare(`INSERT OR REPLACE INTO usage_alerts (agent_id, owner_id, at, tokens, usual, told, covered) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(a.agentId, a.ownerId, a.at, Math.round(a.tokens), Math.round(a.usual), a.told ? 1 : 0, a.covered ?? null);
   }
-  /** A warning that failed to send reached its owner on a later try. */
+  /**
+   * A warning that failed to send, or waited on a loop that ended untold,
+   * reached its owner on a later try: told on its own, so no loop's message
+   * covers it any more (HB-1006).
+   */
   markUsageAlertTold(agentId: string, at: string): void {
-    this.db.prepare(`UPDATE usage_alerts SET told = 1 WHERE agent_id = ? AND at = ?`).run(agentId, at);
+    this.db.prepare(`UPDATE usage_alerts SET told = 1, covered = NULL WHERE agent_id = ? AND at = ?`).run(agentId, at);
   }
   /** Warnings at or after `sinceIso`, newest first; for one owner, or one agent. */
   usageAlertsSince(sinceIso: string, by: { ownerId?: string; agentId?: string; dismissed?: boolean }): Array<{ agentId: string; at: string; tokens: number; usual: number; told: boolean; covered?: string }> {
@@ -4962,6 +5042,12 @@ export class Store {
         out.set(r.agent_id, (out.get(r.agent_id) ?? 0) + tokenRise(prev.total, r.total));
       }
       prev = r;
+    }
+    // Its practice runs on this source, which its transcripts do not hold (HB-0933): a plan's tokens, as the agent's own are.
+    for (const p of this.practiceUsageFor(agentIds, fromIso)) {
+      if (p.profileId !== profileId) continue;
+      const d = p.input + p.output + p.cacheRead + p.cacheWrite;
+      if (d > 0) out.set(p.agentId, (out.get(p.agentId) ?? 0) + d);
     }
     return out;
   }
@@ -5184,9 +5270,17 @@ export class Store {
     }));
   }
 
-  /** Does another account hold this Google account too? They share one grant for the install's client: revoking it would cut them off. */
-  connectionEmailHeldElsewhere(kind: string, email: string, ownerId: string): boolean {
-    return !!this.db.prepare(`SELECT 1 FROM connections WHERE kind = ? AND email = ? COLLATE NOCASE AND owner_id != ? LIMIT 1`).get(kind, email, ownerId);
+  /**
+   * The OAuth clients every connection of this Google account is held with
+   * (null: not recorded), any account's: what a deleted connection's token,
+   * no longer anyone's row, is judged against before it is revoked
+   * (HB-0903, HB-1203). Those of the same Google Cloud project share one
+   * grant with it: revoking it would cut them off (googleConnections.ts,
+   * sameGoogleGrant).
+   */
+  connectionClientsOf(kind: string, email: string): Array<string | null> {
+    return (this.db.prepare(`SELECT client_id FROM connections WHERE kind = ? AND email = ? COLLATE NOCASE`).all(kind, email) as Array<{ client_id: string | null }>)
+      .map((r) => r.client_id ?? null);
   }
   addConnectionRemoval(agentId: string, email: string): void {
     // INSERT OR IGNORE: a removal recorded again keeps its first time.
@@ -5203,7 +5297,7 @@ export class Store {
       .map((r) => ({ agentId: r.agent_id, email: r.email, since: r.created_at }));
   }
 
-  // ---- access checks (orchestrator/accessOverview.ts) ----------------------
+  // ---- access checks (orchestrator/google/accessOverview.ts) ----------------------
 
   /** The newest result of one check: present true/false, or null when it could not run. */
   recordAccessCheck(agentId: string, kind: string, subject: string, present: boolean | null, detail?: string, at = new Date().toISOString()): void {
@@ -5231,10 +5325,60 @@ export class Store {
   clearConnectionRemoval(agentId: string, email: string): void {
     this.db.prepare(`DELETE FROM connection_removals WHERE agent_id = ? AND email = ?`).run(agentId, email);
   }
+  /** An account verifiably taken off an agent, at `at`: the newest time kept, until the agent is deleted (HB-1085). */
+  noteConnectionRemoved(agentId: string, email: string, at = new Date().toISOString()): void {
+    this.db.prepare(
+      `INSERT INTO connection_removed (agent_id, email, removed_at) VALUES (?, ?, ?)
+       ON CONFLICT(agent_id, email) DO UPDATE SET removed_at = excluded.removed_at`,
+    ).run(agentId, email, at);
+  }
+  /** The accounts taken off an agent, and when each last was. */
+  connectionsRemovedFrom(agentId: string): Array<{ email: string; removedAt: string }> {
+    return (this.db.prepare(`SELECT email, removed_at FROM connection_removed WHERE agent_id = ? ORDER BY email`).all(agentId) as Array<{ email: string; removed_at: string }>)
+      .map((r) => ({ email: r.email, removedAt: r.removed_at }));
+  }
 
   deleteConnection(id: string): void {
     this.db.prepare(`DELETE FROM agent_connections WHERE connection_id = ?`).run(id);
     this.db.prepare(`DELETE FROM connections WHERE id = ?`).run(id);
+  }
+
+  /**
+   * A connection deleted, and the record of its token still to end put in
+   * its place, in one transaction (HB-0901): from here no row names the
+   * token but that record, which goes only once the token is revoked (or
+   * kept for another account's grant) and out of the secret store.
+   * Undefined: no such connection.
+   */
+  retireConnection(id: string): ConnectionCleanup | undefined {
+    return this.db.transaction(() => {
+      const c = this.getConnection(id);
+      if (!c) return undefined;
+      const at = new Date().toISOString();
+      this.db.prepare(
+        `INSERT OR IGNORE INTO connection_cleanups (secret_ref, kind, owner_id, email, client_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(c.secretRef, c.kind, c.ownerId, c.email, c.clientId, at);
+      this.deleteConnection(id);
+      return this.connectionCleanup(c.secretRef);
+    })();
+  }
+  /** One token still to end, or undefined once it has. */
+  connectionCleanup(secretRef: string): ConnectionCleanup | undefined {
+    const r = this.db.prepare(`SELECT * FROM connection_cleanups WHERE secret_ref = ?`).get(secretRef) as any;
+    return r ? { secretRef: r.secret_ref, kind: r.kind, ownerId: r.owner_id, email: r.email, clientId: r.client_id ?? null, createdAt: r.created_at, tries: r.tries, triedAt: r.tried_at ?? null, error: r.error ?? null } : undefined;
+  }
+  /** Every token still to end, the oldest first. */
+  connectionCleanups(): ConnectionCleanup[] {
+    return (this.db.prepare(`SELECT secret_ref FROM connection_cleanups ORDER BY created_at, secret_ref`).all() as Array<{ secret_ref: string }>)
+      .flatMap((r) => this.connectionCleanup(r.secret_ref) ?? []);
+  }
+  /** A try at ending it that did not finish, and why. */
+  connectionCleanupFailed(secretRef: string, error: string, at = new Date().toISOString()): void {
+    this.db.prepare(`UPDATE connection_cleanups SET tries = tries + 1, tried_at = ?, error = ? WHERE secret_ref = ?`).run(at, error.slice(0, 300), secretRef);
+  }
+  /** Ended: revoked or kept for another account, and out of the secret store. */
+  settleConnectionCleanup(secretRef: string): void {
+    this.db.prepare(`DELETE FROM connection_cleanups WHERE secret_ref = ?`).run(secretRef);
   }
 
   attachConnection(agentId: string, connectionId: string, gmailNoSend: boolean): void {
@@ -5341,12 +5485,17 @@ export class Store {
       .get(agentId, hashToken(token), new Date().toISOString());
   }
 
-  /** Resolve an A2A caller token to its agent, or undefined. Records the use. */
+  /**
+   * Resolve an A2A caller token to its agent, or undefined. Records the use.
+   * Only an agent that is still here: deleted, being deleted, archived or
+   * moved away, its token calls no one, whatever row a race left (HB-0965).
+   */
   agentForCallToken(token: string): { agentId: string; ownerId: string } | undefined {
     const row = this.db
       .prepare(
-        `SELECT id, owner_id, agent_id FROM cli_tokens
-         WHERE token_hash = ? AND agent_id IS NOT NULL AND (expires_at IS NULL OR expires_at > ?)`,
+        `SELECT t.id, t.owner_id, t.agent_id FROM cli_tokens t JOIN agents a ON a.id = t.agent_id
+         WHERE t.token_hash = ? AND t.agent_id IS NOT NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
+           AND a.state NOT IN ('DELETED', 'DELETING', 'ARCHIVED') AND a.migrated_to IS NULL`,
       )
       .get(hashToken(token), new Date().toISOString()) as { id: string; owner_id: string; agent_id: string } | undefined;
     if (!row) return undefined;
@@ -5365,7 +5514,7 @@ export class Store {
    *  reviewable, not vanish as "merged" without its text landing anywhere. */
   reopenProposal(masterAgentId: string, id: string): void {
     this.db
-      .prepare(`UPDATE agent_proposals SET status = 'pending' WHERE id = ? AND master_agent_id = ? AND status = 'merged'`)
+      .prepare(`UPDATE agent_proposals SET status = 'pending' WHERE id = ? AND master_agent_id = ? AND status = 'merging'`)
       .run(id, masterAgentId);
   }
 
@@ -5375,8 +5524,12 @@ export class Store {
       .run(schedules ? JSON.stringify(schedules) : null, id);
   }
 
-  /** Template tasks not yet added to the agent; `why` is the last attempt's reason (none before the first). */
-  getPendingSchedules(id: string): Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string; announce?: boolean; why?: string }> {
+  /**
+   * Template tasks not yet added to the agent; `why` is the last attempt's
+   * reason (none before the first); `beside`, the tasks of its name the same
+   * import already added (provision.ts applyPendingSchedules, HB-0962).
+   */
+  getPendingSchedules(id: string): Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string; announce?: boolean; why?: string; beside?: Array<{ message: string; cron?: string; everyMs?: number; tz?: string }> }> {
     const r = this.db.prepare(`SELECT pending_schedules FROM agents WHERE id = ?`).get(id) as any;
     return r?.pending_schedules ? (safeJson(r.pending_schedules, []) as any[]) : [];
   }
@@ -5417,7 +5570,7 @@ export class Store {
     ).run(ownerId, agentId, at);
   }
 
-  /** The Recent list's capture for one agent (orchestrator/recent.ts RecentRecord), or undefined. */
+  /** The Recent list's capture for one agent (orchestrator/conversation/recent.ts RecentRecord), or undefined. */
   getAgentRecent(agentId: string): unknown {
     const r = this.db.prepare(`SELECT json FROM agent_recent WHERE agent_id = ?`).get(agentId) as { json: string } | undefined;
     if (!r) return undefined;
@@ -5451,6 +5604,14 @@ export class Store {
   deleteOpsToken(agentId: string): void {
     this.db.prepare(`DELETE FROM ops_tokens WHERE agent_id = ?`).run(agentId);
   }
+  /** Which key the management agent holds now (its hash), or undefined: what a lockdown check saw (opsDrift.ts). */
+  opsTokenHash(agentId: string): string | undefined {
+    return (this.db.prepare(`SELECT token_hash FROM ops_tokens WHERE agent_id = ?`).get(agentId) as { token_hash: string } | undefined)?.token_hash;
+  }
+  /** Revoke the management agent's key only if it is still the one `tokenHash` names: never one a rebuild minted since (HB-0915). */
+  deleteOpsTokenIf(agentId: string, tokenHash: string): boolean {
+    return this.db.prepare(`DELETE FROM ops_tokens WHERE agent_id = ? AND token_hash = ?`).run(agentId, tokenHash).changes === 1;
+  }
   /** The live management agent this key belongs to, or undefined. A key whose
    *  agent is archived, deleted or not running is dead. */
   opsAgentForToken(token: string): Agent | undefined {
@@ -5482,6 +5643,15 @@ export class Store {
   }
   setMgmtProposalOutcome(id: string, outcome: string): void {
     this.db.prepare(`UPDATE mgmt_proposals SET outcome = ? WHERE id = ?`).run(outcome.slice(0, 2000), id);
+  }
+  /** Confirmed cards with no outcome get the one given (a confirm a restart cut off, HB-1053); how many. */
+  markInterruptedMgmtProposals(outcomeOf: (rec: { summary?: string; tool?: string }) => string): number {
+    return this.transact(() => {
+      const rows = this.db.prepare(`SELECT id, record FROM mgmt_proposals WHERE status = 'confirmed' AND outcome IS NULL`).all() as Array<{ id: string; record: string }>;
+      const set = this.db.prepare(`UPDATE mgmt_proposals SET outcome = ? WHERE id = ? AND outcome IS NULL`);
+      for (const r of rows) set.run(outcomeOf(safeJson<{ summary?: string; tool?: string }>(r.record, {})).slice(0, 2000), r.id);
+      return rows.length;
+    });
   }
   /**
    * Every card still waiting (unexpired), and the last day's resolved ones —
@@ -5680,6 +5850,7 @@ export class Store {
     name: r.name,
     tag: r.tag,
     base: r.base,
+    basePackages: String(r.base_packages ?? '').split(' ').filter(Boolean),
     dockerfile: r.dockerfile,
     status: r.status as DerivedImageStatus,
     error: r.error ?? null,
@@ -5692,23 +5863,31 @@ export class Store {
    * Create or replace a derived image record, resetting it to BUILDING. Same
    * name = same tag, so a re-derive under an existing name rebuilds in place
    * (and the agents pinned to that tag pick up the new build on next rebuild).
+   * `basePackages` left out: a new record has none, a replaced one keeps its own.
    */
   upsertDerivedImage(rec: {
     name: string;
     tag: string;
     base: string;
+    basePackages?: string[];
     dockerfile: string;
     createdBy: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO derived_images (name, tag, base, dockerfile, status, error, created_by, created_at, built_at)
-         VALUES (@name, @tag, @base, @dockerfile, 'BUILDING', NULL, @createdBy, @now, NULL)
+        `INSERT INTO derived_images (name, tag, base, base_packages, dockerfile, status, error, created_by, created_at, built_at)
+         VALUES (@name, @tag, @base, COALESCE(@basePackages, ''), @dockerfile, 'BUILDING', NULL, @createdBy, @now, NULL)
          ON CONFLICT(name) DO UPDATE SET
            tag = excluded.tag, base = excluded.base, dockerfile = excluded.dockerfile,
+           base_packages = COALESCE(@basePackages, derived_images.base_packages),
            status = 'BUILDING', error = NULL`,
       )
-      .run({ ...rec, now: new Date().toISOString() });
+      .run({ ...rec, basePackages: rec.basePackages ? rec.basePackages.join(' ') : null, now: new Date().toISOString() });
+  }
+
+  /** The image a derived image was built on here, and the packages laid on it before its lines (an import's build, HB-0986). */
+  setDerivedImageBase(name: string, base: string, basePackages: readonly string[]): void {
+    this.db.prepare(`UPDATE derived_images SET base = ?, base_packages = ? WHERE name = ?`).run(base, basePackages.join(' '), name);
   }
 
   getDerivedImage(name: string): DerivedImage | undefined {
@@ -5864,12 +6043,76 @@ export class Store {
    * of it for this agent (the budget's switch down and its restore, the
    * default-model sweep's hold of what it runs): it leaves modelGeneration
    * as it was.
+   * `apply`: its runtime is to be told now (the caller goes on to
+   * applyModelToRuntime). The ask is stored with the model, in this write
+   * (agent_holds, 'model-apply'), so a restart between the two leaves it for
+   * the next process to tell (lifecycle/modelRuntime.ts, HB-0809). Without
+   * it, a write that changes the model ends an earlier ask: that ask was for
+   * another model, and this one waits for a rebuild as it always did. A
+   * string is the ask's own value (unique), so its maker can tell its ask
+   * from another's when the next process reports it refused (a budget's
+   * switch to a cheaper model: usage/monthlyBudgets.ts, HB-1404).
    */
-  setAgentModel(id: string, model: string | null, opts: { hatchabot?: boolean } = {}): void {
-    this.db
-      .prepare(`UPDATE agents SET model = ?, updated_at = ? WHERE id = ?`)
-      .run(model, new Date().toISOString(), id);
+  setAgentModel(id: string, model: string | null, opts: { hatchabot?: boolean; apply?: boolean | string } = {}): void {
+    // The model and its ask together, whether or not the caller is in a transaction of its own.
+    this.transact(() => {
+      const was = opts.apply ? undefined : (this.db.prepare(`SELECT model FROM agents WHERE id = ?`).get(id) as { model: string | null } | undefined);
+      this.db
+        .prepare(`UPDATE agents SET model = ?, updated_at = ? WHERE id = ?`)
+        .run(model, new Date().toISOString(), id);
+      if (opts.apply) this.setAgentHold(id, 'model-apply', typeof opts.apply === 'string' ? opts.apply : randomUUID());
+      else if (was && (was.model ?? null) !== model) this.clearAgentHold(id, 'model-apply');
+    });
     if (!opts.hatchabot) this.#modelWritten(id);
+  }
+
+  // ---- the tasks an adopt carried (adopt_carried_tasks, HB-0985) ----------
+
+  /** Every source task an adopt gave this agent, and the copy each became (undefined: not known). */
+  carriedTasks(agentId: string): Array<{ sourceAgent: string; sourceId: string; copyId?: string }> {
+    return (this.db.prepare(`SELECT source_agent, source_id, copy_id FROM adopt_carried_tasks WHERE agent_id = ? AND source_agent NOT IN ('*', '+')`)
+      .all(agentId) as Array<{ source_agent: string; source_id: string; copy_id: string | null }>)
+      .map((r) => ({ sourceAgent: r.source_agent, sourceId: r.source_id, ...(r.copy_id ? { copyId: r.copy_id } : {}) }));
+  }
+
+  /** An adopt gave this agent that source task, as `copyId` (undefined: the gateway did not say). The newest copy replaces an older one. */
+  recordCarriedTask(agentId: string, sourceAgent: string, sourceId: string, copyId: string | undefined): void {
+    this.db.prepare(`INSERT INTO adopt_carried_tasks (agent_id, source_agent, source_id, copy_id, at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(agent_id, source_agent, source_id) DO UPDATE SET copy_id = excluded.copy_id, at = excluded.at`)
+      .run(agentId, sourceAgent, sourceId, copyId ?? null, new Date().toISOString());
+  }
+
+  /** An adopt's copies may be on this agent unrecorded: an older release made it, or an adopt carried tasks that had no ids. */
+  mayHoldUnrecordedCarriedTasks(agentId: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM adopt_carried_tasks WHERE agent_id = ? AND source_agent = '*' AND source_id = '*'`).get(agentId);
+  }
+
+  /** An adopt gave this agent a task it could not record (its store gives tasks no ids). */
+  markUnrecordedCarriedTasks(agentId: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO adopt_carried_tasks (agent_id, source_agent, source_id, copy_id, at) VALUES (?, '*', '*', NULL, ?)`)
+      .run(agentId, new Date().toISOString());
+  }
+
+  // ---- what a restart may not lose (agent_holds, HB-0809) -------------------
+  /** Keep `value` for this agent under `kind`, in place of what was kept. */
+  setAgentHold(agentId: string, kind: AgentHoldKind, value: string): void {
+    this.db.prepare(`INSERT INTO agent_holds (agent_id, kind, value, at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(agent_id, kind) DO UPDATE SET value = excluded.value, at = excluded.at`).run(agentId, kind, value, new Date().toISOString());
+  }
+  /** What is kept for this agent under `kind`, or undefined. */
+  agentHold(agentId: string, kind: AgentHoldKind): string | undefined {
+    return (this.db.prepare(`SELECT value FROM agent_holds WHERE agent_id = ? AND kind = ?`).get(agentId, kind) as { value: string } | undefined)?.value;
+  }
+  /** Let it go. `onlyIf`: only while it is still this value (one kept since is another's). True when a row went. */
+  clearAgentHold(agentId: string, kind: AgentHoldKind, onlyIf?: string): boolean {
+    return (onlyIf === undefined
+      ? this.db.prepare(`DELETE FROM agent_holds WHERE agent_id = ? AND kind = ?`).run(agentId, kind)
+      : this.db.prepare(`DELETE FROM agent_holds WHERE agent_id = ? AND kind = ? AND value = ?`).run(agentId, kind, onlyIf)).changes > 0;
+  }
+  /** Every agent with something kept under `kind`, oldest first. */
+  agentHolds(kind: AgentHoldKind): Array<{ agentId: string; value: string; at: string }> {
+    return (this.db.prepare(`SELECT agent_id, value, at FROM agent_holds WHERE kind = ? ORDER BY at, agent_id`).all(kind) as Array<{ agent_id: string; value: string; at: string }>)
+      .map((r) => ({ agentId: r.agent_id, value: r.value, at: r.at }));
   }
 
   /**
@@ -6159,19 +6402,31 @@ export class Store {
     // and the list said "Julieta, Julieta, Julieta" (Chris, 2026-09-27). Two
     // people who share an identity on any channel are one; the one with a
     // real name keeps it, the identities are the union, the other ids ride
-    // along so "already on this agent" still sees them.
-    const byIdentity = new Map<string, { userId: string; name: string; channelUserId?: string; identities: Partial<Record<ChannelKind, string>>; ids: string[] }>();
-    const merged: Array<{ userId: string; name: string; channelUserId?: string; identities: Partial<Record<ChannelKind, string>>; ids: string[] }> = [];
+    // along so "already on this agent" still sees them. One on two channels
+    // joins the two people met before on one each: they are all one, not
+    // only the first of them (HB-1137).
+    type Person = { userId: string; name: string; channelUserId?: string; identities: Partial<Record<ChannelKind, string>>; ids: string[] };
+    const byIdentity = new Map<string, Person>();
+    const merged: Person[] = [];
+    const absorb = (home: Person, p: Person) => {
+      home.ids.push(...p.ids);
+      if (home.name === 'Member' && p.name !== 'Member') { home.name = p.name; home.userId = p.userId; }
+      for (const [k, v] of Object.entries(p.identities)) home.identities[k as ChannelKind] ??= v;
+      home.channelUserId ??= p.channelUserId;
+    };
     for (const p of people.values()) {
       if (!Object.keys(p.identities).length) continue;
       const keys = Object.entries(p.identities).map(([k, v]) => `${k}:${v}`);
-      let home = keys.map((k) => byIdentity.get(k)).find(Boolean);
+      const homes = [...new Set(keys.map((k) => byIdentity.get(k)).filter((h): h is Person => !!h))];
+      let home = homes[0];
       if (!home) { home = { ...p, ids: [p.userId] }; merged.push(home); }
       else {
-        home.ids.push(p.userId);
-        if (home.name === 'Member' && p.name !== 'Member') { home.name = p.name; home.userId = p.userId; }
-        for (const [k, v] of Object.entries(p.identities)) home.identities[k as ChannelKind] ??= v;
-        home.channelUserId ??= p.channelUserId;
+        for (const other of homes.slice(1)) {
+          absorb(home, other);
+          merged.splice(merged.indexOf(other), 1);
+          for (const [k, h] of byIdentity) if (h === other) byIdentity.set(k, home);
+        }
+        absorb(home, { ...p, ids: [p.userId] });
       }
       for (const k of keys) byIdentity.set(k, home);
     }
@@ -6202,15 +6457,28 @@ export class Store {
   }
 
   /** The invite this person joined by: the @handle it named and the app they
-   *  chose, when known — what "Let them in again" may reopen (2026-09-30). */
-  inviteJoinFor(agentId: string, userId: string): { handle?: string; via?: string } {
+   *  chose, when known — what "Let them in again" may reopen (2026-09-30).
+   *  A web-chat invite is no way into a chat app: one that added web chat to
+   *  their seat later hid the app invite they came in by (HB-1136). And only
+   *  one of the seat as it is now, redeemed on or after its joined_at (a
+   *  redemption writes both at once): one from before a removal reopened
+   *  that app for whoever wrote first (HB-1136 review). Before that, a
+   *  redemption wrote its time a moment before the seat's, so a few seconds
+   *  earlier still count; a seat with no joined_at, or none that reads as a
+   *  time, is read as before. */
+  inviteJoinFor(agentId: string, userId: string): { handle?: string; via?: string; byAppInvite?: true } {
     const r = this.db
       .prepare(
-        `SELECT expect_handle h, redeemed_via v FROM invites
-          WHERE agent_id = ? AND redeemed_by = ? ORDER BY redeemed_at DESC LIMIT 1`,
+        `SELECT i.expect_handle h, i.redeemed_via v FROM invites i
+           LEFT JOIN memberships m ON m.agent_id = i.agent_id AND m.user_id = i.redeemed_by
+          WHERE i.agent_id = ? AND i.redeemed_by = ? AND i.web_chat = 0
+            AND (m.joined_at IS NULL OR julianday(m.joined_at) IS NULL
+                 OR julianday(i.redeemed_at) >= julianday(m.joined_at) - 5.0 / 86400)
+          ORDER BY i.redeemed_at DESC LIMIT 1`,
       )
       .get(agentId, userId) as { h: string | null; v: string | null } | undefined;
-    return { handle: r?.h ?? undefined, via: r?.v ?? undefined };
+    // `byAppInvite`: there is one, even when it names neither (joined before either was recorded).
+    return r ? { handle: r.h ?? undefined, via: r.v ?? undefined, byAppInvite: true } : {};
   }
 
   /** Anyone who finds the bot may knock, instead of invitees and people the
@@ -6251,33 +6519,55 @@ export class Store {
     return `${kind ?? 'telegram'}:${openedFor ?? 'owner'}`;
   }
 
-  /** Open the door on this agent until `until` — a claim window is running for this seat. */
+  /**
+   * Open the door on this agent until `until` — a claim window is running for
+   * this seat. `excludeIds`: whose knock is never the one it waits for (a
+   * join's: who had written to a sleeping agent's bot before it); a window
+   * written again without them (the owner's Reopen) has none. Kept with the
+   * generation they were written for, and read only while the row's is that
+   * one: an older release writes a window again without touching the column,
+   * and its Reopen, a window of its own, kept passing them over once this
+   * release ran again (HB-1221 review).
+   */
   openPairingWindow(
     agentId: string,
     until: string,
     openedFor?: string,
-    opts?: { expect?: string; kind?: string; generation?: string },
+    opts?: { expect?: string; kind?: string; generation?: string; excludeIds?: readonly string[] },
   ): string {
     const generation = opts?.generation ?? randomUUID();
     this.db
       .prepare(
-        `INSERT INTO pairing_windows (agent_id, seat, until, opened_for, expect, generation)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO pairing_windows (agent_id, seat, until, opened_for, expect, generation, exclude_ids)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(agent_id, seat) DO UPDATE SET until = excluded.until,
-             opened_for = excluded.opened_for, expect = excluded.expect, generation = excluded.generation`,
+             opened_for = excluded.opened_for, expect = excluded.expect, generation = excluded.generation, exclude_ids = excluded.exclude_ids`,
       )
-      .run(agentId, Store.pairingSeat(opts?.kind, openedFor), until, openedFor ?? null, normalizeHandle(opts?.expect) ?? null, generation);
+      .run(agentId, Store.pairingSeat(opts?.kind, openedFor), until, openedFor ?? null, normalizeHandle(opts?.expect) ?? null, generation,
+        opts?.excludeIds?.length ? JSON.stringify({ generation, ids: opts.excludeIds }) : null);
     return generation;
   }
 
   /** Every window still open on this agent. */
-  pairingWindows(agentId: string, now = new Date()): Array<{ seat: string; until: string; openedFor?: string; expect?: string; generation?: string }> {
+  pairingWindows(agentId: string, now = new Date()): Array<{ seat: string; until: string; openedFor?: string; expect?: string; generation?: string; excludeIds?: string[] }> {
     const rows = this.db
-      .prepare(`SELECT seat, until, opened_for, expect, generation FROM pairing_windows WHERE agent_id = ? ORDER BY until DESC`)
-      .all(agentId) as Array<{ seat: string; until: string; opened_for: string | null; expect: string | null; generation: string | null }>;
+      .prepare(`SELECT seat, until, opened_for, expect, generation, exclude_ids FROM pairing_windows WHERE agent_id = ? ORDER BY until DESC`)
+      .all(agentId) as Array<{ seat: string; until: string; opened_for: string | null; expect: string | null; generation: string | null; exclude_ids: string | null }>;
+    /** The ids written for this generation of the window; none for another's (openPairingWindow). */
+    const ids = (raw: string | null, generation: string | null): string[] | undefined => {
+      if (!raw || !generation) return undefined;
+      // Unreadable names nobody here, and every knock is judged as before.
+      try {
+        const v = JSON.parse(raw) as { generation?: unknown; ids?: unknown } | null;
+        return v?.generation === generation && Array.isArray(v.ids) ? v.ids.filter((x): x is string => typeof x === 'string') : undefined;
+      } catch { return undefined; }
+    };
     return rows
       .filter((r) => Date.parse(r.until) > now.getTime())
-      .map((r) => ({ seat: r.seat, until: r.until, openedFor: r.opened_for ?? undefined, expect: r.expect ?? undefined, generation: r.generation ?? undefined }));
+      .map((r) => {
+        const excludeIds = ids(r.exclude_ids, r.generation);
+        return { seat: r.seat, until: r.until, openedFor: r.opened_for ?? undefined, expect: r.expect ?? undefined, generation: r.generation ?? undefined, ...(excludeIds?.length ? { excludeIds } : {}) };
+      });
   }
 
   /** The longest-open window's terms, or undefined when the door is shut. */
@@ -6343,7 +6633,7 @@ export class Store {
    * Clears the old bound telegram id so they claim first contact anew — the
    * person behind the account may have changed, and pairing re-binds it.
    */
-  reactivateMembership(agentId: string, userId: string, displayName: string, webChat = false): void {
+  reactivateMembership(agentId: string, userId: string, displayName: string, webChat = false, at = new Date().toISOString()): void {
     // web_chat is set from THIS invite: a web-chat right given before the
     // removal does not come back with a plain chat-app invite (2026-09-29).
     // Every re-admission path grants a user seat. A previous admin/owner role
@@ -6355,7 +6645,7 @@ export class Store {
                joined_at = ?, web_chat = ?
          WHERE agent_id = ? AND user_id = ?`,
       )
-      .run(displayName, new Date().toISOString(), webChat ? 1 : 0, agentId, userId);
+      .run(displayName, at, webChat ? 1 : 0, agentId, userId);
     this.clearMemberIdentities(agentId, userId);
   }
 
@@ -6656,8 +6946,12 @@ function rowToChannel(r: any): Channel {
   };
 }
 
-/** A configured copy's setup values and the raw SOUL/AGENTS layer they render into, as a snapshot keeps them. */
-export interface SnapshotParams { values: Record<string, string>; soul?: string; agents?: string }
+/**
+ * A configured copy's setup values and the raw SOUL/AGENTS layer they render
+ * into, as a snapshot keeps them, with the setup fields the layer was written
+ * for (its file fields; absent in a snapshot taken before they were kept).
+ */
+export interface SnapshotParams { values: Record<string, string>; soul?: string; agents?: string; fields?: TemplateParam[] }
 
 /** One snapshot, files included. `params`: null = no setup-values layer then; absent = taken before it was recorded. */
 export interface StoredSnapshot {
@@ -6666,7 +6960,17 @@ export interface StoredSnapshot {
   params?: SnapshotParams | null;
 }
 
-/** One row of `operations` (orchestrator/operations.ts has the meaning of each field). */
+/**
+ * A deleted connection's refresh token still to end (`connection_cleanups`,
+ * HB-0901): whose it was and what it was, to judge whether another
+ * connection shares its grant; the last try that did not finish, and why.
+ */
+export interface ConnectionCleanup {
+  secretRef: string; kind: string; ownerId: string; email: string; clientId: string | null; createdAt: string;
+  tries: number; triedAt: string | null; error: string | null;
+}
+
+/** One row of `operations` (orchestrator/lifecycle/operations.ts has the meaning of each field). */
 export interface OperationRow {
   id: string;
   agentId: string | null;
@@ -6763,10 +7067,46 @@ export interface TokenIncidentRow {
   fix?: string;
 }
 
+/** Store.lastOkOn's rule, on a cursor already read: its newest success, when it was on this source. */
+export function lastOkFrom(c: { lastOk?: string; lastOkProfile?: string } | undefined, profileId: string, strict = false): string | undefined {
+  return c?.lastOk && (c.lastOkProfile ? c.lastOkProfile === profileId : !strict) ? c.lastOk : undefined;
+}
+
+function rowToIncident(r: any): TokenIncidentRow {
+  return {
+    id: r.id, agentId: r.agent_id, ownerId: r.owner_id, kind: r.kind, key: r.key, openedAt: r.opened_at, updatedAt: r.updated_at,
+    ...(r.cleared_at ? { clearedAt: r.cleared_at } : {}), ...(r.told_at ? { toldAt: r.told_at } : {}),
+    count: r.count, ...(r.first_at ? { firstAt: r.first_at } : {}), ...(r.last_at ? { lastAt: r.last_at } : {}), text: r.text, ...(r.fix ? { fix: r.fix } : {}),
+  };
+}
+
 function budgetRow(r: any): BudgetRow {
   return {
     scope: r.scope, ownerId: r.owner_id, usd: r.usd, atLimit: r.at_limit === 'pause' || r.at_limit === 'cheaper' ? r.at_limit : 'warn', setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}),
   };
+}
+
+/**
+ * What one practice run spent on one model (practice_usage, HB-0933): `run`
+ * names the run, `profileId` the source it ran on, `day` its local day (the
+ * machine's zone, as a cost day's), `usd` and `unpricedTokens` as priced then.
+ */
+export interface PracticeUsageRow {
+  agentId: string;
+  run: string;
+  model: string;
+  profileId?: string;
+  at: string;
+  day: string;
+  skill: string;
+  status: string;
+  calls: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  usd: number;
+  unpricedTokens: number;
 }
 
 /** A monthly budget (budgets.ts): scope is an agent's id, or 'machine'. */
@@ -6820,7 +7160,7 @@ export interface TokenActionRow {
   proposalId?: string;
   /** compaction: mode, lines, session, before/after context; context-cap: from, to, model, before figures. */
   detail: Record<string, unknown>;
-  /** running | ok | failed | aborted | applied | pending-rebuild | not-applied */
+  /** running | ok | failed | aborted | interrupted (a restart cut it off) | applied | pending-rebuild | not-applied */
   outcome: string;
 }
 

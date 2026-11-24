@@ -14,10 +14,11 @@ import {
   restoreSnapshot,
   recoverSnapshotRestore,
   SnapshotError,
-} from '../src/orchestrator/snapshots.js';
-import { setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
+} from '../src/orchestrator/files/snapshots.js';
+import { setStepHookForTests, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
+import type { TemplateParam } from '../src/domain/types.js';
 
 /** MockProvider.execShell returns a canned 'sh' response; drive it per call. */
 function fileWorld(initial: Record<string, string>) {
@@ -320,5 +321,60 @@ describe('a restore and the setup-values layer (#68)', () => {
     w.store.insertSnapshot({ id: 'legacy', agentId: 'a1', label: 'old', reason: 'manual', files: { 'SOUL.md': 'An old cook.\n' }, createdAt: '2026-01-01T00:00:00Z' });
     await restoreSnapshot(w.deps, 'a1', 'legacy');
     expect(w.store.getAgent('a1')!.paramFiles).toEqual({ soul: 'An old cook.\n', agents: 'old rules' });
+  });
+
+  it('puts back the setup fields the layer was written for, and keeps the env and data-source fields set up since (HB-0966)', async () => {
+    const STYLE: TemplateParam = { key: 'style', label: 'Style', required: false, type: 'text', default: 'calm', target: 'soul' };
+    const MOOD: TemplateParam = { key: 'mood', label: 'Mood', required: false, type: 'text', default: 'sunny', target: 'soul' };
+    const KEY: TemplateParam = { key: 'recipe_key', label: 'Recipe key', required: false, type: 'text', target: 'env' };
+    const REPO: TemplateParam = { key: 'recipes', label: 'Recipes', required: false, type: 'text', target: 'datasource' };
+    const w = fileWorld({ ...SEED, 'SOUL.md': 'A calm cook.\n' });
+    w.store.setAgentParameters('a1', [STYLE, KEY]);
+    w.store.setAgentParamState('a1', { style: 'calm' }, { soul: 'A {{style}} cook.\n' });
+    const before = await captureSnapshot(w.deps, 'a1', { label: 'calm' });
+    // A push renamed the field, rewrote the layer for it, and brought a data source.
+    w.files['SOUL.md'] = 'A sunny cook.\n';
+    w.store.setAgentParamState('a1', { mood: 'sunny' }, { soul: 'A {{mood}} cook.\n' });
+    w.store.setAgentParameters('a1', [MOOD, { ...KEY, label: 'Recipe API key' }, REPO]);
+    await restoreSnapshot(w.deps, 'a1', before.id);
+    const a = w.store.getAgent('a1')!;
+    expect(a.paramFiles).toEqual({ soul: 'A {{style}} cook.\n' });
+    expect(a.parameters).toEqual([STYLE, { ...KEY, label: 'Recipe API key' }, REPO]);
+
+    // A snapshot from before the fields were kept leaves them as they are.
+    w.store.insertSnapshot({ id: 'older', agentId: 'a1', label: 'old', reason: 'manual', files: { 'SOUL.md': 'An old cook.\n' },
+      params: { values: { mood: 'sunny' }, soul: 'An {{mood}} cook.\n' }, createdAt: '2026-01-01T00:00:00Z' });
+    await restoreSnapshot(w.deps, 'a1', 'older');
+    expect(w.store.getAgent('a1')!.parameters).toEqual([STYLE, { ...KEY, label: 'Recipe API key' }, REPO]);
+  });
+
+  it('keeps a field the description\'s layer still names, with its value, and the fields in their order (HB-0966)', async () => {
+    const field = (key: string, label: string, target: TemplateParam['target'] = 'soul'): TemplateParam => ({ key, label, required: false, type: 'text', target });
+    const TOWN = field('town', 'Town'), CITY = field('city', 'City'), KEY = field('recipe_key', 'Recipe key', 'env');
+    const w = fileWorld({ ...SEED, 'SOUL.md': 'A cook from Springfield.\n' });
+    w.store.setAgentParameters('a1', [TOWN, KEY]);
+    w.store.setAgentParamState('a1', { town: 'Springfield' }, { soul: 'A cook from {{town}}.\n', persona: 'The {{town}} cook' });
+    const before = await captureSnapshot(w.deps, 'a1', { label: 'town' });
+    // A push renamed town to city, in the files and in the description.
+    w.files['SOUL.md'] = 'A cook from Ogdenville.\n';
+    w.store.setAgentParamState('a1', { city: 'Ogdenville' }, { soul: 'A cook from {{city}}.\n', persona: 'The {{city}} cook' });
+    w.store.setAgentParameters('a1', [CITY, KEY]);
+    await restoreSnapshot(w.deps, 'a1', before.id);
+    const a = w.store.getAgent('a1')!;
+    expect(a.paramFiles).toEqual({ soul: 'A cook from {{town}}.\n', persona: 'The {{city}} cook' });
+    expect(a.parameters).toEqual([TOWN, CITY, KEY]);
+    expect(a.paramValues).toEqual({ town: 'Springfield', city: 'Ogdenville' });
+    // Every {{key}} the layers name is a field the values panel asks for.
+    const named = [a.paramFiles!.soul!, a.paramFiles!.persona!].flatMap((t) => [...t.matchAll(/\{\{\s*([a-z0-9_]+)\s*\}\}/g)].map((m) => m[1]));
+    expect(named.every((k) => a.parameters!.some((f) => f.key === k))).toBe(true);
+
+    // The fields keep the agent's order: a restored one where it stands now, not all of them first.
+    const MOOD = field('mood', 'Mood');
+    w.store.setAgentParameters('a1', [TOWN, KEY, MOOD]);
+    w.store.setAgentParamState('a1', { town: 'Springfield', mood: 'calm' }, { soul: 'A {{mood}} cook from {{town}}.\n' });
+    const both = await captureSnapshot(w.deps, 'a1', { label: 'both' });
+    w.store.setAgentParameters('a1', [{ ...TOWN, label: 'Home town' }, KEY, { ...MOOD, label: 'Temper' }]);
+    await restoreSnapshot(w.deps, 'a1', both.id);
+    expect(w.store.getAgent('a1')!.parameters).toEqual([TOWN, KEY, MOOD]);
   });
 });

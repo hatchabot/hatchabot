@@ -7,7 +7,7 @@ merged change is to match the conventions already in the code.
 
 ```sh
 npm install
-npm test          # unit tests + a syntax check of the single-file web app
+npm test          # unit tests + checks of the web app's pages and scripts
 npm run typecheck
 ```
 

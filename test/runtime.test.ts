@@ -64,4 +64,21 @@ describe('GET /v1/runtime', () => {
     expect(body.npmLatest).toBeUndefined();
     expect(body.upgradeAvailable).toBe(false);
   });
+
+  it('says whether an upgrade can be built, never the external memory search address (HB-0854)', async () => {
+    // Read by anyone signed in (the page's Runtime line), so a member here: an address
+    // that may carry credentials went out as upgradeBuildable's value.
+    const was = process.env.HATCHABOT_EMBED_URL;
+    const address = ['http://memory', 'example:8080'].join('.');
+    process.env.HATCHABOT_EMBED_URL = address;
+    try {
+      const f = await world({ latest: '2026.9.9' }); // an image with no engine of its own: needs the shared service or the external one
+      const res = await f.inject({ method: 'GET', url: '/v1/runtime', headers: { 'x-hatchabot-owner': 'user-member' } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ upgradeNeedsSharedEmbedder: true, upgradeBuildable: true });
+      expect(res.body).not.toContain('memory.example');
+    } finally {
+      if (was === undefined) delete process.env.HATCHABOT_EMBED_URL; else process.env.HATCHABOT_EMBED_URL = was;
+    }
+  });
 });

@@ -82,6 +82,8 @@ describe('Google sign-in (identity mode)', () => {
     const cli = store.createCliToken(me, 'laptop');
     const peer = store.createCliToken(me, 'peer server', 90, 'rehost');
     const other = store.createCliToken('user-g-someone-else', 'their laptop');
+    // An agent's call token (its agent is here: a gone one's calls no one, HB-0965).
+    store.insertAgent({ id: 'agent-x', ownerId: me, name: 'Agent x', slug: 'agent-x', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as never);
     const call = store.createAgentCallToken('agent-x', me);
     expect(store.ownerForCliToken(cli.token)).toBe(me);
     const out = await everywhere(f, await signIn(f));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
@@ -31,7 +31,7 @@ case "$*" in
   "ps -q --filter publish=19101 --filter label=hatchabot.role=doorman") echo 'abc123' ;;
   "inspect abc123 --format "*) echo '/hatchabot-doorman-e082d39db388 e082d39d-old' ;;
   "rm -f hatchabot-embedder") touch ${JSON.stringify(state)}.removed ;;
-  "inspect --format {{.State.Running}} hatchabot-embedder") [ -f ${JSON.stringify(state)}.removed ] && exit 1; echo true ;;
+  "inspect --format {{.State.Running}}"*" hatchabot-embedder") [ -f ${JSON.stringify(state)}.removed ] && exit 1; echo true ;;
   "inspect hatchabot-embedder --format "*) echo 'oldkeyhash0000' ;;
   "inspect --format {{.State.Running}} "*) exit 1 ;;
   "run -d --name hatchabot-embedder"*) echo embedderid ;;
@@ -88,7 +88,7 @@ printf '%s\\n' "$*" >> ${JSON.stringify(log)}
 d=${JSON.stringify(dir)}
 case "$*" in
   "network inspect "*) exit 0 ;;
-  "inspect --format {{.State.Running}} hatchabot-embedder") [ -f "$d/embedder" ] && echo true || exit 1 ;;
+  "inspect --format {{.State.Running}}"*" hatchabot-embedder") [ -f "$d/embedder" ] && echo true || exit 1 ;;
   "inspect --format {{.State.Running}} hatchabot-embed-door") [ -f "$d/door" ] && echo true || exit 1 ;;
   "inspect hatchabot-embedder --format "*) cat "$d/embedder" ;;
   "inspect hatchabot-embed-door --format "*) printf '%s|%s\\n' "$(cat "$d/door")" "$(cat "$d/door-nets" 2>/dev/null)" ;;
@@ -152,5 +152,139 @@ exit 0
     await provider.ensureEmbedder(spec as never);
     expect(connects()).toBe(2);
     expect(argv().filter((l) => l.startsWith('run -d --name hatchabot-embed-door'))).toHaveLength(1);
+  });
+});
+
+describe('HB-1021: the memory search engine follows its memory limit', () => {
+  /**
+   * Remembers the engine it ran: its key label, its memory label, and the
+   * limit Docker holds (what --memory asked, in bytes; 0 where `nolimits`
+   * says the kernel has none). `old` stands for an engine made before the
+   * memory label: its key and the limit Docker holds only. `refuse`: Docker
+   * refuses to remove the engine.
+   */
+  function engineStub() {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-engine-mem-'));
+    const log = join(dir, 'argv.log');
+    const stub = join(dir, 'docker');
+    writeFileSync(stub, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+d=${JSON.stringify(dir)}
+case "$*" in
+  "network inspect "*) exit 0 ;;
+  # The health loop's look: its state, memory label and limit.
+  "inspect --format {{.State.Running}}|"*" hatchabot-embedder") [ -f "$d/engine" ] && printf 'true|%s\\n' "$(cut -d'|' -f2- "$d/engine")" || exit 1 ;;
+  "inspect --format {{.State.Running}} hatchabot-embedder") [ -f "$d/engine" ] && echo true || exit 1 ;;
+  "inspect --format {{.State.Running}} hatchabot-embed-door") [ -f "$d/door" ] && echo true || exit 1 ;;
+  # What the format asks for: the key label alone, or the key, memory label and limit.
+  "inspect hatchabot-embedder --format "*embed-memory*) cat "$d/engine" ;;
+  "inspect hatchabot-embedder --format "*) cut -d'|' -f1 "$d/engine" ;;
+  "inspect hatchabot-embed-door --format "*) printf '%s|bridge,hatchabot-embed,\\n' "$(cat "$d/door")" ;;
+  "rm -f hatchabot-embedder") if [ -f "$d/refuse" ]; then echo 'Error response from daemon: removal timed out' >&2; exit 1; fi; rm -f "$d/engine" ;;
+  "run -d --name hatchabot-embedder "*)
+    key=$(echo "$*" | grep -oE 'hatchabot\\.embed-key=[0-9a-f.]+' | cut -d= -f2)
+    asked=$(echo "$*" | grep -oE 'hatchabot\\.embed-memory=[^ ]+' | cut -d= -f2)
+    m=$(echo "$*" | grep -oE -- '--memory [0-9]+[mg]' | head -1 | cut -d' ' -f2)
+    case "$m" in *g) b=$(( \${m%g} * 1073741824 )) ;; *m) b=$(( \${m%m} * 1048576 )) ;; *) b=0 ;; esac
+    [ -f "$d/nolimits" ] && b=0
+    if [ -f "$d/old" ]; then printf '%s|<no value>|%s\\n' "$key" "$b" > "$d/engine"; else printf '%s|%s|%s\\n' "$key" "$asked" "$b" > "$d/engine"; fi
+    echo engineid ;;
+  "run -d --name hatchabot-embed-door "*) echo "$*" | grep -oE 'hatchabot\\.embed-door=[0-9a-f]+' | cut -d= -f2 > "$d/door"; echo doorid ;;
+  "port "*) echo "8093/tcp -> 127.0.0.1:8093" ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    chmodSync(stub, 0o755);
+    const provider = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', fetchImpl: (async () => new Response('{"ok":true}', { status: 200 })) as typeof fetch });
+    const keyFile = join(dir, 'server-key');
+    writeFileSync(keyFile, 'the-key\n');
+    const spec = {
+      image: 'test-image:latest', modelPath: join(dir, 'model.gguf'), modelAlias: 'embeddinggemma', key: 'the-key',
+      doorImage: 'test-image:latest', doorScript: 'noop', doorPort: 8093, doorBind: '127.0.0.1',
+      keysFile: join(dir, 'keys.json'), serverKeyFile: keyFile, uid: process.getuid!(), gid: process.getgid!(), perMin: 600, mbPerMin: 8,
+    };
+    const argv = () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n') : []);
+    const runs = () => argv().filter((l) => l.startsWith('run -d --name hatchabot-embedder '));
+    return { provider, dir, spec, runs, removals: () => argv().filter((l) => l === 'rm -f hatchabot-embedder').length };
+  }
+  const withMemory = async (value: string | undefined, fn: () => Promise<void>) => {
+    const had = process.env.HATCHABOT_EMBEDDER_MEMORY;
+    if (value === undefined) delete process.env.HATCHABOT_EMBEDDER_MEMORY; else process.env.HATCHABOT_EMBEDDER_MEMORY = value;
+    try { await fn(); } finally { if (had === undefined) delete process.env.HATCHABOT_EMBEDDER_MEMORY; else process.env.HATCHABOT_EMBEDDER_MEMORY = had; }
+  };
+
+  it('a changed limit replaces the engine at the next start, and only then; the same limit written another way keeps it', async () => {
+    const { provider, spec, runs, removals } = engineStub();
+    await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(runs()).toHaveLength(1);
+    // A restart that changes nothing keeps it, as before.
+    await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    await withMemory('2048m', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(runs()).toHaveLength(1);
+    expect(removals()).toBe(0);
+    // Raised in .env, then a restart: a new engine at the new limit.
+    await withMemory('4g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(removals()).toBe(1);
+    expect(runs()).toHaveLength(2);
+    expect(runs()[1]).toContain('--memory 4g ');
+    expect(runs()[1]).toContain('--label hatchabot.embed-memory=4g ');
+    await withMemory('4g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(runs()).toHaveLength(2);
+  });
+
+  it('an engine from before the label is judged by the limit Docker holds, and kept where Docker holds none', async () => {
+    const { provider, dir, spec, runs, removals } = engineStub();
+    writeFileSync(join(dir, 'old'), '');
+    await withMemory(undefined, () => provider.ensureEmbedder(spec as never).then(() => {}));
+    // Upgraded with the limit unchanged: kept.
+    rmSync(join(dir, 'old'));
+    await withMemory(undefined, () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(removals()).toBe(0);
+    // Changed: replaced.
+    await withMemory('3g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(removals()).toBe(1);
+    expect(runs().at(-1)).toContain('--memory 3g ');
+    // A kernel with no memory limits: an engine from before the label holds 0, and is not replaced for it.
+    const other = engineStub();
+    writeFileSync(join(other.dir, 'old'), '');
+    writeFileSync(join(other.dir, 'nolimits'), '');
+    await withMemory(undefined, () => other.provider.ensureEmbedder(other.spec as never).then(() => {}));
+    rmSync(join(other.dir, 'old'));
+    await withMemory(undefined, () => other.provider.ensureEmbedder(other.spec as never).then(() => {}));
+    expect(other.removals()).toBe(0);
+    expect(other.runs()).toHaveLength(1);
+  });
+
+  it('the health loop\'s look says an engine is on another limit than the one asked for now, from the same look', async () => {
+    const { provider, spec } = engineStub();
+    await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    await withMemory('2g', async () => expect(await provider.embedderStatus()).toEqual({ embedder: 'running', door: 'running', doorAddress: '127.0.0.1:8093' }));
+    await withMemory('2048m', async () => expect((await provider.embedderStatus()).engineMemoryOff).toBeUndefined());
+    await withMemory('4g', async () => expect(await provider.embedderStatus()).toMatchObject({ embedder: 'running', engineMemoryOff: true }));
+    // Where Docker holds no limit, an engine from before the label is not called off it.
+    const other = engineStub();
+    writeFileSync(join(other.dir, 'old'), '');
+    writeFileSync(join(other.dir, 'nolimits'), '');
+    await withMemory(undefined, () => other.provider.ensureEmbedder(other.spec as never).then(() => {}));
+    await withMemory('4g', async () => expect((await other.provider.embedderStatus()).engineMemoryOff).toBeUndefined());
+  });
+
+  it('a start whose old engine Docker would not remove fails, for a new limit or a new key, instead of saying the old one is up', async () => {
+    const { provider, dir, spec, runs, removals } = engineStub();
+    await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    writeFileSync(join(dir, 'refuse'), '');
+    await withMemory('4g', async () => {
+      await expect(provider.ensureEmbedder(spec as never)).rejects.toMatchObject({ userMessage: "Couldn't replace the memory search engine to start it on its new settings. Try again in a moment." });
+    });
+    await withMemory('2g', async () => {
+      await expect(provider.ensureEmbedder({ ...spec, modelAlias: 'another-alias' } as never)).rejects.toThrow(/embedder removal failed: .*removal timed out/);
+    });
+    expect(removals()).toBe(2);
+    expect(runs()).toHaveLength(1);
+    // Taken once Docker lets it go.
+    rmSync(join(dir, 'refuse'));
+    await withMemory('4g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(runs()).toHaveLength(2);
+    expect(runs()[1]).toContain('--memory 4g ');
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
-import { computePosture, riskKeys, diffRisks, measureAgentDisks } from '../src/orchestrator/posture.js';
+import { computePosture, riskKeys, diffRisks, measureAgentDisks, runPostureSweep, DISK_MEASURE_SCRIPT, onlyVanished, RISK_KEYS_FORMAT } from '../src/orchestrator/health/posture.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
 
 const OWNER = 'user-a';
@@ -107,6 +107,28 @@ describe('computePosture — per-agent Telegram exposure', () => {
     expect(by['u-invited']!.pending).toBe(true);
   });
 
+  it('no group setting is the default the build writes: any group, its members, once its bot admits someone (HB-1093)', () => {
+    const store = baseStore();
+    agent(store, 'tg');
+    store.insertChannel({ id: 'ch-tg', agentId: 'tg', kind: 'telegram', accountId: 'made_up_bot', secretRef: 's/ch-tg', deepLink: 'https://t.me/made_up_bot', createdAt: 'now' } as any);
+    store.insertMembership({ id: 'm-tg', agentId: 'tg', userId: 'u-tg', role: 'owner', channelUserId: '41', status: 'active' });
+    agent(store, 'nobody'); // a bot, nobody admitted: the build writes no group
+    store.insertChannel({ id: 'ch-nb', agentId: 'nobody', kind: 'telegram', accountId: 'made_up_bot2', secretRef: 's/ch-nb', deepLink: 'https://t.me/made_up_bot2', createdAt: 'now' } as any);
+    agent(store, 'web'); // no bot: no Telegram group at all
+    store.insertMembership({ id: 'm-web', agentId: 'web', userId: 'u-web', role: 'owner', channelUserId: '42', status: 'active' });
+    agent(store, 'shut');
+    store.insertChannel({ id: 'ch-shut', agentId: 'shut', kind: 'telegram', accountId: 'made_up_bot3', secretRef: 's/ch-shut', deepLink: 'https://t.me/made_up_bot3', createdAt: 'now' } as any);
+    store.insertMembership({ id: 'm-shut', agentId: 'shut', userId: 'u-shut', role: 'owner', channelUserId: '43', status: 'active' });
+    store.setAgentGroupAccess('shut', { mode: 'off' });
+    const report = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'accounts' });
+    const row = (id: string) => report.agents.find((a) => a.id === id)!;
+    expect(row('tg').group).toBe('members');
+    expect(row('tg').reasons).toContain('group chat (members)');
+    expect(row('nobody').group).toBe('off');
+    expect(row('web').group).toBe('off');
+    expect(row('shut').group).toBe('off');
+  });
+
   it('a Google connection without Gmail is not reported as able to send mail (HB-0600)', () => {
     const store = baseStore();
     agent(store, 'cal');
@@ -161,6 +183,71 @@ describe('risk diffing', () => {
     const d = diffRisks(keys, ['agent:x:high']); // owner-header is new since last time
     expect(d.added).toEqual(['install:owner-header:critical']);
     expect(d.removed).toEqual([]);
+  });
+
+  it('the sweep checks the machine\'s owner when they have no agents yet (HB-1104)', () => {
+    const store = baseStore(); // this machine, its owner, no agent
+    const logged: Array<Record<string, unknown>> = [];
+    const saved = process.env.HATCHABOT_ALLOWED_EMAILS;
+    delete process.env.HATCHABOT_ALLOWED_EMAILS;
+    try {
+      runPostureSweep(store, { authMode: 'identity', log: (_e, d) => { logged.push(d); } });
+    } finally {
+      if (saved !== undefined) process.env.HATCHABOT_ALLOWED_EMAILS = saved;
+    }
+    expect(logged).toHaveLength(1);
+    expect(logged[0]!.ownerId).toBe(OWNER);
+    expect(logged[0]!.added).toContain('install:allowed-emails:critical');
+    expect(store.latestPostureSnapshotBefore(OWNER, '9999-12-31')).toContain('install:allowed-emails:critical');
+  });
+
+  it('an agent already at high that gains another powerful capability is a change the sweep reports (HB-1103)', () => {
+    const store = baseStore();
+    agent(store, 'wide');
+    for (const uid of ['51', '52', '53']) {
+      store.insertMembership({ id: `m-w${uid}`, agentId: 'wide', userId: `u-w${uid}`, role: 'user', channelUserId: uid, status: 'active' });
+    }
+    store.setAgentBrowser('wide', true);
+    store.setAgentBrowserLogins('wide', '0a1b2c3d4e5f');
+    const changes: Array<{ added: string[]; removed: string[] }> = [];
+    const log = (_e: string, d: Record<string, unknown>) => { changes.push(d as never); };
+    runPostureSweep(store, { authMode: 'accounts', log });
+    const before = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'accounts' }).agents.find((a) => a.id === 'wide')!;
+    expect(before.exposure).toBe('high');
+    changes.length = 0;
+    store.insertConnection({ id: 'c-w', ownerId: OWNER, kind: 'google', email: 'helper@example.com', services: ['gmail'], secretRef: 's/c-w' });
+    store.attachConnection('wide', 'c-w', false);
+    runPostureSweep(store, { authMode: 'accounts', log });
+    expect(changes).toEqual([{ ownerId: OWNER, added: ['agent:wide:can:send email as helper@example.com'], removed: [] }]);
+    // A capability that raises nothing is not a risk of its own.
+    store.setAgentSharedMemory('wide', true);
+    changes.length = 0;
+    runPostureSweep(store, { authMode: 'accounts', log });
+    expect(changes).toEqual([]);
+  });
+
+  it('a snapshot of the older key format is no baseline: the upgrade day reports nothing, and the next change is reported (HB-1103)', () => {
+    const store = baseStore();
+    agent(store, 'wide');
+    for (const uid of ['51', '52', '53']) {
+      store.insertMembership({ id: `m-w${uid}`, agentId: 'wide', userId: `u-w${uid}`, role: 'user', channelUserId: uid, status: 'active' });
+    }
+    store.setAgentBrowser('wide', true);
+    store.setAgentBrowserLogins('wide', '0a1b2c3d4e5f');
+    // Yesterday's, as the release before wrote it: no capability keys.
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    const before = riskKeys(computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'accounts' })).filter((k) => !k.includes(':can:'));
+    store.upsertPostureSnapshot(OWNER, yesterday, before);
+    const changes: Array<{ added: string[]; removed: string[] }> = [];
+    const log = (_e: string, d: Record<string, unknown>) => { changes.push(d as never); };
+    runPostureSweep(store, { authMode: 'accounts', log });
+    expect(changes).toEqual([]);
+    expect(store.latestPostureSnapshotBefore(OWNER, '9999-12-31')![0]).toBe(RISK_KEYS_FORMAT);
+    // Against that baseline, a real change is reported.
+    store.insertConnection({ id: 'c-w', ownerId: OWNER, kind: 'google', email: 'helper@example.com', services: ['gmail'], secretRef: 's/c-w' });
+    store.attachConnection('wide', 'c-w', false);
+    runPostureSweep(store, { authMode: 'accounts', log });
+    expect(changes).toEqual([{ ownerId: OWNER, added: ['agent:wide:can:send email as helper@example.com'], removed: [] }]);
   });
 });
 
@@ -229,5 +316,102 @@ describe('agent storage warning', () => {
     expect(d.get('fresh')!.bytes).toBe(5);
     expect(d.get('broken')!.bytes).toBe(7);
     expect(d.has('arch')).toBe(false);
+  });
+
+  it('an incomplete count (du could not read a folder, or ran out of time) keeps the last measurement and is tried again (HB-0943)', async () => {
+    const store = baseStore();
+    agent(store, 'partial', { runtimeRef: 'rt-partial' });
+    agent(store, 'slow', { runtimeRef: 'rt-slow' });
+    const now = Date.parse('2026-09-30T04:00:00.000Z');
+    const old = new Date(now - 2 * 86_400_000).toISOString();
+    store.setAgentDiskBytes('partial', 12e9, old);
+    store.setAgentDiskBytes('slow', 12e9, old);
+    const logged: string[] = [];
+    let calls = 0;
+    const provider = {
+      async execShellOnVolume(ref: string) {
+        calls++;
+        return ref === 'rt-partial'
+          ? { code: 1, stdout: '4096\n', stderr: "du: cannot read directory '/home/node/locked': Permission denied" }
+          : { code: 1, stdout: '4096\n', stderr: '', timedOut: true };
+      },
+    } as unknown as RuntimeProvider;
+    const sweep = () => measureAgentDisks({ store, providerFor: () => provider, now: () => now, log: (e) => logged.push(e) });
+    expect(await sweep()).toEqual({ measured: 0, failed: 2 });
+    const d = store.agentDiskBytes();
+    expect(d.get('partial')).toEqual({ bytes: 12e9, measuredAt: old });
+    expect(d.get('slow')).toEqual({ bytes: 12e9, measuredAt: old });
+    expect(logged).toEqual(['security.disk_measure_failed', 'security.disk_measure_failed']);
+    // Not taken as fresh: the next sweep measures them again.
+    await sweep();
+    expect(calls).toBe(4);
+  });
+
+  it('files that went away while du counted leave the count whole; one it could not read still fails it (HB-0943)', async () => {
+    const store = baseStore();
+    agent(store, 'busy', { runtimeRef: 'rt-busy' });
+    agent(store, 'mixed', { runtimeRef: 'rt-mixed' });
+    const now = Date.parse('2026-09-30T04:00:00.000Z');
+    const gone = "du: cannot access '/home/node/.cache/tmp-41': No such file or directory\ndu: cannot read directory '/home/node/browser/Cache_Data': No such file or directory";
+    const provider = {
+      async execShellOnVolume(ref: string) {
+        return ref === 'rt-busy'
+          ? { code: 1, stdout: '9000000\n', stderr: gone }
+          : { code: 1, stdout: '4096\n', stderr: `${gone}\ndu: cannot read directory '/home/node/locked': Permission denied` };
+      },
+    } as unknown as RuntimeProvider;
+    expect(await measureAgentDisks({ store, providerFor: () => provider, now: () => now })).toEqual({ measured: 1, failed: 1 });
+    expect(store.agentDiskBytes().get('busy')!.bytes).toBe(9_000_000);
+    expect(store.agentDiskBytes().has('mixed')).toBe(false);
+    // The words this machine's du uses for a file that is not there.
+    const { spawnSync } = await import('node:child_process');
+    const du = spawnSync('du', ['-sb', '/nonexistent-hb-0943-41'], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } });
+    expect(du.status).not.toBe(0);
+    expect(onlyVanished(du.stderr)).toBe(true);
+    expect(onlyVanished("du: cannot read directory '/x': Permission denied")).toBe(false);
+    expect(onlyVanished('')).toBe(false);
+  });
+
+  it('the measurement runs du in the C locale, so its words are the ones onlyVanished knows in any language (HB-0943)', async () => {
+    const { mkdtempSync, writeFileSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { spawnSync } = await import('node:child_process');
+    const german = { LANG: 'de_DE.UTF-8', LC_ALL: 'de_DE.UTF-8', LANGUAGE: 'de' };
+    const dir = mkdtempSync(join(tmpdir(), 'hb-du-'));
+    try {
+      // A du of its own on PATH that says which locale it was given.
+      writeFileSync(join(dir, 'du'), `#!/bin/sh\nprintf '%s' "$LC_ALL" > ${JSON.stringify(join(dir, 'seen'))}\necho '4096\t/home/node'\n`, { mode: 0o755 });
+      const run = spawnSync('bash', ['-c', DISK_MEASURE_SCRIPT], { encoding: 'utf8', env: { PATH: `${dir}:${process.env.PATH ?? '/usr/bin:/bin'}`, ...german } });
+      expect(run.status).toBe(0);
+      expect(run.stdout.trim()).toBe('4096');
+      expect(readFileSync(join(dir, 'seen'), 'utf8')).toBe('C');
+      // And this machine's du, asked in German, for a folder that is not there.
+      const real = spawnSync('bash', ['-c', DISK_MEASURE_SCRIPT.replace('/home/node', join(dir, 'gone-41'))], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...german } });
+      expect(real.status).not.toBe(0);
+      expect(onlyVanished(real.stderr)).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(process.getuid?.() === 0)('the measurement fails when du cannot read part of the volume, instead of printing a short total (HB-0943)', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { spawnSync } = await import('node:child_process');
+    const dir = mkdtempSync(join(tmpdir(), 'hb-du-'));
+    try {
+      mkdirSync(join(dir, 'locked'));
+      writeFileSync(join(dir, 'locked', 'big'), Buffer.alloc(1_000_000));
+      chmodSync(join(dir, 'locked'), 0o000);
+      const run = spawnSync('bash', ['-c', DISK_MEASURE_SCRIPT.replace('/home/node', dir)], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } });
+      expect(run.status).not.toBe(0);
+      chmodSync(join(dir, 'locked'), 0o755);
+      const whole = spawnSync('bash', ['-c', DISK_MEASURE_SCRIPT.replace('/home/node', dir)], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } });
+      expect(whole.status).toBe(0);
+      expect(Number(whole.stdout.trim())).toBeGreaterThanOrEqual(1_000_000);
+    } finally {
+      try { chmodSync(join(dir, 'locked'), 0o755); } catch { /* already */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -261,15 +261,16 @@ management agent stays pinned and moves last.
 1. `npm test && npm run typecheck && npm run test:ui` green on `main` (the last one drives the real page in headless Chrome, in docker: scripts/ui-clickthrough.mjs), and
    **`./scripts/upgrade-check.sh`** — it builds a database with each of a few
    past releases' own code and opens it with this build, which is the only way
-   to catch a column added to an existing table with no `ALTER` (every unit
-   test starts from a fresh database, where `CREATE TABLE` runs in full). CI
+   to catch a column added to an existing table with no schema step
+   (`SCHEMA_STEPS` in `src/store/schemaVersion.ts`; every unit test starts
+   from a fresh database, where `CREATE TABLE` runs in full). CI
    runs it too. `npx tsx scripts/schema-drift.ts` does the same against a live
    install's database.
 2. Bump `version` in `package.json` and finish the CHANGELOG section
    (`## [X.Y.Z] — YYYY-MM-DD`).
    **Does it change how containers are made** (docker run flags, mounts,
    network, what the seed writes) so that existing agents should be remade?
-   Append one entry to `SETUP_CHANGES` in `src/orchestrator/rebuildPolicy.ts`:
+   Append one entry to `SETUP_CHANGES` in `src/domain/rebuildPolicy.ts`:
    the next `gen`, this version, a level and a reason ("its mounts were
    tightened"). `required` means every install rebuilds its agents on its
    own, once each is idle (unless its owner chose manual); `recommended`
@@ -277,6 +278,12 @@ management agent stays pinned and moves last.
    `optional` only rides along with the next rebuild. Never edit or remove
    an entry: containers carry the number. A new runtime image needs no entry;
    agents behind the default image are already `recommended`.
+   **Does it carry a schema step marked `additive: false`**
+   (`src/store/schemaVersion.ts`)? Then no older release starts on a
+   database this one has opened, and an upgrade that rolls back leaves the
+   install down until this release, or a newer one, is installed: the
+   rollback puts back the code, never the database. Say so in the
+   CHANGELOG's Upgrading section.
 3. Commit and land the version commit:
    ```sh
    git commit -am "Release vX.Y.Z"
@@ -284,7 +291,13 @@ management agent stays pinned and moves last.
    ```
    `scripts/land.sh` opens the pull request in the dev repo, waits for its
    checks (test, ui, secrets, upgrade), merges it with a rebase, and brings
-   local `main` to what landed.
+   local `main` to what landed. Before it pushes, it runs the `secrets`
+   job's two gitleaks scans when gitleaks is installed (the new commits with
+   `origin/main`'s `.gitleaks.toml`, then the tree with the default rules),
+   and a hit refuses, naming the file and line; without gitleaks it says the
+   scan was skipped. A gitleaks other than the version the job pins (the
+   `V=` of its step in `.github/workflows/ci.yml`) is said, not refused: the
+   default rules change between versions.
 4. Tag it — the publisher publishes it, and GitHub builds the release;
    nothing is built or uploaded from this machine:
    ```sh
@@ -641,8 +654,8 @@ image pin is missing.
 ## Deploying — run releases, not the working tree
 
 A production Hatchabot should run from a **checkout pinned to a tag**, not
-from the directory you develop in. The server reads `web/index.html` from disk
-on every request and runs TypeScript straight from `src/` via `tsx`, so an
+from the directory you develop in. The server reads `web/index.html` and its
+scripts in `web/app/` from disk again whenever one changes and runs TypeScript straight from `src/` via `tsx`, so an
 edit — or a half-finished `git pull` — in a live checkout changes what users see
 *immediately*. Keep them apart:
 

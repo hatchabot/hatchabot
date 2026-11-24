@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { dockerNames } from '../src/providers/dockerNames.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
-import { agentArchiveName } from '../src/orchestrator/backups.js';
+import { agentArchiveName } from '../src/orchestrator/backups/backupFiles.js';
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });

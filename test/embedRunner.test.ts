@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -216,7 +216,7 @@ case "$*" in
   "image inspect "*) echo sha256:abc ;;
   "network inspect "*) exit 0 ;;
   "run --rm --network none --user 0 -v "*"sha256sum"*) echo "0000  /v/model" ;;
-  "inspect --format {{.State.Running}} hatchabot-embedder") [ -f "$d/embedder" ] && echo true || exit 1 ;;
+  "inspect --format {{.State.Running}}"*" hatchabot-embedder") [ -f "$d/embedder" ] && echo true || exit 1 ;;
   "inspect --format {{.State.Running}} hatchabot-embed-door") [ -f "$d/door" ] && echo true || exit 1 ;;
   "run -d --name hatchabot-embedder "*) touch "$d/embedder"; echo embedderid ;;
   "run -d --name hatchabot-embed-door "*) touch "$d/door"; echo doorid ;;
@@ -408,6 +408,34 @@ ${cut ? `head -c ${cut} | sh -c "$script"` : 'sh -c "$script"'}
     expect(readFileSync(join(volume, 'server-key'), 'utf8')).toBe('the-copy-before\n');
     const { readdirSync } = await import('node:fs');
     expect(readdirSync(volume).filter((f) => f.endsWith('.part'))).toEqual([]);
+  });
+  // A file of 1 MiB or more (a model) is streamed, not read whole. A docker
+  // that ends before reading it (a daemon or a disk that failed) left the
+  // stream paused with the file open, and each failed copy kept one more
+  // descriptor until the process had none (HB-0928).
+  it.skipIf(!existsSync('/proc/self/fd'))('a big file is closed when the copy fails before it was read, or after it was', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-embed-fd-'));
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    symlinkSync(process.execPath, join(bin, 'node'));
+    vi.stubEnv('HOME', dir); vi.stubEnv('PATH', bin);
+    const big = join(dir, 'model.gguf');
+    writeFileSync(big, Buffer.alloc(2 * 1024 * 1024, 32));
+    const docker = join(bin, 'docker');
+    // `FAIL` there: it ends at once, reading nothing; otherwise it reads it all and ends well.
+    writeFileSync(docker, `#!${process.execPath}\nconst fs = require('fs');\nif (fs.existsSync(${JSON.stringify(join(dir, 'FAIL'))})) process.exit(1);\nprocess.stdin.resume(); process.stdin.on('end', () => process.exit(0));\n`, { mode: 0o755 });
+    const open = () => readdirSync('/proc/self/fd').filter((fd) => { try { return readlinkSync(`/proc/self/fd/${fd}`) === big; } catch { return false; } }).length;
+    const provider = new LocalDockerProvider({ docker, host: 'ssh://laptop.example.org', image: 'test-image:latest', reachProbe: async () => true });
+    const files = { keysFile: big, serverKeyFile: big, doorImage: 'test-image:latest', uid: 1000, gid: 1000 };
+    try {
+      writeFileSync(join(dir, 'FAIL'), '');
+      for (let i = 0; i < 3; i++) await expect(provider.pushEmbedKeys(files)).rejects.toThrow(/Could not copy|copy model\.gguf/);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(open()).toBe(0);
+      rmSync(join(dir, 'FAIL'));
+      await provider.pushEmbedKeys(files);
+      expect(open()).toBe(0);
+    } finally { vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); }
   });
 });
 

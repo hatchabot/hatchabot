@@ -1,15 +1,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import { createHash, randomBytes } from 'node:crypto';
-import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import { createServer, request, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { FrameReader, GUEST_CONNECT_TIMEOUT_MS, GUEST_IDLE_TO_CLOSE_MS, GUEST_ROOM_EVERY_MS, MAX_GUEST_CONSOLES, encodeFrame } from '../src/api/consoleProxy.js';
 import { consoleIdentity, guestConsoleSessionKey, OWNER_ROLE } from '../src/openclaw/consoleIdentity.js';
-import { ConsoleAccess, consoleAllowUsers, consoleSyncBatch, parseConsoleState } from '../src/orchestrator/consoleAccess.js';
+import { ConsoleAccess, consoleAllowUsers, consoleSyncBatch, parseConsoleState } from '../src/orchestrator/console/consoleAccess.js';
 import { TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH } from '../src/api/controlUiRebase.js';
 import { CONTROL_UI_MATH_PREFIX, CONTROL_UI_MATH_SCRIPT_PATH, CONTROL_UI_MATH_SOURCE_PATH, KATEX_SCRIPT_PATH, KATEX_STYLES_PATH } from '../src/api/controlUiMath.js';
 
@@ -160,6 +160,8 @@ async function world(opts: {
    * moment after the write (the reload) — every open console dropping then.
    */
   liveList?: { reloadMs: number };
+  /** What the sign-out waits for before it answers (a loaded machine, a slow store). */
+  logoutWaits?: (req: FastifyRequest) => Promise<void>;
 } = {}) {
   const gw = await fakeGateway();
   const db = new Database(':memory:');
@@ -217,7 +219,7 @@ async function world(opts: {
     return u ? { ownerId: u, via: 'identity' as const } : undefined;
   });
   await registerRoutes(app, { store, secrets: { get: async () => '', put: async () => {}, delete: async () => {} } as never, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never, ...(opts.authMode ? { authMode: opts.authMode } : {}) });
-  app.post('/v1/logout', async () => ({ ok: true })); // stateless-cookie logout; hooks must still retire console access
+  app.post('/v1/logout', async (req) => { await opts.logoutWaits?.(req); return { ok: true }; }); // stateless-cookie logout; hooks must still retire console access
   await app.listen({ port: 0, host: '127.0.0.1' });
   toClose.push({ close: () => { const raw = app.server as Server; raw.closeAllConnections?.(); raw.close(); } });
   const port = (app.server.address() as { port: number }).port;
@@ -432,6 +434,32 @@ describe('console access after asynchronous waits', () => {
     w.store.setAgentRuntimeRef('a1', 'mock://replacement');
     w.app.consoleSockets!.revalidate();
     expect(await b.until(() => b.isClosed())).toBe(true);
+  });
+
+  it('closes the console of a browser that signed out and hung up before the answer, at once (HB-1405)', async () => {
+    const g = gate();
+    let serverSaw!: Promise<void>;
+    const w = await world({ logoutWaits: async (req) => {
+      serverSaw = new Promise<void>((r) => { req.raw.socket.once('close', () => r()); });
+      g.arrive(); await g.held;
+    } });
+    const cookie = `hbu=${OWNER}; hatchabot_session=synthetic-session-one`;
+    const a = openConsole(w.port, OWNER, { cookie });
+    const b = openConsole(w.port, OWNER, { cookie: `hbu=${OWNER}; hatchabot_session=synthetic-session-two` });
+    expect((await a.ready)?.ok).toBe(true);
+    expect((await b.ready)?.ok).toBe(true);
+    const call = request({ host: '127.0.0.1', port: w.port, method: 'POST', path: '/v1/logout', headers: { cookie, 'x-hatchabot-owner': OWNER } });
+    const hungUp = new Promise<void>((r) => { call.on('error', () => r()); call.on('close', () => r()); });
+    call.end();
+    await g.reached;
+    // The tab is closed (or its fetch timed out) while the sign-out still works.
+    call.destroy();
+    await hungUp;
+    await serverSaw;
+    g.release();
+    // Its answer goes to nobody, but the sign-out happened: its console ends now, not at the 30-second sweep.
+    expect(await a.until(() => a.isClosed(), 2000)).toBe(true);
+    expect(b.isClosed()).toBe(false);
   });
 
   it('returns a bounded gateway error when an upstream response disconnects mid-body', async () => {
@@ -1544,7 +1572,7 @@ describe('the state read and the sync (pure)', () => {
 
 describe('gatewayCallAs when the gateway cannot be reached', () => {
   it('fails once, without closing itself in a loop (a stack overflow in CI, 2026-10-06)', async () => {
-    const { gatewayCallAs } = await import('../src/orchestrator/consoleAccess.js');
+    const { gatewayCallAs } = await import('../src/orchestrator/console/consoleAccess.js');
     const srv = createServer((_q, s) => { s.writeHead(403); s.end(); });
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
     const port = (srv.address() as AddressInfo).port;

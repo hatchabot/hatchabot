@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { admitMember, AdmitError, announceToMembers, denyPairing, revokeMember, RevokeError } from '../src/orchestrator/members.js';
+import { admitMember, AdmitError, announceToMembers, denyPairing, revokeMember, RevokeError } from '../src/orchestrator/members/members.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -103,6 +103,19 @@ describe('admitMember', () => {
     await expect(admitMember({ store, provider }, { ...opts, code: 'GONE' })).rejects.toBeInstanceOf(
       AdmitError,
     );
+    expect(store.listMemberships('a1')).toHaveLength(1); // owner only
+  });
+
+  it('a read of the requests that fails is said to be one, on every app, not "no longer pending" (HB-1050)', async () => {
+    const { store, provider, opts } = await setup();
+    for (const out of [{ code: 1, stdout: '', stderr: 'docker exec: connection reset' }, { code: 0, stdout: JSON.stringify({ version: 1, requests: [], unread: ['db'] }), stderr: '' }]) {
+      provider.execResponses.set('sh', out);
+      for (const kind of ['telegram', 'discord'] as const) {
+        const err = await admitMember({ store, provider }, { ...opts, kind }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(AdmitError);
+        expect(err).toMatchObject({ status: 502, userMessage: "Couldn't read the requests waiting at the agent's door just now — try again in a moment." });
+      }
+    }
     expect(store.listMemberships('a1')).toHaveLength(1); // owner only
   });
 

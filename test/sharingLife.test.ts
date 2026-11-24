@@ -12,15 +12,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { personalSummary, scanPersonalData } from '../src/domain/personalData.js';
-import { readCloneMemory, scanTemplate, stripManagedSections, type TemplateManifest } from '../src/orchestrator/template.js';
-import { aiSourceHealth } from '../src/orchestrator/health.js';
-import { workspacePath } from '../src/orchestrator/snapshots.js';
+import { readCloneMemory, scanTemplate, stripManagedSections, type TemplateManifest } from '../src/orchestrator/transfer/template.js';
+import { aiSourceHealth } from '../src/orchestrator/health/health.js';
+import { workspacePath } from '../src/orchestrator/files/snapshots.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
 import { makeWorld, seedRunningAgent, as, OWNER } from './support/world.js';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { createAgentRecord, memoryFingerprint, runProvisionSteps } from '../src/orchestrator/provision.js';
+import { createAgentRecord, memoryFingerprint, runProvisionSteps } from '../src/orchestrator/lifecycle/provision.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -129,6 +129,63 @@ function localShell(ws: string, slug: string): RuntimeProvider {
     },
   } as unknown as RuntimeProvider;
 }
+
+describe('the agent cap while a copy is being made (HB-1121)', () => {
+  afterEach(() => { delete process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT; });
+  /** The copy's first credential write waits until let go: its row is made by then, and the request has not answered. */
+  function holdCopyWrites(w: Awaited<ReturnType<typeof makeWorld>>) {
+    let go!: () => void;
+    const gate = new Promise<void>((r) => { go = r; });
+    let begun!: () => void;
+    const started = new Promise<void>((r) => { begun = r; });
+    const put = w.secrets.put.bind(w.secrets);
+    w.secrets.put = async (ref, v) => { if (ref.startsWith('agent-env/') && !ref.startsWith('agent-env/fx-')) { begun(); await gate; } return put(ref, v); };
+    return { started, go };
+  }
+  const create = (w: Awaited<ReturnType<typeof makeWorld>>, name: string) =>
+    w.f.inject({ method: 'POST', url: '/v1/agents', headers: as(), payload: { name, aiProfileId: 'p1', hostId: 'h1' } });
+
+  for (const via of ['clone', 'derive', 'template import', 'inbox accept', 'full copy import'] as const) {
+    it(`${via}: the copy counts once while it is made, not as its row and its place both`, async () => {
+      const w = await makeWorld();
+      await seedRunningAgent(w);
+      await w.secrets.put('agent-env/fx-1', 'fixture-value');
+      w.store.insertAgentEnv({ id: 'fx-1', agentId: 'a1', name: 'SEARCH_KEY', secretRef: 'agent-env/fx-1', createdAt: 'now' });
+      // A setup field its copies answer with a credential (the write held below).
+      w.store.setAgentParameters('a1', [{ key: 'api_key', label: 'Key', required: false, type: 'text', target: 'env' }]);
+      const values = { api_key: 'made-up-value' };
+      let into = w;
+      let file: Buffer | undefined;
+      if (via === 'template import' || via === 'inbox accept') {
+        file = (await w.f.inject({ method: 'GET', url: '/v1/agents/a1/export?excludeMemory=1', headers: as() })).rawPayload;
+        if (via === 'inbox accept') w.store.insertShare({ id: 'sh-1', fromOwner: 'user-friend', toEmail: ['owner', 'example.test'].join('@'), toOwner: OWNER, agentName: 'Kitchen', blob: file, createdAt: 'now' });
+      } else if (via === 'full copy import') {
+        file = (await w.f.inject({ method: 'GET', url: '/v1/agents/a1/backup', headers: as() })).rawPayload;
+        // Restored on another install, which has one agent of its own.
+        into = await makeWorld();
+        await seedRunningAgent(into, { id: 'b1', name: 'Garden', slug: 'garden', accountId: 'gardenbot' });
+      }
+      const held = holdCopyWrites(into);
+      process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT = '3';
+      const post = (url: string, payload: unknown, type?: string) =>
+        into.f.inject({ method: 'POST', url, headers: { ...as(), ...(type ? { 'content-type': type } : {}) }, payload: payload as string });
+      const copying = via === 'clone' ? post('/v1/agents/a1/clone', { name: 'Kitchen Copy', telegram: false })
+        : via === 'derive' ? post('/v1/agents/a1/derive', { name: 'Kitchen Child', values })
+        : via === 'template import' ? post('/v1/agents/import?wait=1&name=Kitchen%20Two', Buffer.concat([Buffer.from(JSON.stringify({ values }) + '\n'), file!]), 'application/vnd.hatchabot.import')
+        : via === 'inbox accept' ? post('/v1/inbox/sh-1/accept', { name: 'Their Kitchen', values })
+        : post('/v1/agents/import?wait=1', file!, 'application/octet-stream');
+      try {
+        await held.started;
+        // Its first agent and the copy: two of three, so one more fits, and then no more.
+        expect((await create(into, 'Second')).statusCode).toBe(202);
+        expect((await create(into, 'Third')).statusCode).toBe(429);
+      } finally { held.go(); }
+      const done = await copying;
+      expect(done.statusCode, done.body).toBe(201);
+      expect(into.store.listAgents(OWNER).filter((a) => a.state !== 'DELETED')).toHaveLength(3);
+    });
+  }
+});
 
 describe('a clone carries the daily notes and USER.md', () => {
   let dir: string;
@@ -247,6 +304,17 @@ describe('a clone carries the daily notes and USER.md', () => {
     expect(res.statusCode).toBe(201);
     expect(res.json().envNotCopied).toEqual(['MAIL_KEY']);
     expect(w.store.listAgentEnv(res.json().id).map((e) => e.name)).toEqual(['SEARCH_KEY']);
+    expect(res.json()).not.toHaveProperty('modelNotCopied');
+  });
+
+  it('a model its AI source does not offer is named in the answer (HB-1165)', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w);
+    w.store.setAgentModel('a1', 'claude-made-up-gone');
+    const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/clone', headers: as(), payload: { name: 'Kitchen Copy' } });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().modelNotCopied).toBe('claude-made-up-gone');
+    expect(w.store.getAgent(res.json().id)!.model).toBeUndefined();
   });
 
   it('its first build replaces the scaffold with them, and they are dropped once on the volume', async () => {

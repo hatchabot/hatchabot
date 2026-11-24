@@ -17,7 +17,12 @@ type Agent = { id: string; name: string; slug: string; hostId: string; state: st
 type Options = { method?: string; body?: any; timeoutMs?: number; signal?: AbortSignal };
 type Faults = { inventory?: boolean; applied?: boolean; custom?: boolean; noInvocation?: boolean; noCodeMode?: boolean; metadataOnly?: boolean; command?: boolean; telegram?: boolean; cleanup?: boolean; lostCreate?: boolean; failedCreate?: boolean; collision?: boolean; conflict?: boolean; profiles?: Promise<void>;
   filePreview?: boolean; unsafeUpdate?: boolean; replaceFailure?: boolean; rollbackBytes?: boolean; staleAllowed?: boolean;
-  practiceStatus?: string; practiceBusy?: boolean; practiceMissingReads?: boolean; practiceWrites?: boolean };
+  practiceStatus?: string; practiceBusy?: boolean; practiceMissingReads?: boolean; practiceWrites?: boolean;
+  /** Where a practice's tokens land in the agent's usage: its record only (the default: the transcript went with its folder),
+   * its record with a call of the agent's own meanwhile (`other`),
+   * its record and the agent's own transcripts both (`twice`), recorded but not in the total (`lost`), neither (`none`), or the read fails (`unread`). */
+  practiceUsage?: 'other' | 'twice' | 'lost' | 'none' | 'unread' };
+const PRACTICE_TOKENS = 1_234;
 
 /** All install, runtime and model boundaries are injected. No helper that
  * reads local install configuration is imported or invoked by this fixture. */
@@ -29,6 +34,8 @@ function world(fault: Faults = {}) {
   const reports: { name: string; ok: boolean; error?: string }[] = [];
   const files = new Map<string, string>();
   let selected = ['gog'], applied = ['gog'], turns = 0, profileRead = false, fileVersion = 0, backup: string | undefined;
+  // The agent's usage as GET /v1/agents/:id/usage folds it: what its own transcripts hold, plus the practice they do not.
+  let sampled = 40_000, practiced = 0, added = 0;
   const catalogContent = '# Fixture writing instructions\n';
   const filePreview = () => ({ revision: createHash('sha256').update(JSON.stringify([files.get(SKILL), fileVersion])).digest('hex'),
     state: files.get(SKILL) === catalogContent ? 'current' : 'customized', installed: { content: files.get(SKILL) },
@@ -95,8 +102,18 @@ function world(fault: Faults = {}) {
         if (fault.practiceStatus === 'unsupported') return response({ status: 'unsupported' });
         turns++;
         if (fault.practiceWrites) files.set(SKILL, 'unexpected practice edit');
+        const lands = fault.practiceUsage;
+        if (lands === 'twice') sampled += PRACTICE_TOKENS;
+        if (lands === 'other') sampled += 300;
+        if (lands !== 'none') practiced += PRACTICE_TOKENS;
+        if (lands !== 'none' && lands !== 'lost') added += PRACTICE_TOKENS;
         return response({ status: fault.practiceStatus ?? 'completed', output: 'The seed library opens Saturday at 10.',
           evidence: { skillRead: !fault.practiceMissingReads, fixtureRead: true, toolCalls: 2, codeMode: true } });
+      }
+      if (tail === '/usage') {
+        if (fault.practiceUsage === 'unread') return response({ error: 'fixture read failure' }, 502);
+        return response({ totalTokens: sampled + added, calls: 12, ...(practiced ? { practice: { tokens: practiced,
+          byModel: [{ model: 'fixture-model', runs: 1, calls: 2, tokens: practiced }] } } : {}) });
       }
       if (tail === '/stop?wait=1') agent.state = 'STOPPED';
       else if (tail === '/start?wait=1' || tail === '/rebuild?wait=1') {
@@ -196,6 +213,28 @@ describe('the live skills acceptance runner, entirely injected', () => {
   it.each(['practiceBusy', 'practiceMissingReads', 'practiceWrites'] as const)('fails an invalid practice and still cleans up: %s', async (fault) => {
     const w = world({ [fault]: true });
     expect((await runSkillsScenarios(w.lib, { runId: RUN })).ok).toBe(false);
+    expect(w.agents.map((agent) => agent.id)).toEqual(['unrelated']);
+  });
+
+  // HB-0933: one practice's tokens are in the agent's usage exactly once, from its own record.
+  it('passes a practice counted once, from its own record, with or without a call of its own meanwhile', async () => {
+    for (const practiceUsage of [undefined, 'other'] as const) {
+      const w = world({ practiceUsage });
+      expect(await runSkillsScenarios(w.lib, { runId: RUN }), practiceUsage ?? 'record').toEqual({ ok: true, timedOut: false });
+      expect(w.calls.filter(({ path }) => path === '/v1/agents/mine/usage')).toHaveLength(2);
+    }
+  });
+
+  it.each([
+    ['twice', /1234 tokens are in the agent's usage twice$/],
+    ['lost', /1234 tokens are in the agent's usage not at all$/],
+    ['none', /The practice was not recorded in the agent's usage/],
+    ['unread', /Could not read the disposable agent's usage \(502\)/],
+  ] as const)('fails a practice whose tokens are not in the agent\'s usage exactly once: %s', async (practiceUsage, error) => {
+    const w = world({ practiceUsage });
+    expect((await runSkillsScenarios(w.lib, { runId: RUN })).ok).toBe(false);
+    const failed = w.reports.find((report) => report.name.startsWith('S3b'));
+    expect(failed?.ok).toBe(false); expect(failed?.error).toMatch(error);
     expect(w.agents.map((agent) => agent.id)).toEqual(['unrelated']);
   });
 

@@ -85,7 +85,9 @@ export async function callJson(
   try {
     res = await f(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(10_000) });
   } catch {
-    throw new ConnectorError(`Couldn't reach ${platform}. Check this machine's internet connection and try again.`);
+    // Busy: no answer is no judgement of the token, and is not counted
+    // against the token-check allowance (HB-1155).
+    throw new ConnectorError(`Couldn't reach ${platform}. Check this machine's internet connection and try again.`, true);
   }
   let body: any = undefined;
   try { body = await res.json(); } catch { /* not JSON: judged by status */ }

@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   cleanPreview, keysToRead, mergeRecent, orderRecent, parseRecentRead, previewFor, previewLine,
   RECENT_SCRIPT, recentReadShell, RecentTracker, type RecentPeople, type RecentRecord,
-} from '../src/orchestrator/recent.js';
+} from '../src/orchestrator/conversation/recent.js';
 
 const NOW = 1_790_000_000_000;
 const MIN = 60_000;
@@ -194,6 +194,30 @@ describe('capture: reading only what moved', () => {
     expect(rec.sessions['agent:k:cron:a']).toEqual({ at: NOW - 3 * DAY, role: 'assistant', text: '' });
     expect(keysToRead(sessions, rec, NOW)).toEqual([]);
     expect(keysToRead({ ...sessions, 'agent:k:main': { updatedAt: NOW } }, rec, NOW)).toEqual(['agent:k:main']);
+  });
+  it('more than 40 conversations in the week: each one read is kept, and none is read again until it moves (HB-0911)', () => {
+    for (const tie of [false, true]) {
+      const many: Record<string, { updatedAt: number }> = {};
+      for (let i = 0; i < 60; i++) many[`agent:k:cron:task${String(i).padStart(2, '0')}`] = { updatedAt: tie ? NOW - MIN : NOW - (i + 1) * MIN };
+      let rec: RecentRecord | undefined;
+      let polls = 0;
+      for (; polls < 12; polls++) {
+        const keys = keysToRead(many, rec, NOW);
+        if (!keys.length) break;
+        const read = Object.fromEntries(keys.map((k) => [k, { role: 'assistant' as const, text: `ran ${k}` }]));
+        rec = mergeRecent(rec, many, read, keys, NOW);
+        for (const k of keys) expect(rec.sessions[k]?.text).toBe(`ran ${k}`);
+      }
+      expect(polls).toBe(5); // the newest 40, eight a poll; then nothing
+      expect(Object.keys(rec!.sessions)).toHaveLength(40);
+      expect(rec!.sessions['agent:k:cron:task39']).toBeDefined();
+      // One past the newest 40 is read once it moves, and kept.
+      const moved = { ...many, 'agent:k:cron:task55': { updatedAt: NOW } };
+      expect(keysToRead(moved, rec, NOW)).toEqual(['agent:k:cron:task55']);
+      rec = mergeRecent(rec, moved, { 'agent:k:cron:task55': { role: 'assistant', text: 'ran again' } }, ['agent:k:cron:task55'], NOW);
+      expect(rec.sessions['agent:k:cron:task55']?.text).toBe('ran again');
+      expect(keysToRead(moved, rec, NOW)).toEqual([]);
+    }
   });
   it('drops conversations that are gone or past the week, and keeps the newest activity', () => {
     const prev: RecentRecord = { lastActiveAt: NOW - DAY, sessions: { 'agent:k:gone': { at: NOW - MIN, role: 'assistant', text: 'x' }, 'agent:k:main': { at: NOW - 8 * DAY, role: 'assistant', text: 'y' } } };

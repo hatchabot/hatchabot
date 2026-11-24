@@ -10,6 +10,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { registerAuth } from '../src/api/auth.js';
 import { PUBLIC_RULES, publicClassFor, publicClassTable, publicRuleFor, type PublicClass } from '../src/api/publicRoutes.js';
+import { readPage } from '../scripts/page-source.mjs';
 
 /**
  * The sweep: every route the app registers, in every sign-in mode, has a
@@ -79,6 +80,7 @@ describe('public route classification', () => {
     const open = all().filter((l) => classOf(l) === 'open').filter((l) => !l.startsWith('HEAD '));
     expect(open).toEqual([
       'GET /',
+      'GET /app/:name',
       'GET /healthz',
       'GET /icons/:name',
       'GET /join/:code',
@@ -175,7 +177,7 @@ describe('public route classification', () => {
 
 describe('web/join.html', () => {
   it('every value written into the card goes through esc(), the channel label too (CodeQL js/xss-through-dom)', () => {
-    const html = readFileSync(resolve(import.meta.dirname, '../web/join.html'), 'utf8');
+    const html = readPage(resolve(import.meta.dirname, '../web/join.html'));
     expect(html).not.toMatch(/\$\{label\}/);
     expect(html.match(/\$\{esc\(label\)\}/g)?.length).toBeGreaterThanOrEqual(2);
   });

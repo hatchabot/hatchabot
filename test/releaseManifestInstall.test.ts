@@ -1,13 +1,13 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
-import { manifestRequired, parseReleaseManifest, publishedRuntimeImage, releaseManifest } from '../src/orchestrator/releaseManifest.js';
+import { manifestRequired, parseReleaseManifest, publishedRuntimeImage, releaseManifest } from '../src/providers/releaseManifest.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
-import { installRuntimeImage } from '../src/orchestrator/runnerSetup.js';
+import { installRuntimeImage } from '../src/orchestrator/machines/runnerSetup.js';
 
 /**
  * What a release vouches for (#38, #47; docs/release-by-workflow-design.md
@@ -166,9 +166,11 @@ describe('install.sh when the bundle will not fit or will not move (HB-0429, HB-
   const failingMv = (w: ReturnType<typeof installWorld>, to: string) => shim(w.bin, 'mv', `for last; do :; done
 case "$last" in ${to}) mkdir -p "$last"; echo half > "$last/half-copied"; echo "mv: cannot write: No space left on device" >&2; exit 1 ;; esac
 exec ${JSON.stringify(REAL_MV)} "$@"`);
+  // The folders a run copies the bundle into beside the install (its own, from mktemp: HB-1075).
+  const staged = (w: ReturnType<typeof installWorld>) => readdirSync(w.root).filter((n) => n.startsWith('hatchabot.partial'));
   const nothingLeft = (w: ReturnType<typeof installWorld>) => {
     expect(existsSync(w.dir), 'the install folder').toBe(false);
-    expect(existsSync(`${w.dir}.partial`), 'the partial copy').toBe(false);
+    expect(staged(w), 'the partial copy').toEqual([]);
     expect(read(w.log)).not.toContain('setup-host');
     expect(read(w.log)).not.toContain('git clone');
   };
@@ -176,7 +178,7 @@ exec ${JSON.stringify(REAL_MV)} "$@"`);
   it('the copy beside the folder fails: stopped with the reason, nothing left, no setup and no native install', () => {
     const w = installWorld();
     publish(w, TAG, 'linux-x64');
-    failingMv(w, '*.partial');
+    failingMv(w, '*.partial.*/hatchabot');
     const r = w.run();
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('No space left on device');
@@ -188,24 +190,67 @@ exec ${JSON.stringify(REAL_MV)} "$@"`);
   it('a re-run with room recovers: the folder is whole, not "not a Hatchabot install"', () => {
     const w = installWorld();
     publish(w, TAG, 'linux-x64');
-    failingMv(w, '*.partial');
+    failingMv(w, '*.partial.*/hatchabot');
     expect(w.run().status).toBe(1);
     rmSync(join(w.bin, 'mv'));
     const again = w.run();
     expect(again.status, again.stdout + again.stderr).toBe(0);
     expect(again.stdout).toContain('unpacked: Hatchabot with its own Node');
     expect(JSON.parse(read(join(w.dir, 'BUNDLE.json'))).tag).toBe(TAG);
-    expect(existsSync(`${w.dir}.partial`)).toBe(false);
+    expect(staged(w)).toEqual([]);
   });
 
-  it('a partial copy left by a killed installer does not get in the way', () => {
+  it('an installer stopped part-way through the copy (a kill, a Ctrl-C) leaves no folder of its own behind (review of HB-1075)', async () => {
     const w = installWorld();
     publish(w, TAG, 'linux-x64');
-    mkdirSync(`${w.dir}.partial`); writeFileSync(join(`${w.dir}.partial`, 'half-copied'), 'x');
+    const started = join(w.root, 'copy-started');
+    // The copy beside the install: half done, then still copying (at most 10 s) when the kill comes.
+    shim(w.bin, 'mv', `for last; do :; done
+case "$last" in *.partial.*/hatchabot) mkdir -p "$last"; echo half > "$last/half-copied"; : > ${JSON.stringify(started)}; n=0; while [ "$n" -lt 200 ]; do sleep 0.05; n=$((n + 1)); done; exit 1 ;; esac
+exec ${JSON.stringify(REAL_MV)} "$@"`);
+    // Its own process group, so the TERM reaches the copy as well, as a Ctrl-C or a service stop does.
+    const p = spawn('bash', [resolve('install.sh'), TAG], {
+      detached: true, stdio: 'ignore',
+      env: scriptEnv(w.home, `${w.bin}:/usr/bin:/bin`, { HATCHABOT_DIR: w.dir, TMPDIR: w.root }),
+    });
+    const ended = new Promise<[number | null, NodeJS.Signals | null]>((r) => p.on('close', (code, signal) => r([code, signal])));
+    const until = Date.now() + 20_000;
+    while (!existsSync(started)) {
+      if (Date.now() > until) { process.kill(-p.pid!, 'SIGKILL'); throw new Error('the copy never started'); }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(staged(w), 'the copy under way').toHaveLength(1);
+    process.kill(-p.pid!, 'SIGTERM');
+    const [code] = await ended;
+    expect(staged(w), 'the partial copy').toEqual([]);
+    expect(code).toBe(143);
+    expect(existsSync(w.dir)).toBe(false);
+  });
+
+  it('a kill just after the copy is in place, as its emptied folder is removed, still leaves none (review of HB-1075)', () => {
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    const REAL_RMDIR = spawnSync('sh', ['-c', 'command -v rmdir'], { encoding: 'utf8' }).stdout.trim();
+    // The kill comes while the emptied folder beside the install is being removed, before it is.
+    shim(w.bin, 'rmdir', `case "$1" in *.partial.*) kill -TERM "$PPID"; exit 1 ;; esac
+exec ${JSON.stringify(REAL_RMDIR)} "$@"`);
+    const r = w.run();
+    expect(staged(w), 'the emptied folder').toEqual([]);
+    expect(r.status, r.stdout + r.stderr).toBe(143);
+  });
+
+  it('a folder already called <install>.partial does not get in the way, and is left as it is (HB-1075)', () => {
+    // Another installer's copy under way, a killed one's, or someone's own files:
+    // nothing shows which, so it is not this run's to remove.
+    const w = installWorld();
+    publish(w, TAG, 'linux-x64');
+    mkdirSync(`${w.dir}.partial`); writeFileSync(join(`${w.dir}.partial`, 'someone-elses'), 'x');
     const r = w.run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
-    expect(existsSync(join(w.dir, 'half-copied'))).toBe(false);
-    expect(existsSync(`${w.dir}.partial`)).toBe(false);
+    expect(JSON.parse(read(join(w.dir, 'BUNDLE.json'))).tag).toBe(TAG);
+    expect(existsSync(join(w.dir, 'someone-elses'))).toBe(false);
+    expect(read(join(`${w.dir}.partial`, 'someone-elses'))).toBe('x');
+    expect(staged(w)).toEqual(['hatchabot.partial']);
   });
 
   it('HATCHABOT_DIR with a trailing slash installs in that folder, not "no room" (HB-0429)', () => {
@@ -216,8 +261,8 @@ exec ${JSON.stringify(REAL_MV)} "$@"`);
       expect(r.status, r.stdout + r.stderr).toBe(0);
       expect(r.stdout).toContain('unpacked: Hatchabot with its own Node');
       expect(JSON.parse(read(join(w.dir, 'BUNDLE.json'))).tag).toBe(TAG);
-      expect(existsSync(join(w.dir, '.partial')), 'inside it').toBe(false);
-      expect(existsSync(`${w.dir}.partial`)).toBe(false);
+      expect(readdirSync(w.dir).filter((n) => n.includes('partial')), 'inside it').toEqual([]);
+      expect(staged(w)).toEqual([]);
     }
   });
 
@@ -556,7 +601,7 @@ describe('scripts/build-runtime-image.sh pulls the image the release manifest na
   });
 });
 
-// ---- the app: src/orchestrator/releaseManifest.ts ----------------------------------
+// ---- the app: src/providers/releaseManifest.ts ----------------------------------
 describe('releaseManifest / publishedRuntimeImage (#47)', () => {
   const good = JSON.stringify(manifestFor(TAG, {}));
   const served = (status: number, text = '') => { const urls: string[] = []; return { urls, fetchText: async (u: string) => { urls.push(u); return { status, text }; } }; };
@@ -611,6 +656,47 @@ describe('releaseManifest / publishedRuntimeImage (#47)', () => {
     expect(await publishedRuntimeImage(OPENCLAW, opts(404))).toEqual({ ref: `ghcr.io/hatchabot/runtime:${OPENCLAW}`, openclawVersion: OPENCLAW, pinned: false });
     expect(await publishedRuntimeImage(OPENCLAW, opts(503))).toHaveProperty('problem');
   });
+
+  // A mirror or a proxy that answers 200 with something huge (a misrouted
+  // object, an error page) was read whole before the 64 KiB limit was looked
+  // at (HB-0982). The default fetch, with a made-up body counted as it is read.
+  describe('a body larger than a manifest may be is given up as it arrives', () => {
+    afterEach(() => vi.unstubAllGlobals());
+    const CHUNK = 16 * 1024;
+    /** 4 MiB in 16 KiB pieces, `length` said or not; how many pieces were read, and whether it was cancelled. */
+    const huge = (length?: number) => {
+      const seen = { pulled: 0, cancelled: false };
+      vi.stubGlobal('fetch', async () => new Response(new ReadableStream<Uint8Array>({
+        pull(c) { if (++seen.pulled > 256) c.close(); else c.enqueue(new Uint8Array(CHUNK).fill(32)); },
+        cancel() { seen.cancelled = true; },
+      }, { highWaterMark: 0 }), { status: 200, headers: length === undefined ? {} : { 'content-length': String(length) } }));
+      return seen;
+    };
+    const lookup = () => releaseManifest({ version: '2.0.1', dataDir: temp('hb-mf-data-'), base: 'https://example.invalid/dl' });
+
+    it('one that does not say its size: cancelled just past 64 KiB', async () => {
+      const seen = huge();
+      expect(await lookup()).toEqual({ kind: 'error', problem: 'The release manifest of v2.0.1 is not readable: it is too large.' });
+      expect(seen.cancelled).toBe(true);
+      expect(seen.pulled).toBeLessThanOrEqual(64 * 1024 / CHUNK + 2);
+    });
+
+    it('one that says it is larger: not read at all', async () => {
+      const seen = huge(4 * 1024 * 1024);
+      expect(await lookup()).toEqual({ kind: 'error', problem: 'The release manifest of v2.0.1 is not readable: it is too large.' });
+      expect(seen.pulled).toBeLessThanOrEqual(1);
+    });
+
+    it('a manifest within the limit still reads, said size or not', async () => {
+      for (const said of [true, false]) {
+        const body = new TextEncoder().encode(good);
+        vi.stubGlobal('fetch', async () => new Response(new ReadableStream<Uint8Array>({
+          start(c) { c.enqueue(body.slice(0, 100)); c.enqueue(body.slice(100)); c.close(); },
+        }), { status: 200, headers: said ? { 'content-length': String(body.byteLength) } : {} }));
+        expect(await lookup()).toMatchObject({ kind: 'manifest', manifest: { tag: TAG } });
+      }
+    });
+  });
 });
 
 describe('LocalDockerProvider.ensureBaseImage pulls the release\'s image by digest (#47)', () => {
@@ -629,6 +715,18 @@ describe('LocalDockerProvider.ensureBaseImage pulls the release\'s image by dige
     expect(await p.ensureBaseImage('hatchabot-runtime:2026.9.6')).toBe(true);
     expect(read(w.log)).toContain(`pull --quiet registry.example.org/runtime@${INDEX}`);
     expect(read(w.log)).toContain(`tag registry.example.org/runtime@${INDEX} hatchabot-runtime:2026.9.6`);
+  });
+
+  it('a fleet whose repository names a registry with a port: its version tags are pulled too, and only those (HB-1357 review)', async () => {
+    const w = world('2026.9.6');
+    const p = new LocalDockerProvider({ docker: w.docker, image: 'registry.example:5000/hatchabot-runtime:latest', publishedImage: pinned });
+    expect(await p.ensureBaseImage('registry.example:5000/hatchabot-runtime:2026.9.6')).toBe(true);
+    expect(read(w.log)).toContain(`tag registry.example.org/runtime@${INDEX} registry.example:5000/hatchabot-runtime:2026.9.6`);
+    const other = world('2026.9.6');
+    const q = new LocalDockerProvider({ docker: other.docker, image: 'registry.example:5000/hatchabot-runtime:latest', publishedImage: pinned });
+    expect(await q.ensureBaseImage('registry.example:5000/hatchabot-runtime:latest')).toBe(false);
+    expect(await q.ensureBaseImage('registry.example:5000/hatchabot-runtime:derived-media')).toBe(false);
+    expect(read(other.log)).not.toMatch(/^pull /m);
   });
 
   it('by digest, label disagreeing: refused, nothing tagged', async () => {

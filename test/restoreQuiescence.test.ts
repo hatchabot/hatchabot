@@ -12,10 +12,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentArchiveName, restoreAgentFromBackup, restoreSafetyDir } from '../src/orchestrator/backups.js';
-import { clearBusy } from '../src/orchestrator/busy.js';
-import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
-import { recoverOperation, resumeOperations, type ResumeContext } from '../src/orchestrator/operationsResume.js';
+import { agentArchiveName, restoreAgentFromBackup, restoreSafetyDir } from '../src/orchestrator/backups/backupFiles.js';
+import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
+import { recoverOperation, resumeOperations, type ResumeContext } from '../src/orchestrator/lifecycle/operationsResume.js';
 import { makeWorld, seedRunningAgent } from './support/world.js';
 
 const bdir = mkdtempSync(join(tmpdir(), 'hb-restore-quiet-'));

@@ -14,12 +14,12 @@ import { registerRoutes } from '../src/api/routes.js';
 import { makeOpsWeb } from '../src/ops/opsWeb.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
-import { USAGE_READER_SCRIPT } from '../src/orchestrator/usage.js';
-import { createSearchWatch, type WebSearchState } from '../src/orchestrator/webSearch.js';
+import { USAGE_READER_SCRIPT } from '../src/orchestrator/usage/usage.js';
+import { createSearchWatch, type WebSearchState } from '../src/orchestrator/settings/webSearch.js';
 import {
   DEFAULT_SEARCH_PRICE, monthBefore, OPS_AGENT_SEARCHES, OWN_BRAVE, readSearchPrice, saveSearchPrice, SEARCH_CHECKS, searchPeriod, searchUsageReport,
-} from '../src/orchestrator/searchUsage.js';
-import { attributeBrave, ownSearchKey, storeSearchHours } from '../src/orchestrator/sourceUsage.js';
+} from '../src/orchestrator/settings/searchUsage.js';
+import { attributeBrave, ownSearchKey, storeSearchHours } from '../src/orchestrator/usage/sourceUsage.js';
 import { urlHost } from './helpers/urlHost.js';
 
 const HOUR = 3_600_000;

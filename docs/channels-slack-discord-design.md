@@ -144,7 +144,7 @@ The Telegram routes stay as they are. Ledger entries in `coverage.ts`:
 POST is `app: secret`, DELETE maps to a new broker tool `remove_channel`
 (risk: disruptive), PATCH is `app: later`.
 
-### Provisioning (`src/orchestrator/provision.ts`)
+### Provisioning (`src/orchestrator/lifecycle/provision.ts`)
 
 `buildRuntimeSpec` builds one slice per channel row and puts them on
 `configPatch.slack` and `configPatch.discord` next to `telegram`:
@@ -199,7 +199,7 @@ Telegram group access).
 
 ### People: claim, invites, members
 
-- `src/orchestrator/claim.ts`: `listPairingRequests`, `approvePairing` and
+- `src/orchestrator/members/claim.ts`: `listPairingRequests`, `approvePairing` and
   `claimFirstContact` take a `kind` and pass `--account hatchabot` for the
   new kinds. The bound identity goes to `member_identities`.
 - Owner: adding a channel opens the claim window for that kind; the setup

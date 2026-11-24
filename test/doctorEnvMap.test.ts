@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { envMap } from '../src/doctor.js';
-import { activeValues, envValue } from '../src/config/envFile.js';
+import { doctorReport, envMap, type DoctorFacts } from '../src/doctor.js';
+import { activeValues, envValue, inlineComments } from '../src/config/envFile.js';
 
 // HB-0084: doctor (and the CLI's HATCHABOT_DB / PUBLIC_URL / AUTH) read .env
 // with a parser of their own; they must read it as the server does.
@@ -50,5 +50,57 @@ describe('doctor envMap reads .env as the server does', () => {
 
   it('is empty for a missing file', () => {
     expect(envMap(join(dir, 'absent.env'))).toEqual({});
+  });
+});
+
+// HB-0634: systemd (the Linux service) keeps a "# note" after a value in the
+// value; a shell (the Mac's service, restart.sh) drops it. doctor names each
+// setting read two ways, and the file says comments go on their own line.
+describe('a # comment after a value', () => {
+  it('is found on each setting in force that has one, and only there', () => {
+    const text = [
+      'PORT=9137 # moved off 8080',
+      'HATCHABOT_BIND= # left empty',
+      'HATCHABOT_DB=/srv/hb/data/hb.sqlite\t# tab before it',
+      'HATCHABOT_PASSWORD=made#up',
+      "HATCHABOT_PUBLIC_URL='https://box.example.org/#home' ",
+      'HATCHABOT_TLS_CERT="/srv/hb/a #1.pem"',
+      '# HATCHABOT_IMAGE=hatchabot-runtime:latest # a commented line',
+      '# a comment on its own line',
+      'HATCHABOT_AUTH=accounts',
+    ].join('\n');
+    expect(inlineComments(text)).toEqual(['PORT', 'HATCHABOT_BIND', 'HATCHABOT_DB']);
+    // Quoted words with a comment between, which a shell and systemd read
+    // apart; an escaped space before the #, which both read as "a #b"; a # in
+    // quotes after a quoted word (review of HB-0634).
+    expect(inlineComments([
+      "HATCHABOT_A='a' #x 'b'",
+      'HATCHABOT_B="a" # "b"',
+      'HATCHABOT_C=a\\ #b',
+      'HATCHABOT_D="a"\' #1\'',
+      "HATCHABOT_E='it'\\''s #1'",
+      'HATCHABOT_F="say \\"hi\\" #1"',
+    ].join('\n'))).toEqual(['HATCHABOT_A', 'HATCHABOT_B']);
+    // The last line in force decides, as both readers take the last one.
+    expect(inlineComments('PORT=9137 # old\nPORT=9138\n')).toEqual([]);
+    expect(inlineComments('PORT=9137\nPORT=9138 # new\n')).toEqual(['PORT']);
+  });
+
+  it('doctor warns and names the settings, with the fix', () => {
+    const facts: DoctorFacts = {
+      nodeVersion: 'v22.22.2', dockerCli: true, dockerDaemon: { ok: true, version: '27.1' },
+      envFile: { present: true, secretKey: true, password: true, authMode: 'accounts', publicUrl: 'https://box.example.org', inlineComments: ['PORT', 'HATCHABOT_BIND'] },
+      db: { path: '/x/hatchabot.sqlite', present: true }, service: { manager: 'systemd', active: true, enabled: true },
+      controlPlane: { url: 'http://localhost:8080', ok: true, version: '2.190.0' }, backups: { dir: '/b', lastSet: '2026-09-13', ageDays: 0 },
+    };
+    const line = doctorReport(facts).find((l) => /# comment after the value/.test(l.text));
+    expect(line).toMatchObject({ level: 'warn', text: expect.stringContaining('PORT, HATCHABOT_BIND'), fix: 'Put each comment on a line of its own above its setting in .env (or quote the value whole if the # belongs to it), then ./scripts/restart.sh' });
+    for (const inline of [[], undefined]) {
+      expect(doctorReport({ ...facts, envFile: { ...facts.envFile, inlineComments: inline } }).some((l) => /# comment after the value/.test(l.text))).toBe(false);
+    }
+  });
+
+  it('the .env header says comments go on their own line', () => {
+    expect(readFileSync('.env.example', 'utf8')).toMatch(/Comments go on their own line/);
   });
 });

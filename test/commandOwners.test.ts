@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
-import { commandOwnersFor } from '../src/orchestrator/provision.js';
-import { allowlistScrubScript } from '../src/orchestrator/members.js';
+import { commandOwnersFor } from '../src/orchestrator/lifecycle/provision.js';
+import { allowlistScrubScript } from '../src/orchestrator/members/members.js';
 
 // OpenClaw made the FIRST sender approved by pairing the command owner when
 // commands.ownerAllowFrom was empty — a member, on three live agents

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { gatewayCallAs } from '../src/orchestrator/consoleAccess.js';
+import { gatewayCallAs } from '../src/orchestrator/console/consoleAccess.js';
 
 class Socket {
   static latest: Socket;

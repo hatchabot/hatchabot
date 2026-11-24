@@ -415,14 +415,26 @@ install_bundle() {
     || { echo "   (the bundle does not run on this machine — falling back)"; rm -rf "$tmp"; return 1; }
   # Beside its place first, then a rename: across filesystems an mv is a copy
   # that can stop part-way, and a partial $DIR read as a foreign folder or as an
-  # install to finish on the next run (HB-0429).
-  partial="$DIR.partial"
-  rm -rf "$partial"
-  if ! { mkdir -p "$(dirname "$DIR")" && mv "$tmp/hatchabot" "$partial" && mv "$partial" "$DIR"; }; then
+  # install to finish on the next run (HB-0429). In a folder of this run's own
+  # (mktemp): the one name every run used, $DIR.partial, was removed first
+  # whatever it held, another installer's copy under way or someone's files
+  # (HB-1075). Only that folder is removed, and only by this run: however the
+  # run ends while it has it, a Ctrl-C or a kill in the copy too, which left
+  # it beside the install for good (review of HB-1075). Not once the rename
+  # is done.
+  partial=""; BUNDLE_STAGING=""
+  trap '[ -z "$BUNDLE_STAGING" ] || rm -rf "$BUNDLE_STAGING"' EXIT
+  trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+  if ! { mkdir -p "$(dirname "$DIR")" && partial="$(mktemp -d "$DIR.partial.XXXXXX")" && BUNDLE_STAGING="$partial" && mv "$tmp/hatchabot" "$partial/hatchabot" && mv "$partial/hatchabot" "$DIR"; }; then
     NO_ROOM_AT="$(dirname "$DIR")"; bundle_room
-    rm -rf "$partial" "$tmp"
+    [ -z "$partial" ] || rm -rf "$partial"
+    trap - EXIT INT TERM HUP; BUNDLE_STAGING=""
+    rm -rf "$tmp"
     return 3
   fi
+  # Removed before the traps go, so a kill between the two leaves nothing.
+  rmdir "$partial" 2>/dev/null || true
+  trap - EXIT INT TERM HUP; BUNDLE_STAGING=""
   # Kept where the app and scripts/release-manifest.sh look (the data
   # directory, data/ on a new install), so the runtime image step below need
   # not fetch it again.

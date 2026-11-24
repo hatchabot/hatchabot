@@ -31,7 +31,7 @@ describe('remembering which version an agent was built against', () => {
   });
 
   it('is set when the runtime spec is built', async () => {
-    const { buildRuntimeSpec, createAgentRecord } = await import('../src/orchestrator/provision.js');
+    const { buildRuntimeSpec, createAgentRecord } = await import('../src/orchestrator/lifecycle/provision.js');
     const { MockProvider } = await import('../src/providers/mockProvider.js');
     const { setOpsHandlers } = await import('../src/ops/opsServer.js');
     setOpsHandlers({ mcp: async () => undefined, allowedHosts: () => [] });

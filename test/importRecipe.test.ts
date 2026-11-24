@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { exportAgent, ImageDecisionNeeded, importAgent, TransferError } from '../src/orchestrator/transfer.js';
+import { exportAgent, ImageDecisionNeeded, importAgent, TransferError } from '../src/orchestrator/transfer/transfer.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
+import { formatBuildInputs, type BuildInputs } from '../src/orchestrator/machines/buildInputs.js';
+import { recipeProblem } from '../src/orchestrator/machines/imageRecipe.js';
 
 /**
  * A downloaded copy carries its pinned image as a RECIPE. The file is
@@ -107,6 +109,17 @@ describe('a pinned image in a downloaded copy', () => {
     expect(dst.store.getDerivedImage('media')).toMatchObject({ status: 'READY', createdBy: 'me' });
   });
 
+  it("a fleet whose repository is on a registry with a port keeps the derived image's record too, and its later builds (HB-1357 review)", async () => {
+    const REPO = 'registry.example:5000/hatchabot-runtime';
+    const dst = await installation('me');
+    dst.provider.image = `${REPO}:latest`;
+    dst.provider.publishedBases.add(`${REPO}:2026.7.1-2`);
+    const agent = await importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.store.getAgent(agent.id)?.image).toBe(`${REPO}:derived-media`);
+    expect(dst.store.getDerivedImage('media')).toMatchObject({ status: 'READY', tag: `${REPO}:derived-media`, base: `${REPO}:2026.7.1-2` });
+    expect(dst.provider.built[0]!.labels['org.hatchabot.derived']).toBe('media');
+  });
+
   it('someone who does not own the machine cannot build, even asking to', async () => {
     const dst = await installation('me');
     dst.provider.publishedBases.add(BASE);
@@ -146,7 +159,9 @@ describe('a pinned image in a downloaded copy', () => {
     ['a derived name the machine would not accept', (i: any) => { i.tag = 'hatchabot-runtime:derived-Foo.Bar'; }, /derived-image name/],
     ['a build-time mount', (i: any) => { i.recipe.lines = 'RUN --mount=type=bind,source=/,target=/h cat /h/etc/shadow'; }, /--mount/],
     ['a USER of its own', (i: any) => { i.recipe.lines = 'USER root'; }, /USER is managed/],
-    ['a foreign image name', (i: any) => { i.tag = 'evil/hatchabot:derived-media'; }, /not a runtime image name/],
+    ['a registry and port in its name', (i: any) => { i.tag = 'registry.example:5000/runtime:derived-media'; }, /not a runtime image name/],
+    ['a name in capitals', (i: any) => { i.tag = 'Example-Runtime:derived-media'; }, /not a runtime image name/],
+    ['a base from another fleet than its own name', (i: any) => { i.tag = 'example-runtime:derived-media'; i.recipe.base = 'other-runtime:2026.7.1-2'; }, /Base must be/],
     ['a foreign base', (i: any) => { i.recipe.base = 'ubuntu:24.04'; }, /Base must be/],
     ['a derived base', (i: any) => { i.recipe.base = 'hatchabot-runtime:derived-other'; }, /another derived image/],
     ['shell in a package name', (i: any) => { i.tag = `${BASE}-plus-x`; i.recipe.lines = undefined; i.recipe.packages = ['curl;rm', 'x']; }, /package list/],
@@ -161,6 +176,58 @@ describe('a pinned image in a downloaded copy', () => {
     expect(dst.store.listAgents('me')).toEqual([]);
   });
 
+  it("a copy from a fleet whose images have another name is built and pinned under this fleet's (HB-1183)", async () => {
+    const theirs = await exported('example-runtime:derived-media', (src) => {
+      src.provider.image = 'example-runtime:latest';
+      src.store.upsertDerivedImage({ name: 'media', tag: 'example-runtime:derived-media', base: 'example-runtime:2026.7.1-2', dockerfile: 'RUN apt-get update && apt-get install -y ffmpeg', createdBy: 'o' });
+      src.store.setDerivedImageStatus('media', 'READY');
+    });
+    expect(JSON.parse(gunzipSync(theirs).toString('utf8')).image).toMatchObject({ tag: 'example-runtime:derived-media', recipe: { base: 'example-runtime:2026.7.1-2' } });
+    const dst = await installation('me');
+    dst.provider.publishedBases.add(BASE);
+    const asked = await decision(importAgent(dst.deps as never, theirs, { ownerId: 'me', mayBuild: true }));
+    expect(asked.image).toBe('hatchabot-runtime:derived-media');
+    expect(asked.recipe).toMatchObject({ tag: 'hatchabot-runtime:derived-media', base: BASE });
+    expect(asked.problem).toBeUndefined();
+    const agent = await importAgent(dst.deps as never, theirs, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.store.getAgent(agent.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(dst.provider.pulled).toEqual([BASE]);
+    expect(dst.provider.built[0]).toMatchObject({ tag: 'hatchabot-runtime-check:derived-media', dockerfile: expect.stringMatching(new RegExp(`^FROM ${BASE}\n`)) });
+    expect(dst.provider.tagged).toEqual([['built-hatchabot-runtime-check:derived-media', 'hatchabot-runtime:derived-media']]);
+    expect(dst.store.getDerivedImage('media')).toMatchObject({ status: 'READY', tag: 'hatchabot-runtime:derived-media', base: BASE });
+
+    // The other way round: a fleet named example-runtime reads ours in its names.
+    const there = await installation('me');
+    there.provider.image = 'example-runtime:latest';
+    there.provider.publishedBases.add('example-runtime:2026.7.1-2');
+    const moved = await importAgent(there.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(there.store.getAgent(moved.id)?.image).toBe('example-runtime:derived-media');
+    expect(there.provider.pulled).toEqual(['example-runtime:2026.7.1-2']);
+
+    // A plain version pin is the image of that name here: pinned, nothing built.
+    const plain = await installation('me');
+    plain.provider.tags.push({ tag: BASE, imageId: 'local' });
+    const pinned = await importAgent(plain.deps as never, tamper(await derivedFile(), (i) => { i.tag = 'example-runtime:2026.7.1-2'; i.recipe = { base: 'example-runtime:2026.7.1-2', packages: [], channels: [] }; }), { ownerId: 'me', mayBuild: true });
+    expect(plain.store.getAgent(pinned.id)?.image).toBe(BASE);
+    expect(plain.provider.built).toEqual([]);
+    // One whose recipe lays something on it is not that image by its name: asked (HB-1183 review).
+    for (const laid of [{ packages: ['jq'] }, { lines: 'RUN true' }]) {
+      const other = await installation('me');
+      other.provider.tags.push({ tag: BASE, imageId: 'local' });
+      const file = tamper(await derivedFile(), (i) => { i.tag = 'example-runtime:2026.7.1-2'; i.recipe = { base: 'example-runtime:2026.7.1-2', packages: [], channels: [], ...laid }; });
+      const e = await decision(importAgent(other.deps as never, file, { ownerId: 'me', mayBuild: true }));
+      expect(e.problem, JSON.stringify(laid)).toBe(`an image here already has the name ${BASE}, and nothing here says it is this one`);
+    }
+
+    // A name outside this fleet's repository is never pinned, even one this
+    // mock lists (docker lists this fleet's repository alone): renamed, asked.
+    const outside = await installation('me');
+    outside.provider.tags.push({ tag: 'example-runtime:derived-media', imageId: 'local' });
+    const renamed = await decision(importAgent(outside.deps as never, theirs, { ownerId: 'me', mayBuild: true }));
+    expect(renamed.image).toBe('hatchabot-runtime:derived-media');
+    expect(outside.store.listAgents('me')).toEqual([]);
+  });
+
   it('a different image here under the same name is not replaced', async () => {
     const dst = await installation('me');
     dst.provider.publishedBases.add(BASE);
@@ -169,6 +236,126 @@ describe('a pinned image in a downloaded copy', () => {
     const e = await decision(importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: true, image: 'build' }));
     expect(e.problem).toMatch(/different image here already has the name/);
     expect(dst.store.getDerivedImage('media')?.dockerfile).toContain('imagemagick');
+  });
+
+  it('a fleet whose default is pinned by digest names an import in its repository, never "<name>@sha256" (review of HB-1182)', async () => {
+    const dst = await installation('me');
+    dst.provider.image = `hatchabot-runtime@sha256:${'ab'.repeat(32)}`;
+    dst.provider.publishedBases.add(BASE);
+    const asked = await decision(importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: true }));
+    expect(asked.image).toBe('hatchabot-runtime:derived-media');
+    expect(asked.recipe).toMatchObject({ tag: 'hatchabot-runtime:derived-media', base: BASE });
+    const agent = await importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.store.getAgent(agent.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(dst.provider.pulled).toEqual([BASE]);
+    expect(dst.provider.tagged).toEqual([['built-hatchabot-runtime-check:derived-media', 'hatchabot-runtime:derived-media']]);
+  });
+
+  it("an image here of a file's image's name is pinned only when it is that image, renamed or not (HB-1183 review)", async () => {
+    const theirs = await exported('example-runtime:derived-media', (src) => {
+      src.provider.image = 'example-runtime:latest';
+      src.store.upsertDerivedImage({ name: 'media', tag: 'example-runtime:derived-media', base: 'example-runtime:2026.7.1-2', dockerfile: 'RUN apt-get update && apt-get install -y ffmpeg', createdBy: 'o' });
+      src.store.setDerivedImageStatus('media', 'READY');
+    });
+    const machine = async (lines: string) => {
+      const dst = await installation('me');
+      dst.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: BASE, dockerfile: lines, createdBy: 'me' });
+      dst.store.setDerivedImageStatus('media', 'READY');
+      dst.provider.tags.push({ tag: BASE, imageId: 'base' }, { tag: 'hatchabot-runtime:derived-media', imageId: 'mine' });
+      return dst;
+    };
+    // Renamed into a name here whose image has other lines (imagemagick, not ffmpeg): someone else's, never pinned.
+    const other = await machine('RUN apt-get update && apt-get install -y imagemagick');
+    const e = await decision(importAgent(other.deps as never, theirs, { ownerId: 'me', mayBuild: true }));
+    expect(e.image).toBe('hatchabot-runtime:derived-media');
+    expect(e.problem).toBe('a different image here already has the name hatchabot-runtime:derived-media');
+    // A file in this fleet's own names is held to the same check.
+    const ours = await decision(importAgent(other.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: true }));
+    expect(ours.problem).toBe('a different image here already has the name hatchabot-runtime:derived-media');
+    expect(other.store.listAgents('me')).toEqual([]);
+    expect(other.provider.built).toEqual([]);
+    // The same lines on the same base: that image, pinned as it is.
+    const same = await machine('RUN apt-get update && apt-get install -y ffmpeg');
+    const agent = await importAgent(same.deps as never, theirs, { ownerId: 'me', mayBuild: true });
+    expect(same.store.getAgent(agent.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(same.provider.built).toEqual([]);
+  });
+
+  it("a renamed name is pinned only when something here says the image of that name is the file's, recipe or none (HB-1183 review)", async () => {
+    const theirs = await exported('example-runtime:derived-media', (src) => {
+      src.provider.image = 'example-runtime:latest';
+      src.store.upsertDerivedImage({ name: 'media', tag: 'example-runtime:derived-media', base: 'example-runtime:2026.7.1-2', dockerfile: 'RUN apt-get update && apt-get install -y ffmpeg', createdBy: 'o' });
+      src.store.setDerivedImageStatus('media', 'READY');
+    });
+    const NOTHING_SAYS = 'an image here already has the name hatchabot-runtime:derived-media, and nothing here says it is this one';
+    const withMine = async () => {
+      const dst = await installation('me');
+      dst.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: BASE, dockerfile: 'RUN apt-get update && apt-get install -y imagemagick', createdBy: 'me' });
+      dst.store.setDerivedImageStatus('media', 'READY');
+      dst.provider.tags.push({ tag: BASE, imageId: 'base' }, { tag: 'hatchabot-runtime:derived-media', imageId: 'mine' });
+      return dst;
+    };
+    const noRecipe = (file: Buffer) => tamper(file, (i) => { delete i.recipe; i.problem = 'its recipe was changed and has not built'; });
+    // A file with no recipe (one its source could not make), onto someone else's image of that name: asked.
+    const other = await withMine();
+    expect((await decision(importAgent(other.deps as never, noRecipe(theirs), { ownerId: 'me', mayBuild: true }))).problem).toBe(NOTHING_SAYS);
+    // A derived name with no record here, whatever its recipe lays on: asked.
+    for (const lines of ['', 'RUN true']) {
+      const leftover = await installation('me');
+      leftover.provider.tags.push({ tag: 'hatchabot-runtime:derived-media', imageId: 'leftover' });
+      const file = tamper(theirs, (i) => { i.recipe.lines = lines; i.recipe.packages = []; });
+      expect((await decision(importAgent(leftover.deps as never, file, { ownerId: 'me', mayBuild: true }))).problem, lines).toBe(NOTHING_SAYS);
+    }
+    expect(other.store.listAgents('me')).toEqual([]);
+    // In this fleet's own names, a file with no recipe is pinned by name, as before.
+    const own = await withMine();
+    const kept = await importAgent(own.deps as never, noRecipe(await derivedFile()), { ownerId: 'me', mayBuild: true });
+    expect(own.store.getAgent(kept.id)?.image).toBe('hatchabot-runtime:derived-media');
+  });
+
+  it("this machine's own record of the file's lines, its last build failed: offered, and rebuilt, never pinned to the build before it (HB-1183 review)", async () => {
+    const mine = async (status: 'FAILED' | 'BUILDING' | 'READY') => {
+      const dst = await installation('me');
+      // Changed to the file's lines (ffmpeg): until a build of them is READY, the tag names the build before it.
+      dst.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: BASE, dockerfile: 'RUN apt-get update && apt-get install -y ffmpeg', createdBy: 'me' });
+      dst.store.setDerivedImageStatus('media', status, status === 'FAILED' ? 'apt failed' : null);
+      dst.provider.tags.push({ tag: BASE, imageId: 'base' }, { tag: 'hatchabot-runtime:derived-media', imageId: 'before' });
+      return dst;
+    };
+    const file = await derivedFile();
+    for (const status of ['FAILED', 'BUILDING'] as const) {
+      const asked = await mine(status);
+      const e = await decision(importAgent(asked.deps as never, file, { ownerId: 'me', mayBuild: true }));
+      expect([e.problem, e.recipe?.tag, e.mayBuild], status).toEqual([undefined, 'hatchabot-runtime:derived-media', true]);
+      expect(asked.store.listAgents('me')).toEqual([]);
+    }
+    const failed = await mine('FAILED');
+    const rebuilt = await importAgent(failed.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(failed.store.getAgent(rebuilt.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(failed.provider.built.length).toBe(1);
+    expect(failed.store.getDerivedImage('media')?.status).toBe('READY');
+    // Its last build is the image: pinned, nothing built.
+    const ready = await mine('READY');
+    const kept = await importAgent(ready.deps as never, file, { ownerId: 'me', mayBuild: true });
+    expect(ready.store.getAgent(kept.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(ready.provider.built).toEqual([]);
+  });
+
+  it('a renamed pin from before the label is pinned by its name only as a version or latest, and never onto a derived image (HB-1183 review)', async () => {
+    const pin = async (tag: string, here: { derived?: string } = {}) => {
+      const dst = await installation('me');
+      dst.provider.tags.push({ tag: `hatchabot-runtime:${tag}`, imageId: 'local', ...here });
+      const file = tamper(await derivedFile(), (i) => { i.tag = `example-runtime:${tag}`; i.recipe = { base: `example-runtime:${tag}`, packages: [], channels: [] }; });
+      const r = await importAgent(dst.deps as never, file, { ownerId: 'me', mayBuild: true }).then((a) => dst.store.getAgent(a.id)?.image, (e: unknown) => (e instanceof ImageDecisionNeeded ? `asked: ${e.problem}` : e));
+      return r;
+    };
+    const asked = (tag: string) => `asked: an image here already has the name hatchabot-runtime:${tag}, and nothing here says it is this one`;
+    expect(await pin('latest')).toBe('hatchabot-runtime:latest');
+    expect(await pin('2026.9.8')).toBe('hatchabot-runtime:2026.9.8');
+    // Another name is someone's own image here, whatever it is.
+    expect(await pin('mytool')).toBe(asked('mytool'));
+    // A derived image under a version's name is not that version.
+    expect(await pin('2026.9.8', { derived: 'media' })).toBe(asked('2026.9.8'));
   });
 
   it('a failed build rolls the whole import back', async () => {
@@ -182,5 +369,290 @@ describe('a pinned image in a downloaded copy', () => {
     // Nothing left holding the slug: importing again (on the default) works.
     const agent = await importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', image: 'drop' });
     expect(agent.slug).toBe('kitchen');
+  });
+});
+
+describe("an imported image's base, found by what it was built from (HB-0986)", () => {
+  const L = (c: string) => `sha256:${c.repeat(64)}`;
+  const B7: BuildInputs = {
+    openclaw: '2026.7.1-2', engine: 'baked', packages: [], node: 'node:24-slim', channels: [], channelPlugins: '2026.7.1',
+    plugins: [], pluginInstall: 'link', embedPlugin: '2026.7.1', claudeCode: '2.1.224', byHand: [], release: '2.190.0',
+  };
+  const label = (o: Partial<BuildInputs> = {}) => formatBuildInputs({ ...B7, ...o });
+  /** 7,988 characters of the owner's own lines: twelve short of their cap. */
+  const LINES = 'RUN echo step\n'.repeat(570) + 'RUN true';
+  const JQ_BASE = `${BASE}-plus-jq`;
+  /** A derived image of LINES on a base built with jq, as its labels say. */
+  const jqFile = () => exported('hatchabot-runtime:derived-media', (src) => {
+    src.provider.tags.push(
+      { tag: JQ_BASE, imageId: 'b', openclawVersion: '2026.7.1-2', buildInputs: label({ packages: ['jq'] }), extraPackages: ['jq'], layers: [L('1'), L('2')] },
+      { tag: 'hatchabot-runtime:derived-media', imageId: 'd', openclawVersion: '2026.7.1-2', buildInputs: label({ packages: ['jq'] }), extraPackages: ['jq'], layers: [L('1'), L('2'), L('3')], derived: 'media' },
+    );
+    src.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: JQ_BASE, dockerfile: LINES, createdBy: 'o' });
+    src.store.setDerivedImageStatus('media', 'READY');
+  });
+  /** A machine whose default image is that OpenClaw without jq, on another CPU (other layers). */
+  const plainMachine = async () => {
+    const dst = await installation('me');
+    dst.provider.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image', openclawVersion: '2026.7.1-2', buildInputs: label(), layers: [L('a')] }];
+    return dst;
+  };
+
+  it("lays the base's jq on apart from the owner's lines, which keep their whole cap, and the image travels on again", async () => {
+    expect(LINES.length).toBe(7988);
+    const file = await jqFile();
+    expect(JSON.parse(gunzipSync(file).toString('utf8')).image.recipe).toMatchObject({ base: JQ_BASE, packages: ['jq'], lines: LINES, inputs: label({ packages: ['jq'] }), layers: expect.stringMatching(/^sha256:/) });
+    const dst = await plainMachine();
+    const agent = await importAgent(dst.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.store.getAgent(agent.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(dst.provider.pulled).toEqual([]);
+    expect(dst.provider.built.map((b) => b.dockerfile)).toEqual([`FROM hatchabot-runtime:latest\nUSER root\nRUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*\n${LINES}\nUSER node\n`]);
+    expect(dst.store.getDerivedImage('media')).toMatchObject({ status: 'READY', base: 'hatchabot-runtime:latest', basePackages: ['jq'], dockerfile: LINES });
+
+    // From there, to a third machine: the same lines, still under their cap.
+    const again = (await exportAgent(dst.deps as never, agent.id)).data;
+    expect(JSON.parse(gunzipSync(again).toString('utf8')).image.recipe).toMatchObject({ packages: ['jq'], lines: LINES, inputs: label({ packages: ['jq'] }) });
+    const third = await plainMachine();
+    const moved = await importAgent(third.deps as never, again, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(third.store.getAgent(moved.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(third.store.getDerivedImage('media')).toMatchObject({ status: 'READY', basePackages: ['jq'], dockerfile: LINES });
+  });
+
+  it("after a Rebuild here the image still travels: its record's base packages are among what its base was built from (HB-0986 review)", async () => {
+    const dst = await plainMachine();
+    const agent = await importAgent(dst.deps as never, await jqFile(), { ownerId: 'me', mayBuild: true, image: 'build' });
+    // As a Rebuild here leaves it: the base's labels and its own, and no packages label.
+    const rebuilt = dst.provider.tags.find((x) => x.tag === 'hatchabot-runtime:derived-media')!;
+    rebuilt.buildInputs = label();
+    delete rebuilt.extraPackages;
+    const again = (await exportAgent(dst.deps as never, agent.id)).data;
+    expect(JSON.parse(gunzipSync(again).toString('utf8')).image.recipe).toMatchObject({ packages: ['jq'], inputs: label({ packages: ['jq'] }) });
+    // A third machine whose only image is that OpenClaw with jq: it stands for the base.
+    const third = await installation('me');
+    third.provider.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'jq', openclawVersion: '2026.7.1-2', buildInputs: label({ packages: ['jq'] }), extraPackages: ['jq'], layers: [L('5')] }];
+    const moved = await importAgent(third.deps as never, again, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(third.store.getAgent(moved.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(third.provider.built.map((b) => b.dockerfile.split('\n')[0])).toEqual(['FROM hatchabot-runtime:latest']);
+  });
+
+  it("the cap is on the owner's lines alone", async () => {
+    const long = tamper(await jqFile(), (i) => { i.recipe.lines = `${LINES}\nRUN echo too long`; });
+    const dst = await plainMachine();
+    await expect(importAgent(dst.deps as never, long, { ownerId: 'me', mayBuild: true, image: 'build' })).rejects.toThrow(/malformed .*\(image\.recipe\.lines\)/);
+    expect(recipeProblem({ tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:latest', packages: ['jq'], channels: [], lines: `${LINES}\nRUN echo too long` })).toBe('its Dockerfile lines are too long');
+    expect(dst.provider.built).toEqual([]);
+  });
+
+  it("an image of the same name here is the same one when it builds the same, whatever its base is called", async () => {
+    const dst = await plainMachine();
+    dst.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:latest', basePackages: ['jq'], dockerfile: LINES, createdBy: 'me' });
+    dst.store.setDerivedImageStatus('media', 'READY');
+    const agent = await importAgent(dst.deps as never, await jqFile(), { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.store.getAgent(agent.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(dst.store.getDerivedImage('media')).toMatchObject({ status: 'READY', base: 'hatchabot-runtime:latest', basePackages: ['jq'] });
+    // On a base built another way (another OpenClaw), it is someone else's image.
+    const other = await plainMachine();
+    other.provider.tags[0]!.buildInputs = label({ openclaw: '2026.7.1-1' });
+    other.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:latest', basePackages: ['jq'], dockerfile: LINES, createdBy: 'me' });
+    other.store.setDerivedImageStatus('media', 'READY');
+    const e = await decision(importAgent(other.deps as never, await jqFile(), { ownerId: 'me', mayBuild: true, image: 'build' }));
+    expect(e.problem).toMatch(/different image here already has the name/);
+    expect(other.provider.built).toEqual([]);
+  });
+
+  it("a base image here of a file's image's name is pinned only when it is built the same, with the same packages (HB-1183 review)", async () => {
+    const file = tamper(await jqFile(), (i) => { i.tag = 'example-runtime:2026.7.1-2-plus-jq'; i.recipe = { base: 'example-runtime:2026.7.1-2', packages: ['jq'], channels: [], inputs: label({ packages: ['jq'] }) }; });
+    const machine = async (packages: string[]) => {
+      const dst = await plainMachine();
+      dst.provider.tags.push({ tag: JQ_BASE, imageId: 'here', openclawVersion: '2026.7.1-2', buildInputs: label({ packages }), extraPackages: packages, layers: [L('a'), L('b')] });
+      return dst;
+    };
+    const other = await machine(['curl']);
+    const e = await decision(importAgent(other.deps as never, file, { ownerId: 'me', mayBuild: true }));
+    expect(e.problem).toBe(`a different image here already has the name ${JQ_BASE}`);
+    // Built the same way but without the jq: it stands for the base, and is still not that image.
+    const fewer = await machine([]);
+    expect((await decision(importAgent(fewer.deps as never, file, { ownerId: 'me', mayBuild: true }))).problem).toBe(`a different image here already has the name ${JQ_BASE}`);
+    const same = await machine(['jq']);
+    const agent = await importAgent(same.deps as never, file, { ownerId: 'me', mayBuild: true });
+    expect(same.store.getAgent(agent.id)?.image).toBe(JQ_BASE);
+    expect(same.provider.built).toEqual([]);
+  });
+
+  it("an import keeps the base a record here is built on while it stands, though another image here is the file's very base (HB-0986 review)", async () => {
+    const dst = await installation('me');
+    dst.provider.tags = [
+      { tag: 'hatchabot-runtime:latest', imageId: 'rel', openclawVersion: '2026.7.1-2', buildInputs: label(), layers: [L('1')] },
+      { tag: BASE, imageId: 'loc', openclawVersion: '2026.7.1-2', buildInputs: label({ release: '2.189.0' }), layers: [L('2')] },
+    ];
+    dst.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: BASE, dockerfile: 'RUN true', createdBy: 'me' });
+    dst.store.setDerivedImageStatus('media', 'FAILED', 'an earlier failure');
+    const file = await exported('hatchabot-runtime:derived-media', (src) => {
+      src.provider.tags = [
+        { tag: BASE, imageId: 'rel', openclawVersion: '2026.7.1-2', buildInputs: label(), layers: [L('1')] },
+        { tag: 'hatchabot-runtime:derived-media', imageId: 'd', openclawVersion: '2026.7.1-2', buildInputs: label(), layers: [L('1'), L('3')], derived: 'media' },
+      ];
+      src.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: BASE, dockerfile: 'RUN true', createdBy: 'o' });
+      src.store.setDerivedImageStatus('media', 'READY');
+    });
+    await importAgent(dst.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.provider.built.map((b) => b.dockerfile.split('\n')[0])).toEqual([`FROM ${BASE}`]);
+    expect(dst.store.getDerivedImage('media')).toMatchObject({ status: 'READY', base: BASE });
+  });
+
+  it("what a base was built from names no image: a file from another fleet's names finds the same base (HB-1183)", async () => {
+    const theirs = tamper(await jqFile(), (i) => { i.tag = 'example-runtime:derived-media'; i.recipe.base = 'example-runtime:2026.7.1-2-plus-jq'; });
+    const dst = await plainMachine();
+    const agent = await importAgent(dst.deps as never, theirs, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.store.getAgent(agent.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(dst.provider.built.map((b) => b.dockerfile.split('\n')[0])).toEqual(['FROM hatchabot-runtime:latest']);
+    expect(dst.store.getDerivedImage('media')).toMatchObject({ status: 'READY', base: 'hatchabot-runtime:latest', basePackages: ['jq'] });
+  });
+
+  it.each([
+    ['runs as root', (p: MockProvider) => { p.buildRunsAs = 'root'; }, 'The built image would run as root, not node: a line in it hides the USER node Hatchabot adds at the end (a heredoc that runs to the end, for example). Change the lines and Rebuild.'],
+    ['sets one of Hatchabot\'s own labels', (p: MockProvider) => { p.buildLabels = { 'org.hatchabot.build-inputs': 'v1;openclaw=2026.10.1' }; }, "The built image sets Hatchabot's own label org.hatchabot.build-inputs: a line in it hides a LABEL (in a heredoc or an escape). Change the lines and Rebuild."],
+    ['is not built on its base', (p: MockProvider) => { p.buildLayers = [L('9')]; }, 'The built image is not built on hatchabot-runtime:latest: a line in it starts another image (a FROM hidden in a heredoc or an escape). Change the lines and Rebuild.'],
+  ])("a file whose lines build an image that %s gets nothing: the import is rolled back, saying why in full (HB-1032)", async (_what, makes, why) => {
+    const dst = await plainMachine();
+    makes(dst.provider);
+    const e = await importAgent(dst.deps as never, await jqFile(), { ownerId: 'me', mayBuild: true, image: 'build' }).catch((err) => err);
+    expect(e).toBeInstanceOf(TransferError);
+    expect(e.message).toBe(`Import failed and was rolled back — fix the cause and import again. (the image hatchabot-runtime:derived-media could not be built here: the rebuild failed: ${why})`);
+    expect(e.message.length).toBeLessThanOrEqual(600);
+    expect(dst.provider.tags.map((t) => t.tag)).toEqual(['hatchabot-runtime:latest']);
+    expect(dst.store.getDerivedImage('media')).toBeUndefined();
+    expect(dst.store.listAgents('me').filter((a) => a.state !== 'DELETED')).toEqual([]);
+  });
+
+  it("a base tag moved at the source since its image was built gives no layers to match, so the image here of the moved tag's layers is not taken for its base (HB-0986 review)", async () => {
+    const MOVED = { tag: 'hatchabot-runtime:latest', imageId: 'new', openclawVersion: '2026.9.9', buildInputs: label({ openclaw: '2026.9.9' }), layers: [L('9')] };
+    const file = await exported('hatchabot-runtime:derived-media', (src) => {
+      // Built on the :latest of then (layers 1); :latest is another image now.
+      src.provider.tags = [{ ...MOVED }, { tag: 'hatchabot-runtime:derived-media', imageId: 'd', openclawVersion: '2026.7.1-2', buildInputs: label(), layers: [L('1'), L('3')], derived: 'media' }];
+      src.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: 'o' });
+      src.store.setDerivedImageStatus('media', 'READY');
+    });
+    expect(JSON.parse(gunzipSync(file).toString('utf8')).image.recipe).toMatchObject({ inputs: label() });
+    expect(JSON.parse(gunzipSync(file).toString('utf8')).image.recipe.layers).toBeUndefined();
+    const dst = await installation('me');
+    dst.provider.tags = [{ ...MOVED }, { tag: BASE, imageId: 'old', openclawVersion: '2026.7.1-2', buildInputs: label(), layers: [L('5')] }];
+    await importAgent(dst.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.provider.built.map((b) => b.dockerfile.split('\n')[0])).toEqual([`FROM ${BASE}`]);
+  });
+
+  it("a promote between the OpenClaw check and the build's own pick is not built on: the import says to try again (HB-0986 review)", async () => {
+    const dst = await plainMachine();
+    // Just as the build starts, after the check read the images: :latest is another image now.
+    (dst.deps as { log?: (event: string) => void }).log = (event) => {
+      if (event === 'import.image_build') dst.provider.tags = [{ ...dst.provider.tags[0]!, imageId: 'promoted', layers: [L('b')] }];
+    };
+    await expect(importAgent(dst.deps as never, await jqFile(), { ownerId: 'me', mayBuild: true, image: 'build' }))
+      .rejects.toThrow("(the image hatchabot-runtime:derived-media could not be built here: this machine's images changed just now — try again)");
+    expect(dst.provider.built).toEqual([]);
+    // Unchanged between the two, it builds.
+    const steady = await plainMachine();
+    await importAgent(steady.deps as never, await jqFile(), { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(steady.provider.built.map((b) => b.dockerfile.split('\n')[0])).toEqual(['FROM hatchabot-runtime:latest']);
+  });
+
+  it("the OpenClaw check's images not read is a refusal to try again, never a judgement by the file's own word (HB-0986 review)", async () => {
+    const saved = await exported('hatchabot-runtime:derived-media', (src) => {
+      src.provider.tags = [
+        { tag: 'hatchabot-runtime:latest', imageId: 'srcbase', openclawVersion: '2026.9.8', buildInputs: label({ openclaw: '2026.9.8' }), layers: [L('1')] },
+        { tag: 'hatchabot-runtime:derived-media', imageId: 'd', openclawVersion: '2026.9.8', buildInputs: label({ openclaw: '2026.9.8' }), layers: [L('1'), L('3')], derived: 'media' },
+      ];
+      src.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: 'o' });
+      src.store.setDerivedImageStatus('media', 'READY');
+    });
+    const m = JSON.parse(gunzipSync(saved).toString('utf8'));
+    m.openclawVersion = '2026.9.8';
+    expect(m.image.recipe.inputs).toBe(label({ openclaw: '2026.9.8' }));
+    const file = gzipSync(Buffer.from(JSON.stringify(m)));
+    const machine = async () => {
+      const dst = await installation('me');
+      // The source base's very layers, under the label of an older OpenClaw: the build would run that.
+      dst.provider.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'relabelled', openclawVersion: '2026.7.1-2', buildInputs: label({ openclaw: '2026.9.8' }), layers: [L('1')] }];
+      return dst;
+    };
+    const read = await machine();
+    await expect(importAgent(read.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' })).rejects.toThrow(/would run it on 2026\.7\.1-2/);
+    // The check's own read fails once (the first read is the image's name here).
+    const busy = await machine();
+    let reads = 0;
+    const list = busy.provider.listImageTags.bind(busy.provider);
+    busy.provider.listImageTags = async () => { if (++reads === 2) throw new Error('docker busy'); return list(); };
+    await expect(importAgent(busy.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' }))
+      .rejects.toThrow("This machine's images could not be read just now. Try the import again.");
+    expect([reads, busy.provider.built, busy.store.listAgents('me')]).toEqual([2, [], []]);
+  });
+
+  it('an older OpenClaw is judged by the base a record here is built on, as the build picks it (HB-0986 review)', async () => {
+    const saved = await exported('hatchabot-runtime:derived-media', (src) => {
+      src.provider.tags.push(
+        { tag: 'hatchabot-runtime:2026.9.8', imageId: 'b', openclawVersion: '2026.9.8', buildInputs: label({ openclaw: '2026.9.8' }), layers: [L('1')] },
+        { tag: 'hatchabot-runtime:derived-media', imageId: 'd', openclawVersion: '2026.9.8', buildInputs: label({ openclaw: '2026.9.8' }), layers: [L('1'), L('3')], derived: 'media' },
+      );
+      src.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.8', dockerfile: 'RUN true', createdBy: 'o' });
+      src.store.setDerivedImageStatus('media', 'READY');
+    });
+    const m = JSON.parse(gunzipSync(saved).toString('utf8'));
+    m.openclawVersion = '2026.9.8';
+    const file = gzipSync(Buffer.from(JSON.stringify(m)));
+    const dst = await installation('me');
+    dst.provider.tags = [
+      // The source base's very layers, under a label of an older OpenClaw (a LABEL adds no layer).
+      { tag: 'hatchabot-runtime:latest', imageId: 'relabelled', openclawVersion: '2026.7.1-2', buildInputs: label({ openclaw: '2026.9.8' }), layers: [L('1')] },
+      // What the record here is built on: built the same way, and kept as its base (F3).
+      { tag: 'hatchabot-runtime:2026.9.8', imageId: 'here', openclawVersion: '2026.9.8', buildInputs: label({ openclaw: '2026.9.8', release: '2.189.0' }), layers: [L('2')] },
+    ];
+    dst.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.8', dockerfile: 'RUN true', createdBy: 'me' });
+    dst.store.setDerivedImageStatus('media', 'FAILED', 'an earlier failure');
+    await importAgent(dst.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.provider.built.map((b) => b.dockerfile.split('\n')[0])).toEqual(['FROM hatchabot-runtime:2026.9.8']);
+  });
+
+  it('an older OpenClaw is judged by the image it will be built on here, not by its base by name (HB-0986 review)', async () => {
+    // A base from before the label: the file has its layers, not what it was built from.
+    const saved = await exported('hatchabot-runtime:derived-media', (src) => {
+      src.provider.tags.push(
+        { tag: 'hatchabot-runtime:2026.9.8', imageId: 'b', openclawVersion: '2026.9.8', layers: [L('1')] },
+        { tag: 'hatchabot-runtime:derived-media', imageId: 'd', openclawVersion: '2026.9.8', layers: [L('1'), L('3')], derived: 'media' },
+      );
+      src.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.8', dockerfile: 'RUN true', createdBy: 'o' });
+      src.store.setDerivedImageStatus('media', 'READY');
+    });
+    // Its agent ran OpenClaw 2026.9.8, which 2026.7 cannot read.
+    const m = JSON.parse(gunzipSync(saved).toString('utf8'));
+    m.openclawVersion = '2026.9.8';
+    const file = gzipSync(Buffer.from(JSON.stringify(m)));
+    expect(m.image.recipe.inputs).toBeUndefined();
+    expect(m.image.recipe.layers).toMatch(/^sha256:/);
+    // Here, the name is a hand-made build of an older OpenClaw; the image of those very layers is :latest.
+    const dst = await installation('me');
+    dst.provider.tags = [
+      { tag: 'hatchabot-runtime:latest', imageId: 'same', openclawVersion: '2026.9.8', layers: [L('1')] },
+      { tag: 'hatchabot-runtime:2026.9.8', imageId: 'hand', openclawVersion: '2026.7.1-2', layers: [L('2')] },
+    ];
+    const agent = await importAgent(dst.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' });
+    expect(dst.store.getAgent(agent.id)?.image).toBe('hatchabot-runtime:derived-media');
+    expect(dst.provider.built.map((b) => b.dockerfile.split('\n')[0])).toEqual(['FROM hatchabot-runtime:latest']);
+  });
+
+  it('nothing here is built that way: the import says so, and builds nothing', async () => {
+    const dst = await installation('me');
+    dst.provider.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image', openclawVersion: '2026.9.8', buildInputs: label({ openclaw: '2026.9.8', engine: 'none' }) }];
+    await expect(importAgent(dst.deps as never, await jqFile(), { ownerId: 'me', mayBuild: true, image: 'build' }))
+      .rejects.toThrow("Import failed and was rolled back — fix the cause and import again. (the image hatchabot-runtime:derived-media could not be built here: no image on this machine is built the way hatchabot-runtime:derived-media's base is: hatchabot-runtime:latest runs OpenClaw 2026.9.8, not 2026.7.1-2. Build an image of OpenClaw 2026.7.1-2 with jq on this machine (Settings → Advanced → Runtime images), then try again, or run it on this machine's default image)");
+    expect(dst.provider.built).toEqual([]);
+    expect(dst.store.getDerivedImage('media')).toBeUndefined();
+  });
+
+  it("an older OpenClaw is judged by the one its base was built from, not by the base's name here", async () => {
+    // Saved by an OpenClaw newer than the one the recipe's base runs.
+    const file = gzipSync(Buffer.from(JSON.stringify({ ...JSON.parse(gunzipSync(await jqFile()).toString('utf8')), openclawVersion: '2026.9.8' })));
+    const dst = await plainMachine();
+    await expect(importAgent(dst.deps as never, file, { ownerId: 'me', mayBuild: true, image: 'build' })).rejects.toThrow(/saved by OpenClaw 2026\.9\.8; this machine would run it on 2026\.7\.1-2/);
+    expect(dst.provider.built).toEqual([]);
   });
 });

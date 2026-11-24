@@ -7,7 +7,7 @@ import { addressBucket, approximateSource, isPublic, markPublicSocket, publicCli
 import { guestMay, publicRuleFor, type PublicRule } from './publicRoutes.js';
 import { cookieFromHeader, readSessionCookie, sessionValue } from './sessionCookie.js';
 import { safeEqual } from '../util/safeEqual.js';
-import type { ConsoleSocketsApi } from './consoleSockets.js';
+import type { ConsoleSocketsApi } from '../orchestrator/console/consoleSockets.js';
 import { adminAccounts, evaluateSafeguards, failingSafeguards, hostOf, publicConfig, usableFactors, type PublicConfig, type SafeguardCheck } from './safeguards.js';
 
 /**
@@ -45,6 +45,15 @@ import { adminAccounts, evaluateSafeguards, failingSafeguards, hostOf, publicCon
  */
 
 export const PASS_COOKIE = '__Host-hatchabot_pub';
+/**
+ * When the second factor was last given on a pass, in a cookie of its own
+ * that only giving it writes. The pass is written anew as a request starts,
+ * from the cookie it carried, so one that began before the factor was given
+ * and answered after it sent the older pass last, and the browser kept it:
+ * the next sensitive action asked for the factor again at once (HB-0934).
+ * The pass still carries the time too; the later of the two counts.
+ */
+export const FACTOR_COOKIE = '__Host-hatchabot_factor';
 export const DEVICE_COOKIE = '__Host-hatchabot_device';
 const cookieOpts = { httpOnly: true, sameSite: 'strict' as const, path: '/', secure: true };
 
@@ -91,6 +100,9 @@ export type SecondFactorNeed = 'no' | 'yes' | 'missing' | 'guest';
  * removed factor bumps it, and a second factor given before that no longer counts (#9).
  */
 interface Pass { sess: string; minted: number; seen: number; sfAt: number; used: boolean; en: number; g: number }
+/** The gate's refresh of a request's pass, waiting to be written as it is answered (refreshPass). */
+const PASS_REFRESH = Symbol('public pass refresh');
+type WithRefresh = { [PASS_REFRESH]?: Pass };
 
 export interface PublicAccessApi {
   config(): PublicConfig;
@@ -103,7 +115,12 @@ export interface PublicAccessApi {
   stopListener(): Promise<void>;
   /** A session was handed out (sessionCookie.ts): at the public address, hand out the pass with it. */
   sessionMinted(req: FastifyRequest, reply: FastifyReply, sessionValue: string): void;
-  sessionCleared(req: FastifyRequest, reply: FastifyReply): void;
+  /**
+   * A browser signs out: at the public address, its sign-in ends for every
+   * copy of its cookies. False when that could not be saved, and then its
+   * pass cookie is left as it is unless `anyway` (HB-0957).
+   */
+  sessionCleared(req: FastifyRequest, reply: FastifyReply, anyway?: boolean): boolean;
   /** A public failure bucket filled (auth.ts): put it on the record. */
   failureBurst(req: FastifyRequest, key: string, until: number): void;
   /** The second factor was just given by the signed-in person: note it on their public pass. */
@@ -192,13 +209,18 @@ export function deviceLabel(ua: string | undefined): string {
   return os ? `${browser} on ${os}` : browser;
 }
 
-/** The content security policy for the app's own pages at the public address: as strict as one inline-scripted page allows. */
+/** The content security policy for the app's own pages at the public address. */
 export function publicCsp(mode: string): string {
   const google = mode === 'identity';
   return [
     `default-src 'self'`,
-    // The app is one page with its script and handlers inline; that is what 'unsafe-inline' is for. No other script source.
-    `script-src 'self' 'unsafe-inline'${google ? ' https://accounts.google.com' : ''}`,
+    // No inline script runs (HB-0812): the pages' code is files of their own
+    // (web/app/, HB-0811), they name no inline handler (HB-0810), and
+    // scripts/check-web.mjs fails the build on either coming back. So a
+    // script written into a page by a missed escape does not run. The one
+    // other source is Google's sign-in, in identity mode.
+    `script-src 'self'${google ? ' https://accounts.google.com' : ''}`,
+    // Styles keep 'unsafe-inline': the pages set style attributes throughout.
     `style-src 'self' 'unsafe-inline'${google ? ' https://accounts.google.com' : ''}`,
     `img-src 'self' data: blob: https:`,
     `media-src 'self' data: blob:`,
@@ -394,14 +416,60 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
    */
   const revoked = new Set<string>();
   const passName = (p: Pass): string => `${p.sess}.${p.minted}`;
-  try { for (const id of store?.revokedPublicPasses(Date.now()) ?? []) revoked.add(id); } catch { /* a database from before the table: none yet */ }
-  /** The pass this request carries, genuine, for the session it carries and not signed out. Says nothing about idleness. */
-  const boundPass = (req: { headers: Record<string, string | string[] | undefined> }, session: string | undefined): Pass | undefined => {
+  // Read from the store at the start. Until they have been read, no pass is
+  // good: a read that failed once, taken for "none", let every signed-out
+  // pass back in (HB-0957). Tried again as passes are asked for.
+  let revocationsRead = !store;
+  let revocationsFailed = false;
+  const readRevocations = (): boolean => {
+    if (revocationsRead) return true;
+    try {
+      for (const id of store!.revokedPublicPasses(Date.now())) revoked.add(id);
+      revocationsRead = true;
+      if (revocationsFailed) app.log.warn('public.pass_revocations_read: public passes are accepted again');
+    } catch (err) {
+      if (!revocationsFailed) app.log.error({ err: String(err) }, 'public.pass_revocations_unread: no public pass is accepted until they are read');
+      revocationsFailed = true;
+    }
+    return revocationsRead;
+  };
+  readRevocations();
+  /**
+   * Sign-outs here whose record could not be written: each pass's name, and
+   * when its revocation ends. They were refused (503) but are revoked in this
+   * process all the same, and the record is written again as passes are
+   * checked (every 5 s at most), at the minute's evaluation, and when Sign
+   * out is pressed again, until it is saved. Before, the gate cleared such a
+   * pass's cookie at the page's next request, the next Sign out found no pass
+   * and answered "signed out", and the record was never written: after a
+   * restart every copy worked again (HB-0957). Lost with a restart before it
+   * is saved, as the database's copy would have been.
+   */
+  const unsaved = new Map<string, number>();
+  let unsavedTriedAt = 0;
+  const saveUnsaved = (now = Date.now(), force = false): void => {
+    if (!unsaved.size || !store || (!force && now - unsavedTriedAt < 5_000)) return;
+    unsavedTriedAt = now;
+    for (const [name, until] of unsaved) {
+      if (until > now) {
+        try { store.revokePublicPass(name, until); } catch { return; } // still failing: the next try
+        app.log.warn('public.pass_revoke_saved: a sign-out that could not be saved is now');
+      }
+      unsaved.delete(name);
+    }
+  };
+  /**
+   * The pass this request carries, genuine, for the session it carries and
+   * not signed out (or signed out already, when `evenIfSignedOut`). Says
+   * nothing about idleness.
+   */
+  const boundPass = (req: { headers: Record<string, string | string[] | undefined> }, session: string | undefined, evenIfSignedOut = false): Pass | undefined => {
+    saveUnsaved();
     const pass = decodePass(cookieFromHeader(cookieHeaderOf(req), PASS_COOKIE));
     if (!pass || !session) return undefined;
     const want = sha(session);
     if (!safeEqual(pass.sess, want)) return undefined;
-    if (revoked.has(passName(pass))) return undefined;
+    if (!evenIfSignedOut && (!readRevocations() || revoked.has(passName(pass)))) return undefined;
     return pass;
   };
   /** The valid pass this request carries for the session it carries, or why there is none. */
@@ -413,7 +481,57 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     return pass;
   };
   const setPass = (reply: FastifyReply, p: Pass): void => {
+    delete (reply.request as WithRefresh)[PASS_REFRESH]; // this reply's own pass replaces the refresh
     reply.setCookie(PASS_COOKIE, encodePass(p), { ...cookieOpts, maxAge: Math.floor(publicConfig().idleMs / 1000) });
+  };
+  /**
+   * The gate's refresh of the pass a request carried (it was used: `seen`),
+   * written as the request is answered, not as it starts, and only if that
+   * pass is still the browser's then: its session still signs this person
+   * in, and it has not been signed out. Written as the request started, a
+   * slow request that began before a password change sent the old pass back
+   * after the change's answer had handed out the new one, and the browser
+   * kept it: signed out at the next request (HB-1245, the race HB-0934 had
+   * for the second factor). A pass or a sign-out this reply hands out itself
+   * replaces it (setPass, clearPass).
+   */
+  const refreshPass = (req: FastifyRequest, p: Pass): void => { (req as WithRefresh)[PASS_REFRESH] = p; };
+  const writeRefresh = (req: FastifyRequest, reply: FastifyReply): void => {
+    const p = (req as WithRefresh)[PASS_REFRESH];
+    if (!p) return;
+    delete (req as WithRefresh)[PASS_REFRESH];
+    if (revoked.has(passName(p))) return;
+    let now: ReturnType<NonNullable<typeof app.principalFromCookieHeader>>;
+    try { now = app.principalFromCookieHeader?.(cookieHeaderOf(req), true); }
+    catch (err) {
+      // The session could not be read (the database, say): the answer stands, and the next request writes the pass.
+      app.log.warn({ err: (err as Error)?.message ?? String(err) }, 'public.pass_refresh_skipped');
+      return;
+    }
+    if (!now || now.ownerId !== req.principal?.ownerId) return;
+    setPass(reply, p);
+  };
+  /** The second factor given on this pass (FACTOR_COOKIE), bound to its name; written by giving it, and never by a refresh. */
+  const setFactor = (reply: FastifyReply, p: Pass, sfAt: number, g: number): void => {
+    const body = `f1.${p.sess}.${p.minted}.${sfAt}.${g}`;
+    // It counts only with its pass, which ends long before this: as long as the device cookie.
+    reply.setCookie(FACTOR_COOKIE, `${body}.${sign(body)}`, { ...cookieOpts, maxAge: 400 * 86_400 });
+  };
+  const factorCookieOf = (req: { headers: Record<string, string | string[] | undefined> }, p: Pass): { sfAt: number; g: number } | undefined => {
+    const raw = cookieFromHeader(cookieHeaderOf(req), FACTOR_COOKIE);
+    const i = raw?.lastIndexOf('.') ?? -1;
+    if (!raw || i < 0) return undefined;
+    const body = raw.slice(0, i);
+    if (!safeEqual(raw.slice(i + 1), sign(body))) return undefined;
+    const [v, sess, minted, sfAt, g] = body.split('.');
+    if (v !== 'f1' || sess !== p.sess || Number(minted) !== p.minted) return undefined;
+    const n = [sfAt, g].map(Number);
+    return n.every((x) => Number.isFinite(x) && x >= 0) ? { sfAt: n[0]!, g: n[1]! } : undefined;
+  };
+  const clearPass = (reply: FastifyReply): void => {
+    delete (reply.request as WithRefresh)[PASS_REFRESH]; // a sign-out is never undone by the refresh
+    reply.clearCookie(PASS_COOKIE, cookieOpts);
+    reply.clearCookie(FACTOR_COOKIE, cookieOpts);
   };
   /** The generation of this person's factors a second factor given now is recorded under. */
   const factorGen = (ownerId: string): number => store?.secondFactorGeneration(ownerId) ?? 0;
@@ -422,9 +540,13 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
    * person (0: not given, or given before their factors were reset or one was
    * removed). Every check of the second factor reads it through here: a
    * cookie verified with a factor that is gone stayed verified once a new one
-   * was added (#9).
+   * was added (#9). The later of the pass's own time and FACTOR_COOKIE's.
    */
-  const factorAt = (pass: Pass, ownerId: string): number => (pass.sfAt > 0 && pass.g === factorGen(ownerId) ? pass.sfAt : 0);
+  const factorAt = (req: { headers: Record<string, string | string[] | undefined> }, pass: Pass, ownerId: string): number => {
+    const g = factorGen(ownerId);
+    const f = factorCookieOf(req, pass);
+    return Math.max(pass.sfAt > 0 && pass.g === g ? pass.sfAt : 0, f && f.sfAt > 0 && f.g === g ? f.sfAt : 0);
+  };
 
   const sessionMinted = (req: FastifyRequest, reply: FastifyReply, value: string): void => {
     if (!isPublic(req)) return;
@@ -438,7 +560,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     let en = FIRST_FACTOR_PROOF.test(req.routeOptions?.url ?? '') ? now + FIRST_FACTOR_WINDOW_MS : 0;
     if (req.principal && req.routeOptions?.url === '/v1/local-accounts/:id/password') {
       const old = passOf(req, sessionValue(req));
-      sfAt = old ? factorAt(old, req.principal.ownerId) : 0;
+      sfAt = old ? factorAt(req, old, req.principal.ownerId) : 0;
       g = factorGen(req.principal.ownerId);
       en = old?.en ?? 0;
     }
@@ -447,23 +569,32 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       reply.setCookie(DEVICE_COOKIE, randomBytes(16).toString('base64url'), { ...cookieOpts, maxAge: 400 * 86_400 });
     }
   };
-  const sessionCleared = (req: FastifyRequest, reply: FastifyReply): void => {
-    if (!isPublic(req)) return;
+  const sessionCleared = (req: FastifyRequest, reply: FastifyReply, anyway = false): boolean => {
+    if (!isPublic(req)) return true;
     // Signed out here: this sign-in is over for every copy of its cookies, not only this browser's.
-    const pass = boundPass(req, sessionValue(req));
+    // Signed out by this process already is no matter: a sign-out whose record failed is tried again.
+    const pass = boundPass(req, sessionValue(req), true);
+    let saved = true;
     if (pass) {
-      revoked.add(passName(pass));
-      try { store?.revokePublicPass(passName(pass), Date.now() + revokedPassMs()); } catch (err) { app.log.error({ err: String(err) }, 'public.pass_revoke_failed'); }
+      const name = passName(pass), until = Date.now() + revokedPassMs();
+      revoked.add(name);
+      // Kept in memory only, a failed write was undone by the next restart,
+      // and every copy of the cookies worked again while the browser had been
+      // told it was signed out (HB-0957): the sign-out is refused instead,
+      // and its record written again until it is saved (`unsaved`).
+      try { store?.revokePublicPass(name, until); unsaved.delete(name); }
+      catch (err) { saved = false; unsaved.set(name, until); app.log.error({ err: String(err) }, 'public.pass_revoke_failed'); }
       app.consoleSockets?.revalidate();
     }
-    reply.clearCookie(PASS_COOKIE, cookieOpts);
+    if (saved || anyway) clearPass(reply);
+    return saved;
   };
 
   const secondFactorGiven = (req: FastifyRequest): boolean => {
     if (!isPublic(req)) return true;
     const ownerId = req.principal?.ownerId;
     const pass = passOf(req, sessionValue(req));
-    return !!pass && !!ownerId && factorAt(pass, ownerId) > 0;
+    return !!pass && !!ownerId && factorAt(req, pass, ownerId) > 0;
   };
 
   const secondFactorPassed = (req: FastifyRequest, reply: FastifyReply): void => {
@@ -471,16 +602,18 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     const ownerId = req.principal?.ownerId;
     const pass = passOf(req, sessionValue(req));
     if (!pass || !ownerId) return;
-    setPass(reply, { ...pass, seen: Date.now(), sfAt: Date.now(), g: factorGen(ownerId) });
+    const now = Date.now(), g = factorGen(ownerId);
+    setPass(reply, { ...pass, seen: now, sfAt: now, g });
+    setFactor(reply, pass, now, g);
   };
 
   const secondFactorsChanged = (ownerId: string, keep?: { req: FastifyRequest; reply: FastifyReply }): void => {
     if (!store) return;
     // The request that made the change: its own proof, read under the generation it was given in.
     const mine = keep && isPublic(keep.req) && keep.req.principal?.ownerId === ownerId ? passOf(keep.req, sessionValue(keep.req)) : undefined;
-    const kept = mine ? factorAt(mine, ownerId) : 0;
+    const kept = mine && keep ? factorAt(keep.req, mine, ownerId) : 0;
     const g = store.bumpSecondFactorGeneration(ownerId);
-    if (mine && kept && keep) setPass(keep.reply, { ...mine, sfAt: kept, g });
+    if (mine && kept && keep) { setPass(keep.reply, { ...mine, sfAt: kept, g }); setFactor(keep.reply, mine, kept, g); }
   };
 
   // ---- the record and the notices -------------------------------------------
@@ -491,9 +624,10 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   };
 
   const failureBurst = (req: FastifyRequest, key: string, until: number): void => {
-    const account = /pub:user:(.+)$/.exec(key)?.[1];
+    // Anchored, and any text: a name with a line break in it was put on the record as an address (HB-1389 review).
+    const account = /^(?:(?:link|2fa):)?pub:user:([\s\S]+)$/.exec(key)?.[1];
     record('public.failure_burst', undefined, {
-      bucket: key.endsWith('pub:all') ? 'all public sign-ins' : account ? `account ${account}` : `address ${approximateSource(publicClientAddress(req))}`,
+      bucket: /^(?:(?:link|2fa):)?pub:all$/.test(key) ? 'all public sign-ins' : account ? `account ${account}` : `address ${approximateSource(publicClientAddress(req))}`,
       lockedUntil: new Date(until).toISOString(),
       path: routedPath(req.url),
     });
@@ -635,6 +769,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
   // ---- the gate: second half (after the sign-in hook) --------------------------
 
   const afterSignIn = (): void => {
+    app.addHook('onSend', async (req, reply, payload) => { writeRefresh(req, reply); return payload; });
     app.addHook('onRequest', async (req, reply) => {
       if (!isPublic(req)) return;
       const rule = req.publicRule;
@@ -645,13 +780,16 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       if (!principal || principal.via === 'header') return reply.code(401).send({ error: 'auth required' });
       const pass = passOf(req, sessionValue(req));
       if (!pass) {
-        // A session from the private address, or a public one left idle too long.
-        reply.clearCookie(PASS_COOKIE, cookieOpts);
+        // A session from the private address, or a public one left idle too
+        // long. A pass whose sign-out could not be saved keeps its cookie, so
+        // that Sign out pressed again finds it and writes its record (HB-0957).
+        const carried = unsaved.size ? boundPass(req, sessionValue(req), true) : undefined;
+        if (!carried || !unsaved.has(passName(carried))) clearPass(reply);
         return reply.code(401).send({ error: 'auth required', publicSignIn: true });
       }
       if (!pass.used) firstUse(req, principal.ownerId, pass);
       const now = Date.now();
-      if (!pass.used || now - pass.seen > 60_000) setPass(reply, { ...pass, seen: now, used: true });
+      if (!pass.used || now - pass.seen > 60_000) refreshPass(req, { ...pass, seen: now, used: true });
 
       const need = secondFactorNeed(principal.ownerId);
       if (rule.cls === 'second-step') return;
@@ -676,7 +814,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
         if (pass.en > now) return reply.code(403).send({ error: MUST_ENROL_NOW, secondFactor: 'enrol' });
         return reply.code(403).send({ error: MUST_ENROL_NEEDS_LINK, secondFactor: 'enrol-link' });
       }
-      const sfAt = factorAt(pass, principal.ownerId);
+      const sfAt = factorAt(req, pass, principal.ownerId);
       if (need === 'yes' && sfAt === 0) {
         return reply.code(401).send({ error: 'second factor required', secondFactor: 'required' });
       }
@@ -707,7 +845,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       const becomesGuest = !!o.acceptingWebChat && publicConfig().guestsWithoutSecondFactor && !!store?.localAccount(ownerId) && !hasOwnerRights(ownerId) && !!store?.ownsNothing(ownerId);
       if (!becomesGuest) return 'no second factor';
     }
-    if (need === 'yes' && factorAt(pass, ownerId) === 0) return 'second factor not given';
+    if (need === 'yes' && factorAt({ headers }, pass, ownerId) === 0) return 'second factor not given';
     return undefined;
   };
 
@@ -733,7 +871,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     if (secondFactorNeed(principal.ownerId) !== 'yes') { // (a guest let in without one included)
       return { code: 403, body: { error: 'This needs a second factor at the public address. Add one under Settings → You → Second factor, or use the private address.', secondFactor: 'missing' } };
     }
-    const sfAt = factorAt(pass, principal.ownerId);
+    const sfAt = factorAt(req, pass, principal.ownerId);
     if (sfAt === 0 || Date.now() - sfAt > publicConfig().stepUpMs) return { code: 401, body: { error: 'second factor required', secondFactor: 'step-up' } };
     return undefined;
   };
@@ -747,7 +885,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     if (Date.now() - lastActive > publicConfig().idleMs) return 'idle';
     const need = secondFactorNeed(ownerId);
     if (need === 'missing') return 'no second factor';
-    if (need === 'yes' && factorAt(pass, ownerId) === 0) return 'second factor not given';
+    if (need === 'yes' && factorAt({ headers }, pass, ownerId) === 0) return 'second factor not given';
     return undefined;
   };
 
@@ -807,7 +945,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
     if (!cfg.on) { await stopListener(); return { listening: false }; }
     await evaluate();
     if (!timer) {
-      timer = setInterval(() => { void evaluate().catch((err: unknown) => { serving = false; app.log.error({ err: String(err) }, 'public.evaluate_failed'); }); }, 60_000);
+      timer = setInterval(() => { saveUnsaved(Date.now(), true); void evaluate().catch((err: unknown) => { serving = false; app.log.error({ err: String(err) }, 'public.evaluate_failed'); }); }, 60_000);
       timer.unref();
     }
     if (server?.listening) return { listening: true };

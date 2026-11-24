@@ -17,15 +17,17 @@ process.env.HATCHABOT_READY_TIMEOUT_MS ??= '2000';
 import { Store } from '../../src/store/store.js';
 import { MockProvider } from '../../src/providers/mockProvider.js';
 import { registerRoutes } from '../../src/api/routes.js';
-import type { SecretStore } from '../../src/secrets/secretStore.js';
+import { SecretNotFoundError, type SecretStore } from '../../src/secrets/secretStore.js';
 import { urlHost } from '../helpers/urlHost.js';
+import { telegramRefuses } from './telegramStandIn.js';
 
+/** The secret store in memory: a ref with nothing stored under it is refused as the real stores refuse it. */
 export class MemSecrets implements SecretStore {
   map = new Map<string, string>();
   async put(ref: string, v: string) { this.map.set(ref, v); }
   async get(ref: string) {
     const v = this.map.get(ref);
-    if (v === undefined) throw new Error(`missing secret ${ref}`);
+    if (v === undefined) throw new SecretNotFoundError(ref);
     return v;
   }
   async delete(ref: string) { this.map.delete(ref); }
@@ -71,6 +73,9 @@ function channelStub(availableBots = 0) {
   return { kind: 'telegram', pool, release: async () => {}, discardPending: () => {} } as any;
 }
 
+// No test talks to Telegram: the wake poll (hibernate.ts) and getMe get an empty, well-formed answer.
+const oauthFetch = (async (u: string | URL | Request) => new Response(JSON.stringify(urlHost(u) === 'api.telegram.org' ? { ok: true, result: [] } : { error: 'stubbed' }), { status: urlHost(u) === 'api.telegram.org' ? 200 : 404, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+
 export interface World {
   store: Store;
   secrets: MemSecrets;
@@ -84,11 +89,14 @@ export interface World {
   channel: any;
   /** What registerRoutes hands back (resumeOperations, the retry loop). */
   routes?: import("./../../src/api/routes.js").RoutesHandle;
+  /** The database under the store: what a restart keeps (restartWorld). A world made by makeWorld has it. */
+  db?: Database.Database;
 }
 
 /** A fresh installation whose local host + AI profile belong to `owner`. */
 export async function makeWorld(owner: string = OWNER, availableBots = 0): Promise<World> {
-  const store = new Store(new Database(':memory:'));
+  const db = new Database(':memory:');
+  const store = new Store(db);
   const secrets = new MemSecrets();
   const provider = new MockProvider();
   store.insertHost({ id: 'h1', ownerId: owner, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
@@ -97,11 +105,28 @@ export async function makeWorld(owner: string = OWNER, availableBots = 0): Promi
   const f = Fastify();
   const channel = channelStub(availableBots);
   const providers = new Map<string, MockProvider>([['mock', provider]]);
-  // No test talks to Telegram: the wake poll (hibernate.ts) and getMe get an empty, well-formed answer.
-  const oauthFetch = (async (u: string | URL | Request) => new Response(JSON.stringify(urlHost(u) === 'api.telegram.org' ? { ok: true, result: [] } : { error: 'stubbed' }), { status: urlHost(u) === 'api.telegram.org' ? 200 : 404, headers: { 'content-type': 'application/json' } })) as typeof fetch;
   // Peer calls go through the global fetch, so a test can stand in for the other server with a spy.
-  const routes = await registerRoutes(f, { store, secrets, providers, channel, oauthFetch, peerFetch: viaGlobalFetch });
-  return { store, secrets, provider, providers, f, owner, channel, routes };
+  // A push to the owner's phone is told as the real Telegram tells a made-up token (HB-1437).
+  const routes = await registerRoutes(f, { store, secrets, providers, channel, oauthFetch, pushFetch: telegramRefuses, peerFetch: viaGlobalFetch });
+  return { store, secrets, provider, providers, f, owner, channel, routes, db };
+}
+
+/**
+ * The same installation after a restart of Hatchabot: a new Store over the
+ * same database and a new app with new routes, so everything the last
+ * process held in memory is gone (its queues, its holds, its services). The
+ * machine goes on as it was: the same provider (its containers), secrets and
+ * channel stub. The old app is closed; `resumeOperations` is the caller's to
+ * run, as src/index.ts runs it after a start.
+ */
+export async function restartWorld(w: World): Promise<World> {
+  if (!w.db) throw new Error('restartWorld needs the world makeWorld made (its database)');
+  w.routes?.stop();
+  await w.f.close();
+  const store = new Store(w.db);
+  const f = Fastify();
+  const routes = await registerRoutes(f, { store, secrets: w.secrets, providers: w.providers, channel: w.channel, oauthFetch, pushFetch: telegramRefuses, peerFetch: viaGlobalFetch });
+  return { ...w, store, f, routes };
 }
 
 export interface SeedOpts {

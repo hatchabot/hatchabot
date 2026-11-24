@@ -93,6 +93,15 @@ describe('"Used by" and the delete agree (HB-0380)', () => {
     expect((await del(f)).statusCode).toBe(200);
     expect(provider.removed).toEqual([X]);
   });
+  it('the name a stopped build of it left goes with it, so the image does not live on under that name (HB-1288 review)', async () => {
+    const { f, provider } = await world();
+    const id = provider.tags.find((t) => t.tag === X)!.imageId;
+    provider.tags.push({ tag: 'hatchabot-runtime-check:2026.9.4', imageId: id });
+    expect((await row(f)).blockers).toEqual([]);
+    expect((await del(f)).statusCode).toBe(200);
+    expect(provider.removed).toEqual(['hatchabot-runtime-check:2026.9.4', X]);
+    expect(provider.tags.some((t) => t.imageId === id)).toBe(false);
+  });
   it('a pinned agent on this machine', async () => {
     const { f, store } = await world();
     store.setAgentImage('a1', X);
@@ -258,6 +267,21 @@ describe('POST /v1/runtime/images/promote', () => {
     expect(down.json().error).toMatch(/Garage/);
     expect(provider.tagged).toEqual([]);
   });
+  it('with HATCHABOT_IMAGE pinned to a version tag, an agent pinned to that tag is asked too: it runs what Promote moves (HB-1187)', async () => {
+    const had = process.env.HATCHABOT_IMAGE;
+    process.env.HATCHABOT_IMAGE = 'hatchabot-runtime:2026.9.4';
+    try {
+      const { f, provider, store } = await world();
+      provider.tags.find((t) => t.tag === 'hatchabot-runtime:2026.7.1-2')!.openclawVersion = '2026.7.1-2';
+      store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');
+      provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.7.1-2' });
+      provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+      const down = await f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag: 'hatchabot-runtime:2026.7.1-2' } });
+      expect(down.statusCode).toBe(409);
+      expect(down.json().error).toMatch(/\(Garage\)/);
+      expect(provider.tagged).toEqual([]);
+    } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = had; }
+  });
   it('refuses the default itself, derived images, unknown tags and bad refs', async () => {
     const { f } = await world();
     const post = (tag: string) => f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag } });
@@ -296,7 +320,7 @@ describe('image history + delete', () => {
     store.setAgentImage('a2', null);
     expect((await del('hatchabot-runtime:2026.9.4')).statusCode).toBe(200);
     expect(provider.removed).toEqual(['hatchabot-runtime:2026.9.4']);
-    expect((await del('hatchabot-runtime:2026.9.4')).statusCode).toBe(200); // mock rmi is idempotent; real docker would 409
+    expect((await del('hatchabot-runtime:2026.9.4')).statusCode).toBe(409); // gone: docker, and the mock as it does, refuses a name it does not have
   });
 });
 
@@ -312,6 +336,166 @@ describe('POST /v1/runtime/build', () => {
     const done = (await f.inject({ method: 'GET', url: '/v1/runtime/build', headers: as })).json();
     expect(done.running).toBe(false); expect(done.ok).toBe(true); expect(done.version).toBe('2026.7.9');
     expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: 'x;rm -rf /' } })).statusCode).toBe(400);
+  });
+
+  it('a build made the default is held to Promote\'s check: none older than followers already on 2026.8+ (HB-1063)', async () => {
+    const seen: Array<{ version?: string; candidate: boolean }> = [];
+    const { f, store, provider } = await world(async (o) => { seen.push(o); return { ok: true }; });
+    provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.7.1-2' });
+    provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+    const down = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: false } });
+    expect(down.statusCode).toBe(409);
+    expect(down.json().error).toBe('Made the default, OpenClaw 2026.7.1-2 cannot read the data of agents already on 2026.8 or newer (Garage). Pin those agents to their current image first, or build it as a candidate.');
+    // An archived follower too: a restore runs the default.
+    store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');
+    store.insertAgent({ id: 'a3', ownerId: OWNER, name: 'Attic', slug: 'attic', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentRuntimeRef('a3', 'mock://attic'); store.setAgentState('a3', 'RUNNING'); store.setAgentState('a3', 'STOPPED'); store.setAgentState('a3', 'ARCHIVED');
+    provider.infoOverride.set('mock://attic', { openclawVersion: '2026.9.8' });
+    expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: false } })).json().error).toMatch(/\(Attic\)/);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen).toEqual([]);
+    // As a candidate it touches no default, so it builds.
+    const trial = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: true } });
+    expect(trial.statusCode).toBe(202);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen.map((o) => o.candidate)).toEqual([true]);
+  });
+
+  it('a build onto a tag an agent or class pins is refused for every kind of build, not only the plain version (HB-1074)', async () => {
+    let builds = 0;
+    const { f, store } = await world(async () => { builds++; return { ok: true }; });
+    const build = (payload: Record<string, unknown>) => f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload });
+    store.setAgentImage('a1', 'hatchabot-runtime:2026.7.1-2-plus-curl');
+    store.setAgentState('a1', 'STOPPED'); store.setAgentState('a1', 'ARCHIVED'); // archived: a restore runs its pin
+    const extras = await build({ version: '2026.7.1-2', packages: 'curl' });
+    expect(extras.statusCode).toBe(409);
+    expect(extras.json().error).toBe('hatchabot-runtime:2026.7.1-2-plus-curl is pinned by Kitchen; rebuilding it would change what they run. Unpin them first, or build another version.');
+    // A long list's tag ends in its checksum, as the script names it.
+    const long = 'libicu-dev libssl-dev libsqlite3-dev build-essential curl';
+    store.upsertAgentClass({ id: 'c1', ownerId: OWNER, name: 'Builders', image: 'hatchabot-runtime:2026.7.1-2-plus-libicu-dev-libssl-dev-libsqlite3-dev-bui-1430943702' });
+    expect((await build({ version: '2026.7.1-2', packages: long })).json().error).toMatch(/is pinned by class Builders;/);
+    // Another list, or the plain version, writes another tag.
+    expect((await build({ version: '2026.7.1-2', packages: 'jq' })).statusCode).toBe(202);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(builds).toBe(1);
+  });
+
+  it("GET /v1/runtime/build/check says what POST /v1/runtime/build would refuse, for a build made outside the app, and changes nothing (HB-1428 review)", async () => {
+    let builds = 0;
+    const { f, store, provider } = await world(async () => { builds++; return { ok: true }; });
+    const check = (q: string, headers: Record<string, string> = as) => f.inject({ method: 'GET', url: `/v1/runtime/build/check?${q}`, headers });
+    // Pinned by an archived agent, which the image listing a CLI read leaves out of a tag no longer built.
+    store.setAgentImage('a1', 'hatchabot-runtime:2026.9.8');
+    store.setAgentState('a1', 'STOPPED'); store.setAgentState('a1', 'ARCHIVED');
+    const pinned = await check('tag=hatchabot-runtime%3A2026.9.8&version=2026.9.8&candidate=1');
+    expect(pinned.statusCode).toBe(200);
+    expect(pinned.json()).toEqual({ refused: 'hatchabot-runtime:2026.9.8 is pinned by Kitchen; rebuilding it would change what they run. Unpin them first, or build another version.' });
+    // Made the default: held to the 2026.8 line, as the app's build is.
+    provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+    expect((await check('tag=hatchabot-runtime%3A2026.7.1-2&version=2026.7.1-2')).json()).toEqual({ refused: 'Made the default, OpenClaw 2026.7.1-2 cannot read the data of agents already on 2026.8 or newer (Garage). Pin those agents to their current image first, or build it as a candidate.' });
+    expect((await check('tag=hatchabot-runtime%3A2026.7.1-2&version=2026.7.1-2&candidate=1')).json()).toEqual({ refused: null });
+    // The machine's owner's to ask; a tag or version that is not one is refused.
+    expect((await check('tag=hatchabot-runtime%3A2026.9.6&candidate=1', { 'x-hatchabot-owner': 'user-other' })).statusCode).toBe(403);
+    expect((await check('tag=not%20a%20tag')).statusCode).toBe(400);
+    expect((await check('tag=hatchabot-runtime%3A2026.9.6&version=..%2Fx')).statusCode).toBe(400);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(builds).toBe(0);
+  });
+
+  it('a default build is held to that check again as it ends: a follower that reached 2026.8 meanwhile keeps the default where it is (HB-1187)', async () => {
+    const seen: Array<{ candidate: boolean }> = [];
+    let finish!: (r: { ok: boolean }) => void;
+    const { f, store, provider } = await world((o) => { seen.push(o); return new Promise((r) => { finish = r; }); });
+    const kitchen = store.getAgent('a1')!.runtimeRef!;
+    provider.infoOverride.set(kitchen, { openclawVersion: '2026.7.1-2' });
+    provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.7.1-2' });
+    const build = () => f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: false } });
+    const now = async () => (await f.inject({ method: 'GET', url: '/v1/runtime/build', headers: as })).json();
+    expect((await build()).statusCode).toBe(202);
+    // The script leaves the default alone: it is moved here, as the build ends.
+    expect(seen.map((o) => o.candidate)).toEqual([true]);
+    // While it builds, Kitchen moves onto 2026.9.
+    provider.infoOverride.set(kitchen, { openclawVersion: '2026.9.6' });
+    finish({ ok: true });
+    for (let i = 0; i < 50 && (await now()).running; i++) await new Promise((r) => setTimeout(r, 5));
+    const refused = await now();
+    expect(refused).toMatchObject({ running: false, ok: false });
+    expect(refused.error).toBe('Built, but not made the default: OpenClaw 2026.7.1-2 cannot read the data of agents that reached 2026.8 or newer while it built (Kitchen). It is kept as hatchabot-runtime:2026.7.1-2: pin those agents to their current image, then promote it.');
+    expect(provider.tagged.filter(([, to]) => to === 'hatchabot-runtime:latest')).toEqual([]);
+    // Pinned, Kitchen keeps its own image: the next default build is made the default.
+    store.setAgentImage('a1', 'hatchabot-runtime:2026.9.4');
+    expect((await build()).statusCode).toBe(202);
+    finish({ ok: true });
+    for (let i = 0; i < 50 && (await now()).running; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(await now()).toMatchObject({ running: false, ok: true });
+    expect(provider.tagged.filter(([, to]) => to === 'hatchabot-runtime:latest')).toEqual([['hatchabot-runtime:2026.7.1-2', 'hatchabot-runtime:latest']]);
+  });
+
+  it('with HATCHABOT_IMAGE pinned to a version tag, a default build moves :latest as the script does, never the pin (HB-1187)', async () => {
+    const had = process.env.HATCHABOT_IMAGE;
+    process.env.HATCHABOT_IMAGE = 'hatchabot-runtime:2026.9.4';
+    try {
+      let finish!: (r: { ok: boolean }) => void;
+      const { f, store, provider } = await world(() => new Promise((r) => { finish = r; }));
+      // Garage is pinned to the tag HATCHABOT_IMAGE names, and on 2026.9 data.
+      store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');
+      provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.7.1-2' });
+      provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+      const now = async () => (await f.inject({ method: 'GET', url: '/v1/runtime/build', headers: as })).json();
+      expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: false } })).statusCode).toBe(202);
+      finish({ ok: true });
+      for (let i = 0; i < 50 && (await now()).running; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(await now()).toMatchObject({ running: false, ok: true });
+      expect(provider.tagged).toEqual([['hatchabot-runtime:2026.7.1-2', 'hatchabot-runtime:latest']]);
+    } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = had; }
+  });
+
+  it("with HATCHABOT_IMAGE_REPO set where the service runs, a default build moves the fleet's own :latest, the one its agents run (HB-1352)", async () => {
+    const had = process.env.HATCHABOT_IMAGE_REPO;
+    process.env.HATCHABOT_IMAGE_REPO = 'elsewhere.example/other-runtime';
+    try {
+      let finish!: (r: { ok: boolean }) => void;
+      const { f, store, provider } = await world(() => new Promise((r) => { finish = r; }));
+      provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.7.1-2' });
+      provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.7.1-2' });
+      const now = async () => (await f.inject({ method: 'GET', url: '/v1/runtime/build', headers: as })).json();
+      expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: false } })).statusCode).toBe(202);
+      finish({ ok: true });
+      for (let i = 0; i < 50 && (await now()).running; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(await now()).toMatchObject({ running: false, ok: true });
+      expect(provider.tagged).toEqual([['hatchabot-runtime:2026.7.1-2', 'hatchabot-runtime:latest']]);
+    } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE_REPO; else process.env.HATCHABOT_IMAGE_REPO = had; }
+  });
+
+  it('with HATCHABOT_IMAGE_REPO set, the pin check names the tag where the build writes it, candidate or default (HB-1256, part 3; fixed by HB-1352)', async () => {
+    const had = process.env.HATCHABOT_IMAGE_REPO;
+    process.env.HATCHABOT_IMAGE_REPO = 'elsewhere.example/other-runtime';
+    try {
+      let builds = 0;
+      const { f, store } = await world(async () => { builds++; return { ok: true }; });
+      store.setAgentImage('a1', 'hatchabot-runtime:2026.7.1-2');
+      for (const candidate of [true, false]) {
+        const r = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate } });
+        expect(r.statusCode, `candidate ${candidate}`).toBe(409);
+        expect(r.json().error).toBe('hatchabot-runtime:2026.7.1-2 is pinned by Kitchen; rebuilding it would change what they run. Unpin them first, or build another version.');
+      }
+      // A pin to that name in the repository the setting names is no image the build writes.
+      store.setAgentImage('a1', 'elsewhere.example/other-runtime:2026.7.1-2');
+      expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: true } })).statusCode).toBe(202);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(builds).toBe(1);
+    } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE_REPO; else process.env.HATCHABOT_IMAGE_REPO = had; }
+  });
+
+  it('two default builds asked for at once while the followers are read: one builds (HB-1063)', async () => {
+    let builds = 0;
+    const { f, provider } = await world(() => { builds++; return new Promise(() => {}); });
+    // Docker takes a moment to say what each follower runs.
+    const info = provider.info.bind(provider);
+    provider.info = async (ref: string) => { await new Promise((r) => setTimeout(r, 50)); return info(ref); };
+    const both = await Promise.all([1, 2].map(() => f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.9', candidate: false } })));
+    expect(both.map((r) => r.statusCode).sort()).toEqual([202, 409]);
+    expect(builds).toBe(1);
   });
 
   it('an engine-free image (asked for, or any 2026.8+) needs the shared memory search service, which is off here', async () => {
@@ -358,6 +542,31 @@ describe('classes carry an image', () => {
     expect(store.getAgent('a1')!.image ?? null).toBeNull();
     // Members can't set class images (that's a machine-owner call).
     expect((await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: { 'x-hatchabot-owner': 'user-other' }, payload: { name: 'X', image: 'hatchabot-runtime:2026.9.4' } })).statusCode).toBe(403);
+  });
+});
+
+describe('a fleet whose default is in a registry with a port (HB-1357)', () => {
+  it('can give a class its image, promote one, and read and delete one of its tags', async () => {
+    const had = process.env.HATCHABOT_IMAGE;
+    process.env.HATCHABOT_IMAGE = 'registry.example:5000/family/runtime:latest';
+    try {
+      const { f, provider } = await world();
+      const repo = 'registry.example:5000/family/runtime';
+      provider.tags = [
+        { tag: `${repo}:latest`, imageId: 'img-A' },
+        { tag: `${repo}:2026.9.4`, imageId: 'img-B' },
+        { tag: `${repo}:2026.9.6`, imageId: 'img-E' },
+      ];
+      const made = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: as, payload: { name: 'Builders', image: `${repo}:2026.9.4` } });
+      expect(made.statusCode, made.body).toBe(200);
+      expect(made.json().class.image).toBe(`${repo}:2026.9.4`);
+      const up = await f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag: `${repo}:2026.9.4` } });
+      expect(up.statusCode, up.body).toBe(200);
+      expect(provider.tagged).toEqual([[`${repo}:2026.9.4`, `${repo}:latest`]]);
+      expect((await f.inject({ method: 'GET', url: `/v1/runtime/images/${encodeURIComponent(`${repo}:2026.9.4`)}/history`, headers: as })).statusCode).toBe(200);
+      const del = await f.inject({ method: 'DELETE', url: `/v1/runtime/images/${encodeURIComponent(`${repo}:2026.9.6`)}`, headers: as });
+      expect(del.statusCode, del.body).toBe(200);
+    } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = had; }
   });
 });
 
@@ -475,5 +684,50 @@ describe('agent settings: every refusal before the first write', () => {
     // The same icon alone goes through.
     expect((await f.inject({ method: 'PATCH', url: '/v1/agents/a3', headers: { 'x-hatchabot-owner': OTHER }, payload: { icon: '🐱' } })).statusCode).toBe(200);
     expect(store.getAgent('a3')!.icon).toBe('🐱');
+  });
+});
+
+describe('a body of the wrong shape (HB-0814)', () => {
+  const json = { ...as, 'content-type': 'application/json' };
+  it('promote: a tag that is not text is refused in the words any bad tag gets', async () => {
+    const { f } = await world();
+    const r = await f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: json, payload: { tag: ['hatchabot-runtime:2026.9.4'] } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toBe('That image tag is not valid.');
+  });
+  it('build: a version that is not text, a candidate that is not a yes or no, and a body that is not an object start nothing', async () => {
+    let builds = 0;
+    const { f } = await world(async () => { builds++; return { ok: true }; });
+    for (const payload of [JSON.stringify({ version: 5 }), JSON.stringify({ candidate: 'no' }), JSON.stringify('x'), JSON.stringify([])]) {
+      const r = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: json, payload });
+      expect(r.statusCode, payload).toBe(400);
+    }
+    expect(builds).toBe(0);
+    const ok = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: json, payload: { version: '2026.7.1', candidate: null, packages: null } });
+    expect(ok.statusCode).toBe(202);
+    expect(builds).toBe(1);
+  });
+  it('derived images: a replace that is not a yes or no, and a rebuild base that is not text', async () => {
+    const { f, store } = await world();
+    const r = await f.inject({ method: 'POST', url: '/v1/images', headers: json, payload: { name: 'pdf', dockerfile: 'RUN true', replace: 'yes' } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toContain('replace');
+    store.upsertDerivedImage({ name: 'pdf', tag: 'hatchabot-runtime:derived-pdf', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: OWNER });
+    store.setDerivedImageStatus('pdf', 'READY');
+    const base = await f.inject({ method: 'POST', url: '/v1/images/pdf/rebuild', headers: json, payload: { base: 5 } });
+    expect(base.statusCode).toBe(400);
+    expect(base.json().error).toBe('base: a string.');
+    const nul = await f.inject({ method: 'POST', url: '/v1/images/pdf/rebuild', headers: json, payload: { base: null } });
+    expect(nul.json().error).toBe('base: a string.');
+    const list = await f.inject({ method: 'POST', url: '/v1/images/pdf/rebuild', headers: json, payload: JSON.stringify([]) });
+    expect(list.statusCode).toBe(400);
+  });
+  it('Install image: a wait that is not a yes or no starts no copy', async () => {
+    const { f, store } = await world();
+    store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'cloud', provider: 'mock', name: 'Laptop runner', settings: { dockerHost: 'ssh://runner@10.0.0.9' }, createdAt: 'now' });
+    const r = await f.inject({ method: 'POST', url: '/v1/hosts/h2/install-image', headers: json, payload: { wait: 'yes' } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toContain('wait');
+    expect((await f.inject({ method: 'GET', url: '/v1/hosts/h2/install-image', headers: as })).json()).toEqual({ idle: true });
   });
 });

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { grantChannelAccess, setDmPolicy } from '../src/orchestrator/members.js';
-import { dmPolicyAsserted, forgetDmPolicy, rememberDmPolicy } from '../src/orchestrator/dmPolicyMemo.js';
+import { grantChannelAccess, setDmPolicy } from '../src/orchestrator/members/members.js';
+import { dmPolicyAsserted, forgetDmPolicy, rememberDmPolicy } from '../src/orchestrator/channels/dmPolicyMemo.js';
 
 /**
  * The pairing sweep re-asserts every agent's DM policy every five minutes.

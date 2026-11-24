@@ -54,6 +54,8 @@ export interface PublicAppOptions {
   routeDeps?: Record<string, unknown>;
   /** Add routes before the app is ready. */
   extra?: (app: FastifyInstance, store: Store) => void;
+  /** The database of an app closed before: this one is that app after a restart. */
+  store?: Store;
 }
 
 export interface PublicApp {
@@ -86,7 +88,7 @@ export async function publicApp(opts: PublicAppOptions = {}): Promise<PublicApp>
   _resetLoginThrottle();
   const mode = opts.mode ?? 'accounts';
   const secret = Buffer.alloc(32, 9);
-  const store = new Store(new Database(':memory:'));
+  const store = opts.store ?? new Store(new Database(':memory:'));
   const app = Fastify();
   await registerAuth(app, {
     password: mode === 'password' ? 'shared-pw' : undefined, secret, mode, store, verifier: opts.verifier as never,

@@ -1,8 +1,8 @@
 import {it,expect,vi} from 'vitest';
 import {makeWorld,seedRunningAgent,as,viaGlobalFetch} from './support/world.js';
-import {exportAgent,importAgent} from '../src/orchestrator/transfer.js';
-import {migrateAgent} from '../src/orchestrator/migrate.js';
-import {moveAgentToHost} from '../src/orchestrator/moveHost.js';
+import {exportAgent,importAgent} from '../src/orchestrator/transfer/transfer.js';
+import {migrateAgent} from '../src/orchestrator/transfer/migrate.js';
+import {moveAgentToHost} from '../src/orchestrator/transfer/moveHost.js';
 import {MockProvider} from '../src/providers/mockProvider.js';
 it.each(['http://[::1]:9999','http://[::ffff:127.0.0.1]:9999','http://[fe80::1]:9999'])('peer URL rejects prohibited IPv6 address %s',async url=>{
  const w=await makeWorld(); const calls:string[]=[];

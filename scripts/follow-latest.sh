@@ -131,18 +131,21 @@ tries_open "$STATE/follow-latest-tries" hatchabot-follow-latest-tries "$NEWEST"
 # disk_stop WHAT: a file of this tick's own it could not write (a full disk):
 # said, and counted as a try the disk failed, so the next ticks wait; under
 # set -e it ended the tick with no word, and every tick tried again
-# (fourteenth review). Before a repair or a deploy changes anything.
+# (fourteenth review). Before a repair or a deploy changes anything. In a
+# repair (DISK_TRY 2) it is no try of the tag, and leaves the tag's clock.
+DISK_TRY=1
 disk_stop() {
   echo "Could not write $1 (a full disk?), so this tick stops before changing anything. This does not count against $NEWEST; the next ticks wait."
-  note_try 1
+  note_try "$DISK_TRY"
   exit 1
 }
 # disk_waiting: 0 while the wait after the disk's last failure lasts, as
 # tries_waiting has it for the disk's alone (an hour at most), whatever the
 # tag's own: a repair puts back the release that was serving, and waits for
 # room only. A repair the disk stopped (5) was not counted, and ran again on
-# every tick while the disk stayed full (fifteenth review).
-disk_waiting() { [ "$T_DISK" -gt 0 ] && ( T_COUNT="$T_DISK"; tries_waiting ); }
+# every tick while the disk stayed full (fifteenth review). From the disk's
+# last failure (T_DLAST), not the tag's last try (review of HB-0637).
+disk_waiting() { [ "$T_DISK" -gt 0 ] && ( T_COUNT="$T_DISK"; T_LAST="${T_DLAST:-$T_LAST}"; tries_waiting ); }
 # disk_words TEXT: upgrade.sh's, the list its said_kind reads, a copy
 # (test/nightScripts.test.ts holds them equal): this runs from a copy of
 # itself, and reads nothing of the release's before its deploy script.
@@ -162,6 +165,7 @@ disk_words() {
 # the newest tag (a hand deploy between two rcs; going on would take it back).
 repair_cut() {
   local deploy rc=0
+  DISK_TRY=2
   echo "A deploy of $PROD was cut off part-way; putting ${CUT_FROM:-the previous release} back."
   [ -n "$CUT_FROM" ] || { echo "The interrupted deploy record names no previous release, so no release's code was run. Deploy a release by hand: scripts/deploy-release.sh vX.Y.Z"; return 1; }
   [ "$NO_COPY" = 0 ] || disk_stop "a private copy of $0 in ${TMPDIR:-/tmp}"
@@ -174,13 +178,12 @@ repair_cut() {
   # 4: a deploy or upgrade holds the lock, and repairs it first. Routine, as
   # follow-channel.sh has it (tenth review). 5: the machine's disk, or a
   # folder it cannot write: a try the disk failed, so the next repair waits
-  # (disk_waiting), never counted against the tag.
+  # (disk_waiting), never counted against the tag, nor its clock moved: no
+  # try of the tag (note_try 2).
+  DISK_TRY=1
   if [ "$rc" = 4 ]; then echo "Another deploy or upgrade of $PROD is running; it puts ${CUT_FROM:-the previous release} back, or the next tick does."; rc=0; fi
   if [ "$rc" = 5 ]; then
-    note_try 1
-    # Counted here as well: a try this tick counts after it (a tag not yet
-    # published) writes the record from these, and wrote over this one.
-    T_COUNT=$((T_COUNT + 1)); T_DISK=$((T_DISK + 1)); T_LAST="$(date +%s)"
+    note_try 2
     echo "Putting ${CUT_FROM:-the previous release} back could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $NEWEST."
   fi
   return "$rc"
@@ -197,13 +200,27 @@ if [ -n "$CUT_FROM" ] && [ "$(vernewer "$CUT_FROM" "$NEWEST")" = "$CUT_FROM" ]; 
   repair_cut || exit 1
   exit 0
 fi
-# A tag set aside stays aside, but not with a killed deploy to repair: the
-# deploy repairs that and then tries the tag once more (aside again if it
-# still does not start).
+# A tag set aside stays aside, and one whose last try failed waits its turn,
+# a killed deploy to repair or not. With one, the wait is the disk's alone
+# (disk_waiting), and on a tick the tag is not due the repair runs by itself:
+# the deploy script of the release it came from puts that release back, and
+# the tag is not looked at or counted. The tag's own deploy repairs it too,
+# so it ran in its place on every tick: a deploy that kept failing with the
+# record left (an index.lock in the way) ran every ten minutes, was set
+# aside after eight, and was tried again on the next tick; and a tag not yet
+# published was set aside after eighty minutes (HB-0637 and its review).
 FAILED="$STATE/follow-latest-failed"
-if [ ! -f "$CUT" ] && [ "$(cat "$FAILED" 2>/dev/null)" = "$NEWEST" ]; then exit 0; fi
-# With a killed deploy to repair, the wait is the disk's alone (disk_waiting).
-if [ -f "$CUT" ]; then ! disk_waiting || exit 0; else ! tries_waiting || exit 0; fi
+TAG_HELD=""
+if [ "$(cat "$FAILED" 2>/dev/null)" = "$NEWEST" ]; then TAG_HELD="was set aside, so it is not tried again; the next tag will be"
+elif tries_waiting; then TAG_HELD="is tried again later"; fi
+if [ -f "$CUT" ]; then
+  ! disk_waiting || exit 0
+  if [ -n "$TAG_HELD" ]; then
+    echo "$NEWEST $TAG_HELD. This tick repairs the deploy that was cut off, and only that."
+    repair_cut || { echo "The repair did not finish (above); it will be tried again."; exit 1; }
+    exit 0
+  fi
+elif [ -n "$TAG_HELD" ]; then exit 0; fi
 # set_aside RELEASE SAID AFTER: RELEASE is not tried again (FAILED names it)
 # and its record of tries goes; SAID and AFTER are said. FAILED is written
 # whole or not at all, and never ends the tick: `>` on a full disk left it cut
@@ -293,8 +310,8 @@ case "$vrc" in
     if [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then
       set_aside "$NEWEST" "Not deploying $NEWEST: $WHY, $MAX_TRIES times in a row." "It will not be looked at again; the next tag will be."
     else
-      note_try 0
       echo "Not deploying $NEWEST yet: $WHY. Looking again later ($((T_COUNT + 1 - T_DISK)) of $MAX_TRIES)."
+      note_try 0
     fi
     exit 1 ;;
   30)
@@ -340,8 +357,8 @@ else
   elif [ "$rc" = 3 ] && [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then
     set_aside "$NEWEST" "Deploying $NEWEST did not complete $MAX_TRIES times in a row." "It will not be retried; the next tag will be."
   elif [ "$rc" = 3 ]; then
-    note_try 0
     echo "Deploying $NEWEST did not complete (see above); it will be tried again later ($((T_COUNT + 1 - T_DISK)) of $MAX_TRIES)."
+    note_try 0
   elif [ "$rc" = 5 ]; then
     note_try 1
     echo "Deploying $NEWEST could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $NEWEST."

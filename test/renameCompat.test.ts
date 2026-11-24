@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { applyLegacyEnv } from '../src/envCompat.js';
-import { baseProblem, deriveTag } from '../src/orchestrator/derivedImage.js';
+import { baseProblem, deriveTag } from '../src/orchestrator/machines/derivedImage.js';
 import { DEFAULT_PREFIX, LEGACY_PREFIXES } from '../src/providers/localDockerProvider.js';
-import { EXPORT_FORMAT, LEGACY_EXPORT_FORMAT } from '../src/orchestrator/transfer.js';
-import { LEGACY_TEMPLATE_FORMAT, TEMPLATE_FORMAT } from '../src/orchestrator/template.js';
+import { EXPORT_FORMAT, LEGACY_EXPORT_FORMAT } from '../src/orchestrator/transfer/transfer.js';
+import { LEGACY_TEMPLATE_FORMAT, TEMPLATE_FORMAT } from '../src/orchestrator/transfer/template.js';
 
 // Hatchabot shipped as AgentClaw first; a host that upgraded in place keeps
 // AGENTCLAW_* env files, agentclaw-* docker objects and agentclaw_ tokens.

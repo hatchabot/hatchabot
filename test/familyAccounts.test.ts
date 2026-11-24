@@ -195,6 +195,26 @@ describe('turning on family accounts', () => {
     } finally { w.restore(); }
   });
 
+  it('a body of the wrong shape is a 400 and changes nothing; null is as good as left out (HB-0814)', async () => {
+    const w = await world();
+    const pw = ['long', 'enough', 'words'].join('-');
+    try {
+      // Each was a server error (a username that is not text failed at its trim; a password that is not text at its hash).
+      for (const body of [{ username: 5, password: pw }, { username: 'robin', password: 12345678 }, { username: 'robin', password: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] }]) {
+        const r = await w.post(body);
+        expect(r.statusCode, JSON.stringify(body)).toBe(400);
+      }
+      // A body that is not an object: was read as no username (400 in the username's words); the schema's words now.
+      const list = await w.post([] as never);
+      expect(list.statusCode).toBe(400);
+      expect(list.json().error).not.toBe('Username must be 3–64 characters.');
+      // null is no username, in the username's words, as before.
+      expect((await w.post({ username: null, password: pw })).json()).toEqual({ error: 'Username must be 3–64 characters.' });
+      expect(w.store.countLocalAccounts()).toBe(0);
+      expect(w.env()).not.toContain('HATCHABOT_AUTH');
+    } finally { w.restore(); }
+  });
+
   it('is refused once accounts are already on', async () => {
     const w = await world('accounts');
     try {

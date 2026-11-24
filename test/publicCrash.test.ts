@@ -28,9 +28,13 @@ describe('a crash while public access is being turned on is taken back at the ne
     const marker = publicIntentPath(w.envFile);
     // A tailscale that says, each time Funnel is turned on, whether the note was already there.
     const saw = join(w.dir, 'saw-the-note');
-    const real = join(w.shim.dir, 'tailscale');
+    // A shell wrapper round the shim itself, so the read-only calls are still answered by the shell (HB-0855).
     const wrapper = join(w.shim.dir, 'tailscale-wrapper');
-    writeFileSync(wrapper, `#!/usr/bin/env node\nconst fs = require('fs');\nif (process.argv[2] === 'funnel' && process.argv.includes('--bg')) fs.writeFileSync(${JSON.stringify(saw)}, String(fs.existsSync(${JSON.stringify(marker)})));\nrequire(${JSON.stringify(real)});\n`);
+    writeFileSync(wrapper, `#!/bin/sh
+bg=; for a in "$@"; do [ "$a" = --bg ] && bg=1; done
+if [ "$1" = funnel ] && [ -n "$bg" ]; then if [ -e '${marker}' ]; then printf true; else printf false; fi > '${saw}'; fi
+exec '${w.shim.bin}' "$@"
+`);
     chmodSync(wrapper, 0o755);
     process.env.HATCHABOT_TAILSCALE_BIN = wrapper;
     expect(existsSync(marker)).toBe(false);

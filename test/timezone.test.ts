@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentTimeZone, machineTimeZone, validTimeZone } from '../src/orchestrator/timezone.js';
+import { agentTimeZone, machineTimeZone, validTimeZone, zoneIntlTakes } from '../src/orchestrator/schedules/timezone.js';
 import { buildConfigCommands } from '../src/openclaw/configWriter.js';
 
 /**
@@ -22,6 +22,11 @@ describe('agent time zone', () => {
     expect(validTimeZone('Etc/GMT+5')).toBe(true);
     expect(agentTimeZone({ HATCHABOT_TIMEZONE: 'CST6CDT' })).toBe('CST6CDT');
     for (const bad of ['+05:00', '../etc/passwd', '/UTC', '5EST', 'America/Toronto; x']) expect(validTimeZone(bad), bad).toBe(false);
+  });
+
+  it('a scheduled task\'s zone is any Intl takes, offsets too, trimmed as the gateway trims it (HB-1018)', () => {
+    for (const ok of ['UTC', ' UTC', 'America/Toronto ', '+05:00', '-0800', 'Etc/GMT+5']) expect(zoneIntlTakes(ok), ok).toBe(true);
+    for (const bad of ['', ' ', 'Mars/Olympus_Mons', '+25:00']) expect(zoneIntlTakes(bad), bad).toBe(false);
   });
 
   it('is written into the agent\'s OpenClaw config', () => {

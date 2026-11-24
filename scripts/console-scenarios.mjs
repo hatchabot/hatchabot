@@ -7,7 +7,10 @@
  * and checks what broke three times in September and that no request from
  * the machine itself sees: the page is a secure context, the Control UI's app
  * starts, and its live connection to the agent's gateway opens and carries
- * messages. No AI turns.
+ * messages. First (C0, HB-0812) the app's own page there, signed out and
+ * signed in: the public address's policy runs no inline script, and the page
+ * runs whole under it (its scripts, Google's sign-in in identity mode, the
+ * version it names), nothing refused. No AI turns.
  *
  *   node scripts/console-scenarios.mjs [--keep] [--signin-key <file>.key]
  *
@@ -82,6 +85,32 @@ async function main() {
     await c.send('Network.enable');
     await c.send('Page.enable');
     await c.send('Runtime.enable');
+    // What the page's policy refuses, on every page: DevTools' own script, which that policy does not cover.
+    await c.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `window.__hbRefused = []; document.addEventListener('securitypolicyviolation', (e) => window.__hbRefused.push(e.violatedDirective + ' ' + (e.blockedURI || 'inline')));`,
+    });
+    /** The app's page at the public address: its policy and version headers, and what ran. */
+    const appPage = async () => {
+      await c.send('Page.navigate', { url: `${PUBLIC}/` });
+      await sleep(10_000);
+      const doc = c.events.filter((e) => e.method === 'Network.responseReceived' && e.params.type === 'Document' && new URL(e.params.response.url).pathname === '/').at(-1)?.params.response;
+      const header = (name) => String(Object.entries(doc?.headers ?? {}).find(([k]) => k.toLowerCase() === name)?.[1] ?? '');
+      const ev = await c.send('Runtime.evaluate', {
+        returnByValue: true,
+        expression: `(() => ({
+          refused: window.__hbRefused ?? ['(no recorder)'],
+          ran: typeof initV2 === 'function' && document.querySelectorAll('script[src*="/app/"]').length > 10,
+          signInShown: !!document.getElementById('loginDlg')?.open,
+          identity: typeof appConfig === 'object' && appConfig?.authMode === 'identity',
+          google: !!window.google?.accounts,
+          version: window.HATCHABOT_VERSION ?? null,
+          meta: document.querySelector('meta[name="hatchabot-version"]')?.content ?? null,
+          label: document.getElementById('v2AppVer')?.textContent ?? '',
+        }))()`,
+      });
+      return { ...ev.result.value, csp: header('content-security-policy'), served: header('x-hatchabot-version') };
+    };
+    const out = await appPage(); // a new browser: no session yet
     // Signed in as the owner: with a one-time link when a key is given (a real
     // browser session, as on a phone), else the CLI token on its requests.
     if (keyArg) {
@@ -93,6 +122,15 @@ async function main() {
     } else {
       await c.send('Network.setExtraHTTPHeaders', { headers: { authorization: `Bearer ${TOKEN}` } });
     }
+    const inn = await appPage();
+    await scenario('C0 the app page at the public address runs whole under its policy: no inline script, nothing refused (HB-0812)', async () => [
+      ["the policy runs no inline script ('unsafe-inline' not in script-src)", /script-src /.test(out.csp) && !/script-src [^;]*'unsafe-inline'/.test(out.csp), out.csp || 'no policy header'],
+      ['signed out: its scripts ran and the sign-in screen showed', out.ran && out.signInShown, JSON.stringify(out)],
+      [out.identity ? "signed out, identity mode: Google's sign-in script loaded" : 'not identity mode: no Google sign-in to check', !out.identity || out.google],
+      ['signed out: nothing refused by the policy', !out.refused.length, out.refused.join(' | ')],
+      [`signed in: its scripts ran, naming the server's version (${inn.served})`, inn.ran && !!inn.served && inn.version === inn.served && inn.meta === inn.served && inn.label === `v${inn.served}`, JSON.stringify({ version: inn.version, meta: inn.meta, label: inn.label })],
+      ['signed in: nothing refused by the policy', !inn.refused.length, inn.refused.join(' | ')],
+    ]);
     const url = `${PUBLIC}/v1/agents/${agent.id}/ui/chat?session=${encodeURIComponent(`agent:${agent.slug}:main`)}`;
     await c.send('Page.navigate', { url });
     await sleep(25_000);

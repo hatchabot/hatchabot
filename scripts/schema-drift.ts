@@ -24,7 +24,7 @@ new Store(fresh);
 const args = process.argv.slice(2).filter((a) => a !== '--migrate');
 const migrate = process.argv.includes('--migrate');
 const dbPath = args[0] ?? join(homedir(), 'hatchabot-data', 'hatchabot.sqlite');
-// --migrate opens it the way the SERVER does — running the additive migrations
+// --migrate opens it the way the SERVER does — running the schema steps
 // first — which is what an upgrade check wants to prove. Without it the file is
 // read as-is, which is what checking a live install wants.
 const prod = new Database(dbPath, { readonly: !migrate });
@@ -41,6 +41,6 @@ for (const t of tables(fresh)) {
   if (missing.length) { console.log(`MISSING COLUMN ${t}: ${missing.join(', ')}`); drift++; }
 }
 console.log(drift
-  ? `\n${drift} table(s) drifted — add an ALTER TABLE for each in store.ts`
+  ? `\n${drift} table(s) drifted — append a step for each column to SCHEMA_STEPS in src/store/schemaVersion.ts`
   : `no drift: ${dbPath} has every table and column this build creates`);
 process.exit(drift ? 1 : 0);

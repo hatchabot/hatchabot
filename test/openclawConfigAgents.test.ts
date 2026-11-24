@@ -4,9 +4,9 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openclawConfigAgents } from '../src/openclaw/configWriter.js';
-import { discoverOpenclawAgents } from '../src/orchestrator/openclawImport.js';
-import { findExistingBot } from '../src/orchestrator/adopt.js';
-import { openclawAgentEntryForWorkspace } from '../src/orchestrator/cronImport.js';
+import { discoverOpenclawAgents } from '../src/orchestrator/transfer/openclawImport.js';
+import { findExistingBot } from '../src/orchestrator/transfer/adopt.js';
+import { openclawAgentEntryForWorkspace } from '../src/orchestrator/transfer/cronImport.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 

@@ -234,11 +234,12 @@ export const REST_TOOLS: RestTool[] = [
     // What did not come along, as the app says it: a ✅ alone hid missing
     // data sources, variables and daily notes (HB-0572).
     done: (out) => {
-      const r = (out ?? {}) as { notCopied?: unknown; envNotCopied?: unknown; memoryNotCopied?: unknown; memoryCopyFailed?: unknown };
+      const r = (out ?? {}) as { notCopied?: unknown; envNotCopied?: unknown; modelNotCopied?: unknown; memoryNotCopied?: unknown; memoryCopyFailed?: unknown };
       const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
       const lines: string[] = [];
       if (list(r.notCopied).length) lines.push(`⚠ Its data sources (${list(r.notCopied).join(', ')}) did not come along: add them to the copy under Data.`);
       if (list(r.envNotCopied).length) lines.push(`⚠ Its variables ${list(r.envNotCopied).join(', ')} could not be read, so the copy does not have them: add them under Advanced → Extra credentials.`);
+      if (typeof r.modelNotCopied === 'string') lines.push(`⚠ Its model ${r.modelNotCopied} is not one its AI source offers, so the copy runs on that source's default.`);
       if (r.memoryCopyFailed === true) lines.push("⚠ Its daily notes (memory/) and USER.md couldn't be read, so only MEMORY.md came along.");
       else if (list(r.memoryNotCopied).length) {
         const m = list(r.memoryNotCopied);
@@ -414,7 +415,7 @@ export const REST_TOOLS: RestTool[] = [
     done: (r) => (r && typeof r === 'object' && 'message' in r ? String((r as { message: string }).message) : undefined),
   },
 
-  // ---- long operations (orchestrator/operations.ts) ----
+  // ---- long operations (orchestrator/lifecycle/operations.ts) ----
   {
     name: 'list_operations', tier: 'read',
     description:

@@ -140,7 +140,9 @@ test/embedSwitch.test.ts.
   and method.
 - Limits: body at most 2 MB, at most 256 inputs per call, per-agent token
   bucket (default 600 calls a minute, `HATCHABOT_EMBED_PER_MIN`), 60-second
-  timeout. Over the limit returns 429, which OpenClaw retries.
+  timeout from the call's admission, its body included (a body still coming
+  then gets 408 and its slot back). Over the limit returns 429, which
+  OpenClaw retries.
 - **It never logs or stores request bodies.** They are people's memories.
   Log only: agent id, input count, bytes, milliseconds.
 - The ops agent cannot reach the main port, so `opsServer.ts` gains the same
@@ -293,7 +295,7 @@ OpenClaw's own formats:
 5. Files we read directly: `sessions.json` (unread mark, last seen) and
    `devices/pending.json` (console approval; *2026.9: gone — pending requests
    live in `state/openclaw.sqlite`, table `device_pairing_pending`, read there
-   by `src/orchestrator/pairing.ts`, v2.60.4*). *2026.8+: the session records
+   by `src/orchestrator/console/pairing.ts`, v2.60.4*). *2026.8+: the session records
    moved into the agent's `openclaw-agent.sqlite` (`session_nodes.entry_json`,
    same entry shape, `delivery.kind` instead of `lastTo`); read there with
    `node:sqlite` when the file is gone (`sessionsReadShell`, v2.53.3).

@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
-import { pairingListShell, parsePairingList } from '../src/orchestrator/claim.js';
-import { denyPairing, grantChannelAccess, revokeMember, scrubChannelAllowlist } from '../src/orchestrator/members.js';
+import { listPairingRequests, pairingListShell, parsePairingList } from '../src/orchestrator/members/claim.js';
+import type { RuntimeProvider } from '../src/providers/provider.js';
+import { denyPairing, grantChannelAccess, revokeMember, scrubChannelAllowlist } from '../src/orchestrator/members/members.js';
 import { DISCORD_ID } from './support/fixtures.js';
 
 /**
@@ -157,6 +159,87 @@ describe('pairing requests on a 2026.9 volume (database, no files)', () => {
       const cfg = JSON.parse(readFileSync(join(v.dir, 'openclaw.json'), 'utf8')).channels;
       expect(cfg.telegram.accounts.FamBot.allowFrom).toEqual(['777']);
       expect(cfg.discord.accounts.hatchabot.allowFrom).toEqual([]);
+    } finally { v.done(); }
+  });
+});
+
+describe('a pairing store that is there but cannot be read (HB-1050)', () => {
+  // The list shell run for real against the volume, as the container would.
+  const on = (dir: string) => ({
+    execShell: async (_ref: string, script: string) => {
+      const { stdout } = await promisify(execFile)('sh', ['-c', script.replaceAll(HOME, dir)], { encoding: 'utf8' });
+      return { code: 0, stdout, stderr: '' };
+    },
+  } as unknown as RuntimeProvider);
+  const read = (dir: string, strict: boolean) => listPairingRequests(on(dir), 'ref', 'fambot', 'telegram', { strict });
+
+  it('a damaged database is a read that failed when strict, and none otherwise', async () => {
+    const v = volume();
+    try {
+      writeFileSync(join(v.dir, 'state', 'openclaw.sqlite'), 'not a database, a page of something else'.repeat(200));
+      await expect(read(v.dir, true)).rejects.toThrow(/could not be read \(its database/);
+      expect(await read(v.dir, false)).toEqual([]);
+    } finally { v.done(); }
+  });
+
+  it('a database OpenClaw is writing is waited for, not read as nobody knocking', async () => {
+    const v = volume();
+    const lock = new Database(join(v.dir, 'state', 'openclaw.sqlite'));
+    try {
+      lock.exec('BEGIN EXCLUSIVE');
+      const pending = read(v.dir, true);
+      await new Promise((r) => setTimeout(r, 400));
+      lock.exec('COMMIT');
+      expect((await pending).map((r) => r.code)).toEqual(['CODE1']);
+    } finally { lock.close(); v.done(); }
+  });
+
+  // A pairing table made as the test says, in place of the volume's.
+  const table = (dir: string, columns: string, rows: string[] = []) => {
+    const db = join(dir, 'state', 'openclaw.sqlite');
+    rmSync(db);
+    const d = new Database(db);
+    d.exec(`CREATE TABLE channel_pairing_requests (${columns})`);
+    for (const r of rows) d.exec(`INSERT INTO channel_pairing_requests VALUES (${r})`);
+    d.close();
+  };
+  const fileOf = (dir: string, requests: unknown[]) =>
+    writeFileSync(join(dir, 'credentials', 'telegram-pairing.json'), JSON.stringify({ version: 1, requests }));
+
+  it('a column renamed that is not read (not the gate\'s) leaves the database read, not taken for nobody knocking (HB-1050)', async () => {
+    const v = volume();
+    try {
+      table(v.dir, 'channel_key TEXT, account_id TEXT, request_id TEXT, code TEXT, created_at TEXT, last_seen_ms INTEGER, meta_json TEXT',
+        [`'telegram', 'fambot', '555', 'CODE1', '2026-09-25T01:00:00Z', 1, '{}'`]);
+      expect((await read(v.dir, true)).map((r) => r.code)).toEqual(['CODE1']);
+    } finally { v.done(); }
+  });
+
+  it('2026.7: its table read and empty, or one the query does not fit, and the file answers, strictly too (HB-1050)', async () => {
+    const v = volume();
+    try {
+      // 2026.7 makes the tables but keeps its requests in the file. A table
+      // with the columns read (candidate-gate.sh checks them) and no rows:
+      table(v.dir, 'channel_key TEXT, account_id TEXT, request_id TEXT, code TEXT, created_at TEXT, meta_json TEXT');
+      fileOf(v.dir, [{ id: '42', code: 'FILE1', meta: {} }]);
+      expect((await read(v.dir, true)).map((r) => r.code)).toEqual(['FILE1']);
+      // One the query does not fit at all is not this version's store, not one that could not be read.
+      table(v.dir, 'channel_key TEXT, id TEXT, code TEXT, meta TEXT');
+      expect((await read(v.dir, true)).map((r) => r.code)).toEqual(['FILE1']);
+      // With nothing in the file it is nobody knocking, not a read that failed.
+      fileOf(v.dir, []);
+      expect(await read(v.dir, true)).toEqual([]);
+    } finally { v.done(); }
+  });
+
+  it('a file that cannot be read fails a strict read on 2026.7, and not beside the database\'s rows on 2026.9 (HB-0033)', async () => {
+    const v = volume();
+    try {
+      writeFileSync(join(v.dir, 'credentials', 'telegram-pairing.json'), '{"version":1,"requests":[{"id":"9",');
+      expect((await read(v.dir, true)).map((r) => r.code)).toEqual(['CODE1']);
+      v.exec('delete from channel_pairing_requests');
+      await expect(read(v.dir, true)).rejects.toThrow(/could not be read \(its file/);
+      expect(await read(v.dir, false)).toEqual([]);
     } finally { v.done(); }
   });
 });

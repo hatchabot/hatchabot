@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createServer, type Server } from 'node:http';
+import { createServer, request as httpRequest, type Server } from 'node:http';
 import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -136,5 +136,119 @@ describe('the embed door', () => {
     expect((await health('not-a-key')).status).toBe(401);
     expect((await health('server-secret')).status).toBe(200);
     expect((await health('agent-c-key')).status).toBe(200);
+  });
+});
+
+describe('the embed door keeps no limits for agents it no longer serves (HB-1022)', () => {
+  it('drops a full bucket and a zero count once a minute, and keeps an agent in debt held', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-door-prune-'));
+    const keys = join(dir, 'keys.json');
+    const keyOf = (name: string) => `${name}-secret-key`;
+    const writeKeys = (names: string[]) => writeFileSync(keys, JSON.stringify(Object.fromEntries(names.map((n) => [embedKeyHash(keyOf(n)), n]))));
+    const old = Array.from({ length: 20 }, (_, i) => `agent-old-${i}`);
+    writeKeys([...old, 'agent-debt']);
+    // The door as it runs, and after it, for this test only: its clock moved
+    // forward on "skew <ms>", and the sizes of its three maps on "sizes".
+    const probe = [
+      'const __realNow=Date.now;let __skew=0;Date.now=()=>__realNow()+__skew;',
+      'process.stdin.on("data",(d)=>{for(const l of String(d).split("\\n")){',
+      ' if(l.startsWith("skew "))__skew+=Number(l.slice(5));',
+      ' if(l==="sizes")console.log(JSON.stringify({sizes:[buckets.size,byteBuckets.size,inflightBy.size]}));}});',
+    ].join('\n');
+    const door2 = spawn(process.execPath, ['-e', `${doorScript()}\n${probe}`], {
+      env: {
+        ...process.env,
+        EMBED_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
+        EMBED_UPSTREAM_KEY: 'server-secret',
+        EMBED_KEYS_FILE: keys,
+        EMBED_KEYS_TTL_MS: '0',
+        EMBED_MB_PER_MIN: '0.01', // 10,485 bytes a minute
+        EMBED_DOOR_PORT: '0',
+      },
+    });
+    let out = '';
+    door2.stdout!.on('data', (c) => { out += c.toString(); });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        const look = () => { const m = /"listening":(\d+)/.exec(out); if (m) resolve(Number(m[1])); else setTimeout(look, 10); };
+        look();
+        door2.on('exit', (code) => reject(new Error(`door exited ${code}`)));
+        setTimeout(() => reject(new Error('door did not start')), 5000);
+      });
+      const send = (name: string, body: unknown = { input: 'x' }) => fetch(`http://127.0.0.1:${port}/v1/embeddings`, {
+        method: 'POST', headers: { authorization: `Bearer ${keyOf(name)}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+      }).then((r) => r.status);
+      const sizes = async (): Promise<number[]> => {
+        const from = out.length;
+        door2.stdin!.write('sizes\n');
+        for (let i = 0; i < 200; i++) {
+          const m = /"sizes":\[(\d+),(\d+),(\d+)\]/.exec(out.slice(from));
+          if (m) return [Number(m[1]), Number(m[2]), Number(m[3])];
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        throw new Error('the door did not answer "sizes"');
+      };
+      for (const name of old) expect(await send(name)).toBe(200);
+      // A big call leaves this one far in debt: about twenty minutes of its byte allowance.
+      expect(await send('agent-debt', { input: ['m'.repeat(200_000)] })).toBe(200);
+      expect(await send('agent-debt')).toBe(429);
+      // Two buckets each; nothing in flight, and no count kept at zero.
+      expect(await sizes()).toEqual([21, 21, 0]);
+      // The old agents are deleted (their keys gone), and a minute passes.
+      writeKeys(['agent-debt', 'agent-new']);
+      door2.stdin!.write('skew 61000\n');
+      // The door reads its input in order: once it answers this, the clock has
+      // moved. Nothing is dropped by time alone, only at the next call.
+      expect(await sizes()).toEqual([21, 21, 0]);
+      expect(await send('agent-new')).toBe(200);
+      // Only the newcomer's, and the indebted agent's byte allowance, which is not full again yet.
+      expect(await sizes()).toEqual([1, 2, 0]);
+      expect(await send('agent-debt')).toBe(429);
+    } finally {
+      door2.kill();
+    }
+  });
+});
+
+describe('the embed door\'s deadline covers the body (HB-0974)', () => {
+  it('a call that sends part of its body is ended at the deadline, and its slot is free again', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-door-slow-'));
+    const keys = join(dir, 'keys.json');
+    writeFileSync(keys, JSON.stringify({ [embedKeyHash('agent-s-secret-key')]: 'agent-s' }));
+    const slow = spawn(process.execPath, ['-e', doorScript()], {
+      env: {
+        ...process.env,
+        EMBED_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
+        EMBED_UPSTREAM_KEY: 'server-secret',
+        EMBED_KEYS_FILE: keys,
+        EMBED_KEYS_TTL_MS: '0',
+        EMBED_MAX_INFLIGHT_AGENT: '1',
+        EMBED_TIMEOUT_MS: '600',
+        EMBED_DOOR_PORT: '0',
+      },
+    });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        let out = '';
+        slow.stdout!.on('data', (c) => { out += c.toString(); const m = /"listening":(\d+)/.exec(out); if (m) resolve(Number(m[1])); });
+        slow.on('exit', (code) => reject(new Error(`door exited ${code}`)));
+        setTimeout(() => reject(new Error('door did not start')), 5000);
+      });
+      const send = () => fetch(`http://127.0.0.1:${port}/v1/embeddings`, { method: 'POST', headers: { authorization: 'Bearer agent-s-secret-key', 'content-type': 'application/json' }, body: '{"input":"x"}' });
+      // Admitted, then a tenth of its body, and nothing more.
+      const stalled = new Promise<number | string>((resolve) => {
+        const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: '/v1/embeddings', headers: { authorization: 'Bearer agent-s-secret-key', 'content-type': 'application/json', 'content-length': '100' } });
+        req.on('response', (res) => { res.resume(); resolve(res.statusCode ?? 0); });
+        req.on('error', (e) => resolve(String((e as NodeJS.ErrnoException).code ?? e)));
+        req.write('{"input":');
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      expect((await send()).status).toBe(429); // its one slot is held meanwhile
+      const ended = await Promise.race([stalled, new Promise((r) => setTimeout(() => r('still held'), 5000))]);
+      expect(ended).not.toBe('still held');
+      expect((await send()).status).toBe(200);
+    } finally {
+      slow.kill();
+    }
   });
 });

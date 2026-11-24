@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { CACHE_READ_DEFAULT, CACHE_READ_SHARE, CACHE_WRITE_MULTIPLIER, estimateCost, MODEL_PRICES, priceList, PRICES_CHECKED, PRICES_SOURCE } from '../src/orchestrator/pricing.js';
-import { MODEL_CATALOG, priceMix } from '../src/orchestrator/modelOptions.js';
+import { CACHE_READ_DEFAULT, CACHE_READ_SHARE, CACHE_WRITE_MULTIPLIER, estimateCost, MODEL_PRICES, priceList, PRICES_CHECKED, PRICES_SOURCE } from '../src/orchestrator/usage/pricing.js';
+import { MODEL_CATALOG, priceMix } from '../src/orchestrator/sources/modelOptions.js';
 
 describe('estimateCost', () => {
   it('prices the qualified and dated spellings like the bare name; an inherited name is unknown (review, 2026-10-22)', () => {

@@ -409,7 +409,7 @@ top-right, quiet-for and shared bottom-left, chat apps bottom-right), leans a
 little left beside a needs-you mark, and the corner marks paint over it if a
 wide one ever meets them. It is absolutely placed, so tiles keep their size.
 The constants are `V2_COST_BADGE_MIN_USD` and `V2_COST_GOLD_FROM_USD` in
-web/index.html.
+web/app/home.js.
 
 - *The measure*: the tokens each model actually used in the last 7 days
   (rolling) — input, output, cache reads at the model's share, cache writes
@@ -429,7 +429,7 @@ web/index.html.
   view; again for cheapest first) beside Age · Name · Activity, which work as
   everywhere. The Cost view remembers its own sort; the other views keep
   theirs. The band edges are one list, `COST_BANDS` in
-  src/orchestrator/agentCosts.ts ([10, 50, 100]); the app names the bands
+  src/orchestrator/usage/agentCosts.ts ([10, 50, 100]); the app names the bands
   from it.
 - *The window* (since v2.122.0): a row of pills under View by when Cost is
   chosen — **1 hr · 3 hr · 6 hr · 9 hr · 12 hr · 1 day · 1 wk · 1 mo** — sets
@@ -439,7 +439,7 @@ web/index.html.
   window has its own bands, about the week's $10 / $50 / $100 scaled to it and
   rounded (an hour: $0.05 / $0.25 / $0.50; a day: $1.50 / $7.50 / $15; 30
   days: $40 / $200 / $400), its smallest chip (a week's $1, scaled) and its
-  gold from the top band — `COST_PERIODS` in src/orchestrator/agentCosts.ts.
+  gold from the top band — `COST_PERIODS` in src/orchestrator/usage/agentCosts.ts.
   Windows are exact: an hour bucket the window only partly covers counts for
   that part, so "1 hr" is the last 60 minutes, not the clock hour. The
   sampler reads every 10 minutes, so the short windows trail by up to that.
@@ -465,7 +465,7 @@ Usage): the price list every cost in the app is
 figured from, per model and per million tokens — input, output, cache read,
 cache write (5-minute cache) — older models dimmed, with the date the prices
 were checked against [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
-(`PRICES_CHECKED` in src/orchestrator/pricing.ts) and the multipliers (cache
+(`PRICES_CHECKED` in src/orchestrator/usage/pricing.ts) and the multipliers (cache
 read 0.1× input, 0.05× on Opus 5.5, 0.025× on Fable 5.1; cache write 1.25×).
 Under it, what caching means in a conversation: every message re-sends the
 whole conversation; within about five minutes the part the model has seen is
@@ -638,7 +638,9 @@ the Alerts line and the tile's tooltip are what you have.
 - **The month** is the calendar month in the machine's time zone. Spend is
   read every 10 minutes, from the usage sampler's hour buckets, and kept per
   day (`agent_cost_days`), so the month's first days still count after the
-  sampler's 30 days have moved on.
+  sampler's 30 days have moved on. A skill practice run's spend is added on
+  the day it ran (`practice_usage`), as soon as it answers: its transcript
+  went with its temporary folder, so the sampler never counts it.
 - **API**: `GET /v1/budgets`, `PUT /v1/agents/:id/budget` (`{ usd | null,
   atLimit: "warn" | "pause" }`), `PUT /v1/budgets/machine` (the machine owner).
   Budget changes are recorded with compactions and caps (`tokenActions`).
@@ -929,7 +931,7 @@ and its age.
 
 ### Thresholds
 
-All in `THRESHOLDS` (src/orchestrator/tokenHealth.ts), tested.
+All in `THRESHOLDS` (src/orchestrator/usage/tokenHealth.ts), tested.
 
 | Check | Threshold |
 |---|---|
@@ -1084,7 +1086,9 @@ API to mint bots, so normally you're walked through creating one at
 [@BotFather](https://t.me/botfather) and pasting its token (~60 seconds).
 When you delete the agent, the bot still exists on Telegram's side — and its
 token isn't lost: delete parks it in the Bot pool by default (API callers can
-opt out with `?recycleBot=0`), ready for a future agent.
+opt out with `?recycleBot=0`, and the CLI with `hatchabot delete --no-recycle`,
+which forget a bot you gave it; one leased from the pool, on any messaging
+app, goes back there anyway), ready for a future agent.
 
 Bots outlive agents by default: **deleting an agent parks its bot in the
 Bot pool** (⚙ Settings → Messaging → Telegram) — pool-leased and hand-pasted alike — and
@@ -1300,7 +1304,9 @@ form on file-import and inbox-accept; the CLI prompts). The template carries
 field *definitions and defaults* only — never the author's own filled values.
 Values stay editable afterwards: 📖 Definition → **Setup values** edits or
 resets any answer in place (snapshot first), on imported copies AND on the
-master itself (its layer seeds from the live files on first Apply).
+master itself (its layer seeds from the live files on first Apply). The
+sections Hatchabot keeps in AGENTS.md (its data sources, Google accounts,
+peers and the like) stay as the file has them when the values are applied.
 
 **Master → child agents** (the productization pattern): on a master (an
 agent with setup fields), **👪 New child** derives a copy — same training,
@@ -1528,13 +1534,51 @@ to messaging two hours later, the answer is to hold the door open again rather
 than to leave it ajar all day: their row under **Members** says *"hasn't
 messaged yet"* with **Let them in again**, which opens a fresh 30 minutes (and
 keeps the named @handle, if the invite had one). Hatchabot also tells you when
-a window closes unused, so you find out while the invite is still fresh instead
+an invite's window closes unused, so you find out while the invite is still fresh instead
 of when they complain the bot ignores them. The 30 minutes count only while the
 agent is up, but how long a window waits for a stopped or rebuilding agent
 depends on whom it is for. One that names its person waits for the agent, up
 to a week. One that names nobody (the first person to message gets in) ends at
 most an hour after it opened, time down included, so a stranger writing days
-later is never let in; open a new one once the agent is up.
+later is never let in; open a new one once the agent is up. A restart of
+Hatchabot does not end a window: the next start watches it again for the time
+it had left. One whose time runs out while Hatchabot is not running is not
+opened again, so someone who wrote meanwhile is not let in. For an invite's
+window, Hatchabot tells you so, and you let them in under **Alerts** if their
+message waits there, or with **Let them in again** and ask them to write
+again. A window opened with **Let them in again** just closes, with no note,
+as it does when its time runs out while Hatchabot is up: if they have not got
+in, press it again.
+
+**Joining an agent that isn't running.** Someone who opens an invite while the
+agent is asleep, being rebuilt or still being set up joins as usual and is
+told *"It's not running right now; your first message will be let in as soon
+as it is."* A sleeping agent is woken for them. Their window is the one above,
+counted from when they joined: for an invite that names nobody, an hour at
+most, time down included. An invite made for their @handle, or someone already
+known from another of your agents, also works while you have the agent
+stopped: their window waits for your next Start, up to a week, and admits only
+them. An invite that names nobody is refused while the agent waits for you to
+start it (stopped, or set up as far as its bot): the join page says it isn't
+running and to ask you to start it, then open the invite again, and the invite
+stays good. A join that waits is remembered, so a restart of Hatchabot loses
+nothing; the hour, or the week, still counts from the join. Telegram keeps a
+stopped bot's messages for a day and hands them over when it starts, and
+OpenClaw dates each one when it reads it, not when it was sent, so the first
+message in at the wake may be one written before the join. For an invite that
+names nobody, used while the agent sleeps, Hatchabot asks Telegram who has
+direct messages waiting for the bot before it wakes the agent: they wrote
+before the join, and that window never lets them in, nor shows you their
+knock as the one it waits for (you, and anyone already let in on the agent,
+are not among them). That may be the person themselves, if they
+wrote to the bot before opening the invite: if nobody is let in, you are told
+that someone who had written first was passed over, and **Let them in again**
+under Members opens a new window that passes nobody over. If Telegram cannot
+be asked then, or more are waiting than it shows at once (a hundred
+messages), the agent's timeline says so and the window lets in the first
+message, as before. Someone who writes after the join and before the person
+does still takes the seat, as with a running agent. To be sure of who gets
+in, name them.
 
 **An invite can name who it is for.** Invite… asks for their Telegram
 @handle; give it, and the 30-minute window that opens admits **only** that
@@ -1991,7 +2035,7 @@ runs the console check alone on any agent.
 **Without its own memory search engine.** The build drawer's tick box (or
 `hatchabot upgrade-image --no-engine`, or `EMBED_ENGINE=none` for the script)
 builds the image without the baked memory search engine — about 390 MB
-lighter, tagged `-lite` — and every agent on it uses the machine's **shared
+lighter, tagged `-lite` (`-lite-plus-…` with extra packages) — and every agent on it uses the machine's **shared
 memory search service** (below) whatever its own switch says; the switch
 follows. It needs that service running, so the build is refused while it is
 off, and an agent built onto such an image while the service is unavailable
@@ -2008,7 +2052,7 @@ what it is (fleet default, candidate, older build, derived), what it carries
 like, and **Pin & rebuild _n_** pins each and queues the rebuilds of the running
 ones (memory kept, six at a time). A stopped or sleeping one stays so and moves
 onto the image when it next starts; so does one whose trial you discard with ✕
-while it is stopped. An agent's own pin lives in its ⚙ Advanced → Runtime image as a
+while it is stopped. An agent's own pin lives in its sheet's Advanced tab, under Runtime (Image), as a
 dropdown of every image with a line saying what each one is, and **Fleet
 default** at the top to put it back. **Pin & rebuild** does both at once — the agent moves onto the image right away, memory kept (a stopped one moves when it starts).
 
@@ -2062,8 +2106,10 @@ gets unless it says otherwise: *Put idle agents to sleep after* (36h, 90m,
 search service*, and *Files an agent may send or receive* on Telegram (up to
 50 MB), Discord (sends only; 10 MB on a server without boosts, up to 500) and
 Slack (100 MB, up to 1000). The app writes each to `.env` and applies it at
-once, no rebuild, on every agent this Hatchabot runs (runners included). At
-startup, any agent whose OpenClaw config lacks the ceiling for one of its apps
+once, no rebuild, on every agent this Hatchabot runs (runners included). The
+memory search service's memory is the exception on a runner: this machine's
+service restarts at once, and a runner's takes it at its next health check
+that finds it idle, usually within about 5 minutes. At startup, any agent whose OpenClaw config lacks the ceiling for one of its apps
 gets it. Only the machine's owner sees the box. An agent overrides two of them
 on its Advanced tab: *Sleep when idle* and *Files it may send or receive*.
 
@@ -2307,7 +2353,15 @@ can read that workspace only. It reports observed instruction/sample reads and
 the answer, with usage and cost when the runtime reports them. The model run has
 a 60-second deadline and a 512-output-token setting per response; those are not
 a guaranteed dollar cap. Metered AI charges apply, and each agent has a two-minute
-interval between attempts. Unsupported runtimes or model harnesses report that
+interval between attempts. What a practice spends counts as the agent's own
+calls do: toward its budget and its spike warnings, as its source's tokens (a
+Claude plan's too), and in its Usage, where it shows as "practice". It counts
+once: the practice's transcript stays in its own temporary folder, which the
+usage sampler never reads, and Practice records what it spent before the folder
+goes. A run stopped at its time limit counts what it had spent by then, but if
+the machine stops answering before the run reports back, what it spent cannot be
+read and is not counted. Practice waits while the
+agent is paused by its budget. Unsupported runtimes or model harnesses report that
 limitation. A practice result does not prove Google, Jira, browser or image-provider
 access. See [Skills setup and examples](skills.md).
 
@@ -2631,7 +2685,10 @@ getting them right by hand is expert work. The tab lists every derived image in
 one table (state, contents, what pins it) with Rebuild, Log and Delete. Your
 lines run as **root** (the base ends as `USER node`), then the image restores
 `USER node`, the runtime contract the volume (uid 1000) and Claude Code depend
-on; you never write your own `FROM`/`USER`. The image is tagged
+on; you never write your own `FROM`/`USER`. A build whose image would not run
+as `node` (a line that hides that last `USER node`), or is not built on its
+base (a `FROM` hidden in the lines), fails, saying so, and the image agents run
+on is left as it was. The image is tagged
 `hatchabot-runtime:derived-<name>`; the Dockerfile is kept so **Rebuild**
 reruns it against a promoted base after a fleet upgrade. Delete is refused while
 an agent still pins it. From the CLI:
@@ -2695,22 +2752,58 @@ is started then. The service keeps its files beside the database: the model
 in `<data>/models/`, the key file and the on/off marker in `<data>/embed/`.
 
 **A pin travels as its recipe.** An image is never copied between machines;
-its recipe is: the plain base (`hatchabot-runtime:<OpenClaw version>`, pulled
-from the published registry if missing), the extra apt packages recorded in the
-image's labels, and a derived image's Dockerfile lines. Built on the other
+its recipe is: what its base was built from, the extra apt packages recorded in
+the image's labels, and a derived image's Dockerfile lines. Built on the other
 machine, for its own CPU, in minutes.
+- **Its base there** is found by what it was built from, never by its name:
+  every runtime image says so in its label `org.hatchabot.build-inputs` (its
+  OpenClaw, memory search engine, Node, messaging and baked plugins, packages,
+  and which of those were set by hand). An image there of the very same layers
+  (a copy Install image made), or one built the same way, is the base; the
+  base a derived image there is already built on stays its base while it is
+  one of those. A Node
+  patch, the plugins' versions (unless set by hand), Claude Code and the
+  release may differ; nothing else may. A base with packages is matched by one
+  with the same packages, or by one with none, and they are laid on. Nothing
+  there built that way: the published image of that OpenClaw is pulled and
+  judged the same way; still none, it says what differs and how to build one
+  there: that OpenClaw, with its packages and engine, from Settings → Advanced
+  → Runtime images; its settings by hand, by hand
+  (`scripts/build-runtime-image.sh`); and when a build from Settings there
+  would have another Node or other messaging plugins built in, none is
+  offered. It builds nothing. An image built before the label (or a file from before it) is
+  matched by its layers, else by its base's name, as before.
+- **The image built there** is used only once it is seen to run as `node`, to
+  be built on that base (its layers begin with the base's), and to carry the
+  base's own `org.hatchabot.*` labels and those the build sets, no others
+  (nor a `hatchabot.*` one, which its agents' containers carry):
+  built to a name of its own (`hatchabot-runtime-check:…`), it takes the pin's
+  name only then. Anything else (lines from a file that hide the last `USER
+  node`, start another image, or set one of those labels) is refused with why,
+  and the pin's name there is left as it was.
 - **Move to a runner** (same cluster): rebuilt there automatically; only if it
-  can't be (no published base, a failed build) does the move offer the runner's
-  default image instead.
+  can't be (no base built that way, a failed build) does the move offer the
+  runner's default image instead.
 - **Download a copy** (`.hatchabot`): the file carries the recipe. Importing it
-  where that image already exists just pins it. Where it doesn't, the import
+  where that image already exists just pins it. A file from a fleet whose
+  images have another name (`HATCHABOT_IMAGE`) is read in this one's, unless an
+  image of the file's own name is there: its `example-runtime:derived-media` is
+  this fleet's `hatchabot-runtime:derived-media`, and the agent is pinned to
+  that. Where it doesn't exist, the import
   stops and **shows what building would run**; only that machine's owner can
   choose Build (the lines run as root while building), and anyone can choose the
   default image. The file is untrusted: a recipe with its own `FROM`, `USER`, a
-  build mount or network, a base or name outside `hatchabot-runtime`, or a
-  package name that isn't one is never built. A derived image arrives listed
-  among that machine's images, so it can travel on from there; one of the same
-  name with different lines is never replaced. CLI: `hatchabot restore <file>`
+  build mount or network, a base from outside its own fleet, a name with a
+  registry's host or port, or a
+  package name that isn't one is never built, nor are a Node or plugins the
+  file says were set by hand: they are only matched. A derived image arrives
+  listed among that machine's images, so it can travel on from there, with the
+  packages laid on its base kept apart from its own lines (which keep their
+  8,000 characters); one of the same name that builds something else (other
+  lines, or a base built another way) is never replaced. A derived image's own
+  lines may not set `org.hatchabot.*` or `hatchabot.*` labels: a line that plainly does is
+  refused as it is saved, and one that does through a variable or a hidden
+  `LABEL` fails the build. CLI: `hatchabot restore <file>`
   asks the same question, or takes `--build-image` / `--drop-pin`.
 - **Move to another Hatchabot** (CLI: `rehost`): rebuilt there if the server token you
   registered belongs to that server's owner; otherwise refused with the source

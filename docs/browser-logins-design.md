@@ -270,14 +270,14 @@ page said, it read on the side, as a person reads the screen.
 ## Code it would touch
 
 - `src/providers/localDockerProvider.ts` — `ensureBrowser` (the `/profile`
-  mount) and a streaming exec for the relay; `src/orchestrator/browser.ts`
+  mount) and a streaming exec for the relay; `src/orchestrator/console/browser.ts`
   — `browserSweep` (the volumes).
 - `src/api/routes.ts` — `'/v1/agents/:id/browser'` (PATCH `keepLogins`),
   the panel's WebSocket, forget; `src/api/publicRoutes.ts`;
   `src/mgmt/coverage.ts`.
 - `scripts/backup-volumes.sh`, `scripts/uninstall.sh` (`volumes`),
-  `src/orchestrator/transfer.ts`, `src/orchestrator/moveHost.ts`,
-  `src/orchestrator/archive.ts`: where the volume is left out or removed.
+  `src/orchestrator/transfer/transfer.ts`, `src/orchestrator/transfer/moveHost.ts`,
+  `src/orchestrator/lifecycle/archive.ts`: where the volume is left out or removed.
 - `src/providers/localDockerProvider.ts` — `stopBrowser` and the agent's
   stop paths: `Browser.close` before the container goes, for a browser
   that keeps logins.

@@ -20,8 +20,9 @@ They run **before a release reaches anyone else**:
 
 A test is **due** for a release when it has never passed on that release or
 an earlier one, when a file in its area changed since the release it last
-passed on, or when its latest run on that release failed (a pass before it,
-on that release or an earlier one, does not clear it). A run that skipped
+passed on, or when a run since it last passed, on that release or one
+between, failed (the pass before it does not clear it, and a later release
+that changes nothing in its area does not forget it). A run that skipped
 (nothing to test with, or a part it could not run) does not count either
 way, and a run that tested nothing fails. The gate
 counts only runs that are committed: `due` says when some are not yet.
@@ -50,10 +51,10 @@ on a machine that can; it does not hold the gate here.
 | `runner-scenarios` | Moves and rebuilds between this machine and a runner, across OpenClaw versions; each machine's memory search; Install image ([runner-test-runs.md](runner-test-runs.md)) | A runner: `-- --runner "<name>"`, plus `--old-image <a pre-2026.8 image on it>` once it is current (without it phase A is a SKIP). `--old-image` points the runner's default image at the old one until A1 is done (back on Ctrl-C too): run it when nobody is creating or rebuilding agents there | 20–40 min | none |
 | `transfer` | Clone, a template shared with its memory and imported, and download → delete → restore: each copy runs web-only and still finds its notes by meaning | Room for 3 agents under the account's limit; Hatchabot 2.150.0+ | 10–15 min | none |
 | `apps` | An app installs into an agent (its tests run there), its scheduled command runs by itself, an update keeps its config, a release with failing tests is refused, rollback and stop work | Room for 1 agent | 10–15 min | none |
-| `console` | A real browser opens an agent's console at the public HTTPS address: a secure context and its app starts; with a sign-in key, also that its live connection opens and carries messages | `HATCHABOT_PUBLIC_URL`; room for 1 agent; a sign-in key for the live connection (it admits a signed-in browser only): `-- --signin-key <file>.key`, or `~/.config/hatchabot/signin-live-test.key` with its `.pub` as `HATCHABOT_SIGNIN_KEY_FILE` (docs/signin-links.md); without one the run is a SKIP | 2–5 min | none |
+| `console` | The app's own page at the public HTTPS address runs whole under its policy, which runs no inline script: its scripts, the version it names, Google's sign-in in identity mode, nothing refused, signed out and signed in (C0, HB-0812). A real browser opens an agent's console there: a secure context and its app starts; with a sign-in key, also that its live connection opens and carries messages | `HATCHABOT_PUBLIC_URL`; room for 1 agent; a sign-in key for the live connection (it admits a signed-in browser only): `-- --signin-key <file>.key`, or `~/.config/hatchabot/signin-live-test.key` with its `.pub` as `HATCHABOT_SIGNIN_KEY_FILE` (docs/signin-links.md); without one the run is a SKIP | 2–5 min | none |
 | `browser` | An agent's own browser: off by default; switched on it opens and reads a real page; none of the agent's files in it; scripts and private addresses refused, and a page that sends itself to one later does not reach it (the agent itself still does); the sign-in panel signs it in to a public demo login page through the app's routes, and the agent's own tool then sees the signed-in page; with Keep its logins on, that sign-in outlives an agent restart, and is gone after Forget logins (its old profile deleted from the machine); it follows an agent restart; switched off it is gone, its kept profile too | Room for 1 agent; internet from the agents | 11–16 min | none |
 | `google-plain-request` | Under Code Mode, an agent told of an attached account runs `gog` for a plain request that names no command, and answers from the result. A stand-in `gog` over a made-up mailbox: it does not show that a real mailbox answers | Room for 1 agent; no Google account | 3–5 min | one |
-| `skills` | Selection reaches the runtime; customized instructions survive disable/re-enable and explicit replacement/rollback; a plain Code Mode request invokes its skill fixture; isolated practice observes skill and sample reads | Room for 1 web-only agent on the local machine and a configured AI source; no Google account or external browser service | 10–18 min | two |
+| `skills` | Selection reaches the runtime; customized instructions survive disable/re-enable and explicit replacement/rollback; a plain Code Mode request invokes its skill fixture; isolated practice observes skill and sample reads, and its tokens are in the agent's usage exactly once | Room for 1 web-only agent on the local machine and a configured AI source; no Google account or external browser service | 10–18 min | two |
 | `candidate-gate` | An agent on an image builds, answers, and keeps its memory search and tools | The image (default: this machine's default) | 5–10 min | one |
 | `regress-autonomous` | An agent made from the CLI answers, remembers, runs a task on demand and on its schedule, pauses, and keeps both across a restart | The live install | 10–15 min | about eight |
 | `restore-drill` | The newest complete nightly backup restores, every agent's archive into its own throwaway volume (no network, no secrets mounted), without touching the live system; writes its record under `<backups>/drills` | A backup set | 10–60 min | none |
@@ -88,8 +89,14 @@ then explicitly replaces and rolls back the file to its exact original bytes.
 One ordinary-language request under forced Code Mode must
 invoke a local fixture described only in the skill and use the fresh receipt it
 returns. A second AI run exercises the isolated practice API and must report both
-skill and sample reads. The runner checks actual invocation evidence and removes only its own
-agent, including on failure. Requests, commands and cleanup have time limits.
+skill and sample reads. Its tokens must then be in the agent's usage exactly once:
+the agent's total rises by what Practice recorded from the practice's own
+folder, which the usage sampler never reads, not by nothing and not by twice
+that (HB-0933). A call of the agent's own meanwhile (a heartbeat, say) may add
+to the rise, so it must be at least the practice's tokens and under twice them.
+The runner
+checks actual invocation evidence and removes only its own agent, including on
+failure. Requests, commands and cleanup have time limits.
 This proves a real model uses the fixture; it does not exercise Google, web
 research or browser services. Do not run it from a coding session.
 

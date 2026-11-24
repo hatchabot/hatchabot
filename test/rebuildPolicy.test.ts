@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { inQuietHours, pickAutoRebuilds, rebuildNeed, rebuildPolicy, type RebuildCandidate, type SetupChange } from '../src/orchestrator/rebuildPolicy.js';
+import { inQuietHours, pickAutoRebuilds, rebuildNeed, rebuildPolicy, type RebuildCandidate, type SetupChange } from '../src/domain/rebuildPolicy.js';
 
 /**
  * Releases can now say "every agent needs a rebuild", and the machine acts on
@@ -186,6 +186,69 @@ describe('over the API', () => {
     expect(await sweep()).toEqual([]);
     readable = true; // read: no conversations at all — idle
     expect(await sweep()).toEqual(['unread']);
+  });
+
+  it('the sweep looks at a big fleet a few agents at a time, not every container at once (HB-1128)', async () => {
+    const b = await box();
+    for (let i = 0; i < 40; i++) {
+      b.agent(`a${i}`);
+      b.provider.infoOverride.set(`docker://a${i}`, { onAgentNetwork: false }); // each needs a rebuild: its activity is read too
+    }
+    const counter = () => {
+      let now = 0;
+      const c = {
+        calls: 0, most: 0,
+        async around<T>(fn: () => Promise<T>): Promise<T> {
+          c.calls++; now++; c.most = Math.max(c.most, now);
+          try { await new Promise((r) => setTimeout(r, 2)); return await fn(); } finally { now--; }
+        },
+      };
+      return c;
+    };
+    const infos = counter();
+    const reads = counter();
+    const info = b.provider.info.bind(b.provider);
+    b.provider.info = (ref: string) => infos.around(() => info(ref));
+    // Its conversations can't be read: nothing is picked, so no rebuild adds calls of its own.
+    b.provider.execShell = (async () => reads.around(async () => ({ code: 1, stdout: '', stderr: 'container is restarting' }))) as never;
+    process.env.HATCHABOT_REBUILD_POLICY = 'required-only';
+    const sweep = (b.f as any).rebuildSweep as (now?: Date) => Promise<string[]>;
+    expect(await sweep()).toEqual([]);
+    expect(infos.calls).toBe(40);
+    expect(reads.calls).toBeGreaterThanOrEqual(40);
+    expect(infos.most).toBeLessThanOrEqual(6);
+    expect(reads.most).toBeLessThanOrEqual(6);
+  });
+
+  it('a sweep that starts while one is still looking does nothing: one sweep at a time (HB-1128)', async () => {
+    const b = await box();
+    for (let i = 0; i < 8; i++) {
+      b.agent(`a${i}`);
+      b.provider.infoOverride.set(`docker://a${i}`, { onAgentNetwork: false });
+    }
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let infos = 0;
+    const info = b.provider.info.bind(b.provider);
+    b.provider.info = async (ref: string) => { infos++; await held; return info(ref); };
+    b.provider.execShell = (async () => ({ code: 1, stdout: '', stderr: 'container is restarting' })) as never;
+    process.env.HATCHABOT_REBUILD_POLICY = 'required-only';
+    const sweep = (b.f as any).rebuildSweep as (now?: Date) => Promise<string[]>;
+    const first = sweep();
+    try {
+      await vi.waitFor(() => expect(infos).toBe(6));
+      // The next interval's, while the first still waits on its looks: done at once, having looked at nothing.
+      const second = await Promise.race([sweep(), new Promise((r) => setTimeout(() => r('still looking'), 200))]);
+      expect(second).toEqual([]);
+      expect(infos).toBe(6);
+    } finally {
+      release();
+    }
+    expect(await first).toEqual([]);
+    expect(infos).toBe(8);
+    // Once it is done, the next one runs.
+    await sweep();
+    expect(infos).toBe(16);
   });
 
   it('starting a stopped agent that needs a required rebuild brings it up rebuilt', async () => {

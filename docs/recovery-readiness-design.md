@@ -61,7 +61,7 @@ passes when it is readable, has the layout, and its restore did not fail.
 
 ## Readiness, per agent (`GET /v1/backups/readiness`)
 
-`src/orchestrator/recoveryReadiness.ts` — `computeReadiness` is a pure
+`src/orchestrator/backups/recoveryReadiness.ts` — `computeReadiness` is a pure
 function of the sets, the drill records, the agents and the runners' answers.
 
 - **Latest usable backup**: the newest finished set that holds its archive

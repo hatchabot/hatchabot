@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { effectiveModel } from '../src/orchestrator/provision.js';
+import { effectiveModel } from '../src/orchestrator/lifecycle/provision.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 class MemSecrets implements SecretStore {
@@ -278,6 +278,22 @@ describe('apply-default-model on an agent whose volume is gone (HB-0373)', () =>
   });
 });
 
+describe('apply-default-model never stores a list the editor cannot send back (HB-0907)', () => {
+  it('answers 400 with what to take off when the kept models would take the list over 16, and changes nothing', async () => {
+    const { store, f } = await world();
+    const extras = Array.from({ length: 15 }, (_, i) => `claude-extra-${i + 1}`);
+    store.setAIProfileModels('p1', ['claude-opus-4-8', ...extras]);
+    const before = store.getAIProfile('p1');
+    // The row's Also switchable as the editor shows it, under a new default
+    // not on the list: Follower1 and Follower2 stay on opus-4-8, Override on sonnet-5.
+    const res = await apply(f, 'p1', { model: 'claude-opus-5', models: ['claude-opus-5', ...extras], apply: [] });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: "This source's list would hold 18 models: the new default, 15 you chose and 2 kept for agents that stay on theirs. A source holds 16: remove 2 from Also switchable, then save again." });
+    expect(store.getAIProfile('p1')).toEqual(before);
+    expect(['a1', 'a2', 'a3'].map((id) => store.getAgent(id)!.model)).toEqual([undefined, undefined, 'claude-sonnet-5']);
+  });
+});
+
 describe('apply-default-model reports what it actually changed', () => {
   it('counts only the caller\'s own agents, not every id passed in', async () => {
     const { store, f } = await world({ shared: true });
@@ -308,6 +324,50 @@ describe('apply-default-model on a Claude plan holds an agent whose runtime is t
     expect(effectiveModel(store.getAgent('a1')!, store.getAIProfile('p-sub')!)).toBe('claude-opus-4-8');
     expect(store.getAgent('a2')!.model).toBeUndefined();
     expect(effectiveModel(store.getAgent('a2')!, store.getAIProfile('p-sub')!)).toBe('claude-opus-5-5');
+  });
+
+  it('a model the owner chooses for an agent during the runtime check stands, ticked or held (HB-0889)', async () => {
+    const { store, f, provider } = await world();
+    store.insertAIProfile({ id: 'p-sub', ownerId: OWNER, name: 'Claude plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', models: ['claude-haiku-4-5'], secretRef: 'ai/sub', createdAt: 'now' } as any);
+    store.setAgentAIProfile('a1', 'p-sub');
+    store.setAgentAIProfile('a2', 'p-sub');
+    store.setAgentModel('a1', 'claude-opus-4-8');
+    // While the check reads a1's runtime, the owner pins both to Haiku (the model route's write).
+    const info = provider.info.bind(provider);
+    let once = true;
+    provider.info = async (ref) => {
+      if (once) { once = false; store.setAgentModel('a1', 'claude-haiku-4-5'); store.setAgentModel('a2', 'claude-haiku-4-5'); }
+      return { ...(await info(ref)), openclawVersion: '2026.9.8' };
+    };
+    const res = await apply(f, 'p-sub', { model: 'claude-opus-5-5', apply: ['a1'] });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ applied: 0, notSwitched: [{ id: 'a1', name: 'Follower1', reason: expect.stringMatching(/changed while this applied/) }] });
+    expect(store.getAgent('a1')!.model).toBe('claude-haiku-4-5');
+    expect(store.getAgent('a2')!.model).toBe('claude-haiku-4-5');
+    for (const id of ['a1', 'a2']) expect(effectiveModel(store.getAgent(id)!, store.getAIProfile('p-sub')!)).toBe('claude-haiku-4-5');
+  });
+
+  it('a ticked agent set back to follow the default during the runtime check is switched, and live (HB-0889)', async () => {
+    const { store, f, provider } = await world();
+    store.insertAIProfile({ id: 'p-sub', ownerId: OWNER, name: 'Claude plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', models: ['claude-haiku-4-5'], secretRef: 'ai/sub', createdAt: 'now' } as any);
+    store.setAgentAIProfile('a1', 'p-sub');
+    store.setAgentModel('a1', 'claude-haiku-4-5');
+    // While the check reads a1's runtime, the owner sets it back to follow the default.
+    const info = provider.info.bind(provider);
+    let once = true;
+    provider.info = async (ref) => {
+      if (once) { once = false; store.setAgentModel('a1', null); }
+      return { ...(await info(ref)), openclawVersion: '2026.9.8' };
+    };
+    const res = await apply(f, 'p-sub', { model: 'claude-opus-5-5', apply: ['a1'] });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ applied: 1, live: 1 });
+    expect(res.json().notSwitched).toBeUndefined();
+    expect(store.getAgent('a1')!.model).toBeUndefined();
+    expect(effectiveModel(store.getAgent('a1')!, store.getAIProfile('p-sub')!)).toBe('claude-opus-5-5');
+    const sets = provider.execLog.filter((c) => Array.isArray(c) && c[0] === 'models' && c[1] === 'set').map((c) => c[2]);
+    expect(sets).toEqual(['anthropic/claude-opus-5-5']);
+    expect(store.getAgent('a1')!.appliedModel).toBe('claude-opus-5-5');
   });
 
   it('an API-key source is not judged on the plan rule', async () => {

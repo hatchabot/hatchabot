@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -44,14 +44,14 @@ function world() {
   symlinkSync(process.execPath, join(bin, 'node'));
   return { home, repo, bin, log };
 }
-const run = (w: ReturnType<typeof world>, args: string[]) =>
+const run = (w: ReturnType<typeof world>, args: string[], extra: Record<string, string> = {}) =>
   spawnSync('bash', [join(w.repo, 'scripts', 'uninstall.sh'), ...args], {
     // A minimal PATH: the script removes the `hbt` shim it finds on PATH, and with the
     // user's PATH it removed the machine's real one (2026-09-27). Only the shims and the system dirs.
     // Built from scratch, never from process.env: a HATCHABOT_DB exported in the
     // shell running the tests reached the script, and --purge removed THAT
     // data directory (review, 2026-10-09).
-    encoding: 'utf8', env: scriptEnv(w.home, `${w.bin}:/usr/bin:/bin`),
+    encoding: 'utf8', env: scriptEnv(w.home, `${w.bin}:/usr/bin:/bin`, extra),
   });
 
 /** A purge-able install: a real database naming two agents, and the module to read it. */
@@ -554,6 +554,141 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
     expect(existsSync(join(backups, '2026-10-04'))).toBe(false);
   });
 
+  it('--backups with no key here keeps every set that says which install made it, and still takes one that says nothing (HB-1066)', () => {
+    for (const env of ['', 'HATCHABOT_SECRET_KEY=\n']) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = join(dirname(w.repo), 'shared');
+      const set = (d: string, files: Record<string, string>) => { mkdirSync(join(backups, d), { recursive: true }); for (const [f, t] of Object.entries(files)) writeFileSync(join(backups, d, f), t); };
+      set('2026-10-01', { 'backup-status.json': '{}', '.backup-owner': 'feedfacefeedface\n' }); // another install's mark
+      set('2026-10-02', { 'backup-status.json': '{}', 'secret-key.env': 'HATCHABOT_SECRET_KEY=another-made-up-key\n' }); // another's, from before marks
+      set('2026-10-03', { 'hatchabot.sqlite': 'x' }); // says nothing: as before, removed
+      writeFileSync(join(w.repo, '.env'), `${env}HATCHABOT_BACKUP_DIR=${backups}\n`);
+      const r = run(w, ['--purge', '--backups', '--yes']);
+      expect(r.stdout, env + r.stdout + r.stderr).toContain('removed 1 backup sets');
+      expect(r.stdout).toMatch(/kept 2 sets that say which install made them: with no HATCHABOT_SECRET_KEY in .*\.env, this one cannot tell whether that is itself/);
+      expect(r.stdout).not.toContain('another Hatchabot install made there');
+      expect(existsSync(join(backups, '2026-10-01', '.backup-owner')), env).toBe(true);
+      expect(existsSync(join(backups, '2026-10-02', 'secret-key.env')), env).toBe(true);
+      expect(existsSync(join(backups, '2026-10-03')), env).toBe(false);
+      expect(existsSync(backups)).toBe(true);
+    }
+  });
+
+  it('--backups never takes a key from the shell that runs it: with none in .env, another install\'s exported there marks nothing as this one\'s (HB-1066 review)', () => {
+    const other = 'fixture-other-install-key';
+    const theirs = createHash('sha256').update(`hatchabot-backup-owner\0${other}`).digest('hex').slice(0, 16);
+    for (const [name, mac] of [['HATCHABOT_SECRET_KEY', false], ['AGENTCLAW_SECRET_KEY', false], ['HATCHABOT_SECRET_KEY', true]] as const) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      if (mac) writeFileSync(join(w.bin, 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+      const backups = join(dirname(w.repo), 'shared');
+      const set = (d: string, files: Record<string, string>) => { mkdirSync(join(backups, d), { recursive: true }); for (const [f, t] of Object.entries(files)) writeFileSync(join(backups, d, f), t); };
+      set('2026-10-01', { 'backup-status.json': '{}', '.backup-owner': `${theirs}\n` }); // the other install's mark
+      set('2026-10-02', { 'backup-status.json': '{}', 'secret-key.env': `HATCHABOT_SECRET_KEY=${other}\n` }); // the other's, from before marks
+      mkdirSync(join(backups, `restore-safety-${theirs}`));
+      writeFileSync(join(w.repo, '.env'), `HATCHABOT_BACKUP_DIR=${backups}\n`);
+      const r = run(w, ['--purge', '--backups', '--yes'], { [name]: other });
+      const label = `${name}${mac ? ' (Mac)' : ''}`;
+      expect(r.status, label + r.stdout + r.stderr).toBe(0);
+      expect(r.stdout, label).toContain('removed 0 backup sets');
+      expect(r.stdout, label).toMatch(/kept 2 sets that say which install made them: with no HATCHABOT_SECRET_KEY in .*\.env/);
+      expect(existsSync(join(backups, '2026-10-01', '.backup-owner')), label).toBe(true);
+      expect(existsSync(join(backups, '2026-10-02', 'secret-key.env')), label).toBe(true);
+      expect(existsSync(join(backups, `restore-safety-${theirs}`)), label).toBe(true);
+    }
+  });
+
+  it('--purge --backups goes by .env and its defaults alone: another install\'s database, backups and network exported in the shell are left alone (HB-1066 review)', () => {
+    for (const [p, mac] of [['HATCHABOT_', false], ['AGENTCLAW_', false], ['HATCHABOT_', true]] as const) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      if (mac) writeFileSync(join(w.bin, 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+      // Another install beside this one: its registry names an agent of its own, and its backups are sets that say nothing.
+      const other = join(dirname(w.repo), 'other-install');
+      mkdirSync(join(other, 'data'), { recursive: true });
+      const otherDb = join(other, 'data', 'hatchabot.sqlite');
+      const db = new Database(otherDb);
+      db.exec('CREATE TABLE agents (id TEXT, runtime_ref TEXT, image TEXT)');
+      db.prepare('INSERT INTO agents VALUES (?, ?, NULL)').run('33333333-cccc', 'docker://hatchabot-garden-33333333');
+      db.close();
+      const otherBackups = join(other, 'backups');
+      for (const d of ['2026-10-01', '2026-10-02']) { mkdirSync(join(otherBackups, d), { recursive: true }); writeFileSync(join(otherBackups, d, 'backup-status.json'), '{}'); }
+      // This install's own backups, in the default folder: .env names none.
+      const mine = join(w.home, 'hatchabot-backups', '2026-10-05'); mkdirSync(mine, { recursive: true }); writeFileSync(join(mine, 'backup-status.json'), '{}');
+      writeFileSync(join(w.repo, '.env'), 'HATCHABOT_SECRET_KEY=x\n');
+      const label = `${p}${mac ? ' (Mac)' : ''}`;
+      const r = run(w, ['--purge', '--backups', '--yes'], { [`${p}DB`]: otherDb, [`${p}BACKUP_DIR`]: otherBackups, [`${p}AGENT_NETWORK`]: 'fixture-other-net' });
+      expect(existsSync(otherDb), label).toBe(true);
+      for (const d of ['2026-10-01', '2026-10-02']) expect(existsSync(join(otherBackups, d, 'backup-status.json')), `${label} ${d}`).toBe(true);
+      const calls = readFileSync(w.log, 'utf8');
+      expect(calls, label).not.toMatch(/garden-33333333|fixture-other-net/);
+      // What is this install's went: its database, its agent's volume, its backup set and network.
+      expect(existsSync(join(w.repo, 'data', 'hatchabot.sqlite')), label).toBe(false);
+      expect(calls, label).toContain('docker volume rm hatchabot-leaky-11111111-vol');
+      expect(calls, label).toContain('docker network rm hatchabot-agents');
+      expect(existsSync(mine), label).toBe(false);
+      expect(r.stdout, label).toContain(`Note: not using ${p}AGENT_NETWORK ${p}BACKUP_DIR ${p}DB from this shell — ${w.repo}/.env and its defaults decide, as they do for the service.`);
+      expect(r.status, label + r.stdout + r.stderr).toBe(0);
+    }
+  });
+
+  it('--purge of an install started with its database named only in the shell: refused while .env finds none, so its key is not deleted from under it (HB-1236)', () => {
+    for (const p of ['HATCHABOT_', 'AGENTCLAW_']) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const elsewhere = join(dirname(w.repo), 'by-hand'); mkdirSync(elsewhere);
+      const db = join(elsewhere, 'hb.sqlite');
+      renameSync(join(w.repo, 'data', 'hatchabot.sqlite'), db);
+      writeFileSync(join(w.repo, '.env'), 'HATCHABOT_SECRET_KEY=x\n');
+      const r = run(w, ['--purge', '--yes'], { [`${p}DB`]: db });
+      expect(r.status, p + r.stdout + r.stderr).toBe(2);
+      expect(r.stdout).toContain(`This shell sets ${p}DB=${db}, a database that is there, but ${w.repo}/.env names none`);
+      expect(r.stdout).toContain(`add the line HATCHABOT_DB=${db} to ${w.repo}/.env`);
+      expect(existsSync(join(w.repo, '.env')), p).toBe(true);
+      expect(existsSync(db), p).toBe(true);
+      expect(existsSync(w.log) ? readFileSync(w.log, 'utf8') : '', p).not.toMatch(/docker (rm|volume rm|rmi|stop)|systemctl/); // nothing stopped or removed
+      // No .env at all: its key was the shell's too, and that is said, not a file's.
+      renameSync(join(w.repo, '.env'), join(dirname(w.repo), 'env.kept'));
+      const bare = run(w, ['--purge', '--yes'], { [`${p}DB`]: db });
+      expect(bare.status, p + bare.stdout + bare.stderr).toBe(2);
+      expect(bare.stdout).toContain(`but there is no ${w.repo}/.env and no database at`);
+      expect(bare.stdout).toContain(`put the line HATCHABOT_DB=${db} in ${w.repo}/.env, with the key it was started with (HATCHABOT_SECRET_KEY)`);
+      expect(bare.stdout).not.toContain('holds its key');
+      // What a purge would do then, truly: no agent removed (it reads no database), not "remove its agents" (review of HB-1236).
+      expect(bare.stdout).toContain('--purge would not read it: it would remove the service but none of its agents. Their containers and volumes would stay');
+      expect(bare.stdout).not.toContain('would remove its agents');
+      expect(existsSync(db), p).toBe(true);
+      renameSync(join(dirname(w.repo), 'env.kept'), join(w.repo, '.env'));
+      // A shell naming no database that is there: the purge goes on as before.
+      const gone = run(w, ['--purge', '--yes'], { [`${p}DB`]: join(elsewhere, 'not-there.sqlite') });
+      expect(gone.status, p + gone.stdout + gone.stderr).toBe(0);
+      expect(existsSync(join(w.repo, '.env')), p).toBe(false);
+    }
+  });
+
+  it('a purge with no database finds no agent and removes none, and says so, never that they are gone; their containers keep the network and images (review of HB-1236)', () => {
+    const w = purgeWorld();
+    rmSync(join(w.repo, 'data', 'hatchabot.sqlite'));
+    // The agents' containers still here (made by Hatchabot: its label), their volumes too.
+    dockerShim(w, `${VOLS}
+  "ps -aq --filter label=hatchabot.gen") echo beef00000003 ;;
+  "image inspect --format {{.Id}} hatchabot-runtime:latest") echo sha256:dddd ;;`);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain(`There was no database at ${w.repo}/data/hatchabot.sqlite, so none of this install's agents were found, and none were removed.`);
+    expect(r.stdout).not.toContain('Its agents, volumes and database are gone');
+    const calls = readFileSync(w.log, 'utf8');
+    expect(calls).not.toMatch(/docker (rm|volume rm|rmi) /);
+    expect(calls).not.toMatch(/docker network rm hatchabot-agents/);
+    expect(r.stdout).toContain('kept the hatchabot-agents network');
+    // With a database that names them, the purge's own words, as before.
+    const named = purgeWorld();
+    dockerShim(named, VOLS);
+    const ok = run(named, ['--purge', '--yes']);
+    expect(ok.stdout).not.toContain('There was no database');
+  });
+
   it('--backups reads the key as the backup does, not as shell: a passphrase with a $ or a quote still knows its own sets, and .env runs nothing (HB-0376)', () => {
     const owner = (key: string) => createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16);
     for (const [line, key] of [
@@ -582,6 +717,28 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
     writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x$(touch ${ran})y\n`);
     expect(run(w, ['--purge', '--yes']).status).toBe(0);
     expect(existsSync(ran)).toBe(false);
+  });
+
+  it('--backups reads a key ending in an escaped space as systemd does, the space kept; an escaped backslash before a space loses the space (review of HB-1065)', () => {
+    const owner = (key: string) => createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16);
+    for (const [line, key, near] of [
+      ['made-up-key\\ ', 'made-up-key ', 'made-up-key'],       // systemd keeps the escaped space
+      ['made-up-key\\\\ ', 'made-up-key\\', 'made-up-key\\ '], // an escaped backslash, then a space systemd trims
+    ] as const) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      const backups = join(dirname(w.repo), 'shared');
+      for (const [d, mark] of [['2026-10-01', owner(key)], ['2026-10-02', owner(near)]] as const) {
+        mkdirSync(join(backups, d), { recursive: true });
+        writeFileSync(join(backups, d, 'backup-status.json'), '{}');
+        writeFileSync(join(backups, d, '.backup-owner'), `${mark}\n`);
+      }
+      writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=${line}\nHATCHABOT_BACKUP_DIR=${backups}\n`);
+      const r = run(w, ['--purge', '--backups', '--yes']);
+      expect(r.stdout, line + r.stdout + r.stderr).toContain('removed 1 backup sets');
+      expect(existsSync(join(backups, '2026-10-01')), line).toBe(false); // what the backup marked, with the key the service has
+      expect(existsSync(join(backups, '2026-10-02')), line).toBe(true);  // a key one space away is another's
+    }
   });
 
   const owner = (key: string) => createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16);
@@ -763,12 +920,255 @@ describe('scripts/uninstall.sh --purge takes a whole data folder only when it is
     expect(r.stdout).toContain('the folder is not Hatchabot\'s own, so it stays');
   });
 
+  it('in a folder that is not Hatchabot\'s, what the app keeps beside its database stays and is named, its keys said (HB-1152)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-uninstall-home-')); dirs.push(root);
+    const home = join(root, 'household-files');
+    mkdirSync(join(home, 'embed'), { recursive: true }); writeFileSync(join(home, 'embed', 'server-key'), 'made-up-embed-key');
+    mkdirSync(join(home, 'models')); writeFileSync(join(home, 'models', 'made-up.gguf'), 'made-up model');
+    const { db, r } = movedTo(home);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(db)).toBe(false);
+    expect(readFileSync(join(home, 'embed', 'server-key'), 'utf8')).toBe('made-up-embed-key');
+    expect(existsSync(join(home, 'models', 'made-up.gguf'))).toBe(true);
+    expect(r.stdout).toContain(`kept embed/ models/ in ${home}: the app keeps them beside its database, and the folder is not Hatchabot's own, so they may be yours too.`);
+    expect(r.stdout).toContain('embed/ holds the memory search service\'s keys');
+    // A folder with nothing of the app's beside the database: nothing more to say.
+    const bare = join(root, 'bare-folder');
+    expect(movedTo(bare).r.stdout).not.toContain(`in ${bare}: the app keeps them`);
+  });
+
   it('a folder named hatchabot-data is Hatchabot\'s own, and goes whole', () => {
     const root = mkdtempSync(join(tmpdir(), 'hb-uninstall-own-')); dirs.push(root);
     const own = join(root, 'hatchabot-data');
     const { r } = movedTo(own);
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(existsSync(own)).toBe(false);
+  });
+});
+
+describe('scripts/uninstall.sh --purge and a data folder another database shares (HB-1052)', () => {
+  /** A real SQLite database with a made-up row in it: another install's. */
+  const otherDb = (file: string) => {
+    mkdirSync(dirname(file), { recursive: true });
+    const db = new Database(file);
+    db.exec("CREATE TABLE settings (k TEXT, v TEXT); INSERT INTO settings VALUES ('household', 'the other made-up one')");
+    db.close();
+  };
+  const rowOf = (file: string) => {
+    expect(existsSync(file), `${file} is gone`).toBe(true);
+    const db = new Database(file, { readonly: true });
+    try { return db.prepare('SELECT v FROM settings').get(); } finally { db.close(); }
+  };
+  const folder = (name: string) => { const root = mkdtempSync(join(tmpdir(), 'hb-uninstall-shared-db-')); dirs.push(root); return join(root, name); };
+  const moveCopies = (dbName: string) => `move-copies-${createHash('sha256').update(dbName).digest('hex').slice(0, 16)}`;
+
+  /** This install's database moved into `dir` as `name`, with its -wal and -shm, and what the app keeps beside a database. */
+  function sharedWith(dir: string, name = 'one.sqlite') {
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    mkdirSync(dir, { recursive: true });
+    const db = join(dir, name);
+    renameSync(join(w.repo, 'data', 'hatchabot.sqlite'), db);
+    writeFileSync(`${db}-wal`, 'made-up wal'); writeFileSync(`${db}-shm`, 'made-up shm');
+    writeFileSync(`${db}.lock`, ''); // the server's lock (HB-1436): empty
+    mkdirSync(join(dir, 'embed')); writeFileSync(join(dir, 'embed', 'server-key'), 'made-up-embed-key');
+    mkdirSync(join(dir, 'derived-builds')); writeFileSync(join(dir, 'derived-builds', 'notes.log'), 'made-up build log');
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_DB=${db}\n`);
+    return { w, db };
+  }
+
+  it('purging one of two databases in a shared hatchabot-data or agentclaw-data leaves the other, its -wal and the folder', () => {
+    for (const name of ['hatchabot-data', 'agentclaw-data']) {
+      const shared = folder(name);
+      const { w, db } = sharedWith(shared);
+      const two = join(shared, 'two.sqlite');
+      otherDb(two);
+      writeFileSync(`${two}-wal`, 'the other install\'s made-up wal'); writeFileSync(`${two}-shm`, 'made-up shm');
+      const r = run(w, ['--purge', '--yes']);
+      expect(r.status, name + r.stdout + r.stderr).toBe(0);
+      for (const f of [db, `${db}-wal`, `${db}-shm`, `${db}.lock`]) expect(existsSync(f), f).toBe(false);
+      expect(rowOf(two), name).toEqual({ v: 'the other made-up one' });
+      expect(readFileSync(`${two}-wal`, 'utf8')).toBe('the other install\'s made-up wal');
+      expect(existsSync(`${two}-shm`)).toBe(true);
+      expect(r.stdout).toContain(`kept ${two}: another database`);
+      expect(r.stdout).not.toContain(`kept ${two}-`); // its -wal and -shm are not more databases
+      expect(r.stdout).toContain(`removed the database in ${shared} (another database shares the folder, so the folder stays)`);
+      expect(r.stdout).not.toContain(`removed ${shared}`);
+      // What the app keeps beside a database says nothing of whose it is: it stays, named, and its keys are said.
+      expect(readFileSync(join(shared, 'embed', 'server-key'), 'utf8')).toBe('made-up-embed-key');
+      expect(existsSync(join(shared, 'derived-builds', 'notes.log'))).toBe(true);
+      expect(r.stdout).toContain(`kept derived-builds/ embed/ in ${shared}:`);
+      expect(r.stdout).toContain('embed/ holds the memory search service\'s keys');
+    }
+  });
+
+  it('another database by any name, in a folder below, or only what SQLite keeps beside one, keeps the folder too', () => {
+    const cases: Array<[string, (dir: string) => string]> = [
+      ['an SQLite file with no extension', (d) => { const f = join(d, 'registry'); otherDb(f); return f; }],
+      ['an empty .db', (d) => { const f = join(d, 'household.db'); writeFileSync(f, ''); return f; }],
+      ['a database in a folder below', (d) => { const f = join(d, 'test-install', 'hatchabot.sqlite'); otherDb(f); return f; }],
+      ['only its -wal', (d) => { const f = join(d, 'three.sqlite-wal'); writeFileSync(f, 'made-up wal'); return f; }],
+    ];
+    for (const [what, make] of cases) {
+      const shared = folder('hatchabot-data');
+      const { w, db } = sharedWith(shared);
+      const other = make(shared);
+      const r = run(w, ['--purge', '--yes']);
+      expect(r.status, what + r.stdout + r.stderr).toBe(0);
+      expect(existsSync(db), what).toBe(false);
+      expect(existsSync(other), what).toBe(true);
+      expect(r.stdout, what).toContain(`kept ${other}: another database`);
+    }
+  });
+
+  it('a database\'s -wal and -shm are named with it, not as more databases; past six, the rest are counted', () => {
+    const shared = folder('hatchabot-data');
+    const { w } = sharedWith(shared);
+    const others = 'abcdefgh'.split('').map((c) => join(shared, `${c}.sqlite`));
+    for (const f of others) { otherDb(f); writeFileSync(`${f}-wal`, 'made-up wal'); writeFileSync(`${f}-shm`, 'made-up shm'); }
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const named = r.stdout.split('\n').filter((l) => l.includes(': another database'));
+    expect(named, r.stdout).toEqual(others.slice(0, 6).map((f) => `  kept ${f}: another database, not this install's (another install's, or a copy of one)`));
+    expect(r.stdout).toContain(`  …and 2 more in ${shared}\n`);
+    expect(r.stdout).not.toMatch(/-(wal|shm): /);
+    for (const f of others) for (const g of [f, `${f}-wal`, `${f}-shm`]) expect(existsSync(g), g).toBe(true);
+  });
+
+  it('a file that cannot be read keeps the folder, and is said to be that, not a database', () => {
+    if (process.getuid?.() === 0) return; // root reads everything
+    const own = folder('hatchabot-data');
+    const { w, db } = sharedWith(own, 'hatchabot.sqlite');
+    const notes = join(own, 'notes.txt'); writeFileSync(notes, 'made-up notes', { mode: 0o000 });
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(db)).toBe(false);
+    expect(existsSync(notes)).toBe(true);
+    expect(r.stdout).toContain(`kept ${notes}: it cannot be read, so it may be another database`);
+    expect(r.stdout).toContain(`removed the database in ${own} (part of it cannot be read, and may be another install's, so the folder stays)`);
+    expect(r.stdout).not.toContain('another database, not this install\'s');
+  });
+
+  it('a folder in it that cannot be read, at the top or below, keeps the folder and what the app keeps there, and says so', () => {
+    if (process.getuid?.() === 0) return; // root reads everything
+    for (const where of ['locked', join('imports', 'locked')]) {
+      const shared = folder('hatchabot-data');
+      const { w, db } = sharedWith(shared);
+      const locked = join(shared, where);
+      otherDb(join(locked, 'two'));
+      chmodSync(locked, 0o000);
+      try {
+        const r = run(w, ['--purge', '--yes']);
+        expect(r.status, where + r.stdout + r.stderr).toBe(0);
+        expect(r.stderr, where).not.toContain('Permission denied');
+        expect(existsSync(db), where).toBe(false);
+        expect(r.stdout, where).toContain(`kept ${locked}: it cannot be read, so it may hold another database`);
+        expect(r.stdout, where).toContain(`removed the database in ${shared} (part of it cannot be read, and may be another install's, so the folder stays)`);
+        expect(readFileSync(join(shared, 'embed', 'server-key'), 'utf8'), where).toBe('made-up-embed-key');
+        expect(r.stdout, where).toContain('embed/ holds the memory search service\'s keys');
+      } finally { chmodSync(locked, 0o755); }
+      expect(rowOf(join(locked, 'two')), where).toEqual({ v: 'the other made-up one' });
+    }
+  });
+
+  it('a binary file that is not a database is read without a warning, and the lone folder goes whole', () => {
+    const own = folder('hatchabot-data');
+    const { w } = sharedWith(own, 'hatchabot.sqlite');
+    const binary = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    writeFileSync(join(own, 'photo.bin'), binary);
+    mkdirSync(join(own, 'imports')); writeFileSync(join(own, 'imports', 'copy.tgz'), binary);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stderr).not.toMatch(/null byte/);
+    expect(existsSync(own), r.stdout).toBe(false);
+  });
+
+  it('with this install\'s database already gone, the other one is still not taken with the folder', () => {
+    const shared = folder('hatchabot-data');
+    const { w, db } = sharedWith(shared);
+    for (const f of [db, `${db}-wal`, `${db}-shm`]) rmSync(f);
+    const two = join(shared, 'two.sqlite'); otherDb(two);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(rowOf(two)).toEqual({ v: 'the other made-up one' });
+    expect(r.stdout).not.toContain('removed the database');
+    expect(r.stdout).toContain(`no database of this install's was left in ${shared}`);
+    // The server's lock, left by the last one that ran, is no database: it goes, unsaid (HB-1436).
+    expect(existsSync(`${db}.lock`)).toBe(false);
+  });
+
+  it('alone in its hatchabot-data, agentclaw-data or the install\'s data/, the folder still goes whole, with what the app keeps there', () => {
+    for (const name of ['hatchabot-data', 'agentclaw-data']) {
+      const own = folder(name);
+      const { w } = sharedWith(own, 'hatchabot.sqlite');
+      mkdirSync(join(own, 'models')); writeFileSync(join(own, 'models', 'made-up.gguf'), 'made-up model');
+      // The app's own folders are not searched for databases: what a CLI keeps in its scratch home is the app's.
+      mkdirSync(join(own, 'mgmt-cli-home', '.cache'), { recursive: true }); writeFileSync(join(own, 'mgmt-cli-home', '.cache', 'state.db'), 'made-up');
+      writeFileSync(join(own, 'limits-check.json'), '{}');
+      const r = run(w, ['--purge', '--yes']);
+      expect(r.status, name + r.stdout + r.stderr).toBe(0);
+      expect(existsSync(own), name + r.stdout).toBe(false);
+      expect(r.stdout).toContain(`removed ${own}`);
+      expect(r.stdout).not.toContain('another database');
+    }
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    const data = join(w.repo, 'data');
+    writeFileSync(join(data, 'hatchabot.sqlite-wal'), 'made-up wal');
+    mkdirSync(join(data, 'embed')); writeFileSync(join(data, 'embed', 'server-key'), 'made-up-embed-key');
+    mkdirSync(join(data, 'release-manifests')); writeFileSync(join(data, 'release-manifests', 'v1.0.0.json'), '{}');
+    writeFileSync(join(data, 'server.log'), 'made-up log');
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(data), r.stdout).toBe(false);
+    expect(r.stdout).toContain(`removed ${data}`);
+  });
+
+  it('backups inside the data folder, whose sets hold copies of the database, are kept and not taken for another database', () => {
+    const w = purgeWorld();
+    dockerShim(w, VOLS);
+    const data = join(w.repo, 'data');
+    const set = join(data, 'backups', '2026-10-01'); mkdirSync(set, { recursive: true });
+    copyFileSync(join(data, 'hatchabot.sqlite'), join(set, 'hatchabot.sqlite'));
+    writeFileSync(join(set, 'backup-status.json'), '{}');
+    writeFileSync(join(data, 'server.log'), 'made-up log');
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_BACKUP_DIR=${join(data, 'backups')}\n`);
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(join(set, 'hatchabot.sqlite'))).toBe(true);
+    expect(existsSync(join(data, 'hatchabot.sqlite'))).toBe(false);
+    expect(existsSync(join(data, 'server.log'))).toBe(false);
+    expect(r.stdout).toContain('except backups/');
+    expect(r.stdout).not.toContain('another database');
+
+    // With another database there as well, the backups and that database both stay.
+    const w2 = purgeWorld();
+    dockerShim(w2, VOLS);
+    const data2 = join(w2.repo, 'data');
+    const set2 = join(data2, 'backups', '2026-10-01'); mkdirSync(set2, { recursive: true });
+    writeFileSync(join(set2, 'backup-status.json'), '{}');
+    const two = join(data2, 'two.sqlite'); otherDb(two);
+    writeFileSync(join(w2.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_BACKUP_DIR=${join(data2, 'backups')}\n`);
+    const r2 = run(w2, ['--purge', '--yes']);
+    expect(r2.status, r2.stdout + r2.stderr).toBe(0);
+    expect(existsSync(join(data2, 'hatchabot.sqlite'))).toBe(false);
+    expect(rowOf(two)).toEqual({ v: 'the other made-up one' });
+    expect(existsSync(join(set2, 'backup-status.json'))).toBe(true);
+    expect(r2.stdout).toContain(`kept ${two}: another database`);
+  });
+
+  it('a hatchabot-data holding another database\'s move copies is kept, even with that database not there', () => {
+    const shared = folder('hatchabot-data');
+    const { w, db } = sharedWith(shared);
+    const mine = join(shared, moveCopies('one.sqlite')), theirs = join(shared, moveCopies('two.sqlite'));
+    for (const d of [mine, theirs]) { mkdirSync(d); writeFileSync(join(d, 'copy.tgz'), 'made-up volume'); }
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(db)).toBe(false);
+    expect(existsSync(mine)).toBe(false);
+    expect(readFileSync(join(theirs, 'copy.tgz'), 'utf8')).toBe('made-up volume');
+    expect(r.stdout).toMatch(/move copies cannot be attributed/);
+    expect(r.stdout).not.toContain(`removed ${shared}`);
   });
 });
 

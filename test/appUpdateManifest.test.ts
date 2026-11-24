@@ -6,7 +6,7 @@
  * its files and its cron list are in memory.
  */
 import { describe, expect, it } from 'vitest';
-import { installRelease, parseManifest, type InstallDeps } from '../src/orchestrator/apps.js';
+import { installRelease, parseManifest, type InstallDeps } from '../src/orchestrator/apps/apps.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 
 const LIVE = 'a'.repeat(40);

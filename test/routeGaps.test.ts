@@ -169,6 +169,23 @@ describe('snapshots over HTTP: create, restore, delete', () => {
   });
 });
 
+describe('a snapshot by hand: its label (HB-0814)', () => {
+  it('a label that is not text, or a body that is not an object, is a 400 and takes none', async () => {
+    const { store, f, provider } = await liveWorld();
+    provider.execResponses.set('sh', { code: 0, stdout: 'soul text', stderr: '' });
+    for (const payload of [{ label: 7 }, '"before"']) {
+      const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/snapshots', headers: { ...H, 'content-type': 'application/json' }, payload: typeof payload === 'string' ? payload : JSON.stringify(payload) });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    // Another owner's agent is still a 404 first.
+    const theirs = await f.inject({ method: 'POST', url: '/v1/agents/nobody/snapshots', headers: { ...H, 'content-type': 'application/json' }, payload: JSON.stringify({ label: 7 }) });
+    expect(theirs.statusCode).toBe(404);
+    expect(store.listSnapshots('a1')).toEqual([]);
+    // No body at all is a snapshot with no label, as before.
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/snapshots', headers: H })).statusCode).toBe(201);
+  });
+});
+
 describe('DELETE /v1/agents/:id/members/:userId', () => {
   it('revokes a member; the owner seat refuses', async () => {
     const { store, f } = await liveWorld();
@@ -188,7 +205,7 @@ describe('DELETE /v1/agents/:id/members/:userId', () => {
 describe('POST /v1/join — the unauthenticated internet-facing route (audit backlog #1)', () => {
   it('redeems a real invite, mints the membership, and returns only public bot info', async () => {
     const { store, f } = await liveWorld();
-    const { createInvite } = await import('../src/orchestrator/invite.js');
+    const { createInvite } = await import('../src/orchestrator/members/invite.js');
     const { code } = createInvite(store, 'a1', OWNER);
     // NO auth headers — this is the invitee's phone.
     const res = await f.inject({ method: 'POST', url: '/v1/join', payload: { code, name: 'Gran' } });
@@ -217,10 +234,35 @@ describe('POST /v1/join — the unauthenticated internet-facing route (audit bac
     // liveWorld registers no verifier — emulate one by re-registering? Simpler:
     // with no verifier configured the token is ignored (lightweight join),
     // which is the documented password-mode behavior — pin THAT.
-    const { createInvite } = await import('../src/orchestrator/invite.js');
+    const { createInvite } = await import('../src/orchestrator/members/invite.js');
     const { code } = createInvite(store, 'a1', OWNER);
     const res = await f.inject({ method: 'POST', url: '/v1/join', payload: { code, name: 'Zed', idToken: 'garbage' } });
     expect(res.statusCode).toBe(201); // no verifier → lightweight membership, token ignored
+  });
+
+  it('a body of the wrong shape is a 400 before anything is counted or spent; null is as good as left out (HB-0814)', async () => {
+    const { store, f } = await liveWorld();
+    const { createInvite, checkInvite } = await import('../src/orchestrator/members/invite.js');
+    const { code } = createInvite(store, 'a1', OWNER);
+    const join = (payload: unknown) => f.inject({ method: 'POST', url: '/v1/join', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(payload) });
+    for (const [payload, words] of [
+      [{ code: 5 }, 'code: '], [['x'], ''], [{ code, name: 7 }, 'name: '], [{ code, channel: 7 }, 'channel: '], [{ code, idToken: true }, 'idToken: '],
+    ] as const) {
+      const res = await join(payload);
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+      expect(res.json().error).toContain(words);
+      expect(res.json().error).not.toBe('code required');
+    }
+    expect(checkInvite(store, code).valid).toBe(true);
+    // Left out or null: the words it always had.
+    expect((await join({ code: null })).json()).toEqual({ error: 'code required' });
+    expect((await join({ code, channel: 'irc' })).json()).toEqual({ error: 'Unknown channel.' });
+    const ok = await join({ code, name: null, idToken: null, channel: null });
+    expect(ok.statusCode, ok.body).toBe(400); // a null channel names no app, as before
+    expect(ok.json()).toEqual({ error: 'Unknown channel.' });
+    const joined = await join({ code, name: null, idToken: null });
+    expect(joined.statusCode, joined.body).toBe(201);
+    expect(store.listMemberships('a1').find((m) => m.role === 'user')?.displayName).toBe('Guest');
   });
 });
 

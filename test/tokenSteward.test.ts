@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -8,16 +8,16 @@ import { spawnSync } from 'node:child_process';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { READER_FLOORS, USAGE_READER_SCRIPT, type TokenHealthRaw } from '../src/orchestrator/usage.js';
-import { sampleAgentUsage } from '../src/orchestrator/sourceUsage.js';
-import { buildTokenHealth, incidentWords, injectedSize, loopSignals, promptFiles, THRESHOLDS } from '../src/orchestrator/tokenHealth.js';
-import { LOOP_LINE, parseLoopLines } from '../src/orchestrator/loopLines.js';
-import { runTokenWatch, TELL_PER_HOUR } from '../src/orchestrator/tokenWatch.js';
-import { channelHandlerTimeoutMs, channelTimeoutEnv, CHANNEL_HANDLER_TIMEOUT_DEFAULT_MS } from '../src/orchestrator/channelTimeout.js';
-import { compactAgent, compactArgv, nextProviderEntry, parseCompactResult, syncContextCap } from '../src/orchestrator/compaction.js';
-import { buildRuntimeSpec, provisionAgent, syncDataSourceDocs } from '../src/orchestrator/provision.js';
+import { READER_FLOORS, USAGE_READER_SCRIPT, type TokenHealthRaw } from '../src/orchestrator/usage/usage.js';
+import { sampleAgentUsage } from '../src/orchestrator/usage/sourceUsage.js';
+import { buildTokenHealth, incidentWords, injectedSize, loopSignals, promptFiles, THRESHOLDS } from '../src/orchestrator/usage/tokenHealth.js';
+import { LOOP_LINE, parseLoopLines } from '../src/domain/loopLines.js';
+import { runTokenWatch, TELL_PER_HOUR } from '../src/orchestrator/usage/tokenWatch.js';
+import { channelHandlerTimeoutMs, channelTimeoutEnv, CHANNEL_HANDLER_TIMEOUT_DEFAULT_MS } from '../src/orchestrator/channels/channelTimeout.js';
+import { compactAgent, compactArgv, nextProviderEntry, parseCompactResult, syncContextCap } from '../src/orchestrator/memory/compaction.js';
+import { buildRuntimeSpec, provisionAgent, syncDataSourceDocs } from '../src/orchestrator/lifecycle/provision.js';
 import { OPS_AGENTS_MD, OPS_RENAMED_HEADINGS, OPS_SOUL, opsSection } from '../src/ops/opsAgent.js';
-import { LEGACY_REVIEW_NAME, MODEL_REVIEW_NAME, reviewMessageHash, syncModelReviewCron } from '../src/orchestrator/modelReview.js';
+import { LEGACY_REVIEW_NAME, MODEL_REVIEW_NAME, reviewMessageHash, syncModelReviewCron } from '../src/orchestrator/usage/modelReview.js';
 import { OPS_MODEL_REVIEW_MESSAGE } from '../src/ops/opsAgent.js';
 import { MANIFEST, toolDef } from '../src/mgmt/tools.js';
 import { REST_BY_NAME } from '../src/mgmt/restTools.js';
@@ -566,6 +566,42 @@ describe('the loop watcher', () => {
     expect(told).toHaveLength(1);
   });
 
+  it('a loop seen again after 50 newer incidents reopens its own, and the pass goes on to the next agent (HB-1004)', async () => {
+    const { store } = await world();
+    const now = Date.now();
+    const tell = async () => true;
+    store.setTokenHealth('a1', stuckHealth(now), iso(now));
+    await runTokenWatch({ store, tell }, now);
+    const [first] = store.listTokenIncidents({ open: true });
+    const quiet = stuckHealth(now); quiet.ingress![0]!.st = 'completed';
+    store.setTokenHealth('a1', quiet, iso(now));
+    await runTokenWatch({ store, tell }, now + MIN);
+    for (let i = 0; i < 50; i++) {
+      store.openTokenIncident({ id: `later${i}`, agentId: 'a1', ownerId: OWNER, kind: 'tool-loop', key: `k${i}`, openedAt: iso(now + 2 * MIN + i), updatedAt: iso(now + 2 * MIN + i), count: 1, text: 'resolved' } as never);
+      store.clearTokenIncident(`later${i}`, iso(now + 3 * MIN));
+    }
+    // The same loop again, and a task failing on the next agent.
+    store.setTokenHealth('a1', stuckHealth(now), iso(now));
+    const jobs = [{ id: 'job-0', name: 'Task 0', runs: 5, ok: 0, error: 5, interrupted: 0, skipped: 0, streak: 5, first: now - DAY, last: now - HOUR, lastStatus: 'error', rr: [] as Array<[number, number]> }];
+    store.setTokenHealth('a2', health({ jobs }), iso(now));
+    await runTokenWatch({ store, tell }, now + 4 * MIN);
+    const open = store.listTokenIncidents({ open: true });
+    expect(open.map((i) => i.id)).toContain(first!.id);
+    expect(open.some((i) => i.agentId === 'a2' && i.kind === 'task-failing')).toBe(true);
+  });
+
+  it('reads each owner\'s fleet and consults once a pass, not once per agent (HB-1005)', async () => {
+    const { store } = await world();
+    const agents = store.listAllActiveAgents().filter((a) => a.state !== 'DELETED' && a.state !== 'ARCHIVED');
+    const owners = new Set(agents.map((a) => a.ownerId));
+    expect(agents.length).toBeGreaterThan(owners.size);
+    const fleets = vi.spyOn(store, 'listAgents');
+    const consults = vi.spyOn(store, 'consultEvents');
+    await runTokenWatch({ store, tell: async () => true }, Date.now());
+    expect(consults.mock.calls.length).toBe(owners.size);
+    expect(fleets.mock.calls.length).toBe(owners.size);
+  });
+
   it('runs on the usage pass\'s timer: no new interval, and a rate limit is not an incident', async () => {
     const { store } = await world();
     const now = Date.now();
@@ -803,6 +839,31 @@ describe('the context cap', () => {
     expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('unchanged');
     expect(provider.execLog.at(-1)).toEqual(['config', 'unset', 'models.providers.openai']);
     expect(store.getContextCap('a1')!.appliedModel).toBe('anthropic/claude-sonnet-5');
+  });
+
+  it('a switch of source waiting for its rebuild keeps the cap on the model still running (HB-0891)', async () => {
+    const { store, provider } = await world();
+    store.insertAIProfile({ id: 'p4', ownerId: OWNER, name: 'Other', vendor: 'google', kind: 'api_key', model: 'gemini-example', secretRef: 'ai/p4', createdAt: 'now' } as never);
+    store.setAgentApplied('a1', 'p1', 'claude-sonnet-5'); // the container runs this
+    store.setContextCap('a1', 150_000, iso(Date.now()));
+    store.markContextCapApplied('a1', 'anthropic/claude-sonnet-5', iso(Date.now()));
+    store.setAgentAIProfile('a1', 'p4'); // saved, not rebuilt yet
+    const ours = { models: [{ id: 'claude-sonnet-5', name: 'Sonnet 5', contextTokens: 150_000 }] };
+    provider.execShell = async (_ref, script) => ({ code: 0, stdout: script.endsWith('models.providers.anthropic') ? JSON.stringify(ours) : '', stderr: '' });
+    expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('unchanged');
+    expect(provider.execLog.some((a) => a[0] === 'config')).toBe(false);
+    expect(store.getContextCap('a1')!.appliedModel).toBe('anthropic/claude-sonnet-5');
+    // A new cap meanwhile goes on the model it runs.
+    store.setContextCap('a1', 200_000, iso(Date.now()));
+    expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('applied');
+    const set = provider.execLog.find((a) => a[0] === 'config' && a[1] === 'set')!;
+    expect(set[2]).toBe('models.providers.anthropic');
+    expect(JSON.parse(set[3]!)).toEqual({ models: [{ id: 'claude-sonnet-5', name: 'Sonnet 5', contextTokens: 200_000 }] });
+    // The rebuild puts it on the new source: the cap moves there.
+    store.setAgentApplied('a1', 'p4', 'gemini-example');
+    expect(await syncContextCap({ store, provider }, store.getAgent('a1')!, store.getAgent('a1')!.runtimeRef!)).toBe('applied');
+    expect(provider.execLog).toContainEqual(['config', 'unset', 'models.providers.anthropic']);
+    expect(store.getContextCap('a1')!.appliedModel).toBe('google/gemini-example');
   });
 
   it('a cap on a model id with slashes of its own comes off that row (B05)', async () => {

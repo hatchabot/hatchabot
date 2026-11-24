@@ -4,7 +4,7 @@ import { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, sy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RuntimeProvider } from '../src/providers/provider.js';
-import { ARGV_SAFE_B64, writeFileInAgent } from '../src/orchestrator/snapshots.js';
+import { ARGV_SAFE_B64, writeFileInAgent } from '../src/orchestrator/files/snapshots.js';
 
 const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });

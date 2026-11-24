@@ -1,17 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
-import {
-  BROWSER_CLOSE_SOURCE, BROWSER_FENCE_VERSION, BROWSER_LOGINS_RE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_PROFILE_WARN_BYTES, BROWSER_UID,
-  browserImage, browserLoginsVolume, browserSweep, newBrowserLogins,
-} from '../src/orchestrator/browser.js';
-import { browserSteerers, siteOf } from '../src/orchestrator/browserLogins.js';
+import { BROWSER_PROFILE_WARN_BYTES, browserImage, browserSweep } from '../src/orchestrator/console/browser.js';
+import { BROWSER_CLOSE_SOURCE, BROWSER_FENCE_VERSION, BROWSER_LOGINS_RE, BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK, BROWSER_UID, browserLoginsVolume, newBrowserLogins } from '../src/providers/browserContainer.js';
+import { browserSteerers, siteOf } from '../src/orchestrator/console/browserLogins.js';
 import { makeWorld, seedRunningAgent, as, type World } from './support/world.js';
 
 /**
@@ -35,7 +33,8 @@ describe('the profile, the volume and the close', () => {
     expect(BROWSER_PROFILE_PREP).toContain('"restore_on_startup":1');
     expect(BROWSER_PROFILE_PREP).toContain(`chown -R ${BROWSER_UID}:${BROWSER_UID} /profile`);
     expect(BROWSER_PROFILE_PREP.trim().split('\n').at(-1)).toBe('echo READY');
-    expect(BROWSER_PROFILE_UNLOCK).toMatch(/^rm -f \/profile\/SingletonLock .* && echo UNLOCKED$/);
+    expect(BROWSER_PROFILE_UNLOCK).toContain('rm -f /profile/SingletonLock /profile/SingletonSocket /profile/SingletonCookie && echo UNLOCKED');
+    expect(BROWSER_PROFILE_UNLOCK).toMatch(/&& echo UNLOCKED$/);
     for (const sh of [BROWSER_PROFILE_PREP, BROWSER_PROFILE_UNLOCK]) execFileSync('sh', ['-n', '-c', sh]);
     // The close is Browser.close, from the agent's side, and nothing else.
     expect(BROWSER_CLOSE_SOURCE).toContain("method: 'Browser.close'");
@@ -57,7 +56,7 @@ describe('the container (docker argv)', () => {
    * `browser`: the running browser's labels, or none. `volume`: the label an
    * existing profile volume carries, or none (made new).
    */
-  function stub(o: { browser?: { with: string; logins: string; memory?: number; fence?: string }; volume?: string; prep?: string; closes?: boolean } = {}) {
+  function stub(o: { browser?: { with: string; logins: string; memory?: number; fence?: string }; volume?: string; prep?: string; unlock?: string; closes?: boolean; first?: string } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'hb-logins-'));
     stubDirs.push(dir);
     vi.stubEnv('HOME', dir); vi.stubEnv('PATH', dir);
@@ -68,6 +67,7 @@ describe('the container (docker argv)', () => {
     writeFileSync(bin, `#!/bin/bash
 printf '%s\\n' "$*" >> ${JSON.stringify(log)}
 case "$*" in
+  ${o.first ?? ''}
   "inspect hatchabot-a1 --format "*) echo "true|2026-11-13T10:00:00Z" ;;
   "inspect hatchabot-a1-browser --format "*browser-with*) ${b ? `echo "true|${b.with}|${browserImage().image}||${b.memory ?? 1024 ** 3}|${b.logins}|${b.fence ?? BROWSER_FENCE_VERSION}"` : 'echo "no such container" >&2; exit 1'} ;;
   "inspect hatchabot-a1-browser --format "*) ${b ? `echo "true|${b.logins}"` : 'exit 1'} ;;
@@ -80,7 +80,7 @@ case "$*" in
     else echo "Error: no such volume" >&2; exit 1; fi ;;
   "volume create "*) : > "$HOME/created"; echo made ;;
   "volume ls "*) : > "$HOME/listed"; printf '%s\\n' 'hatchabot-a1-browser-logins-${ID}|hatchabot-a1|a1|${ID}' 'hatchabot-a1-browser-logins-${ID2}|hatchabot-a1|a1|${ID2}' 'hatchabot-zz-browser-logins-${ID}|hatchabot-zz|<no value>|${ID}' ;;
-  "run --rm --network none "*UNLOCKED*) echo UNLOCKED ;;
+  "run --rm --network none "*UNLOCKED*) ${o.unlock ?? 'echo UNLOCKED'} ;;
   "run --rm --network none "*) ${o.prep ?? 'echo READY'} ;;
   "run --rm "*) echo FENCED ;;
   "exec hatchabot-a1 node "*) ${o.closes === false ? 'exit 1' : 'echo CLOSING'} ;;
@@ -129,6 +129,54 @@ exit 0
     const other = stub({ volume: 'something-else' });
     await expect(other.p.ensureBrowser({ ...spec, logins: ID })).rejects.toThrow(/not a browser profile of this install/);
     expect(other.argv().some((l) => l.startsWith('run -d'))).toBe(false);
+  });
+
+  // A start stopped after the volume was made and before its prep (a
+  // restart, the settings changed at that moment) left one that was there
+  // and still root's: never prepared again, and Chromium could not use it
+  // (HB-0975). The unlock, as the browser's user, says so first.
+  it('a volume there that was never prepared is prepared now, then unlocked', async () => {
+    const { p, argv, at } = stub({ volume: ID, unlock: '[ -f "$HOME/prepared" ] && echo UNLOCKED || echo UNPREPARED', prep: ': > "$HOME/prepared"; echo READY' });
+    expect(await p.ensureBrowser({ ...spec, logins: ID })).toBe('started');
+    const lines = argv();
+    expect(lines.some((l) => l.startsWith('volume create'))).toBe(false);
+    const prep = lines.find((l) => l.startsWith('run --rm --network none') && l.includes('--cap-add CHOWN'))!;
+    expect(prep).toContain('--user 0:0 --cap-drop ALL --cap-add CHOWN --security-opt no-new-privileges');
+    expect(prep).toContain(`-v ${VOL}:/profile`);
+    const unlocks = lines.map((l, i) => (l.includes('UNLOCKED') ? i : -1)).filter((i) => i >= 0);
+    expect(unlocks).toHaveLength(2);
+    expect(unlocks[0]).toBeLessThan(at('run --rm --network none --label hatchabot.role=browser-prep --user 0:0'));
+    expect(unlocks[1]).toBeGreaterThan(at('run --rm --network none --label hatchabot.role=browser-prep --user 0:0'));
+    expect(at('run -d ')).toBeGreaterThan(unlocks[1]!);
+    // Its prep failing keeps it (it may be another start's, preparing it now) and starts nothing.
+    const failing = stub({ volume: ID, unlock: 'echo UNPREPARED', prep: 'echo "chown: Operation not permitted" >&2; exit 1' });
+    await expect(failing.p.ensureBrowser({ ...spec, logins: ID })).rejects.toThrow(/browser logins prep failed/);
+    expect(failing.argv().some((l) => l.startsWith('volume rm'))).toBe(false);
+    expect(failing.argv().some((l) => l.startsWith('run -d'))).toBe(false);
+    // Prepared and still saying otherwise: refused, not prepared in a loop.
+    const stuck = stub({ volume: ID, unlock: 'echo UNPREPARED' });
+    await expect(stuck.p.ensureBrowser({ ...spec, logins: ID })).rejects.toThrow(/browser logins unlock failed/);
+    expect(stuck.argv().filter((l) => l.includes('--cap-add CHOWN'))).toHaveLength(1);
+  });
+
+  it('the unlock, run here on a folder in place of /profile: not prepared, or prepared and its lock cleared', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-logins-profile-'));
+    stubDirs.push(dir);
+    const run = (profile: string) => execFileSync('sh', ['-c', BROWSER_PROFILE_UNLOCK.replaceAll('/profile', profile)], { encoding: 'utf8' }).trim();
+    // Made and never prepared: empty, or (as root's is to the browser's user) not writable.
+    const empty = join(dir, 'empty');
+    mkdirSync(empty);
+    expect(run(empty)).toBe('UNPREPARED');
+    const prepared = join(dir, 'prepared');
+    mkdirSync(join(prepared, 'Default'), { recursive: true });
+    writeFileSync(join(prepared, 'Default', 'Preferences'), '{"session":{"restore_on_startup":1}}');
+    writeFileSync(join(prepared, 'SingletonLock'), '');
+    expect(run(prepared)).toBe('UNLOCKED');
+    expect(existsSync(join(prepared, 'SingletonLock'))).toBe(false);
+    if (process.getuid?.() !== 0) {
+      chmodSync(prepared, 0o555);
+      try { expect(run(prepared)).toBe('UNPREPARED'); } finally { chmodSync(prepared, 0o755); }
+    }
   });
 
   it('a prep that fails removes the volume it made, and starts no browser', async () => {
@@ -198,6 +246,30 @@ exit 0
     expect(lines).toContain(`volume rm hatchabot-a1-browser-logins-${ID}`);
     expect(lines).toContain(`volume rm hatchabot-a1-browser-logins-${ID2}`);
     expect(lines).not.toContain(`volume rm hatchabot-zz-browser-logins-${ID}`);
+  });
+
+  // Its browser that Docker would not remove, and so the profile it holds:
+  // the purge said done, and the delete with it (HB-1078).
+  it('a purge that leaves its browser or a profile fails, saying so, and a retry finishes it', async () => {
+    const browserStays = `"rm -f hatchabot-a1-browser") [ -f "$HOME/fixed" ] || { echo "Error response from daemon: cannot remove container" >&2; exit 1; } ;;
+  "volume rm hatchabot-a1-browser-logins-${ID}") [ -f "$HOME/fixed" ] || { echo "Error response from daemon: remove ${VOL}: volume is in use" >&2; exit 1; } ;;`;
+    const s = stub({ first: browserStays });
+    await expect(s.p.destroy('docker://hatchabot-a1', { purge: true })).rejects.toMatchObject({ userMessage: expect.stringMatching(/browser and the logins it kept/), message: expect.stringMatching(new RegExp(`its browser .*; ${VOL} \\(.*volume is in use`)) });
+    // Both were tried, and the other profile went.
+    expect(s.argv()).toContain('rm -f hatchabot-a1-browser');
+    expect(s.argv()).toContain(`volume rm ${VOL}`);
+    expect(s.argv()).toContain(`volume rm hatchabot-a1-browser-logins-${ID2}`);
+    writeFileSync(join(process.env.HOME!, 'fixed'), '');
+    await expect(s.p.destroy('docker://hatchabot-a1', { purge: true })).resolves.toBeUndefined();
+    // One already gone is not a failure; nor is a volume that is not this install's profile.
+    const gone = stub({ first: `"rm -f hatchabot-a1-browser") echo "Error: No such container: hatchabot-a1-browser" >&2; exit 1 ;;` });
+    await expect(gone.p.destroy('docker://hatchabot-a1', { purge: true })).resolves.toBeUndefined();
+    const notOurs = stub({ first: `"volume inspect "*"${ID2}") echo '{"hatchabot.role":"browser-logins","hatchabot.browser-prefix":"another-install"}' ;;` });
+    await expect(notOurs.p.destroy('docker://hatchabot-a1', { purge: true })).resolves.toBeUndefined();
+    expect(notOurs.argv()).not.toContain(`volume rm hatchabot-a1-browser-logins-${ID2}`);
+    // Not listed at all: not known to be gone.
+    const unlisted = stub({ first: '"volume ls "*) echo "error during connect" >&2; exit 1 ;;' });
+    await expect(unlisted.p.destroy('docker://hatchabot-a1', { purge: true })).rejects.toMatchObject({ message: expect.stringMatching(/could not be listed/) });
   });
 
   it('lists this install\'s profiles by their labels; removes only what is one', async () => {

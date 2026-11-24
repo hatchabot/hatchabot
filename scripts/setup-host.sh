@@ -17,7 +17,26 @@ say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 say "Checking prerequisites…"
 command -v docker >/dev/null || { echo "docker is required — install Docker Engine first."; exit 1; }
-docker info >/dev/null 2>&1 || { echo "docker is installed but not usable by this user (try: sudo usermod -aG docker \$USER, then re-login)."; exit 1; }
+# The Docker daemon the service will use is the one .env names (a tenant's
+# rootless daemon on a shared host), or will name once HATCHABOT_SETUP_ENV is
+# written to a new .env: that is the one checked, and the one the runtime
+# image is looked for and fetched on below. Looked for on this shell's daemon,
+# an image there read as "already present" while the tenant's daemon had none
+# (audit #040); checked on it, a re-run on such an install stopped here when
+# this shell had no daemon of its own (HB-1059). The last line wins, as
+# systemd's EnvironmentFile reads it.
+if [ -f .env ]; then ENV_LINES="$(cat .env)"; NAMED_IN=.env; else ENV_LINES="${HATCHABOT_SETUP_ENV:-}"; NAMED_IN=HATCHABOT_SETUP_ENV; fi
+# Given to grep as a here-string, never piped to it: grep -q stops at the first
+# match, and under pipefail the printf it left writing (a full .env is some
+# 18 KB) died of SIGPIPE, the test read as "not named", and the default
+# daemon was checked instead (review of HB-1059).
+if grep -q '^DOCKER_HOST=' <<<"$ENV_LINES"; then
+  DH="$(sed -n 's/^DOCKER_HOST=//p' <<<"$ENV_LINES" | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
+  if [ -n "$DH" ]; then export DOCKER_HOST="$DH"; else unset DOCKER_HOST; fi
+  docker info >/dev/null 2>&1 || { echo "The Docker daemon $NAMED_IN names (DOCKER_HOST=$DH) is not reachable — start it, or correct DOCKER_HOST in $NAMED_IN, then re-run."; exit 1; }
+else
+  docker info >/dev/null 2>&1 || { echo "docker is installed but not usable by this user (try: sudo usermod -aG docker \$USER, then re-login)."; exit 1; }
+fi
 command -v node >/dev/null || { echo "node is required — install Node.js 22+."; exit 1; }
 node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' \
   || { echo "Node 22+ required (found $(node --version))."; exit 1; }
@@ -83,24 +102,87 @@ fi
 # its default (src/config/envFile.ts). Hatchabot does this again at each start.
 ./node_modules/.bin/tsx scripts/env-sync.ts .env >/dev/null || say "Couldn't list every setting in .env yet; Hatchabot will when it starts."
 
-# The Docker daemon the service will use is the one .env names (a tenant's
-# rootless daemon on a shared host, from HATCHABOT_SETUP_ENV): the runtime
-# image is looked for and fetched there. Looked for on this shell's daemon, an
-# image there read as "already present" while the tenant's daemon had none
-# (audit #040). The last line wins, as systemd's EnvironmentFile reads it.
-if grep -q '^DOCKER_HOST=' .env; then
-  DH="$(sed -n 's/^DOCKER_HOST=//p' .env | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
-  if [ -n "$DH" ]; then export DOCKER_HOST="$DH"; else unset DOCKER_HOST; fi
-  docker info >/dev/null 2>&1 || { echo "The Docker daemon .env names (DOCKER_HOST=$DH) is not reachable — start it, or correct DOCKER_HOST in .env, then re-run."; exit 1; }
-fi
+# The settings below, read from .env as the service reads it: on Linux by
+# systemd's EnvironmentFile rules (the reader is backup-volumes.sh's, held the
+# same by test/backupKeyLine.test.ts), where spaces around the = count and a
+# " # ..." after a value is part of it; on a Mac as its launchd job reads it,
+# sourced by bash (launchd-plist.sh), in a subshell, where only NAME=value
+# sets it. Read by sed with a comment taken off, the image, the mirror and the
+# CLI's address could be what the service never got (review of HB-1109 and
+# HB-1210). Each name .env sets is ENV_<name>, with ENVSET_<name>=1.
+env_named() {
+  local kv k
+  for k in "$@"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
+  while IFS= read -r -d '' kv; do
+    k="${kv%%=*}"
+    printf -v "ENV_$k" '%s' "${kv#*=}"; printf -v "ENVSET_$k" '%s' 1
+  done < <(
+    if [ "$(uname -s)" = Darwin ]; then
+      set +eu
+      for k in "$@"; do unset "$k"; done
+      set -a; . ./.env >/dev/null 2>&1; set +a
+      for k in "$@"; do [ -z "${!k+x}" ] || printf '%s=%s\0' "$k" "${!k}"; done
+    else
+      node -e '
+    const systemd = (t) => {
+      const out = {}; let st = "prekey", k = "", v = "", lw = -1;
+      // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
+      // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
+      const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
+      for (const c of t + "\n") {
+        const nl = c === "\n" || c === "\r", ws = /\s/.test(c);
+        if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
+        else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
+        else if (st === "commentesc") st = "comment";
+        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.trimEnd(); st = "prevalue"; } else k += c; }
+        else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
+        else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
+        else if (st === "esc") { st = "value"; if (!nl) v += c; }
+        else if (st === "single") { if (c === "\x27") st = "prevalue"; else v += c; }
+        else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
+        else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
+      }
+      return out;
+    };
+    const out = systemd(require("node:fs").readFileSync(".env", "utf8"));
+    for (const k of process.argv.slice(1)) if (Object.prototype.hasOwnProperty.call(out, k)) process.stdout.write(k + "=" + out[k] + "\0");' "$@" 2>/dev/null || true
+    fi
+  )
+}
+env_named HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY PORT HATCHABOT_TLS_CERT HATCHABOT_BIND
 
-if docker image inspect hatchabot-runtime:latest >/dev/null 2>&1; then
+# On the daemon .env names (DOCKER_HOST, set under the prerequisites above),
+# and the image the service runs agents on and the mirror it pulls from as
+# .env names them (HATCHABOT_IMAGE, HATCHABOT_IMAGE_REGISTRY); with none, what
+# the environment has, as upgrade.sh has it. hatchabot-runtime:latest was
+# looked at whatever the service used, so setup fetched or kept the default
+# image while the service ran agents on another (HB-1210).
+# build-runtime-image.sh, given them, fetches into that image's repository
+# from that mirror.
+for v in HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY; do
+  set_in="ENVSET_$v"; val="ENV_$v"
+  [ -n "${!set_in}" ] || continue
+  if [ -n "${!val}" ]; then export "$v=${!val}"; else unset "$v"; fi
+done
+IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
+# A fetch moves :latest of the image's repository (build-runtime-image.sh,
+# REPO), so that is the one looked at. One named by another tag (or a digest)
+# is one the owner pinned, which no fetch makes or moves (upgrade.sh leaves it).
+IMAGE_REPO="$(printf '%s' "$IMAGE" | sed 's/:[^:/]*$//')"
+LATEST="${HATCHABOT_IMAGE_REPO:-$IMAGE_REPO}:latest"
+if [ "$IMAGE" != "$IMAGE_REPO" ] && [ "$IMAGE" != "$IMAGE_REPO:latest" ] || [ "$IMAGE" != "${IMAGE%@*}" ]; then
+  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    say "The runtime image is pinned to $IMAGE (HATCHABOT_IMAGE) — keeping it."
+  else
+    say "⚠ The runtime image .env pins, $IMAGE (HATCHABOT_IMAGE), is not on this machine, and setup does not fetch a pinned image: agents cannot start until it is here (docker pull $IMAGE), or HATCHABOT_IMAGE goes from .env for this release's default."
+  fi
+elif docker image inspect "$LATEST" >/dev/null 2>&1; then
   # An existing install may have promoted a NEWER image to :latest — a default
   # build here would silently demote it (learned the hard way). An OLDER one
   # (a reinstall on a box that kept its images) is brought up to this
   # release's default, the way an upgrade does (2026-09-25).
   WANT="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
-  HAVE="$(docker image inspect hatchabot-runtime:latest --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
+  HAVE="$(docker image inspect "$LATEST" --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
   [ "$HAVE" != "<no value>" ] || HAVE=""
   if [ -n "$WANT" ] && [ -z "$HAVE" ]; then
     # No version label: an old or hand-built image, OpenClaw unknown. Every
@@ -159,21 +241,31 @@ say "Linking the hatchabot CLI…"
 # The CLI is optional, so a failure here never sinks the setup.
 ./scripts/link-cli.sh --no-doctor || echo "⚠ Could not link the hatchabot command — run ./scripts/link-cli.sh later."
 mkdir -p ~/.config/hatchabot
-# The CLI assumes port 8080: an install on another port (a tenant on a shared
-# host, a second install) tells it here so `hbt` works without --url.
-# Read as the service reads it, the last line wins (audit, 2026-10-29;
-# first-run-link.sh and restart.sh read it the same way): systemd takes spaces
-# around the =; the Mac's launchd job sources .env with bash, where only
-# PORT=value sets it (PORT = 9137 is a command, PORT= 9137 sets nothing).
-if [ "$(uname -s)" = "Darwin" ]; then
-  P="$(sed -n -e '/^[[:space:]]*PORT=[[:space:]][[:space:]]*[^#[:space:]]/d' -e 's/^[[:space:]]*PORT=//p' .env)"
-else
-  P="$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' .env)"
-fi
-P="$(printf '%s\n' "$P" | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
-if [ -n "$P" ] && [ "$P" != 8080 ] && ! grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null; then
-  echo "HATCHABOT_URL=http://127.0.0.1:$P" >> ~/.config/hatchabot/env
-fi
+# The CLI assumes http://localhost:8080. An install on another port (a tenant
+# on a shared host, a second install), serving TLS itself (HATCHABOT_TLS_CERT)
+# or listening on one address (HATCHABOT_BIND) tells it here, as restart.sh
+# and first-run-link.sh reach that listener, so `hbt` works without --url.
+# Saved as http://127.0.0.1:<port> whatever those said, the CLI asked plain
+# http of an https listener, or loopback of one on a LAN address (HB-1109).
+# Read as the service reads them (env_named, above): the last line wins
+# (audit, 2026-10-29).
+P="$ENV_PORT"
+SCHEME=http; [ -z "$ENV_HATCHABOT_TLS_CERT" ] || SCHEME=https
+BIND="$ENV_HATCHABOT_BIND"
+case "$BIND" in
+  # Loopback by address over http, as before; by name over https, which a
+  # certificate names more often than an address.
+  ""|0.0.0.0|127.0.0.1) CLI_HOST=127.0.0.1; [ "$SCHEME" = http ] || CLI_HOST=localhost ;;
+  ::|"[::]"|localhost) CLI_HOST=localhost ;;
+  \[*) CLI_HOST="$BIND" ;;
+  *:*) CLI_HOST="[$BIND]" ;;   # an IPv6 address goes in brackets in a URL
+  *) CLI_HOST="$BIND" ;;
+esac
+CLI_URL="$SCHEME://$CLI_HOST:${P:-8080}"
+case "$CLI_URL" in
+  http://127.0.0.1:8080|http://localhost:8080) ;;
+  *) grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null || echo "HATCHABOT_URL=$CLI_URL" >> ~/.config/hatchabot/env ;;
+esac
 if ! grep -q '^HATCHABOT_PASSWORD=' ~/.config/hatchabot/env 2>/dev/null; then
   # A hand-written .env may have no password line (e.g. identity mode) —
   # the CLI prompts in that case, so don't let set -e die on the last step.

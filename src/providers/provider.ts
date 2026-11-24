@@ -32,7 +32,7 @@ export interface RuntimeSpec {
   /**
    * Swap the container may use ON TOP of `memory` ("2g"); absent = none. A
    * provider gives it only where its host compresses swap (zswap or zram,
-   * see orchestrator/swap.ts) and otherwise runs the container without swap.
+   * see domain/swap.ts) and otherwise runs the container without swap.
    */
   memorySwap?: string;
   /**
@@ -250,6 +250,8 @@ export interface ImagesInUse {
 
 export interface RuntimeProvider {
   readonly key: string;
+  /** The default image (`<repository>:<tag>`); its repository is this fleet's, the one its runtime images are named in. */
+  readonly image?: string;
 
   /**
    * Create the runtime and its persistent volume, seed the workspace, and
@@ -338,8 +340,8 @@ export interface RuntimeProvider {
   /** The default image, or the named one (an agent's pinned image). */
   currentImageInfo(image?: string): Promise<RuntimeInfo>;
 
-  /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
-  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine; plugins?: string[]; pluginInstall?: 'link' | 'npm' }[]>;
+  /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). Throws when Docker cannot be asked: none read is not none there (HB-0973). */
+  listImageTags(): Promise<ImageTagInfo[]>;
 
   /** The isolated network's gateway address on this host (created on first
    *  use). Absent on providers without the concept (mock). */
@@ -382,10 +384,13 @@ export interface RuntimeProvider {
   agentProxySource?(): Promise<string | undefined>;
   /**
    * Where THIS machine can reach a port an agent published on its host's
-   * loopback. Local: that port. A runner over SSH: a tunnel to it. Undefined
-   * when there is no way through (a tcp:// runner).
+   * loopback. Local: that port. A runner over SSH: a tunnel to it, which is
+   * the agent's (`runtimeRef`): it ends when that runtime is destroyed.
+   * Undefined when there is no way through (a tcp:// runner).
    */
-  gatewayEndpoint?(port: number): Promise<{ host: string; port: number } | undefined>;
+  gatewayEndpoint?(port: number, runtimeRef?: string): Promise<{ host: string; port: number } | undefined>;
+  /** Its host is removed: let go of what it holds for the process (a runner's console tunnels). */
+  dispose?(): void;
   /**
    * Make sure a plain base runtime image (`<repo>:<openclaw version>`) is on
    * this host's daemon, pulling the published multi-arch one if it is not.
@@ -402,8 +407,8 @@ export interface RuntimeProvider {
   removeEmbedder?(): Promise<void>;
   /** The container a runtime ref names on this provider (a legacy ref's is not its bare fragment). */
   containerName?(runtimeRef: string): string;
-  /** An agent's own browser (src/orchestrator/browser.ts): start it, or keep the one sharing the agent's current network. */
-  ensureBrowser?(spec: import('../orchestrator/browser.js').BrowserSpec): Promise<'running' | 'started'>;
+  /** An agent's own browser (src/orchestrator/console/browser.ts): start it, or keep the one sharing the agent's current network. */
+  ensureBrowser?(spec: import('./browserContainer.js').BrowserSpec): Promise<'running' | 'started'>;
   /** Remove it; one that keeps logins is closed first, so it writes its profile. */
   stopBrowser?(agentContainer: string): Promise<void>;
   /** `logins`: the kept profile it runs on, if any. */
@@ -416,14 +421,16 @@ export interface RuntimeProvider {
   browserProfileBytes?(agentContainer: string): Promise<number | undefined>;
   /** The Chromium an agent's running browser is ("154.0.8037.92"), or undefined when it cannot be asked. */
   browserVersion?(agentContainer: string): Promise<string | undefined>;
-  /** "Sign in to a site" (src/orchestrator/browserPanel.ts): a relay in the agent's container, on a tab of its own in its browser. */
-  openBrowserPanel?(agentContainer: string): import('../orchestrator/browserPanel.js').BrowserPanelChannel;
+  /** "Sign in to a site" (src/orchestrator/console/browserPanel.ts): a relay in the agent's container, on a tab of its own in its browser. */
+  openBrowserPanel?(agentContainer: string): import('./browserPanelRelay.js').BrowserPanelChannel;
   /** A runner's copy of the memory search key files, after they changed here (no-op on this machine). */
   pushEmbedKeys?(files: import('../embedder/embedder.js').EmbedKeyFiles): Promise<void>;
   /** The engine container's live memory and CPU (from `docker stats`), for the health loop's memory guard. */
   embedderStats?(): Promise<ContainerStats | undefined>;
   /** Build `tag` from a Dockerfile on THIS host's daemon (a runner's, over its connection). */
   buildImage?(tag: string, dockerfile: string, labels: Record<string, string>): Promise<{ ok: boolean; error?: string }>;
+  /** What an image runs as and its layers, by any name (a build's check, HB-1032). Throws when Docker cannot say. */
+  inspectImage?(ref: string): Promise<ImageFacts>;
 
   /** Point `to` at the image `from` names (e.g. promote a candidate to :latest). */
   tagImage(from: string, to: string): Promise<void>;
@@ -446,7 +453,8 @@ export interface RuntimeProvider {
    *  strings differ (ssh://h vs ssh://h:22, IP vs hostname, local vs a runner
    *  aliasing localhost). Move uses this to never purge a volume it just
    *  moved onto the same daemon. Throws if the daemon can't be reached — the
-   *  caller must treat "can't verify" as "don't do the destructive thing". */
+   *  caller must treat "can't verify" as "don't do the destructive thing".
+   *  Asked of the daemon each time: what an address reaches can change (HB-0977). */
   daemonId(): Promise<string>;
 
   /** Recent runtime output for the observability card. */
@@ -473,10 +481,14 @@ export interface RuntimeProvider {
    * systemd's record of the scope, so any `systemctl daemon-reload` puts
    * memory.swap.max back to "max" while docker still says no swap (Spark,
    * 2026-10-02). Keyed by runtimeRef; a container that is not there is absent.
+   * With `missing`, the refs whose container docker said is not there are
+   * added to it, and a read that failed as a whole (docker not answering, the
+   * time limit) throws instead of coming back empty: absent and not missing
+   * means not read (HB-1106).
    */
-  memoryLimitsLive?(runtimeRefs: string[]): Promise<Map<string, LiveMemoryLimits>>;
+  memoryLimitsLive?(runtimeRefs: string[], opts?: { missing?: Set<string> }): Promise<Map<string, LiveMemoryLimits>>;
   /** Whether this provider's host compresses swap (zswap or zram), read through the host's own probe; cached briefly. */
-  compressedSwap?(opts?: { fresh?: boolean }): Promise<import('../orchestrator/swap.js').CompressedSwap>;
+  compressedSwap?(opts?: { fresh?: boolean }): Promise<import('../domain/swap.js').CompressedSwap>;
 
   /** Only the model-call lines ("[model-fetch] response …") logged since `sinceIso`, each prefixed with its timestamp,
    *  plus the loop lines token health counts (tokenHealth.ts LOOP_LINE: retried channel messages, failed compactions). */
@@ -635,6 +647,51 @@ export interface RuntimeInfo {
   swapBytes?: number;
 }
 
+/** What a build's check asks of an image it made (HB-1032): its id, the user it runs as, its layers, its labels (HB-0986 review). */
+export interface ImageFacts {
+  id: string;
+  user: string;
+  layers: string[];
+  /** Every label it has; none is `{}`. */
+  labels: Record<string, string>;
+}
+/** `docker image inspect --format` for ImageFacts: one JSON array, so no user name or label can break it. */
+export const IMAGE_FACTS_FORMAT = '[{{json .Id}},{{json .Config.User}},{{json .RootFS.Layers}},{{json .Config.Labels}}]';
+/** The answer to IMAGE_FACTS_FORMAT; undefined when it is not one (then nothing about the image is known). */
+export function parseImageFacts(out: string): ImageFacts | undefined {
+  let v: unknown;
+  try { v = JSON.parse(out.trim()); } catch { return undefined; }
+  if (!Array.isArray(v) || v.length !== 4) return undefined;
+  const [id, user, layers, labels] = v as unknown[];
+  if (typeof id !== 'string' || typeof user !== 'string' || !Array.isArray(layers) || !layers.length) return undefined;
+  if (!layers.every((l) => typeof l === 'string' && /^sha256:[a-f0-9]{64}$/.test(l))) return undefined;
+  // Docker says null for an image with no labels.
+  if (labels !== null && (typeof labels !== 'object' || Array.isArray(labels) || !Object.values(labels).every((x) => typeof x === 'string'))) return undefined;
+  return { id, user, layers: layers as string[], labels: { ...(labels as Record<string, string> | null) } };
+}
+
+/** One tag of the runtime image repository on a daemon, and what its labels say (listImageTags). */
+export interface ImageTagInfo {
+  tag: string;
+  imageId: string;
+  createdAt?: string;
+  size?: string;
+  openclawVersion?: string;
+  channels?: string[];
+  extraPackages?: string[];
+  embedEngine?: EmbedEngine;
+  plugins?: string[];
+  pluginInstall?: 'link' | 'npm';
+  /** What it was built from, as its label org.hatchabot.build-inputs says (orchestrator/machines/buildInputs.ts); absent on an image built before the label (HB-0986). */
+  buildInputs?: string;
+  /** A derived image's name, by its label org.hatchabot.derived: never a base. */
+  derived?: string;
+  /** On a derived image, the stamp of the base and lines it was built from (org.hatchabot.recipe, derivedImage.ts recipeStamp). */
+  recipe?: string;
+  /** Its layers (RootFS diff IDs), lowest first: the same list is the same files, however it is named. */
+  layers?: string[];
+}
+
 export type EmbedEngine = 'baked' | 'none';
 /** Parse the org.hatchabot.embed-engine label: only an explicit `none` means none (older images have no label). */
 export function parseEmbedEngineLabel(v: string | undefined): EmbedEngine {
@@ -677,6 +734,21 @@ export class ProviderError extends Error {
   ) {
     super(message, options);
     this.name = 'ProviderError';
+  }
+}
+
+/**
+ * A memory search start that stopped before it changed anything: the engine
+ * and its door are as they were (the old engine Docker would not remove, a
+ * runner's files that could not be copied there, the service's network that
+ * could not be checked). The health loop's start of an engine off its memory
+ * limit leaves a service so as it was, serving on its old limit, and tries
+ * again at its next tick (HB-1021).
+ */
+export class EmbedderUntouchedError extends ProviderError {
+  constructor(message: string, userMessage: string, options?: { cause?: unknown }) {
+    super(message, userMessage, options);
+    this.name = 'EmbedderUntouchedError';
   }
 }
 

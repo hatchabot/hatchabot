@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clearStaleRuntimePins, clearStaleRuntimePinsWhenUp, listRuntimePins } from '../src/orchestrator/runtimePins.js';
+import { clearStaleRuntimePins, clearStaleRuntimePinsWhenUp, listRuntimePins } from '../src/orchestrator/sources/runtimePins.js';
 import { as, makeWorld, seedRunningAgent } from './support/world.js';
 
 /**
@@ -141,5 +141,33 @@ describe('more conversations than one list call returns (report B27, 2026-10-22)
     const events: Array<[string, Record<string, unknown>]> = [];
     expect(await listRuntimePins(provider, 'ref', 'sample', (e, d) => events.push([e, d]))).toHaveLength(500);
     expect(events).toEqual([['runtime.pin_failed', { error: expect.stringContaining('after the first 500') }]]);
+  });
+
+  it('a later page whose call throws, or whose answer is not JSON, is logged too; the stale pins already found are cleared (HB-1010)', async () => {
+    // 500 stale pins on the first page.
+    const stale = Array.from({ length: 500 }, (_, i) => ({ key: `p${i}`, agentRuntime: rt('claude-cli') }));
+    for (const later of [
+      async () => { throw new Error('connection closed'); },
+      async () => ({ code: 0, stdout: 'Gateway restarting…', stderr: '' }),
+    ]) {
+      const patched: string[] = [];
+      const provider: any = {
+        exec: async (_r: string, args: string[]) => {
+          if (args.includes('sessions.list')) {
+            const p = JSON.parse(args[args.indexOf('--params') + 1]!);
+            return p.offset ? later() : listing(stale);
+          }
+          if (args.includes('sessions.patch')) { patched.push(JSON.parse(args[args.indexOf('--params') + 1]!).key); return { code: 0, stdout: JSON.stringify({ ok: true }), stderr: '' }; }
+          return { code: 0, stdout: JSON.stringify({ 'anthropic/claude-opus-4-8': {} }), stderr: '' };
+        },
+      };
+      const events: Array<[string, Record<string, unknown>]> = [];
+      expect(await clearStaleRuntimePins(provider, 'ref', 'sample', (e, d) => events.push([e, d]))).toHaveLength(500);
+      expect(patched).toHaveLength(500);
+      expect(events[0]).toEqual(['runtime.pin_failed', { error: expect.stringContaining('after the first 500') }]);
+    }
+    // The first page is still the whole answer or none: one that throws is the caller's to log.
+    const provider: any = { exec: async () => { throw new Error('connection closed'); } };
+    await expect(listRuntimePins(provider, 'ref', 'sample')).rejects.toThrow('connection closed');
   });
 });

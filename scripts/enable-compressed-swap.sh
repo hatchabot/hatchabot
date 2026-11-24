@@ -107,7 +107,7 @@ status() {
   else
     note "boot unit: not installed (nothing is re-applied at boot)"
   fi
-  # In the order Hatchabot judges it (src/orchestrator/swap.ts, parseSwapProbe),
+  # In the order Hatchabot judges it (src/domain/swap.ts, parseSwapProbe),
   # so the two never disagree: zram alone; zram with disk swap needs zswap;
   # zswap's shrinker writes agents' cold memory to disk early.
   local verdict=none why='' zram disk zon=N shr=N

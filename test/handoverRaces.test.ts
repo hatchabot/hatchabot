@@ -7,7 +7,7 @@
  * a member and a model change keep off a volume another operation holds.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { clearBusy, markBusy } from '../src/orchestrator/busy.js';
+import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 

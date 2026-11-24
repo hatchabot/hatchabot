@@ -1,10 +1,11 @@
 import { createHash, createHmac } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
+import { z } from 'zod';
 import { LOCAL_OWNER, internalPrincipal, type Principal } from './principal.js';
 import { registerAccountRoutes, sessionAccount, signInLocalByLink } from './accountsAuth.js';
 import { registerSigninLink, SIGNIN_LINK_PATH, type LinkSignIn, type SigninLinkDeps } from './signinLink.js';
-import { clearSessionCookies, readSessionCookie, sessionValue, setSessionCookie, upgradeSessionCookie } from './sessionCookie.js';
+import { clearSessionCookies, readSessionCookie, sessionValue, setSessionCookie, SIGN_OUT_NOT_SAVED, upgradeSessionCookie } from './sessionCookie.js';
 import { safeEqual } from '../util/safeEqual.js';
 import { registerOriginCheck } from './requestOrigin.js';
 import { addressBucket, isPublic, publicClientAddress } from './trust.js';
@@ -23,6 +24,18 @@ import {
 } from './identity.js';
 import { routedPath } from './routedPath.js';
 import { dockerDesktop } from '../ops/opsServer.js';
+/**
+ * POST /v1/login and POST /v1/session: the one field each reads, of any type
+ * (HB-0814). Nothing here refuses: anything but text is a wrong password
+ * (`safeEqual`) or a malformed sign-in token (`IdentityVerifier.verify`), a
+ * 401 as before, after the throttle; a body that is not an object is read as
+ * without it, as the casts read it.
+ */
+const LoginBody = z.object({ password: z.unknown().optional() });
+const SessionBody = z.object({ idToken: z.unknown().optional() });
+
+/** The page's scripts (src/api/pageRoutes.ts): the static shell, before sign-in like the page. Exactly that shape, nothing under it. */
+const PAGE_SCRIPT_PATH = /^\/app\/[a-z0-9-]+\.js$/;
 
 /** The agent-to-agent consult (its caller's token is checked in the handler): only when the router matched that very route. */
 const isAgentMessageRoute = (req: FastifyRequest): boolean => req.method === 'POST' && req.routeOptions?.url === '/v1/agents/:id/message';
@@ -34,7 +47,44 @@ const isAgentMessageRoute = (req: FastifyRequest): boolean => req.method === 'PO
  */
 const failLimit = () => Number(process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW ?? 10); // read per call (tests tune it)
 const FAIL_WINDOW_MS = Number(process.env.HATCHABOT_LOGIN_WINDOW_MS ?? 15 * 60_000);
-const failures = new Map<string, { n: number; until: number }>();
+/** A bucket's misses in its window. `typed`: its last miss was a name typed at a sign-in (noteFailure). */
+type Count = { n: number; until: number; typed?: boolean };
+const failures = new Map<string, Count>();
+/**
+ * The misses and the lockouts (`failures`, `strikes`) are kept in the store
+ * as well, in the table the consult limit uses (`rate_hits`), and read back
+ * at the start: in memory only, every restart (every deploy) gave a
+ * locked-out guesser ten more tries and forgot how often it had been locked
+ * out (HB-0836, the owner's choice). The maps are this process's copy. A
+ * count is kept once it refuses (at its limit: locked), as that many misses
+ * and written once (`keep`), and a lockout's strike always: a count below
+ * its limit is lost with a restart, which gives at most the rest of one
+ * window's tries. A forwarded-for address is never kept: a loopback peer
+ * makes up as many as it likes, and the account's count, and the public
+ * address's, carry the rule. Read back under the maps' bound. The other limits (recovery messages,
+ * new-device notices, the public address's per-minute ceiling) stay in
+ * memory: a restart gives one more of each, which opens no door.
+ */
+let throttleStore: Store | undefined;
+const FAIL_BUCKET = 'signin:fail:';
+const STRIKE_BUCKET = 'signin:strike:';
+/** The store's copy of one count; a write that fails leaves this process's, and is said. */
+function saveCount(prefix: string, k: string, v: { n: number; until: number } | undefined, req?: FastifyRequest): void {
+  try { throttleStore?.setRateCount(prefix + k, v?.n ?? 0, v?.until ?? 0); }
+  catch (err) { req?.log.warn({ err: String(err) }, 'signin.throttle_not_saved'); }
+}
+/** The store the counts are kept in, and what it holds read back (registerAuth, at the start). */
+function keepThrottleIn(store: Store | undefined, log: FastifyInstance['log']): void {
+  throttleStore = store;
+  if (!store) return;
+  try {
+    const now = Date.now();
+    for (const r of store.rateCounts(FAIL_BUCKET, now)) failures.set(r.bucket.slice(FAIL_BUCKET.length), { n: r.n, until: r.until });
+    for (const r of store.rateCounts(STRIKE_BUCKET, now)) strikes.set(r.bucket.slice(STRIKE_BUCKET.length), { n: r.n, until: r.until });
+    bound(failures, now);
+    bound(strikes, now);
+  } catch (err) { log.error({ err: String(err) }, 'signin.throttle_unread: sign-in limits start from nothing'); }
+}
 /**
  * Whom to count a failure against. Behind `tailscale serve` or a local reverse
  * proxy every client arrives from loopback, so counting the socket address
@@ -57,13 +107,24 @@ export function loopbackIsRemote(): boolean {
  * The account a failure is counted against, as a key of bounded size: anyone
  * can type any "username", and megabyte-long ones, each kept as a map key,
  * were a way to fill the process's memory with no account at all (review,
- * 2026-10-01).
+ * 2026-10-01). A name that starts with `*` is hashed as a long one is: `*…*`
+ * keys are the shared buckets' (SharedBucket), and a name typed at the
+ * sign-in as `*first-run-setup*` counted against the setup code's, and any
+ * starting with `*` got a shared bucket's ten-fold limit (HB-1434). No
+ * account's name holds a `*` (usernameProblem).
  */
 function accountKey(who: string): string {
   const w = who.trim().toLowerCase();
-  return w.length <= 64 ? w : `#${createHash('sha256').update(w).digest('hex').slice(0, 32)}`;
+  return w.length <= 64 && !w.startsWith('*') ? w : `#${createHash('sha256').update(w).digest('hex').slice(0, 32)}`;
 }
-function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): string[] {
+/**
+ * A bucket everyone's misses share (the one password, the first-run setup
+ * code), counted as `user:*<name>*`. Never a name: a name someone typed goes
+ * through accountKey, which never makes a `*…*` key (HB-1434).
+ */
+export interface SharedBucket { readonly shared: string }
+function throttleKeys(req: FastifyRequest, who?: string | SharedBucket, scope?: 'link' | '2fa'): string[] {
+  const name = typeof who === 'object' ? `*${who.shared}*` : who ? accountKey(who) : undefined;
   // The public listener (trust.ts) counts apart from everything else, so a
   // stranger on the internet can lock an account out of the PUBLIC address
   // only: the owner still signs in at the private one. There the visitor's
@@ -71,7 +132,7 @@ function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link' | '2fa')
   // and `pub:all` is a ceiling on every public failure together.
   if (isPublic(req)) {
     const keys = [`pub:ip:${addressBucket(publicClientAddress(req))}`];
-    if (who) keys.push(`pub:user:${accountKey(who)}`);
+    if (name) keys.push(`pub:user:${name}`);
     keys.push('pub:all');
     return scope ? keys.map((k) => `${scope}:${k}`) : keys;
   }
@@ -91,20 +152,28 @@ function throttleKeys(req: FastifyRequest, who?: string, scope?: 'link' | '2fa')
     if (first) ip = `fwd:${first}`;
   }
   const keys = [`ip:${ip.slice(0, 80)}`];
-  if (who) keys.push(`user:${accountKey(who)}`);
+  if (name) keys.push(`user:${name}`);
   // A scope is a separate count: sign-in links' misses never lock anyone out
   // of the password form. A junk link costs a page on another site nothing
   // to send (it needs no cookie), so sharing the bucket let ten of them lock
   // the owner out of signing in (2026-10-01).
   return scope ? keys.map((k) => `${scope}:${k}`) : keys;
 }
+/**
+ * The ceiling on every public failure together, in each scope. Anchored, as
+ * PUBLIC_KEY: a forged forwarded-for address that ended with `pub:all` got
+ * the ceiling's hundred misses (HB-1389 review).
+ */
+const CEILING_KEY = /^(?:(?:link|2fa):)?pub:all$/;
+/** A shared bucket (the one password, the first-run code: `*…*` names), at either address. Anchored, as CEILING_KEY. */
+const SHARED_KEY = /^(?:(?:link|2fa):)?(?:pub:)?user:\*/;
 /** How many misses a bucket takes before it refuses. */
 function limitFor(k: string): number {
-  if (k.endsWith('pub:all')) return publicConfig().failsCeiling;
+  if (CEILING_KEY.test(k)) return publicConfig().failsCeiling;
   // A shared bucket (the one password, the first-run code) is a ceiling on
   // everyone together, not a lock: at the per-client limit, ten misses from
   // anyone locked the owner out too (regression review, 2026-09-28).
-  return k.includes('user:*') ? failLimit() * 10 : failLimit();
+  return SHARED_KEY.test(k) ? failLimit() * 10 : failLimit();
 }
 /**
  * Public lockouts back off: each time the same address or account is locked
@@ -114,15 +183,18 @@ function limitFor(k: string): number {
  */
 const strikes = new Map<string, { n: number; until: number }>();
 const STRIKE_MEMORY_MS = 24 * 60 * 60_000;
-function lockMsFor(k: string): number {
+function lockMsFor(k: string, req?: FastifyRequest): number {
   const now = Date.now();
   const s = strikes.get(k);
   const n = s && now < s.until ? s.n + 1 : 1;
   strikes.set(k, { n, until: now + STRIKE_MEMORY_MS });
-  if (strikes.size > 10_000) for (const [key, v] of strikes) if (now > v.until) strikes.delete(key);
+  saveCount(STRIKE_BUCKET, k, strikes.get(k), req);
+  // Held to the counts' bound: only expired ones went, and past 10,000 live
+  // ones nothing did (HB-1389 review).
+  bound(strikes, now);
   return Math.min(FAIL_WINDOW_MS * 2 ** (n - 1), STRIKE_MEMORY_MS);
 }
-export function throttled(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): boolean {
+export function throttled(req: FastifyRequest, who?: string | SharedBucket, scope?: 'link' | '2fa'): boolean {
   for (const k of throttleKeys(req, who, scope)) {
     const f = failures.get(k);
     if (!f) continue;
@@ -142,7 +214,7 @@ export function throttled(req: FastifyRequest, who?: string, scope?: 'link' | '2
  * when the check is over, whatever its result.
  */
 const pending = new Map<string, number>();
-export function reserve(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): (() => void) | undefined {
+export function reserve(req: FastifyRequest, who?: string | SharedBucket, scope?: 'link' | '2fa'): (() => void) | undefined {
   const keys = throttleKeys(req, who, scope);
   const now = Date.now();
   for (const k of keys) {
@@ -162,43 +234,151 @@ export function reserve(req: FastifyRequest, who?: string, scope?: 'link' | '2fa
     }
   };
 }
-export function noteFailure(req: FastifyRequest, who?: string, scope?: 'link' | '2fa'): void {
+/**
+ * `typed`: `who` is a name someone typed at a sign-in (POST /v1/login), so it
+ * may be nobody's account. Counted as any name is, so the answer never says
+ * which names are accounts; only how many such counts the store keeps is
+ * bounded (`keep`, HB-1240).
+ */
+export function noteFailure(req: FastifyRequest, who?: string | SharedBucket, scope?: 'link' | '2fa', opts: { typed?: boolean } = {}): void {
   for (const k of throttleKeys(req, who, scope)) {
     const f = failures.get(k);
     const now = Date.now();
-    const cur = !f || now > f.until ? { n: 1, until: now + FAIL_WINDOW_MS } : { n: f.n + 1, until: f.until };
+    const cur: Count = !f || now > f.until ? { n: 1, until: now + FAIL_WINDOW_MS } : { n: f.n + 1, until: f.until };
+    if (opts.typed === true) cur.typed = true;
     failures.set(k, cur);
     // A public bucket that just filled: lock it for its backed-off time, and put it on the record.
-    if (k.includes('pub:') && cur.n === limitFor(k)) {
-      if (!k.endsWith('pub:all')) cur.until = now + lockMsFor(k);
+    // Only a count at the public address: a forged forwarded-for address holding `pub:` had
+    // a strike of its own, kept a day in the store, and a burst on the record, for every
+    // address a peer here made up (HB-1389 review).
+    if (PUBLIC_KEY.test(k) && cur.n === limitFor(k)) {
+      if (!CEILING_KEY.test(k)) cur.until = now + lockMsFor(k, req);
       req.server.publicAccess?.failureBurst(req, k, cur.until);
     }
+    keep(k, f, cur, now, req, opts.typed === true);
   }
-  // Bounded: expired entries go first, then client buckets with the fewest
-  // misses; an account's bucket goes last. Dropping the oldest by insertion
-  // let a flood of junk evict the very account being guessed at, and with it
-  // the per-account cap (night review, 2026-09-27).
-  if (failures.size > 10_000) {
-    const now = Date.now();
-    for (const [k, f] of failures) if (now > f.until) failures.delete(k);
-    if (failures.size > 8_000) {
-      const order = [...failures.entries()].sort(([ka, a], [kb, b]) =>
-        (ka.includes('user:') ? 1 : 0) - (kb.includes('user:') ? 1 : 0) || a.n - b.n);
-      for (const [k] of order.slice(0, failures.size - 8_000)) failures.delete(k);
-    }
+  bound(failures, Date.now());
+}
+/**
+ * How many typed names that are no account keep their count in the store.
+ * Any name typed at /v1/login is counted, and a loopback peer that typed a
+ * new one every ten misses wrote ten rows a name (2,000 names: 20,000 rows,
+ * kept about 75 minutes; HB-1240). Past this many, such a name's count is
+ * this process's only: a restart gives a name that is nobody's another
+ * window's tries, at an account that does not exist. An account's own count
+ * is always kept, however many made-up ones there are, so no flood of them
+ * can make a restart forget a real account's lockout; and below the bound a
+ * made-up name is kept like a real one, so a restart does not tell which
+ * names are accounts either.
+ */
+const MADE_UP_NAMES_KEPT = 500;
+/**
+ * A name's bucket. Anchored: only a `user:` or `pub:user:` key names an
+ * account (an address key can hold any text). Its name is any text, line
+ * breaks too: with `.`, a typed name holding one was no name key, so it was
+ * stored past MADE_UP_NAMES_KEPT and ranked as an address (HB-1389 review).
+ */
+const NAME_KEY = /^(?:(?:link|2fa):)?(?:pub:)?user:([\s\S]*)$/;
+/** A count at the public address. Anchored, as NAME_KEY: a forged forwarded-for address can read like one. */
+const PUBLIC_KEY = /^(?:(?:link|2fa):)?pub:/;
+/** This machine's accounts' names as their buckets have them (accountKey); undefined with no store, or unread. */
+function accountNameKeys(): Set<string> | undefined {
+  if (!throttleStore) return undefined;
+  try { return new Set(throttleStore.listLocalAccounts().map((a) => accountKey(a.username))); }
+  catch { return undefined; }
+}
+/** A typed-name bucket of a name that is no account here (by its bucket key, as the count is shared: `Kiosk` and `kiosk` are one). */
+function madeUpName(k: string, accounts?: Set<string>): boolean {
+  const name = NAME_KEY.exec(k)?.[1];
+  if (name === undefined) return false;
+  const known = accounts ?? accountNameKeys();
+  return known !== undefined && !known.has(name); // unread: kept, as an account's would be
+}
+/** How many typed-name buckets (accounts' and made-up ones, both addresses) the store keeps now. */
+function nameCountsKept(now: number): number {
+  if (!throttleStore) return 0;
+  try { return throttleStore.rateCounts(`${FAIL_BUCKET}user:`, now).length + throttleStore.rateCounts(`${FAIL_BUCKET}pub:user:`, now).length; }
+  catch { return 0; }
+}
+/**
+ * The store's copy of a count that refuses: at most its limit's misses, and
+ * written only when that number or its end changes (the miss that fills it,
+ * which is when a lock begins). Written at every miss past the limit, a
+ * burst let through together (a route that checks, waits, then counts) cost
+ * each miss a rewrite of all of them: 2,000 made-up tokens at once held the
+ * process for five seconds (HB-0836). A typed name that is no account is
+ * kept only while the store holds fewer than MADE_UP_NAMES_KEPT name counts
+ * (HB-1240).
+ */
+function keep(k: string, was: { n: number; until: number } | undefined, cur: { n: number; until: number }, now: number, req: FastifyRequest, typed = false): void {
+  if (k.replace(/^(?:link|2fa):/, '').startsWith('ip:fwd:')) return;
+  const limit = limitFor(k);
+  const kept = (v?: { n: number; until: number }) => (v && now <= v.until ? Math.min(v.n, limit) : 0);
+  if (kept(cur) < limit || (kept(was) === limit && was?.until === cur.until)) return;
+  if (typed && madeUpName(k) && nameCountsKept(now) >= MADE_UP_NAMES_KEPT) return;
+  saveCount(FAIL_BUCKET, k, { n: limit, until: cur.until }, req);
+}
+/**
+ * Bounded: expired entries go first, then, fewest misses first among
+ * equals: this side's addresses' counts below their limit and names typed
+ * here that are nobody's account; then this side's addresses' lockouts (a
+ * peer on this machine can forge forwarded-for addresses, so they are worth
+ * least); last, every count at the public address (all held to the public
+ * ceiling, `pub:all`, so few), the ceiling itself, accounts' counts and the
+ * shared buckets. Dropping the oldest by insertion let a flood of junk evict
+ * the very account being guessed at, and with it the per-account cap (night
+ * review, 2026-09-27); with every name alike, about 12,000 made-up names
+ * each missed as often as a locked-out account did the same (HB-1389); with
+ * every address alike, 9,500 from a forging peer let a public address's
+ * lockout and the ceiling go, a sign-in link's only limits (HB-1389
+ * review). The counts read back at the start are held to it too (HB-0836):
+ * they carry no `typed`, so they go with the accounts' (the store keeps at
+ * most MADE_UP_NAMES_KEPT made-up ones).
+ */
+function bound(m: Map<string, Count>, now: number): void {
+  if (m.size <= 10_000) return;
+  for (const [k, f] of m) if (now > f.until) m.delete(k);
+  if (m.size > 8_000) {
+    const accounts = accountNameKeys();
+    // 0: this side's address below its limit, or a name typed here that is nobody's account;
+    // 1: this side's address at its limit; 2: anything public, an account's, a shared bucket's
+    // (whatever its last miss: a typed one let a flood evict the setup code's, HB-1434).
+    const rank = (k: string, f: Count): number =>
+      PUBLIC_KEY.test(k) || SHARED_KEY.test(k) ? 2
+        : NAME_KEY.test(k) ? (f.typed && accounts !== undefined && madeUpName(k, accounts) ? 0 : 2)
+          : f.n >= limitFor(k) ? 1 : 0;
+    const order = [...m.entries()].map(([k, f]) => ({ k, n: f.n, r: rank(k, f) })).sort((a, b) => a.r - b.r || a.n - b.n);
+    for (const { k } of order.slice(0, m.size - 8_000)) m.delete(k);
   }
 }
-/** A recovered account starts clean: the lock-out someone ran up on it ends. */
-export function clearFailures(who: string): void {
-  failures.delete(`user:${accountKey(who)}`);
-  failures.delete(`pub:user:${accountKey(who)}`);
+/**
+ * A recovered account starts clean: the lock-out someone ran up on it ends,
+ * at both addresses and for its second factor (counted against
+ * `2fa:<its id>`, secondFactor.ts), and so do their strikes, which outlive a
+ * restart now: kept, its next lockout still doubled (HB-0836). A sign-in
+ * link's misses name no account: there is none of its own to clear. The
+ * addresses' counts and the public ceiling stay as they were: cleared, they
+ * would be a reset button for those limits that anyone with an account
+ * could press.
+ */
+export function clearFailures(who: string, ownerId?: string): void {
+  const keys = [`user:${accountKey(who)}`, `pub:user:${accountKey(who)}`];
+  if (ownerId) keys.push(`2fa:user:${accountKey(`2fa:${ownerId}`)}`, `2fa:pub:user:${accountKey(`2fa:${ownerId}`)}`);
+  for (const k of keys) {
+    failures.delete(k);
+    saveCount(FAIL_BUCKET, k, undefined);
+    strikes.delete(k);
+    saveCount(STRIKE_BUCKET, k, undefined);
+  }
 }
 /** Password mode has one password, so one bucket for it: forged forwarded-for addresses each got a fresh client bucket and unlimited guesses (night review). */
-const PASSWORD_BUCKET = '*shared-password*';
+const PASSWORD_BUCKET: SharedBucket = { shared: 'shared-password' };
 /** Test hook. */
 export function _resetLoginThrottle(): void { failures.clear(); strikes.clear(); pending.clear(); }
 /** Test hook: the bucket names in use (never their counts). */
 export function _loginThrottleKeys(): string[] { return [...failures.keys()]; }
+/** Test hook: the buckets with a strike (never their counts). */
+export function _loginStrikeKeys(): string[] { return [...strikes.keys()]; }
 // The session cookie's name, flags and reading rules: sessionCookie.ts. It is
 // `secure` (and `__Host-`) only when the request actually arrived over HTTPS:
 // the browser silently DISCARDS a secure cookie on an http:// origin, so a
@@ -356,7 +536,8 @@ function registerLogoutEverywhere(app: FastifyInstance, store: Store | undefined
     // …and the browsers the public address remembers: the next sign-in from each is announced again.
     store.forgetDevices(who);
     if (cliTokens) app.log.warn({ owner: who, revoked: cliTokens }, 'logout_everywhere.cli_tokens_revoked');
-    clearSessionCookies(reply, req);
+    // Every session has ended with the epoch, and every pass with its session.
+    clearSessionCookies(reply, req, true);
     return { ok: true, cliTokens };
   });
 }
@@ -378,6 +559,7 @@ function linkRoute(app: FastifyInstance, opts: AuthOptions, signIn: SigninLinkDe
 
 export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Promise<void> {
   await app.register(fastifyCookie);
+  keepThrottleIn(opts.store, app.log);
   // Before any sign-in hook: a request a page on another site (a neighbouring
   // tenant included) made the browser send changes nothing (requestOrigin.ts).
   registerOriginCheck(app);
@@ -433,10 +615,10 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     return safeEqual(sig, expected);
   };
 
-  app.post<{ Body: { password?: string } }>('/v1/login', async (req, reply) => {
+  app.post('/v1/login', async (req, reply) => {
     if (!opts.password) return { ok: true }; // auth disabled
     if (throttled(req, PASSWORD_BUCKET)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
-    const given = (req.body as { password?: string } | null)?.password ?? '';
+    const given = LoginBody.safeParse(req.body).data?.password ?? '';
     const match = safeEqual(given, opts.password);
     if (!match) {
       // Flat-rate the brute-force path a little; real rate limiting can come
@@ -458,7 +640,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
   // who this tab is. Exempt from auth below — logging out with an already
   // dead session must succeed, not 401.
   app.post('/v1/logout', async (req, reply) => {
-    clearSessionCookies(reply, req);
+    if (!clearSessionCookies(reply, req)) return reply.code(503).send({ error: SIGN_OUT_NOT_SAVED });
     return { ok: true };
   });
   registerLogoutEverywhere(app, opts.store, !!opts.password);
@@ -496,7 +678,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     // (which exists only when HATCHABOT_SIGNIN_KEY_FILE is set).
     if (path === SIGNIN_LINK_PATH) return;
     // PWA shell assets carry no data — reachable before login so the app can install.
-    if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
+    if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/') || PAGE_SCRIPT_PATH.test(path)) return;
     if (path === '/privacy' || path === '/terms') return; // public legal pages (Google OAuth consent screen)
     // Invitees don't have the LAN password — their invite code is their
     // credential. The join surface validates codes itself.
@@ -538,7 +720,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
   registerAccountRoutes(app, { store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner }, { throttled, noteFailure, clearFailures, reserve });
 
   app.post('/v1/logout', async (req, reply) => {
-    clearSessionCookies(reply, req);
+    if (!clearSessionCookies(reply, req)) return reply.code(503).send({ error: SIGN_OUT_NOT_SAVED });
     return { ok: true };
   });
   registerLogoutEverywhere(app, store);
@@ -574,7 +756,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     // …and so is using a recovery code: it IS the credential, checked in the route.
     if (path === '/v1/local-accounts/recover-with-code') return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
-    if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
+    if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/') || PAGE_SCRIPT_PATH.test(path)) return;
     if (path === '/privacy' || path === '/terms') return;
     if (path === '/v1/connections/google/callback') return;
     if (isAgentMessageRoute(req)) return;
@@ -675,8 +857,8 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     return { sub, email };
   };
 
-  app.post<{ Body: { idToken?: string } }>('/v1/session', async (req, reply) => {
-    const idToken = (req.body as { idToken?: string } | null)?.idToken;
+  app.post('/v1/session', async (req, reply) => {
+    const idToken = SessionBody.safeParse(req.body).data?.idToken;
     if (!idToken) return reply.code(400).send({ error: 'idToken required' });
     if (throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     try {
@@ -708,7 +890,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
   });
 
   app.post('/v1/logout', async (req, reply) => {
-    clearSessionCookies(reply, req);
+    if (!clearSessionCookies(reply, req)) return reply.code(503).send({ error: SIGN_OUT_NOT_SAVED });
     return { ok: true };
   });
   registerLogoutEverywhere(app, opts.store);
@@ -763,7 +945,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       || path === '/v1/local-accounts/recover' || path === '/v1/local-accounts/recover-with-code')) return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     // PWA shell assets carry no data — reachable before login so the app can install.
-    if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
+    if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/') || PAGE_SCRIPT_PATH.test(path)) return;
     if (path === '/privacy' || path === '/terms') return; // public legal pages (Google OAuth consent screen)
     // Cross-site OAuth redirect: strict-SameSite keeps the session cookie
     // home, so the single-use state token is this path's credential.

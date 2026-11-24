@@ -4,6 +4,11 @@
  *   - /v1/* (live, authenticated data) is NEVER cached — always the network.
  *   - navigations are network-first, falling back to the cached shell offline.
  *   - static shell assets (icons, manifest) are cache-first.
+ *   - the page's scripts (/app/*.js, HB-0811) are cache-first by the address
+ *     the page names them with, which carries their digest; one copy of each
+ *     is kept, and only bytes the server said are that digest's. The page
+ *     itself is cached afresh on every load that reaches the network, so the
+ *     shell offline is a page whose scripts are kept.
  * Bump CACHE to ship a new shell.
  */
 // Bumped to evict a shell cached before the app was served no-store: an old
@@ -33,9 +38,38 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== self.location.origin) return; // third-party: leave alone
   if (url.pathname.startsWith('/v1/')) return; // live data: never cached
 
+  // A cache write the worker is kept alive for; one that fails costs only the offline copy.
+  const keep = (write) => e.waitUntil(write.catch(() => {}));
+
   if (req.mode === 'navigate') {
-    // Fresh page when online; the cached shell when not.
-    e.respondWith(fetch(req).catch(() => caches.match('/')));
+    // Fresh page when online; the cached shell when not. A redirected
+    // response is not kept: a browser refuses one from the cache for a page.
+    e.respondWith(fetch(req).then((res) => {
+      if (res.ok && !res.redirected && url.pathname === '/') { const copy = res.clone(); keep(caches.open(CACHE).then((c) => c.put('/', copy))); }
+      return res;
+    }).catch(() => caches.match('/')));
+    return;
+  }
+
+  if (/^\/app\/[a-z0-9-]+\.js$/.test(url.pathname) && url.searchParams.has('v')) {
+    e.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => {
+      // Kept only when the server answered with the bytes the digest names
+      // (it marks those immutable). Asked for an older release's digest, it
+      // answers with the current file, marked no-cache: kept, those bytes sat
+      // under the older digest for good (HB-0894).
+      if (res.ok && /\bimmutable\b/.test(res.headers.get('cache-control') || '')) {
+        const copy = res.clone();
+        keep(caches.open(CACHE).then(async (c) => {
+          await c.put(req, copy);
+          // The copy an older page named goes: one of each script is kept.
+          for (const k of await c.keys()) {
+            const u = new URL(k.url);
+            if (u.pathname === url.pathname && u.search !== url.search) await c.delete(k);
+          }
+        }));
+      }
+      return res;
+    })));
     return;
   }
 

@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { clearBusy, markBusy } from '../src/orchestrator/busy.js';
+import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
@@ -525,7 +525,7 @@ describe('the 30th audit: an AI source is in use where its token RUNS, and a bui
     const { store } = await world();
     const { MemSecrets } = await import('./support/world.js');
     const secrets = new MemSecrets();
-    const { buildRuntimeSpec } = await import('../src/orchestrator/provision.js');
+    const { buildRuntimeSpec } = await import('../src/orchestrator/lifecycle/provision.js');
     store.insertAIProfile({ id: 'p9', ownerId: 'user-other', name: 'Theirs', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p9', shared: true, createdAt: 'now' });
     await secrets.put('ai/p9', 'sk-theirs');
     store['db'].prepare('UPDATE agents SET ai_profile_id = ? WHERE id = ?').run('p9', 'a1');

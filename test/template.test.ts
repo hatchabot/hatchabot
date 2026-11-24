@@ -3,7 +3,8 @@ import Database from 'better-sqlite3';
 import { gzipSync } from 'node:zlib';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { exportTemplate, importTemplate, parseTemplate, resolveParamValues, TemplateParamSchema } from '../src/orchestrator/template.js';
+import { exportTemplate, importTemplate, parseTemplate, resolveParamValues } from '../src/orchestrator/transfer/template.js';
+import { TemplateParamSchema } from '../src/domain/templateParams.js';
 import { buildWorkspaceSeed } from '../src/openclaw/workspace.js';
 
 /**

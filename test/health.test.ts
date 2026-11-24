@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { agentHealth, doctorLint } from '../src/orchestrator/health.js';
+import { agentHealth, doctorLint } from '../src/orchestrator/health/health.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 class MemSecrets implements SecretStore {
@@ -161,6 +161,23 @@ describe('doctorLint', () => {
     const d = (await doctorLint(p, ref))!;
     expect(d.ok).toBeUndefined();
     expect(d.findings).toEqual([]);
+    expect(d.complete).toBe(false);
+  });
+
+  it('only a run with a real ok, checks run, and findings for a not-ok is complete (HB-1047)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const lint = async (body: unknown) => {
+      p.execResponses.set('doctor', { code: 0, stdout: JSON.stringify(body), stderr: '' });
+      return (await doctorLint(p, ref))!.complete;
+    };
+    expect(await lint({ ok: true, checksRun: 12, findings: [] })).toBe(true);
+    // Only the by-design warnings: not ok, but the reasons are known.
+    expect(await lint({ ok: false, checksRun: 12, findings: [{ checkId: 'core/doctor/security', severity: 'warning', message: 'openclaw.json contains plaintext secret-bearing config' }] })).toBe(true);
+    expect(await lint({ ok: false, checksRun: 12, findings: [] })).toBe(false); // not ok, and no reason given
+    expect(await lint({ ok: true, checksRun: 0, findings: [] })).toBe(false); // nothing was checked
+    expect(await lint({ ok: true, findings: [] })).toBe(false);
+    expect(await lint({ checksRun: 12, findings: [] })).toBe(false);
   });
 
   it('returns undefined (never throws) when doctor is absent or broken', async () => {

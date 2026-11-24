@@ -27,8 +27,31 @@ export interface Shim {
 
 export const SHIM_DNS = 'box.example.com';
 
-const SCRIPT = String.raw`#!/usr/bin/env node
-const fs = require('fs'), path = require('path');
+/**
+ * What only reads (its version, its status, Funnel's and serve's status) is
+ * answered by the shell from the files beside it: src/ops/tailnet.ts gives
+ * those calls 2.5 to 4 seconds, which a Node start on a machine at load 40 to
+ * 80 can take, and "turn on" then answers 409, "Tailscale is not installed on
+ * this machine" (HB-0855: a stand-in whose Node part starts 3 seconds late
+ * gives that failure with a Node-only stand-in, and passes with this one).
+ * What changes the configuration goes to Node (20 seconds).
+ * An argument with a quote or a backslash goes to Node too, which logs it as
+ * JSON; the shell's log line is the same JSON for the plain words it takes.
+ */
+const shellPart = (node: string) => `#!/bin/sh
+d="\${0%/*}"
+case "$*" in *'"'*|*'\\'*) exec '${node}' "$d/tailscale.cjs" "$@" ;; esac
+log() { j=; for a in "$@"; do j="$j\${j:+,}\\"$a\\""; done; printf '[%s]\\n' "$j" >> "$d/calls.log"; }
+case "$1" in
+  --version) [ "$#" = 1 ] && { log "$@"; echo 1.80.0; exit 0; } ;;
+  status) log "$@"; cat "$d/status.json" 2>/dev/null || echo '{}'; exit 0 ;;
+  serve) [ "$2" = status ] && { log "$@"; echo 'No serve config'; exit 0; } ;;
+  funnel) [ "$2" = status ] && { log "$@"; cat "$d/serve.json" 2>/dev/null || echo '{}'; exit 0; } ;;
+esac
+exec '${node}' "$d/tailscale.cjs" "$@"
+`;
+
+const SCRIPT = String.raw`const fs = require('fs'), path = require('path');
 const dir = __dirname;
 const args = process.argv.slice(2);
 fs.appendFileSync(path.join(dir, 'calls.log'), JSON.stringify(args) + '\n');
@@ -65,8 +88,9 @@ console.error('shim: unexpected ' + args.join(' ')); process.exit(2);
 export function tailscaleShim(): Shim {
   const dir = mkdtempSync(join(tmpdir(), 'hb-tailscale-shim-'));
   const bin = join(dir, 'tailscale');
-  writeFileSync(bin, SCRIPT);
+  writeFileSync(bin, shellPart(process.execPath));
   chmodSync(bin, 0o755);
+  writeFileSync(join(dir, 'tailscale.cjs'), SCRIPT);
   const status = {
     BackendState: 'Running',
     Self: { DNSName: `${SHIM_DNS}.`, TailscaleIPs: ['100.64.0.1'], CapMap: { funnel: null, 'https://tailscale.com/cap/funnel-ports?ports=443,8443,10000': null } },

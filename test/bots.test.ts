@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { TelegramPoolProvisioner } from '../src/channels/telegramPool.js';
-import { auditBots } from '../src/orchestrator/bots.js';
+import { auditBots } from '../src/orchestrator/channels/bots.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 class MemSecrets implements SecretStore {

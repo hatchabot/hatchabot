@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createOpsPush, PushBudget, pushText } from '../src/ops/push.js';
 
 /**
@@ -84,6 +84,54 @@ describe('pushing "something is waiting" to the owner', () => {
     });
     expect(await push.waiting('owner', 'Private task name', undefined, { beforeSend: () => current })).toBe(false);
     expect(sent).toEqual([]);
+  });
+
+  it('a push called off at its last check gives its slot of the hour back, on Telegram and on Discord (HB-0938)', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const push = createOpsPush({ botToken: async () => 'fixture-bot', chatId: () => 'fixture-chat', fetchImpl: stubFetch(calls) });
+    for (let i = 0; i < 6; i++) expect(await push.waiting('owner', `Called off ${i}`, undefined, { beforeSend: () => false })).toBe(false);
+    expect(calls).toHaveLength(0);
+    // The hour's six are all still there.
+    for (let i = 0; i < 6; i++) expect(await push.waiting('owner', `Real ${i}`)).toBe(true);
+    expect(calls).toHaveLength(6);
+    expect(String(calls[5]!.body.text)).toContain('last of these for this hour');
+    expect(await push.waiting('owner', 'One too many')).toBe(false);
+
+    const dms: string[] = [];
+    const viaDiscord = createOpsPush({ botToken: async () => undefined, chatId: () => undefined, perHour: 1,
+      sendDiscord: async (_owner, text, beforeSend) => { if (beforeSend && !beforeSend()) return false; dms.push(text); return true; },
+    });
+    expect(await viaDiscord.waiting('owner', 'Called off', undefined, { beforeSend: () => false })).toBe(false);
+    expect(await viaDiscord.waiting('owner', 'Real')).toBe(true);
+    expect(dms).toHaveLength(1);
+  });
+
+  it('gives back its own slot, not a later push\'s, so the hour still ends when it should (HB-0938 review)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-03-02T09:00:00Z') });
+    try {
+      const dms: string[] = [];
+      let release = () => {};
+      const held = new Promise<void>((r) => { release = r; });
+      const push = createOpsPush({ botToken: async () => undefined, chatId: () => undefined, perHour: 2,
+        sendDiscord: async (_owner, text, beforeSend) => {
+          // The first waits on its token while the next is sent.
+          if (text.includes('Called off')) await held;
+          if (beforeSend && !beforeSend()) return false;
+          dms.push(text); return true;
+        },
+      });
+      const first = push.waiting('owner', 'Called off', undefined, { beforeSend: () => false });
+      vi.setSystemTime(new Date('2026-03-02T09:30:00Z'));
+      expect(await push.waiting('owner', 'Real at half past')).toBe(true);
+      release();
+      expect(await first).toBe(false);
+      // An hour after the first, before an hour after the second: the second's slot is still taken.
+      vi.setSystemTime(new Date('2026-03-02T10:15:00Z'));
+      expect(await push.waiting('owner', 'Real at quarter past')).toBe(true);
+      expect(dms.at(-1)).toContain('last of these for this hour');
+      expect(await push.waiting('owner', 'One too many')).toBe(false);
+      expect(dms).toHaveLength(2);
+    } finally { vi.useRealTimers(); }
   });
 
   it('a refused or failed send is logged, never thrown', async () => {

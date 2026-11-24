@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
-import { checkInvite, createInvite, redeemInvite, InviteInvalidError } from '../src/orchestrator/invite.js';
+import { checkInvite, createInvite, redeemInvite, InviteInvalidError } from '../src/orchestrator/members/invite.js';
 
 function makeStore(): Store {
   const store = new Store(new Database(':memory:'));

@@ -139,6 +139,29 @@ describe('the embedding service', () => {
     expect(w.provider.embedder.embedder).toBe('stopped');
   });
 
+  it('an engine on another memory limit than the one asked for now is started again, door kept, once (HB-1021)', async () => {
+    const w = world();
+    const sha = await withModel(w, 'data');
+    const svc = new EmbedderService({
+      provider: () => w.provider, secrets: w.secrets, store: w.store, dataDir: w.dataDir, runtimeImage: 'x:1',
+      doorScript: 'noop', doorBind: async () => '127.0.0.1', modelSha256: sha, log: (e, d) => w.events.push([e, d]),
+    });
+    await svc.start();
+    const starts = w.provider.embedderSpecs.length;
+    let stops = 0;
+    const stop = w.provider.stopEmbedder.bind(w.provider);
+    w.provider.stopEmbedder = async () => { stops++; await stop(); };
+    // A runner's engine, or this machine's after a Restart Docker refused: up, on the old limit.
+    w.provider.embedder = { ...w.provider.embedder, engineMemoryOff: true };
+    expect(await svc.healthTick()).toBe('restarted');
+    expect(w.provider.embedderSpecs.length).toBe(starts + 1);
+    expect(stops).toBe(0);
+    expect(w.events.some((e) => e[0] === 'embedder.limit_restart')).toBe(true);
+    // On its limit now: left alone.
+    expect(await svc.healthTick()).toBe('ok');
+    expect(w.provider.embedderSpecs.length).toBe(starts + 1);
+  });
+
   it('an idle engine sitting near its memory cap is restarted; a busy or lean one is left alone', async () => {
     const w = world();
     const sha = await withModel(w, 'data');

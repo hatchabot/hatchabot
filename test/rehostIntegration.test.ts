@@ -5,7 +5,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { registerAuth } from '../src/api/auth.js';
-import { MigrateError, migrateAgent, versionBehind } from '../src/orchestrator/migrate.js';
+import { MigrateError, migrateAgent, versionBehind } from '../src/orchestrator/transfer/migrate.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 
@@ -173,7 +173,8 @@ describe('rehost over real HTTP', () => {
     expect(res.sourceState).toBe('STOPPED');
     const arrived = dest.store.listAgents('owner-b').find((a) => a.slug === 'kitchen');
     expect(arrived?.image).toBe('hatchabot-runtime:derived-media'); // the pin travelled
-    expect(dest.provider.built.map((b) => b.tag)).toEqual(['hatchabot-runtime:derived-media']);
+    expect(dest.provider.built.map((b) => b.tag)).toEqual(['hatchabot-runtime-check:derived-media']);
+    expect(dest.provider.tags.map((t) => t.tag)).toContain('hatchabot-runtime:derived-media');
     expect(dest.provider.built[0]!.dockerfile).toContain('RUN apt-get install -y ffmpeg');
     // It is one of that machine's images now, so it can travel on from there.
     expect(dest.store.getDerivedImage('media')?.status).toBe('READY');

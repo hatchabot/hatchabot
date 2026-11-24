@@ -43,6 +43,7 @@ ROLLED_BACK=0   # 1 once the new release was tried and did not come up
 CHANGING=0      # 1 while the tree is part-way between two releases
 RESTARTED=0     # 1 once the service was restarted onto the new release
 ASIDE=0         # 1 once a git install's node_modules was moved aside
+DEPS_HELD=0     # 1 while this run holds the dependencies' lock (deps_lock)
 SERVING=0       # 1 once the new release is up: only tidying is left
 DISK=0          # 1 once this run found the machine short of room or permission (machine_short)
 LOCK=""; STAGE=""; STAGE_FREED=0; STEP_LOG=""; STEP_SAID=""
@@ -67,6 +68,7 @@ finish() {
     if [ "$rc" != 0 ] && [ "$(remembered_channel)" = "$PIN_ON" ]; then unpin; fi
     rm -f "$PIN_RECORD" "$PIN_RECORD.tmp"
   fi
+  [ "$DEPS_HELD" != 1 ] || deps_unlock
   # Only its holder lets it go: a lock cleared and taken by another run is theirs.
   [ -z "$LOCK" ] || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ME" ] || rm -rf "$LOCK"
   rm -f "$HATCHABOT_UPGRADE_COPY"; [ -z "$STAGE" ] || rm -rf "$STAGE"; [ -z "$STEP_LOG" ] || rm -f "$STEP_LOG"
@@ -503,15 +505,28 @@ LOCKS="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"
 PRC=0; put_dir "$LOCKS" || PRC=$?
 [ "$PRC" = 0 ] || put_failed "$PRC" "Could not make $LOCKS, where upgrades keep their lock (a full disk, or no permission there?): nothing was changed. Free some space or fix its permissions, then try again."
 LOCK_PATH="$LOCKS/upgrade-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
+# When a process started, as ps tells it in this run's time zone: how the
+# holder line (owner) has always been written, and how a release before this
+# one reads it, so it stays that way. Read in two zones the same start differs:
+# a holder started from a shell with TZ set (or by the timer, with none) was
+# taken for gone by a run in another zone, and its lock taken while it ran. So
+# the holder also writes its start in UTC beside it (owner.utc), and that is
+# what this release judges by when it is there (review of HB-1067).
 proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+proc_start_utc() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+# Whether $2 is when pid $1 started, in this zone or in UTC.
+started_as() { [ -n "$2" ] && { [ "$2" = "$(proc_start "$1")" ] || [ "$2" = "$(proc_start_utc "$1")" ]; }; }
 ME="$$"; MY_START="$(proc_start $$)"; [ -z "$MY_START" ] || ME="$$ $MY_START"
+ME_UTC="$$ $(proc_start_utc $$)"
 lock_left_over() {
-  local owner pid
+  local owner pid utc
   owner="$(cat "$LOCK_PATH/owner" 2>/dev/null)" || owner=""
   if [ -z "$owner" ]; then [ -n "$(find "$LOCK_PATH" -maxdepth 0 -mmin +60 2>/dev/null)" ]; return; fi
   pid="${owner%% *}"
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start "$pid")" ]; fi
+  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; return; fi
+  utc="$(cat "$LOCK_PATH/owner.utc" 2>/dev/null)" || utc=""
+  case "$utc" in "$pid "?*) [ "$utc" != "$pid $(proc_start_utc "$pid")" ] ;; *) ! started_as "$pid" "${owner#* }" ;; esac
 }
 # take_lock: 0 taken; 1 another run holds it (or a file is in its way); 2 the
 # machine could not make it or write its holder (a full disk, no permission).
@@ -527,7 +542,8 @@ take_lock() {
     LOCK_ERR="$(LC_ALL=C mkdir "$LOCK_PATH" 2>&1)" || { { [ ! -e "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ]; } || return 1; return 2; }
   fi
   LOCK="$LOCK_PATH"
-  if LOCK_ERR="$( { export LC_ALL=C; printf '%s\n' "$ME" > "$LOCK_PATH/owner.$$" && mv -f "$LOCK_PATH/owner.$$" "$LOCK_PATH/owner"; } 2>&1 )"; then
+  # owner.utc first: a reader that finds it with no owner yet takes the lock as just made.
+  if LOCK_ERR="$( { export LC_ALL=C; printf '%s\n' "$ME_UTC" > "$LOCK_PATH/owner.utc" && printf '%s\n' "$ME" > "$LOCK_PATH/owner.$$" && mv -f "$LOCK_PATH/owner.$$" "$LOCK_PATH/owner"; } 2>&1 )"; then
     # A step log beside the lock is a run's of this install that held it, and
     # one left now is a killed run's (fifth review).
     rm -f "${LOCK_PATH%.lock.d}".step.* 2>/dev/null || true
@@ -770,10 +786,69 @@ $f
   [ -z "$STAGED" ] || rm -rf "$STAGED"
   rm -f "$SWAPPING" "$SWAPPING.tmp"
 }
+
+# The dependencies' own lock, ensure-deps.sh's (its DEPS_LOCK: the same
+# folder, name and holder line, a pid and its start in UTC), held while
+# node_modules is moved aside or put back: a git install's, and a bundle's in
+# its swap (the bundle's own node_modules among its files). Moved without
+# it, a restart's npm ci running there meanwhile had its tree moved from
+# under it, and the stamp it wrote then said up to date over a partial tree
+# (HB-1212). deploy-release.sh keeps a copy of these, held the same by
+# test/nightScripts.test.ts.
+# Held for the move alone: the install step runs ensure-deps.sh, which takes
+# it itself. Written out here, not asked of ensure-deps.sh: a repair moves the
+# dependencies back under a release whose ensure-deps.sh may be older than
+# this script. Waited for as ensure-deps.sh waits for it, half an hour at
+# most (then deps_lock returns 1); with no lock to be had at all (no room, no
+# permission) the move goes on without it, as an install does.
+DEPS_LOCK="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
+DEPS_ME="$$"; DEPS_START="$(proc_start_utc $$)"; [ -z "$DEPS_START" ] || DEPS_ME="$$ $DEPS_START"
+# How many one-second tries the lock is waited for: half an hour (tests make it a few).
+DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"; case "$DEPS_WAIT" in ''|*[!0-9]*) DEPS_WAIT=1800 ;; esac
+deps_holder_gone() {
+  local owner pid
+  owner="$(cat "$DEPS_LOCK/owner" 2>/dev/null)" || owner=""
+  if [ -z "$owner" ]; then [ -n "$(find "$DEPS_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; return; fi
+  pid="${owner%% *}"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start_utc "$pid")" ]; fi
+}
+deps_lock() {
+  local waited=0
+  [ "$DEPS_HELD" != 1 ] || return 0
+  until mkdir "$DEPS_LOCK" 2>/dev/null; do
+    [ -d "$DEPS_LOCK" ] || return 0
+    find "$DEPS_LOCK.takeover" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null || true
+    if deps_holder_gone && mkdir "$DEPS_LOCK.takeover" 2>/dev/null; then
+      if deps_holder_gone; then rm -rf "$DEPS_LOCK"; fi
+      rmdir "$DEPS_LOCK.takeover"
+      continue
+    fi
+    [ "$waited" != 0 ] || echo "Waiting for an install of the dependencies in $DIR to finish before moving them…"
+    waited=$((waited + 1))
+    [ "$waited" -lt "$DEPS_WAIT" ] || return 1
+    sleep 1
+  done
+  # A holder it could not write would read as a run just begun: let go, and on without it.
+  if { printf '%s\n' "$DEPS_ME" > "$DEPS_LOCK/owner.$$" && mv -f "$DEPS_LOCK/owner.$$" "$DEPS_LOCK/owner"; } 2>/dev/null; then DEPS_HELD=1
+  else rm -rf "$DEPS_LOCK"; fi
+  return 0
+}
+deps_unlock() {
+  [ "$DEPS_HELD" = 1 ] || return 0
+  DEPS_HELD=0
+  [ "$(cat "$DEPS_LOCK/owner" 2>/dev/null)" != "$DEPS_ME" ] || rm -rf "$DEPS_LOCK"
+  return 0
+}
+DEPS_STUCK="Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so nothing was moved. If no npm is running there, remove it (rm -r \"$DEPS_LOCK\"), then try again."
+
 if [ "$BUNDLED" = 1 ] && [ -f "$SWAPPING" ]; then
   echo "An upgrade of $DIR was cut off part-way — putting $(sed -n 's/^from //p' "$SWAPPING" | sed -n 1p) back first."
   WAS_RESTARTED=0; ! grep -qx restarted "$SWAPPING" || WAS_RESTARTED=1
+  # Under the dependencies' lock, as every move of node_modules (deps_lock).
+  deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so the previous release's files are still in $PREV, not put back: the next upgrade puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; exit 3; }
   restore_prev || { echo "Could not put the previous release back (above): $PREV holds its files."; exit 3; }
+  deps_unlock
   # The service was already restarted onto the new release: back onto this one.
   if [ "$WAS_RESTARTED" = 1 ]; then PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || true; fi
 fi
@@ -830,7 +905,7 @@ clear_own_index_lock() {
   while read -r word pid start; do
     [ "$word" = git ] || continue
     named=1
-    if [ -n "$start" ]; then [ "$start" != "$(proc_start "$pid")" ] || { echo "The checkout that upgrade started is still running (pid $pid) — try again once it ends."; return 1; }
+    if [ -n "$start" ]; then ! started_as "$pid" "$start" || { echo "The checkout that upgrade started is still running (pid $pid) — try again once it ends."; return 1; }
     elif kill -0 "$pid" 2>/dev/null; then echo "The checkout that upgrade started is still running (pid $pid) — try again once it ends."; return 1; fi
   done < "$FROM_FILE"
   [ -e .git/index.lock ] || return 0
@@ -883,7 +958,11 @@ if [ "$BUNDLED" = 0 ] && [ -f "$FROM_FILE" ]; then
   echo "An upgrade of $DIR was cut off part-way — putting ${FROM:-the previous release} back first."
   clear_own_index_lock || exit 3
   repair_tree || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
-  [ ! -d node_modules.prev ] || { rm -rf node_modules; mv node_modules.prev node_modules; }
+  if [ -d node_modules.prev ]; then
+    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${FROM:-the previous release}'s are still in node_modules.prev, not put back: the next upgrade puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; exit 3; }
+    rm -rf node_modules; mv node_modules.prev node_modules
+    deps_unlock
+  fi
   if grep -qx restarted "$FROM_FILE"; then $RESTART || true; fi
   rm -f "$FROM_FILE"
 fi
@@ -1026,6 +1105,12 @@ if [ "$BUNDLED" = 1 ]; then
   [ -f "$NEW/.bundle-files" ] || ( cd "$NEW" && ls -A > .bundle-files )
   [ -f .bundle-files ] || ls -A "$NEW" > .bundle-files.guess
   OLDLIST="$( [ -f .bundle-files ] && cat .bundle-files || cat .bundle-files.guess )"; rm -f .bundle-files.guess
+  # The swap moves node_modules too (the bundle's own, in its .bundle-files):
+  # from here to its end under the dependencies' lock, as a git install's move
+  # aside, so a restart's install there is not moved from under (review of
+  # HB-1212). Taken before anything here changes; let go before the restart,
+  # whose ensure-deps.sh takes it.
+  deps_lock || { echo "$DEPS_STUCK"; exit 3; }
   pin_named
   # Its own check below says what a failed rm left (set -e stopped here before).
   # A .rollback-scripts here is a leftover too: a swap cut off part-way was
@@ -1057,13 +1142,29 @@ if [ "$BUNDLED" = 1 ]; then
     # older upgrade.sh's order).
     [ -z "$STAGE" ] || rm -rf "$STAGE" || true
     STAGE_FREED=1   # restore_prev: what this run put back is what it knows of (back)
+    # Under the dependencies' lock (held already when a move of the swap
+    # failed), let go before the restart. One this run cannot have leaves the
+    # old files where they are and fails: the record stays for the repair.
+    if ! deps_lock; then
+      echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${CUR}'s files were left in $PREV, not put back. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""
+      return 1
+    fi
     restore_prev || return 1
+    deps_unlock
     # The old release's restart, on its own Node — only when the service was
     # restarted onto the new one; otherwise the old release never stopped.
     if [ "$RESTARTED" = 1 ]; then PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh"; fi
     return 0
   }
   undo() { rollback_bundle; }
+  # A rollback once the service was restarted, which did not work: the record
+  # stays and the next run repairs from it. Said, with what to run, as
+  # change_failed says it; it ended with exit 1 and no next step (review of
+  # HB-1212). Still 1: the release itself did not come up.
+  rollback_or_redo() {
+    rollback_bundle && return 0
+    echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
+  }
   # By its words too: a move across file systems that ran out of room removes
   # its part copy, and the space it took is free again (third review).
   swap_failed() { change_failed undo "swapped in" "$1" "The upgrade stopped part-way — putting $CUR back."; }
@@ -1091,9 +1192,10 @@ if [ "$BUNDLED" = 1 ]; then
     ! grep -qxF "in $f" "$SWAPPING" || continue
     LC_ALL=C run_step mv "$DIR/$f" "$PREV/" || swap_failed "Could not move $DIR/$f aside."
   done < <(printf '%s\n' "$OLDLIST")   # not <<<: bash 3.2 writes that to a temporary file, on the disk that may be full
+  deps_unlock
   LC_ALL=C run_step put_rec "$SWAPPING" '>>' restarted || swap_failed "Could not write $SWAPPING (above)."
   RESTARTED=1
-  PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || { CHANGING=0; ROLLED_BACK=1; rollback_bundle || true; exit 1; }
+  PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || { CHANGING=0; ROLLED_BACK=1; rollback_or_redo || true; exit 1; }
   CHANGING=0; SERVING=1
   rm -f "$SWAPPING"
   echo "Now on $TARGET."
@@ -1106,9 +1208,23 @@ else
 # Only once the working one was moved aside (ASIDE): stopped while a stale
 # node_modules.prev was being removed, the rollback deleted the only working
 # node_modules (HB-0266).
+# Under the dependencies' lock (deps_lock), let go before the restart that
+# follows, whose ensure-deps.sh takes it. One this run cannot have within half
+# an hour leaves them where they are and fails (1): the record stays, and the
+# next run's repair puts them back under the lock. Taken for done, the record
+# went, the next run deleted node_modules.prev as a leftover, and the old
+# release was left on the failed install's partial tree (review of HB-1212).
+# Not moved without the lock either: what holds it that long is most likely
+# an npm at work in that very tree.
 restore_deps() {
+  [ -d node_modules.prev ] || [ "$ASIDE" = 1 ] || return 0
+  if ! deps_lock; then
+    echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${CUR:-the previous release}'s were left in node_modules.prev, not put back. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""
+    return 1
+  fi
   if [ -d node_modules.prev ]; then rm -rf node_modules; mv node_modules.prev node_modules
   elif [ "$ASIDE" = 1 ]; then rm -rf node_modules; fi
+  deps_unlock
   return 0
 }
 # The service is restarted only if it was restarted onto the new release: an
@@ -1132,14 +1248,24 @@ rollback() {
   # running service had none until someone came. The record stays for the repair.
   local back=0
   back_to_cur || back=1
-  restore_deps
+  restore_deps || back=1
   [ "$back" = 0 ] || return 1
   if [ "$RESTARTED" = 1 ]; then $RESTART; fi
 }
 undo() { rollback && rm -f "$FROM_FILE"; }
+# As the bundle's (above): a rollback after the restart that did not work
+# keeps the record, and says what to run (review of HB-1212).
+rollback_or_redo() {
+  undo && return 0
+  echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
+}
 # An upgrade killed (or a power cut) right after moving node_modules aside
 # left node_modules.prev as the only working copy. Put back first: deleted as
 # a leftover, a failed install then had nothing to roll back to (audit #033).
+# From here to the move aside below, under the dependencies' lock
+# (deps_lock): taken before the record, so one this run cannot have changes
+# nothing.
+deps_lock || { echo "$DEPS_STUCK"; exit 3; }
 [ -d node_modules ] || [ ! -d node_modules.prev ] || mv node_modules.prev node_modules
 # A leftover, removed before the record is written: half removed under it,
 # the next run's repair would move it in as the old release's.
@@ -1154,6 +1280,7 @@ PRC=0; put_line "$FROM_FILE" "from $CUR" "to $TARGET" "$PINS_RECORDED" || PRC=$?
 [ "$PRC" = 0 ] || put_failed "$PRC" "Could not write $FROM_FILE (a full disk, or no permission there?), so nothing was changed. Free some space, then try again."
 CHANGING=1
 if [ -d node_modules ]; then mv node_modules node_modules.prev; fi; ASIDE=1
+deps_unlock
 # The checkout or the install failed, and the old release goes back. Exit 3,
 # usually something passing, unless the disk is what stopped it: a disk that
 # filled here exited 3 too, and the timer set the release aside after 8 tries
@@ -1170,7 +1297,7 @@ LC_ALL=C run_step checkout_recorded --quiet "$TARGET" || change_failed undo "che
 LANG="${LC_ALL:-${LANG-}}" LC_ALL= LC_MESSAGES=C run_step $INSTALL || change_failed undo installed
 LC_ALL=C run_step put_rec "$FROM_FILE" '>>' restarted || change_failed undo started "Could not write $FROM_FILE (above)."
 RESTARTED=1
-$RESTART || { CHANGING=0; ROLLED_BACK=1; { rollback && rm -f "$FROM_FILE"; } || true; exit 1; }
+$RESTART || { CHANGING=0; ROLLED_BACK=1; rollback_or_redo || true; exit 1; }
 CHANGING=0; SERVING=1
 # The record first: left behind beside a half-removed node_modules.prev, the
 # next run moved that in over the release now serving.
@@ -1184,17 +1311,87 @@ fi
 # every install gets". Best effort: a failed pull is a line here, never a
 # failed upgrade, and the app's Settings → Images does the same on demand.
 # On the daemon the service uses: the one .env names (a tenant's rootless daemon
-# on a shared host), as setup-host.sh reads it; neither this shell nor the
-# timer has .env, so the image was looked for and fetched on the default daemon,
-# and the service's kept the old one (HB-0431). The last line wins, as systemd's
-# EnvironmentFile reads it.
+# on a shared host); neither this shell nor the timer has .env, so the image
+# was looked for and fetched on the default daemon, and the service's kept the
+# old one (HB-0431). The last line wins.
+# And the image the service runs agents on and the mirror it pulls from, as
+# .env names them (HATCHABOT_IMAGE, HATCHABOT_IMAGE_REGISTRY), for the same
+# reason: hatchabot-runtime:latest was looked at whatever the service used,
+# and the fetch went to the default repository from the default registry. The
+# service's own image never moved, and one named only in this shell was
+# judged by the default's version, so a newer one promoted there was taken
+# back to this release's default (HB-0984).
+# All three read from .env as the service reads it, and as setup-host.sh now
+# reads them (env_named, the same function there, held so by
+# test/backupKeyLine.test.ts): on Linux by systemd's EnvironmentFile rules,
+# where spaces around the = count and a " # ..." after a value is part of it;
+# on a Mac as its launchd job reads it, sourced by bash in a subshell. Read by
+# sed (NAME= at the start of a line, a comment taken off), a line
+# `HATCHABOT_IMAGE = x` was the service's image and setup's, but not the
+# upgrade's: setup fetched x, the upgrade the default (review of HB-1210).
+env_named() {
+  local kv k
+  for k in "$@"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
+  while IFS= read -r -d '' kv; do
+    k="${kv%%=*}"
+    printf -v "ENV_$k" '%s' "${kv#*=}"; printf -v "ENVSET_$k" '%s' 1
+  done < <(
+    if [ "$(uname -s)" = Darwin ]; then
+      set +eu
+      for k in "$@"; do unset "$k"; done
+      set -a; . ./.env >/dev/null 2>&1; set +a
+      for k in "$@"; do [ -z "${!k+x}" ] || printf '%s=%s\0' "$k" "${!k}"; done
+    else
+      node -e '
+    const systemd = (t) => {
+      const out = {}; let st = "prekey", k = "", v = "", lw = -1;
+      // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
+      // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
+      const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
+      for (const c of t + "\n") {
+        const nl = c === "\n" || c === "\r", ws = /\s/.test(c);
+        if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
+        else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
+        else if (st === "commentesc") st = "comment";
+        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.trimEnd(); st = "prevalue"; } else k += c; }
+        else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
+        else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
+        else if (st === "esc") { st = "value"; if (!nl) v += c; }
+        else if (st === "single") { if (c === "\x27") st = "prevalue"; else v += c; }
+        else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
+        else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
+      }
+      return out;
+    };
+    const out = systemd(require("node:fs").readFileSync(".env", "utf8"));
+    for (const k of process.argv.slice(1)) if (Object.prototype.hasOwnProperty.call(out, k)) process.stdout.write(k + "=" + out[k] + "\0");' "$@" 2>/dev/null || true
+    fi
+  )
+}
 if [ "${HATCHABOT_UPGRADE_IMAGE:-1}" = 1 ] && command -v docker >/dev/null 2>&1; then
-  if [ -f .env ] && grep -q '^DOCKER_HOST=' .env; then
-    DH="$(sed -n 's/^DOCKER_HOST=//p' .env | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
-    if [ -n "$DH" ]; then export DOCKER_HOST="$DH"; else unset DOCKER_HOST; fi
-  fi
+  if [ -f .env ]; then env_named DOCKER_HOST HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY; fi
+  for v in DOCKER_HOST HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY; do
+    set_in="ENVSET_$v"; val="ENV_$v"
+    [ -n "${!set_in:-}" ] || continue
+    if [ -n "${!val}" ]; then export "$v=${!val}"; else unset "$v"; fi
+  done
   WANT="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
-  HAVE="$(docker image inspect hatchabot-runtime:latest --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
+  IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
+  # The fetch moves :latest of the image's repository (build-runtime-image.sh,
+  # REPO), so that is the one looked at. An image named by another tag (or a
+  # digest) is one the owner pinned, which no fetch moves: it is left as it is.
+  IMAGE_REPO="$(printf '%s' "$IMAGE" | sed 's/:[^:/]*$//')"
+  if [ "$IMAGE" != "$IMAGE_REPO" ] && [ "$IMAGE" != "$IMAGE_REPO:latest" ] || [ "$IMAGE" != "${IMAGE%@*}" ]; then
+    echo "The runtime image is pinned to $IMAGE (HATCHABOT_IMAGE): the upgrade leaves it as it is (this release's default is OpenClaw ${WANT:-unknown})."
+    WANT=""
+  fi
+  HAVE=""
+  [ -z "$WANT" ] || HAVE="$(docker image inspect "${HATCHABOT_IMAGE_REPO:-$IMAGE_REPO}:latest" --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
+  # No version label (an old or hand-built image) is what docker prints as
+  # "<no value>": OpenClaw unknown, so older, as setup-host.sh has it (HB-0041).
+  # Compared as a version, sort -V put every real version before it, and the
+  # upgrade never fetched over such an image while setup replaced it (HB-1211).
+  [ "$HAVE" != "<no value>" ] || HAVE=""
   # Only upwards: a promoted candidate newer than the default stays.
   if [ -n "$WANT" ] && [ "$HAVE" != "$WANT" ] && { [ -z "$HAVE" ] || [ "$(printf '%s\n%s\n' "$HAVE" "$WANT" | sed 's/-/~/' | sort -V | sed -n 1p)" = "$(printf '%s' "$HAVE" | sed 's/-/~/')" ]; }; then
     echo "The runtime image here carries OpenClaw ${HAVE:-nothing}; this release's default is $WANT — fetching it (a few GB; agents move to it on their next rebuild)…"

@@ -134,6 +134,29 @@ describe('agent classes', () => {
     expect(store.getAgent('a1')!.aiProfileId).toBe('p1');
   });
 
+  it('a shared source its owner stops sharing while a join is checked is not written to the agent (HB-0970)', async () => {
+    const { store, provider, f } = await world();
+    store.insertAIProfile({ id: 'p-theirs', ownerId: 'user-other', name: 'Their plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-5-5', secretRef: 'ai/p-theirs', shared: true, createdAt: 'now' } as any);
+    const classId = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Plan', aiProfileId: 'p-theirs' } })).json().class.id;
+    // The join's runtime check reads the image it would be rebuilt on; meanwhile its owner unshares it.
+    const real = provider.currentImageInfo.bind(provider);
+    provider.currentImageInfo = async (image) => {
+      store.setAIProfileShared('p-theirs', false);
+      return { ...(await real(image)), openclawVersion: '2026.10.1' };
+    };
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: H, payload: { classId } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('class source unavailable');
+    const a = store.getAgent('a1')!;
+    expect(a.aiProfileId).toBe('p1');
+    expect(a.classId).toBeUndefined();
+    // Shared again: the join goes through.
+    provider.currentImageInfo = async (image) => ({ ...(await real(image)), openclawVersion: '2026.10.1' });
+    store.setAIProfileShared('p-theirs', true);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: H, payload: { classId } })).json()).toMatchObject({ classId, rebuild: true });
+    expect(store.getAgent('a1')!.aiProfileId).toBe('p-theirs');
+  });
+
   it('editing a class skips ARCHIVED members', async () => {
     const { store, f } = await world();
     const classId = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'T', model: 'claude-sonnet-5' } })).json().class.id;

@@ -21,9 +21,34 @@ vi.setConfig({ testTimeout: 30_000 });
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-function world(prState: 'merge' | 'fail' | 'kitfail' | 'close' | 'noauto' | 'green' | 'queued' | 'runsdown' | 'statusdown' | 'statusonly' | 'stuck' = 'merge', required = true) {
+/** A gitleaks stand-in: finds nothing, a value in the new commits or in the tree, or cannot run. */
+type Gitleaks = 'clean' | 'commit-hit' | 'tree-hit' | 'broken';
+
+/** The gitleaks version CI's secrets job pins (the V= of its step), from the real workflow. */
+const CI_GITLEAKS = /name: gitleaks on the new commits[\s\S]*?\bV=([0-9][0-9.]*)/.exec(readFileSync('.github/workflows/ci.yml', 'utf8'))![1]!;
+
+function world(prState: 'merge' | 'fail' | 'kitfail' | 'close' | 'noauto' | 'green' | 'queued' | 'runsdown' | 'statusdown' | 'statusonly' | 'stuck' = 'merge', required = true, gitleaks?: Gitleaks, gitleaksVersion = CI_GITLEAKS) {
   const root = mkdtempSync(join(tmpdir(), 'hb-land-')); dirs.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin);
+  // Each call logged with where it ran and GITLEAKS_CONFIG; the config it was
+  // given is kept, and a dir scan lists its folder and the tree in it.
+  const glLog = join(root, 'gitleaks.log');
+  if (gitleaks) writeFileSync(join(bin, 'gitleaks'), `#!/bin/sh
+[ "$1" != version ] || { echo "${gitleaksVersion}"; exit 0; }
+echo "$1|\${GITLEAKS_CONFIG:-unset}|$*" >> "${glLog}"
+out=; prev=
+for a in "$@"; do
+  case "$prev" in --report-path) out="$a" ;; --config) cp "$a" "${root}/config-used" ;; esac
+  prev="$a"
+done
+[ "$1" != dir ] || { ls -A . > "${root}/dir-root"; ls -A tree > "${root}/dir-tree"; }
+case "${gitleaks}:$1" in
+  broken:*) echo 'FTL unknown flag: --report-template' >&2; exit 1 ;;
+  commit-hit:git) printf 'b.txt:1: generic-api-key (commit 0123456789ab)\n' > "$out"; exit 3 ;;
+  tree-hit:dir) printf 'tree/b.txt:1: generic-api-key\n' > "$out"; exit 3 ;;
+esac
+: > "$out"
+`, { mode: 0o755 });
   const origin = join(root, 'origin.git');
   const log = join(root, 'gh.log');
   const merged = join(root, 'merged');
@@ -80,14 +105,19 @@ esac
   git(work, 'init', '-q', '-b', 'main');
   writeFileSync(join(work, 'scripts', 'land.sh'), readFileSync('scripts/land.sh'), { mode: 0o755 });
   writeFileSync(join(work, 'a.txt'), 'one\n');
+  writeFileSync(join(work, '.gitleaks.toml'), '# the config on main\n');
+  // The real workflow, whose gitleaks pin land.sh reads.
+  mkdirSync(join(work, '.github', 'workflows'), { recursive: true });
+  writeFileSync(join(work, '.github', 'workflows', 'ci.yml'), readFileSync('.github/workflows/ci.yml'));
   git(work, 'add', '.'); git(work, 'commit', '-q', '-m', 'start');
   git(work, 'remote', 'add', 'origin', origin);
   git(work, 'push', '-q', 'origin', 'main');
   const land = (...args: string[]) => spawnSync('bash', [join(work, 'scripts', 'land.sh'), ...args], {
-    cwd: work, encoding: 'utf8', env: { ...env, HATCHABOT_LAND_POLL_SECS: '0', GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null', GIT_CONFIG_KEY_1: 'user.name', GIT_CONFIG_VALUE_1: 'Test', GIT_CONFIG_KEY_2: 'user.email', GIT_CONFIG_VALUE_2: 'test@example.org' },
+    cwd: work, encoding: 'utf8', env: { ...env, GITLEAKS_CONFIG: join(root, 'a-config-of-ones-own.toml'), HATCHABOT_LAND_POLL_SECS: '0', GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null', GIT_CONFIG_KEY_1: 'user.name', GIT_CONFIG_VALUE_1: 'Test', GIT_CONFIG_KEY_2: 'user.email', GIT_CONFIG_VALUE_2: 'test@example.org' },
   });
   const ghLog = () => { try { return readFileSync(log, 'utf8'); } catch { return ''; } };
-  return { work, origin, git, land, ghLog };
+  const kept = (f: string) => { try { return readFileSync(join(root, f), 'utf8'); } catch { return undefined; } };
+  return { work, origin, git, land, ghLog, glLog: () => kept('gitleaks.log') ?? '', kept };
 }
 
 describe('scripts/land.sh lands commits on main through a pull request', () => {
@@ -224,6 +254,117 @@ describe('scripts/land.sh lands commits on main through a pull request', () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('more than GitHub rebase-merges at once');
     expect(w.ghLog()).toBe('');
+  });
+
+  describe("CI's gitleaks scans, before anything is pushed (HB-0852)", () => {
+    const addB = (w: ReturnType<typeof world>) => {
+      writeFileSync(join(w.work, 'b.txt'), 'two\n');
+      writeFileSync(join(w.work, '.gitleaks.toml'), '# this change loosens it\n');
+      w.git(w.work, 'add', '.'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+    };
+    const nothingPushed = (w: ReturnType<typeof world>, before: string) => {
+      expect(w.ghLog()).toBe('');
+      expect(w.git(w.origin, 'rev-parse', 'main')).toBe(before);
+      expect(w.git(w.origin, 'for-each-ref', '--format=%(refname)', 'refs/heads/land/')).toBe('');
+    };
+
+    it('without gitleaks: says the scan was skipped, and lands', () => {
+      const w = world('merge');
+      addB(w);
+      const r = w.land();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toContain('• gitleaks is not installed, so the secrets scan CI runs was skipped here (CI still runs it).');
+    });
+
+    it("finding nothing: the new commits with main's config, then the tree alone with the default rules, and it lands", () => {
+      const w = world('merge', true, 'clean');
+      addB(w);
+      const r = w.land();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toContain("✓ gitleaks: nothing in the new commits or the tree, as CI's secrets job scans them");
+      // The version CI pins: nothing said of it.
+      expect(r.stdout).not.toContain('• gitleaks here is');
+      expect(r.stdout).not.toContain("CI's gitleaks version was not found");
+      const [commits, tree] = w.glLog().trim().split('\n');
+      expect(commits).toMatch(/^git\|.*\|git --log-opts=origin\/main\.\.HEAD --config \S+ --redact --no-banner --exit-code 3 /);
+      // The config as main has it, not as the change made it.
+      expect(w.kept('config-used')).toBe('# the config on main\n');
+      // The tree in a folder with no config or ignore list beside it, and none named.
+      expect(tree).toMatch(/^dir\|unset\|dir \. --redact --no-banner --exit-code 3 /);
+      expect(tree).not.toContain('--config');
+      expect(w.kept('dir-root')).toBe('tree\n');
+      expect(w.kept('dir-tree')!.split('\n')).toEqual(expect.arrayContaining(['.gitleaks.toml', 'a.txt', 'b.txt', 'scripts']));
+    });
+
+    it('with no config on main nor in the change: the commits too are scanned with the default rules, not a config named in the environment', () => {
+      const w = world('merge', true, 'clean');
+      w.git(w.work, 'rm', '-q', '.gitleaks.toml'); w.git(w.work, 'commit', '-q', '-m', 'No config');
+      w.git(w.work, 'push', '-q', 'origin', 'main');
+      writeFileSync(join(w.work, 'b.txt'), 'two\n'); w.git(w.work, 'add', 'b.txt'); w.git(w.work, 'commit', '-q', '-m', 'Add b');
+      const r = w.land();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      const [commits, tree] = w.glLog().trim().split('\n');
+      expect(commits).toMatch(/^git\|unset\|git --log-opts=origin\/main\.\.HEAD --redact --no-banner --exit-code 3 /);
+      expect(tree).toMatch(/^dir\|unset\|/);
+    });
+
+    it('a value in the new commits: refused, exit 2, naming the file and line, with nothing pushed', () => {
+      const w = world('merge', true, 'commit-hit');
+      const before = w.git(w.origin, 'rev-parse', 'main');
+      addB(w);
+      const r = w.land();
+      expect(r.status, r.stdout + r.stderr).toBe(2);
+      expect(r.stderr).toBe(
+        "✗ gitleaks found what CI's secrets job will refuse, in the new commits, so nothing was pushed:\n" +
+        '  b.txt:1: generic-api-key (commit 0123456789ab)\n' +
+        'Change the value (a made-up one must not look like a key either), commit, and land again.\n',
+      );
+      nothingPushed(w, before);
+    });
+
+    it("a value in the tree under the default rules: refused likewise, the file named as it is in the repo", () => {
+      const w = world('merge', true, 'tree-hit');
+      const before = w.git(w.origin, 'rev-parse', 'main');
+      addB(w);
+      const r = w.land();
+      expect(r.status, r.stdout + r.stderr).toBe(2);
+      expect(r.stderr).toContain("in the tree (gitleaks' default rules), so nothing was pushed:\n  b.txt:1: generic-api-key\n");
+      nothingPushed(w, before);
+    });
+
+    it('a gitleaks of another version than CI pins: said, and it still scans and lands', () => {
+      const w = world('merge', true, 'clean', '8.18.0');
+      addB(w);
+      const r = w.land();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toContain(
+        `• gitleaks here is 8.18.0, but CI's secrets job runs ${CI_GITLEAKS} (.github/workflows/ci.yml): their default rules can differ, ` +
+        `so the tree may pass here and not there, or the other way. Install gitleaks ${CI_GITLEAKS} to scan as CI does.\n`,
+      );
+      expect(r.stdout).toContain("✓ gitleaks: nothing in the new commits or the tree, as CI's secrets job scans them");
+      expect(w.glLog().trim().split('\n')).toHaveLength(2);
+    });
+
+    it('a workflow whose pin cannot be read: said, so the two do not drift unnoticed', () => {
+      const w = world('merge', true, 'clean');
+      addB(w);
+      w.git(w.work, 'rm', '-q', '.github/workflows/ci.yml'); w.git(w.work, 'commit', '-q', '-m', 'No workflow');
+      const r = w.land();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toContain(
+        `• CI's gitleaks version was not found in .github/workflows/ci.yml (the V= of its step "gitleaks on the new commits"), so this gitleaks (${CI_GITLEAKS}) was not checked against it.\n`,
+      );
+    });
+
+    it('a gitleaks that cannot run: refused, saying what it said, with nothing pushed', () => {
+      const w = world('merge', true, 'broken');
+      const before = w.git(w.origin, 'rev-parse', 'main');
+      addB(w);
+      const r = w.land();
+      expect(r.status, r.stdout + r.stderr).toBe(2);
+      expect(r.stderr).toContain('✗ gitleaks could not scan the new commits, so nothing was pushed: FTL unknown flag: --report-template (update gitleaks, or uninstall it to land without the scan).');
+      nothingPushed(w, before);
+    });
   });
 
   it('a closed pull request is exit 1; a main that moved on is refused before pushing anything', () => {

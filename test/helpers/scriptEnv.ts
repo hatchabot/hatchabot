@@ -1,3 +1,6 @@
+import { mkdirSync, readdirSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
+
 /**
  * The environment for a test that runs one of the real shell scripts, built
  * from scratch. Never spread process.env into it: a HATCHABOT_DB or
@@ -37,4 +40,22 @@ export function scriptEnv(home: string, path: string, extra: Record<string, stri
 export function hangingStep(started: string): string {
   const js = `require("fs").writeFileSync(${JSON.stringify(started)}, ""); setTimeout(() => {}, 30000)`;
   return `#!/usr/bin/env bash\nmkdir -p node_modules/half-installed\nexec ${JSON.stringify(process.execPath)} -e '${js}'\n`;
+}
+
+/**
+ * A folder of links to everything in /usr/bin and /bin but `names`, to put on
+ * a script's PATH in their place: a machine without those commands (a Mac's
+ * PATH with no `timeout`, HB-1208). Made in `dir`, which the caller removes.
+ */
+export function systemPathWithout(dir: string, names: string[]): string {
+  mkdirSync(dir, { recursive: true });
+  for (const from of ['/usr/bin', '/bin']) {
+    let entries: string[] = [];
+    try { entries = readdirSync(from); } catch { continue; }
+    for (const f of entries) {
+      if (names.includes(f)) continue;
+      try { symlinkSync(join(from, f), join(dir, f)); } catch { /* there already (/bin is often /usr/bin) */ }
+    }
+  }
+  return dir;
 }

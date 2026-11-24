@@ -1,28 +1,57 @@
 /**
  * End-to-end coverage of runner-host registration (Cluster mode): adding a
  * remote Docker endpoint as a host, and removing it. The endpoint used here
- * (tcp://127.0.0.1:1) refuses fast, so the best-effort reachability ping returns
- * quickly with reachable:false without stalling the test.
+ * (tcp://127.0.0.1:1) refuses fast, so a runner's knock (a connect on this
+ * machine's loopback) finds it down at once.
+ *
+ * Nothing here runs the real docker, ssh or ssh-keygen (HB-1257): docker and
+ * ssh are shims on PATH for the whole file, answering as a runner that is not
+ * there (a block below puts its own in front, for one that answers), and the
+ * runner key and its ssh config block are fakes.
  */
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
+import { formatBuildInputs } from '../src/orchestrator/machines/buildInputs.js';
 
 const RUNNER = 'tcp://127.0.0.1:1';
 
-// POST /v1/hosts now prepares the runner SSH key/config — keep that away from
-// the real ~/.ssh of whoever runs the tests.
+// POST /v1/hosts prepares the runner's SSH key and config block first: fakes, so no ssh-keygen runs and no config is written.
+vi.mock('../src/orchestrator/machines/runnerSetup.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/orchestrator/machines/runnerSetup.js')>()),
+  ensureRunnerKey: async () => 'ssh-ed25519 made-up-key-for-the-test',
+  ensureSshConfigBlock: async () => {},
+}));
+
+/** docker and ssh for the whole file: every call is noted, and none reaches a daemon or a machine. */
+const shims = mkdtempSync(join(tmpdir(), 'acl-hostflows-bin-'));
+const SHIM_CALLS = join(shims, 'calls.log');
+writeFileSync(join(shims, 'docker'), `#!/usr/bin/env bash
+printf 'docker %s\\n' "$*" >> ${JSON.stringify(SHIM_CALLS)}
+echo "Cannot connect to the Docker daemon at the test's runner. Is the docker daemon running?" >&2
+exit 1
+`, { mode: 0o755 });
+writeFileSync(join(shims, 'ssh'), `#!/usr/bin/env bash
+printf 'ssh %s\\n' "$*" >> ${JSON.stringify(SHIM_CALLS)}
+echo 'ssh: connect to the test runner: Connection refused' >&2
+exit 255
+`, { mode: 0o755 });
+const shimCalls = () => (existsSync(SHIM_CALLS) ? readFileSync(SHIM_CALLS, 'utf8').split('\n').filter(Boolean) : []);
+let pathBefore: string | undefined;
 beforeAll(() => {
+  pathBefore = process.env.PATH;
+  process.env.PATH = `${shims}:${pathBefore}`;
   process.env.HATCHABOT_SSH_DIR = mkdtempSync(join(tmpdir(), 'acl-hostflows-ssh-'));
   // A tcp:// runner is TLS only (HB-0029): made-up client certificate files for it.
   const certs = mkdtempSync(join(tmpdir(), 'acl-hostflows-certs-'));
   for (const f of ['ca.pem', 'cert.pem', 'key.pem']) writeFileSync(join(certs, f), 'made-up\n');
   process.env.DOCKER_CERT_PATH = certs;
 });
+afterAll(() => { process.env.PATH = pathBefore; });
 
 describe('Runner hosts — POST /v1/hosts', () => {
   it('registers a runner and lists it (host owner)', async () => {
@@ -100,16 +129,27 @@ describe('Runner hosts: an address that can sign in, and one row a machine (HB-0
     const bin = mkdtempSync(join(tmpdir(), 'acl-hostflows-docker-'));
     writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash
 args="$*"
+# A runner signed in to as "slow" takes its time to answer.
+case "$args" in *slow@*) sleep 0.5 ;; esac
 case "$args" in
   *" version "*) echo 27.0 ;;
   *" image inspect "*) echo ok ;;
   *" info --format "*) case "$args" in *other*) echo id-other ;; *) echo id-studio ;; esac ;;
 esac
 `, { mode: 0o755 });
-    const path = process.env.PATH;
+    // The knock asks ssh where it connects (ssh -G, HB-1057): a shim, not the
+    // real ssh reading the real ~/.ssh/config. No config here: where the address says.
+    writeFileSync(join(bin, 'ssh'), `#!/usr/bin/env bash
+[ "$1" = -G ] || exit 255
+shift; port=22
+[ "$1" = -p ] && { port=$2; shift 2; }
+printf 'hostname %s\\nport %s\\n' "\${1#*@}" "$port"
+`, { mode: 0o755 });
+    // PATH as it is when the block starts (the file's shims on it), not as it was when the file was read.
+    let path: string | undefined;
     const door = createServer((c) => c.destroy());
     const at = (who: string, host = '127.0.0.1') => `ssh://${who}@${host}:${(door.address() as AddressInfo).port}`;
-    beforeAll(async () => { process.env.PATH = `${bin}:${path}`; await new Promise<void>((r) => door.listen(0, '127.0.0.1', r)); });
+    beforeAll(async () => { path = process.env.PATH; process.env.PATH = `${bin}:${path}`; await new Promise<void>((r) => door.listen(0, '127.0.0.1', r)); });
     afterAll(async () => { process.env.PATH = path; await new Promise((r) => door.close(r)); });
     const add = (w: Awaited<ReturnType<typeof makeWorld>>, name: string, dockerHost: string) => w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name, dockerHost } });
 
@@ -122,6 +162,13 @@ esac
       const b = await add(w, 'Studio tail', at('sam', 'localhost'));
       expect(b.statusCode).toBe(201);
       expect(b.json().warning).toContain('the same Docker as "Studio"');
+    });
+    it('the same address written two ways, added at once, is added once (HB-1119)', async () => {
+      const w = await makeWorld();
+      const both = await Promise.all([add(w, 'Slow', at('slow')), add(w, 'Slow again', `${at('slow')}/`)]);
+      expect(both.map((r) => r.statusCode).sort()).toEqual([201, 409]);
+      expect(both.find((r) => r.statusCode === 409)!.json().error).toBe('That machine is already being added.');
+      expect(w.store.listHosts(w.owner).filter((h) => h.kind !== 'local')).toHaveLength(1);
     });
     it('a different machine is not', async () => {
       const w = await makeWorld();
@@ -194,8 +241,11 @@ describe('Ping — GET /v1/hosts/:id/ping', () => {
     const w = await makeWorld();
     const runner = (await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'R', dockerHost: RUNNER } })).json();
 
+    const pinged = shimCalls().length;
     const res = await w.f.inject({ method: 'GET', url: `/v1/hosts/${runner.id}/ping`, headers: as() });
     expect(res.statusCode).toBe(200);
+    // The probe ran, against the shim: docker version, at the runner's address.
+    expect(shimCalls().slice(pinged)).toEqual([`docker -H ${RUNNER} --tlsverify version --format {{.Server.Version}}`]);
     const body = res.json();
     // The UI reads `reachable`; the raw pingRunner `ok` field would render every
     // probe — success included — as "unreachable — no response". Regression guard.
@@ -351,7 +401,11 @@ describe('Move — the pinned image travels as its recipe (item 5, 2026-09-23)',
     expect(res.statusCode).toBe(200);
     expect(mock2.pulled).toEqual(['hatchabot-runtime:2026.7.1-2']);
     expect(mock2.built).toHaveLength(1);
-    expect(mock2.built[0]!.tag).toBe(tag);
+    // Built to a name of its own, then named as the pin once it is seen to run as node on its base (HB-1032).
+    expect(mock2.built[0]!.tag).toBe('hatchabot-runtime-check:2026.7.1-2-plus-traceroute');
+    expect(mock2.tagged).toEqual([['built-hatchabot-runtime-check:2026.7.1-2-plus-traceroute', tag]]);
+    expect(mock2.tags.map((t) => t.tag)).toContain(tag);
+    expect(mock2.tags.map((t) => t.tag)).not.toContain('hatchabot-runtime-check:2026.7.1-2-plus-traceroute');
     expect(mock2.built[0]!.dockerfile).toMatch(/^FROM hatchabot-runtime:2026\.7\.1-2\nUSER root\nRUN apt-get update && apt-get install -y --no-install-recommends traceroute/);
     expect(mock2.built[0]!.dockerfile.trim().endsWith('USER node')).toBe(true);
     expect(w.store.getAgent(id)!.image).toBe(tag); // it keeps its pin — and its packages
@@ -395,5 +449,44 @@ describe('Move — the pinned image travels as its recipe (item 5, 2026-09-23)',
     const r2 = await b.move();
     expect(r2.statusCode).toBe(409);
     expect(r2.json().error).toMatch(/the rebuild failed: E: Unable to locate package/);
+  });
+
+  it('another image of the pin\'s name there is refused with why, left as it is, and the agent stays (HB-1325)', async () => {
+    const inputs = (openclaw: string) => formatBuildInputs({
+      openclaw, engine: 'none', packages: ['jq'], node: 'node:24-slim', channels: [], channelPlugins: openclaw, plugins: [], pluginInstall: 'npm',
+      embedPlugin: '2026.7.1', claudeCode: '2.1.224', byHand: [], release: '2.190.0',
+    });
+    // Layers as every real listing has them, and never the same on two machines' own builds.
+    const layer = (c: string) => `sha256:${c.repeat(64)}`;
+    const { w, mock2, id, move } = await setup({ tag: 'hatchabot-runtime:2026.9.8-plus-jq', imageId: 'src', openclawVersion: '2026.9.8', extraPackages: ['jq'], buildInputs: inputs('2026.9.8'), layers: [layer('1'), layer('2')] });
+    mock2.tags.push({ tag: 'hatchabot-runtime:2026.9.8-plus-jq', imageId: 'theirs', openclawVersion: '2026.9.6', extraPackages: ['jq'], buildInputs: inputs('2026.9.6'), layers: [layer('8')] } as any);
+    const res = await move();
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'pinned_image_missing', image: 'hatchabot-runtime:2026.9.8-plus-jq' });
+    expect(res.json().error).toBe(`"${w.store.getAgent(id)!.name}" is pinned to the image hatchabot-runtime:2026.9.8-plus-jq, and Laptop has a different image of that name (the one there runs OpenClaw 2026.9.6, not 2026.9.8), which is left as it is. Move it on that runner's default image instead — its extra packages will be missing there.`);
+    expect([mock2.built, mock2.tagged, mock2.pulled]).toEqual([[], [], []]);
+    expect(w.store.getAgent(id)!.hostId).toBe('h1');
+  });
+
+  it('an image of the pin\'s name there from before the build-inputs label is taken by name, its layers its own: the move goes ahead (HB-1325 review)', async () => {
+    const layer = (c: string) => `sha256:${c.repeat(64)}`;
+    const { w, mock2, id, move } = await setup({ tag: 'hatchabot-runtime:2026.9.8-plus-jq', imageId: 'src', openclawVersion: '2026.9.8', extraPackages: ['jq'], layers: [layer('1'), layer('2')] });
+    mock2.tags.push({ tag: 'hatchabot-runtime:2026.9.8-plus-jq', imageId: 'theirs', openclawVersion: '2026.9.8', extraPackages: ['jq'], layers: [layer('8'), layer('9')] } as any);
+    const res = await move();
+    expect(res.statusCode, res.body).toBe(200);
+    expect(mock2.built).toEqual([]);
+    expect(w.store.getAgent(id)!.hostId).toBe('h2');
+    expect(w.store.getAgent(id)!.image).toBe('hatchabot-runtime:2026.9.8-plus-jq');
+  });
+
+  it('a rebuild there whose image would run as root is refused, and the agent stays where it was (HB-1032)', async () => {
+    const { w, mock2, id, move } = await setup({ tag: 'hatchabot-runtime:2026.7.1-2-plus-jq', imageId: 'src', openclawVersion: '2026.7.1-2', extraPackages: ['jq'] });
+    mock2.publishedBases.add('hatchabot-runtime:2026.7.1-2');
+    mock2.buildRunsAs = 'root';
+    const res = await move();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/the rebuild failed: The built image would run as root, not node/);
+    expect(mock2.tags.map((t) => t.tag)).toEqual(['hatchabot-runtime:latest', 'hatchabot-runtime:2026.7.1-2']);
+    expect(w.store.getAgent(id)!.hostId).toBe('h1'); // nothing moved
   });
 });

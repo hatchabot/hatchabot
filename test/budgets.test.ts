@@ -2,19 +2,19 @@ import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage.js';
-import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
+import { HOUR_FIELDS, type HourField, type WindowModelStats } from '../src/orchestrator/usage/usage.js';
+import type { StoredProfile } from '../src/orchestrator/usage/modelScorecard.js';
 import type { Agent } from '../src/domain/types.js';
 import {
   budgetLine, budgetView, dailyCosts, dayKey, levelOf, MACHINE, MAX_BUDGET, monthElapsed, monthKey, nextMonth, parseNewAgentBudget, PAUSE_WAIT_MS, pausedReplySweep, pausedReplyText, prevMonth, REPLY_EVERY_MS, runBudgets, suggestBudget, type BudgetDeps,
-} from '../src/orchestrator/budgets.js';
-import { MACHINE_DEFAULTS } from '../src/orchestrator/machineDefaults.js';
-import { primeSpendAlert, QUEUE_FULL_TOLD, stepLine, stepView, STEP_TELL_EVERY_MS } from '../src/orchestrator/budgets.js';
-import { createAgentRecord } from '../src/orchestrator/provision.js';
-import { evaluateModelChanges, recordChange, rightSizeSavings } from '../src/orchestrator/modelLedger.js';
+} from '../src/orchestrator/usage/budgets.js';
+import { MACHINE_DEFAULTS } from '../src/orchestrator/settings/machineDefaults.js';
+import { primeSpendAlert, QUEUE_FULL_TOLD, stepLine, stepView, STEP_TELL_EVERY_MS } from '../src/orchestrator/usage/budgets.js';
+import { createAgentRecord } from '../src/orchestrator/lifecycle/provision.js';
+import { evaluateModelChanges, recordChange, rightSizeSavings } from '../src/orchestrator/usage/modelLedger.js';
 import { REST_BY_NAME } from '../src/mgmt/restTools.js';
 import { riskOf } from '../src/mgmt/broker.js';
 import { COVERAGE } from '../src/mgmt/coverage.js';
@@ -65,6 +65,30 @@ describe('the calendar', () => {
     expect(levelOf(39, 50)).toBe(0);
     expect(levelOf(40, 50)).toBe(80);
     expect(levelOf(50, 50)).toBe(100);
+  });
+  it('a pass over the fleet works out each hour\'s day once, not once per agent and model (HB-0893)', async () => {
+    const { recordCostDays } = await import('../src/orchestrator/usage/budgets.js');
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'Key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key', createdAt: 'now' } as never);
+    // Thirty days of hourly use, on two models, for twelve agents.
+    const now = Date.parse('2026-11-20T12:00:00Z');
+    const hours: Record<number, Split> = {};
+    for (let i = 0; i < 720; i++) hours[now - i * HOUR] = { input: 1000 };
+    for (let n = 0; n < 12; n++) {
+      store.insertAgent({ id: `c${n}`, ownerId: OWNER, name: `Helper ${n}`, slug: `c${n}`, state: 'RUNNING', aiProfileId: 'key', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+      store.setModelProfile(`c${n}`, profile(now, { 'claude-opus-4-8': model(hours), 'claude-sonnet-5': model(hours) }), iso(now));
+    }
+    const formats = vi.spyOn(Date.prototype, 'toLocaleString');
+    let calls: number;
+    try { recordCostDays(store, 'America/Toronto', now); calls = formats.mock.calls.length; } finally { formats.mockRestore(); }
+    // The 720 hours, each agent's first day and the prune's: never 12 × 2 × 720.
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThanOrEqual(720 + 12 + 1);
+    // The same days as an agent worked out on its own.
+    const alone = dailyCosts(profile(now, { 'claude-opus-4-8': model(hours), 'claude-sonnet-5': model(hours) }), 'America/Toronto').days;
+    const month = store.costBetween('2026-10-01', '2026-11-31', ['c0']).get('c0');
+    expect(month).toBeCloseTo([...alone.values()].reduce((a, b) => a + b, 0), 6);
   });
 });
 
@@ -194,6 +218,30 @@ describe('runBudgets', () => {
     expect(r2.resumed).toEqual(['a3']);
     expect(store.getBudgetPause('a3', '2026-10')!.resumedBy).toBe('new-month');
     expect(store.getAgent('a3')!.state).toBe('RUNNING');
+  });
+
+  it('a pause whose start failed on the 1st still shows, with its own month and spend, until it is up (HB-1011)', async () => {
+    const { store, agent, deps } = world();
+    agent('a3', 'Recipe Box');
+    store.setBudget('a3', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('a3', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(store.getAgent('a3')!.state).toBe('STOPPED');
+    // November 2: its machine does not answer, so the start it is owed fails.
+    const nov = Date.parse('2026-11-02T08:00:00Z');
+    const r = await runBudgets({ ...deps, resume: async () => false }, nov);
+    expect(r.resumed).toEqual([]);
+    expect(store.getBudgetPause('a3', '2026-10')!.resumedAt).toBeUndefined();
+    const v = budgetView(store, store.getBudget('a3')!, 0, nov, 'UTC', 'a3');
+    expect(v).toMatchObject({ month: '2026-11', spent: 0, level: 0, paused: { at: expect.any(String), ended: { month: '2026-10', spent: 25, on: 'November 1' } } });
+    expect(budgetLine(v, 'it')).toBe("Its budget's pause ended on November 1, but it could not be started yet: Hatchabot tries again each pass, or start it now. It used $25.00 in October");
+    // Up some other way (a rebuild): not shown, though the pass has not closed it yet.
+    store.setAgentState('a3', 'RUNNING');
+    expect(budgetView(store, store.getBudget('a3')!, 0, nov, 'UTC', 'a3').paused).toBeUndefined();
+    store.setAgentState('a3', 'STOPPED');
+    // The next pass's start works: done.
+    expect((await runBudgets(deps, nov + 10 * MIN, { record: false })).resumed).toEqual(['a3']);
+    expect(budgetView(store, store.getBudget('a3')!, 0, nov, 'UTC', 'a3').paused).toBeUndefined();
   });
 
   it('started by hand after a pause: it runs on until the 1st; an asleep agent is paused without a wake; busy waits', async () => {
@@ -526,7 +574,7 @@ async function app() {
 describe('the budget routes', () => {
   it.each(['running', 'asleep', 'unknown', 'lost-reply'] as const)('records a pause only once the runtime confirms it stopped: %s (HB-0711)', async (mode) => {
     const { f, store, provider } = await app();
-    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/usage/budgets.js');
     const now = Date.now(), month = monthKey(now, machineTz());
     const ref = store.getAgent('r1')!.runtimeRef!;
     store.setModelProfile('r1', profile(now, opus(now - HOUR, 30)), iso(now));
@@ -564,7 +612,7 @@ describe('the budget routes', () => {
     const now = Date.now();
     store.setModelProfile('r1', { since: now - 30 * DAY, models: opus(now, 30), promptErrors: 0, crons: 0, firstCall: now - 60 * DAY, hourly: true } as StoredProfile, iso(now));
     // The usage pass writes the cost days; here the GET reads them after one pass.
-    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/usage/budgets.js');
     recordCostDays(store, machineTz(), now);
 
     let r = await f.inject({ method: 'PUT', url: '/v1/agents/r1/budget', headers: as(OWNER), payload: { usd: 0.5 } });
@@ -604,11 +652,67 @@ describe('the budget routes', () => {
     expect(store.getBudget('r1')).toBeUndefined();
   });
 
+  it("a pause from a month that is over, still owed its start, is on its tile, and Start ends it (HB-1011)", async () => {
+    const { f, store, provider } = await app();
+    const { machineTz } = await import('../src/orchestrator/usage/budgets.js');
+    const month = monthKey(Date.now(), machineTz()), last = prevMonth(month);
+    const at = new Date(Date.parse(`${last}-20T12:00:00Z`)).toISOString();
+    await provider.stop(store.getAgent('r1')!.runtimeRef!);
+    store.setAgentState('r1', 'STOPPED');
+    store.setBudget('r1', OWNER, 25, 'pause', at);
+    store.addBudgetPause('r1', last, 'r1', at);
+    const tileOf = async () => ((await f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; budget?: { line?: string; paused?: { ended?: { month: string } } }; budgetPaused?: { line?: string; ended?: unknown } }>).find((a) => a.id === 'r1')!;
+    let r1 = await tileOf();
+    expect(r1.budget!.paused!.ended!.month).toBe(last);
+    expect(r1.budget!.line).toMatch(/^Its budget's pause ended on [A-Z][a-z]+ 1, but it could not be started yet: Hatchabot tries again each pass, or start it now\. It used \$0\.00 in [A-Z][a-z]+$/);
+    // The machine's budget, the same.
+    store.setBudget('r1', OWNER, null, 'pause', at);
+    store.resumeBudgetPause('r1', last, at, 'gone');
+    store.addBudgetPause('r1', prevMonth(last), MACHINE, at);
+    store.addBudgetPause('r1', last, MACHINE, at);
+    r1 = await tileOf();
+    expect(r1.budgetPaused).toMatchObject({ ended: { month: last } });
+    expect(r1.budgetPaused!.line).toMatch(/^Its pause for this Hatchabot's budget ended on [A-Z][a-z]+ 1, but it could not be started yet/);
+    // Start ends every pause it was owed a start for, not only this month's.
+    const s = await f.inject({ method: 'POST', url: '/v1/agents/r1/start', headers: as(OWNER) });
+    expect(s.statusCode).toBe(200);
+    expect(store.openBudgetPauses('r1')).toEqual([]);
+    expect(store.getBudgetPause('r1', last)!.resumedBy).toBe('owner');
+    expect((await tileOf()).budgetPaused).toBeUndefined();
+    await f.close();
+  });
+
+  it("an ended machine-budget pause tells the machine's spend to its owner only; a member's tile has their agent's own (HB-1011)", async () => {
+    const { f, store, provider } = await app();
+    const { machineTz } = await import('../src/orchestrator/usage/budgets.js');
+    const last = prevMonth(monthKey(Date.now(), machineTz()));
+    const at = new Date(Date.parse(`${last}-20T12:00:00Z`)).toISOString();
+    store.setBudget(MACHINE, OWNER, 80, 'pause', at);
+    for (const [id, usd] of [['r1', 12.5], ['x1', 75]] as const) {
+      await provider.stop(store.getAgent(id)!.runtimeRef!);
+      store.setAgentState(id, 'STOPPED');
+      store.setCostDays(id, new Map([[`${last}-10`, usd]]));
+      store.addBudgetPause(id, last, MACHINE, at);
+    }
+    const tile = async (who: string, id: string) => ((await f.inject({ method: 'GET', url: '/v1/agents', headers: as(who) })).json() as Array<{ id: string; budgetPaused?: { line?: string; ended?: { spent: number } } }>).find((a) => a.id === id)!.budgetPaused!;
+    // The member: GET /v1/budgets gives them no machine figure, and neither does their tile.
+    expect((await f.inject({ method: 'GET', url: '/v1/budgets', headers: as(OTHER) })).json().machine).toBeUndefined();
+    const member = await tile(OTHER, 'x1');
+    expect(JSON.stringify(member)).not.toContain('87.5');
+    expect(member.ended).toEqual({ month: last, spent: 75, on: expect.stringMatching(/^[A-Z][a-z]+ 1$/) });
+    expect(member.line).toMatch(/^Its pause for this Hatchabot's budget ended on [A-Z][a-z]+ 1, but it could not be started yet: Hatchabot tries again each pass, or start it now\. It used \$75\.00 in [A-Z][a-z]+$/);
+    // Its owner sees the whole machine's.
+    const owner = await tile(OWNER, 'r1');
+    expect(owner.ended).toMatchObject({ spent: 87.5, machine: true });
+    expect(owner.line).toMatch(/This Hatchabot used \$87\.50 in [A-Z][a-z]+$/);
+    await f.close();
+  });
+
   it('a cheaper model the runtime refused is not a switch: the record goes back, and the next pass tries again (review, 2026-10-22)', async () => {
     const { f, store, provider } = await app();
     const now = Date.now();
     store.setModelProfile('r1', { since: now - 30 * DAY, models: opus(now, 30), promptErrors: 0, crons: 0, firstCall: now - 60 * DAY, hourly: true } as StoredProfile, iso(now));
-    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/usage/budgets.js');
     recordCostDays(store, machineTz(), now);
     const month = monthKey(now, machineTz());
     provider.execResponses.set('models set', { code: 1, stdout: '', stderr: 'gateway restarting' });
@@ -722,7 +826,7 @@ describe('"cheaper model" at the limit', () => {
 
   it('Start leaves a budget\'s cheaper model in place, to come back on the 1st (audit, 2026-10-20)', async () => {
     const { f, store } = await app();
-    const month = monthKey(Date.now(), (await import('../src/orchestrator/budgets.js')).machineTz());
+    const month = monthKey(Date.now(), (await import('../src/orchestrator/usage/budgets.js')).machineTz());
     store.setAgentModel('r1', 'claude-haiku-4-5');
     store.addBudgetPause('r1', month, 'r1', iso(Date.now()), { fromModel: 'claude-opus-4-8', toModel: 'claude-haiku-4-5' });
     store.setAgentState('r1', 'STOPPED');
@@ -820,7 +924,7 @@ describe('a paused agent answers on Telegram, once a chat', () => {
     // Kept on the pause row, beside the chats answered: a restart does not say it again.
     expect(store.getBudgetPause('t1', '2026-10')!.replies).toMatchObject({ [QUEUE_FULL_TOLD]: { u: 100 }, '4242': { u: 199 } });
     vi.resetModules();
-    const restarted = await import('../src/orchestrator/budgets.js');
+    const restarted = await import('../src/orchestrator/usage/budgets.js');
     await restarted.pausedReplySweep(deps, later + 2 * HOUR);
     expect(logged.filter((l) => l.event === 'budget.paused_reply_queue_full')).toHaveLength(1);
     // Paused again later in the month: that pause says it once more.
@@ -932,7 +1036,7 @@ describe('"tell me every $X"', () => {
     const { f, store } = await app();
     const now = Date.now();
     store.setModelProfile('r1', { since: now - 30 * DAY, models: opus(now, 30), promptErrors: 0, crons: 0, firstCall: now - 60 * DAY, hourly: true } as StoredProfile, iso(now));
-    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/usage/budgets.js');
     recordCostDays(store, machineTz(), now);
     expect((await f.inject({ method: 'PUT', url: '/v1/agents/r1/spend-alert', headers: as(OWNER), payload: { every: 0.5 } })).statusCode).toBe(400);
     const r = await f.inject({ method: 'PUT', url: '/v1/agents/r1/spend-alert', headers: as(OWNER), payload: { every: 10 } });
@@ -1264,6 +1368,21 @@ describe('budgets that act together, and messages that did not get through', () 
     }
     expect(store.usageAlertsSince(new Date(Date.now() - DAY).toISOString(), { ownerId: OWNER })).toHaveLength(2);
   });
+
+  it('a body that is not an object is refused too, not read as "all of them" (HB-0814)', async () => {
+    const { f, store } = await app();
+    const at = new Date(Date.now() - HOUR).toISOString();
+    store.addUsageAlert({ agentId: 'r1', ownerId: OWNER, at, tokens: 44e6, usual: 15e6, told: true });
+    for (const payload of ['[]', '"all"', '7', 'true']) {
+      const r = await f.inject({ method: 'POST', url: '/v1/usage/alerts/dismiss', headers: { ...as(OWNER), 'content-type': 'application/json' }, payload });
+      expect(r.statusCode).toBe(400);
+      expect(r.json().error).toBe('Give both agentId and at for one warning, or neither for all of them.');
+    }
+    expect(store.usageAlertsSince(new Date(Date.now() - DAY).toISOString(), { ownerId: OWNER })).toHaveLength(1);
+    // Neither, or no body at all: every warning of theirs.
+    expect((await f.inject({ method: 'POST', url: '/v1/usage/alerts/dismiss', headers: as(OWNER), payload: {} })).json()).toEqual({ cleared: 1 });
+    expect((await f.inject({ method: 'POST', url: '/v1/usage/alerts/dismiss', headers: as(OWNER) })).statusCode).toBe(200);
+  });
 });
 
 describe('spend on a model with no known price is unknown, not $0 (HB-0402)', () => {
@@ -1289,7 +1408,7 @@ describe('spend on a model with no known price is unknown, not $0 (HB-0402)', ()
     store.setModelProfile('l1', profile(now, { 'plain-local-model': model({ [at]: { input: 9_000 } }), 'ollama/some-model': model({ [at]: { input: 9_000 } }) }), iso(now));
     // On a priced model now, part of the month on one with no price.
     store.setModelProfile('m1', profile(now, { ...opus(at, 1), [NOPRICE]: model({ [at]: { input: 7_000 } }) }), iso(now));
-    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/usage/budgets.js');
     recordCostDays(store, machineTz(), now);
     const row = async (id: string) => (await f.inject({ method: 'GET', url: '/v1/budgets', headers: as(OWNER) })).json().agents.find((a: { id: string }) => a.id === id);
     return { store, f, row };
@@ -1385,7 +1504,7 @@ describe('an owner no chat reaches, and one on Discord (HB-0403)', () => {
     });
     const now = Date.now();
     store.setModelProfile('w1', profile(now, opus(now, 45)), iso(now));
-    const { recordCostDays, machineTz } = await import('../src/orchestrator/budgets.js');
+    const { recordCostDays, machineTz } = await import('../src/orchestrator/usage/budgets.js');
     recordCostDays(store, machineTz(), now);
     return { store, f, dms };
   }
@@ -1407,7 +1526,7 @@ describe('an owner no chat reaches, and one on Discord (HB-0403)', () => {
     const { f, dms, store } = await routes(true);
     await f.inject({ method: 'PUT', url: '/v1/agents/w1/spend-alert', headers: as(OWNER), payload: { every: 10 } });
     // Set when the month had spent nothing: the spend has since passed several steps.
-    const { machineTz } = await import('../src/orchestrator/budgets.js');
+    const { machineTz } = await import('../src/orchestrator/usage/budgets.js');
     primeSpendAlert(store, 'w1', 10, 0, Date.now(), machineTz());
     await f.inject({ method: 'PUT', url: '/v1/agents/w1/budget', headers: as(OWNER), payload: { usd: 10_000 } });
     expect(dms.some((d) => d.text.includes('you hear every $10'))).toBe(true);

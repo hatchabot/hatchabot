@@ -10,9 +10,8 @@ import { registerRoutes } from '../src/api/routes.js';
 import { buildConfigCommands } from '../src/openclaw/configWriter.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
-import {
-  applySearchScript, createSearchWatch, DDG_TURNED_AWAY, duckDuckGoTurnedAway, ownSearchKeys, probeBrave, probeDuckDuckGo, readAgentSearchTest, readWebSearch, searchProviderFor,
-} from '../src/orchestrator/webSearch.js';
+import { applySearchScript, createSearchWatch, ownSearchKeys, probeBrave, probeDuckDuckGo, readAgentSearchTest, readWebSearch, searchProviderFor } from '../src/orchestrator/settings/webSearch.js';
+import { DDG_TURNED_AWAY, duckDuckGoTurnedAway } from '../src/domain/searchAdvice.js';
 import { urlHost } from './helpers/urlHost.js';
 
 const T0 = Date.parse('2026-11-03T12:00:00Z');

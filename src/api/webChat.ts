@@ -1,14 +1,15 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import type { Agent } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
-import { runWebChatTurn, webChatHistory, WEB_CHAT_MESSAGE_ID, type WebChatRights } from '../orchestrator/webChat.js';
+import { runWebChatTurn, webChatHistory, WEB_CHAT_MESSAGE_ID, type WebChatRights } from '../orchestrator/conversation/webChat.js';
 import { ownerIdOf } from './principal.js';
 
 /**
  * Chat on the web (2026-09-29): the routes behind the member's 💬 Chat panel.
  * Allowed: the agent's owner, and an ACTIVE member the owner gave web chat.
- * The turn itself is runWebChatTurn (orchestrator/webChat.ts): a guest's is a
+ * The turn itself is runWebChatTurn (orchestrator/conversation/webChat.ts): a guest's is a
  * member's turn (no owner-only tools), the agent's owner's is the owner's.
  */
 export interface WebChatDeps {
@@ -27,6 +28,12 @@ export interface WebChatDeps {
 
 export const MAX_WEB_CHAT_CHARS = 8000;
 const HOUR_MS = 3_600_000;
+/**
+ * POST /v1/agents/:id/chat: the text and the message id, of any type
+ * (HB-0814), checked by the route in its own words after who is asking, as
+ * before; a body that is not an object is read as without either.
+ */
+const ChatBody = z.object({ text: z.unknown().optional(), messageId: z.unknown().optional() });
 
 /** What a guest is told when the agent's gateway could not give them a member's (limited) turn. */
 export const webChatNeedsRebuild = (name: string): string =>
@@ -73,14 +80,15 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
   const nameOf = (agent: Agent, userId: string): string =>
     store.getMembership(agent.id, userId)?.displayName || (agent.ownerId === userId ? 'The owner' : 'Someone');
 
-  app.post<{ Params: { id: string }; Body: { text?: string; messageId?: unknown } }>('/v1/agents/:id/chat', async (req, reply) => {
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/chat', async (req, reply) => {
     const me = ownerIdOf(req);
     const found = allowed(req.params.id, me, reply);
     if (!found) return reply;
-    const text = String((req.body as { text?: string } | undefined)?.text ?? '').trim();
+    const body = ChatBody.safeParse(req.body).data;
+    const text = String(body?.text ?? '').trim();
     if (!text) return reply.code(400).send({ error: 'Say something.' });
     if (text.length > MAX_WEB_CHAT_CHARS) return reply.code(413).send({ error: 'That message is over 8,000 characters.' });
-    const messageId = req.body?.messageId;
+    const messageId = body?.messageId;
     if (messageId !== undefined && (typeof messageId !== 'string' || !WEB_CHAT_MESSAGE_ID.test(messageId))) return reply.code(400).send({ error: 'That message id is not valid.' });
     const key = webChatKey(found.id, me);
     if (deps.inFlight.has(key)) return reply.code(409).send({ error: 'It is still answering your last message.' });

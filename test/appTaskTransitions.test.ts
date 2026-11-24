@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import type { ExecResult } from '../src/providers/provider.js';
-import { parseManifest, syncTasks, taskTransitionPending, type InstallDeps } from '../src/orchestrator/apps.js';
-import { SimulatedCrash } from '../src/orchestrator/operations.js';
+import { parseManifest, syncTasks, taskTransitionPending, type InstallDeps } from '../src/orchestrator/apps/apps.js';
+import { SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 
 // The scheduler, transition journal and settled provenance survive a simulated
 // restart, while each syncTasks invocation has fresh local state. No shell or

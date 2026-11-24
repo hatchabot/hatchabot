@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {parseSwapProbe,dockerMemorySwap} from '../src/orchestrator/swap.js';
+import {parseSwapProbe,dockerMemorySwap} from '../src/domain/swap.js';
 it('mixed zram and disk swap withholds the agent allowance regardless of priority',()=>{
  const s=parseSwapProbe(`zswap.enabled=N
 --swaps

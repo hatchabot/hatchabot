@@ -6,9 +6,9 @@ import { MockProvider, importsTook } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ExecResult, RuntimeProvider } from '../src/providers/provider.js';
-import { OAuthStateJar, gogAccounts, googleAuthUrl, materializeConnection, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
-import { stripManagedSections } from '../src/orchestrator/template.js';
-import { syncDataSourceDocs } from '../src/orchestrator/provision.js';
+import { OAuthStateJar, gogAccounts, googleAuthUrl, materializeConnection, parseOAuthClient, syncConnections } from '../src/orchestrator/google/googleConnections.js';
+import { stripManagedSections } from '../src/orchestrator/transfer/template.js';
+import { syncDataSourceDocs } from '../src/orchestrator/lifecycle/provision.js';
 import { urlIs } from './helpers/urlHost.js';
 
 /** The browser-binding cookie the start route set (night review, 2026-09-28). */
@@ -749,6 +749,30 @@ describe('attach / detach / remove', () => {
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: 'c-x' } });
     expect(res.statusCode).toBe(404);
     expect(provider.execLog.length).toBe(before);
+  });
+
+  it('a body of the wrong shape is a 400 before anything is attached or detached (HB-0814)', async () => {
+    const w = await connectedWorld();
+    const post = (url: string, payload: string) => w.f.inject({ method: 'POST', url, headers: { ...H, 'content-type': 'application/json' }, payload });
+    const before = w.provider.execLog.length;
+    for (const body of ['[]', '"text"', '7', `{"connectionId":7}`, `{"connectionId":"${w.connId}","gmailNoSend":"yes"}`]) {
+      const res = await post('/v1/agents/a1/connections/attach', body);
+      expect(res.statusCode, body).toBe(400);
+    }
+    for (const body of ['[]', `{"connectionId":{"id":"${w.connId}"}}`]) {
+      expect((await post('/v1/agents/a1/connections/detach', body)).statusCode, body).toBe(400);
+    }
+    expect(w.store.listAgentConnections('a1')).toEqual([]);
+    expect(w.provider.execLog.length).toBe(before);
+    // Left out, or null, is no connection, as before.
+    expect((await post('/v1/agents/a1/connections/attach', '{"connectionId":null,"gmailNoSend":null}')).json()).toEqual({ error: 'No such connection.' });
+    expect((await post('/v1/agents/a1/connections/detach', 'null')).json()).toEqual({ error: 'No such connection.' });
+    // Another owner's agent is still a 404 first.
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: { 'x-hatchabot-owner': 'user-other', 'content-type': 'application/json' }, payload: '[]' })).statusCode).toBe(404);
+    // The consent's start: a body that is not an object is refused; `services` keeps its own check.
+    expect((await post('/v1/connections/google/start', '"gmail"')).statusCode).toBe(400);
+    expect((await post('/v1/connections/google/start', '{"services":"gmail"}')).statusCode).toBe(200);
+    expect((await post('/v1/connections/google/start', '{"services":["constructor"]}')).json()).toEqual({ error: 'Pick at least one service.' });
   });
 
   it('detach removes the row and the container account; vault removal revokes at Google', async () => {

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import zlib from 'node:zlib';
 import Database from 'better-sqlite3';
-import { InspectReadError, listInspectableFiles, readInspectableFile, readTranscript, utf8Prefix } from '../src/orchestrator/inspect.js';
+import { InspectReadError, listInspectableFiles, readInspectableFile, readTranscript, utf8Prefix } from '../src/orchestrator/diagnostics/inspect.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
 
 /**

@@ -118,7 +118,7 @@ describe('the pre-push check', () => {
   });
   it('the name Hatchabot gives a member who joins without one ("Guest") is not private (HB-0682)', () => {
     // invite.ts names such a member "Guest"; the word is all over the code.
-    expect(readFileSync(join(__dirname, '..', 'src', 'orchestrator', 'invite.ts'), 'utf8')).toMatch(/\|\| 'Guest'/);
+    expect(readFileSync(join(__dirname, '..', 'src', 'orchestrator', 'members', 'invite.ts'), 'utf8')).toMatch(/\|\| 'Guest'/);
     const d = new Database(db);
     d.prepare('insert into memberships values (?, ?)').run('123456789013', 'Guest');
     d.close();

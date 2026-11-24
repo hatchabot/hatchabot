@@ -14,7 +14,7 @@ Advanced → Other Hatchabot servers / `hatchabot servers add`) and agents move 
 which carries the agent's whole state (bot token, memory, members) and re-binds
 it to a vendor-matched AI profile on the destination.
 
-- **Mechanism:** the `peers` table + Rehost (`src/orchestrator/migrate.ts`).
+- **Mechanism:** the `peers` table + Rehost (`src/orchestrator/transfer/migrate.ts`).
 - **You see:** one dashboard per node.
 - **Status:** shipped.
 - **Good for:** your own boxes — e.g. a DGX at home + a cloud VM, for one person.
@@ -33,7 +33,7 @@ host (local or a remote runner).
   needs to scale horizontally (then, and only then, Postgres).
 - **You see:** one dashboard for everything.
 - **Moving within the cluster:** **Move…** in the agent's Advanced tab
-  (`POST /v1/agents/:id/move-host`, `src/orchestrator/moveHost.ts`) relocates an
+  (`POST /v1/agents/:id/move-host`, `src/orchestrator/transfer/moveHost.ts`) relocates an
   agent between hosts on the same control plane — quiesce, snapshot the volume,
   recreate on the target, retire the source. Same agent record, same bot, same
   members; no tombstone (that's Rehost, the Mesh move). Fleet ops: per-runner

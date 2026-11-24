@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { listCrons } from '../src/orchestrator/crons.js';
+import { listCrons } from '../src/orchestrator/schedules/crons.js';
 
 describe('cron listing reads the gateway\'s camelCase schedule keys (2026-09-11)', () => {
   it('surfaces everyMs for interval jobs and at for one-shots', async () => {

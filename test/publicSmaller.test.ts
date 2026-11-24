@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Jar, PUBLIC_HOST, PUBLIC_URL, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { SoftAuthenticator } from './helpers/softAuthenticator.js';
 import { agentRow, closeAfterEach, ctx, privCookie, world } from './helpers/publicWorld.js';
-import { createInvite } from '../src/orchestrator/invite.js';
+import { createInvite } from '../src/orchestrator/members/invite.js';
 import { totp } from '../src/api/totp.js';
+import { readPage } from '../scripts/page-source.mjs';
 
 /**
  * The smaller findings of the second review that were cheap and clearly
@@ -138,9 +138,10 @@ describe('smaller fixes', () => {
   }, 30_000);
 
   it('the page puts an address a button copies in a data attribute, never inside a script string', () => {
-    const html = readFileSync(join(import.meta.dirname, '../web/index.html'), 'utf8');
+    const html = readPage(join(import.meta.dirname, '../web/index.html'));
     // esc() makes text safe for HTML, not for a JavaScript string inside an attribute: after the browser decodes the attribute, a quote is a quote again.
     expect(html).not.toMatch(/on\w+="[^"\n]*\('\$\{esc\(/);
-    expect(html).toContain('data-copy="${esc(r.url)}" onclick="copyText(this.dataset.copy)');
+    // Since HB-0810 the button's action reads it from there ({$:'data'}); its arguments are JSON, escaped once by onAction.
+    expect(html).toContain(`data-copy="\${esc(r.url)}" \${onAction('click', 'copyAndSay', [{ $: 'data', k: 'copy' }`);
   });
 });

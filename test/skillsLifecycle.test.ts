@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { isBusy } from '../src/orchestrator/busy.js';
+import { isBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 const worlds: World[] = [];

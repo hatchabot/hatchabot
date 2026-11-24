@@ -105,8 +105,18 @@ codebase gets deployed, updated and rolled back from Hatchabot.
    this; it uses the host's paths and git credentials): a local repo folder
    (`~/calendarhelper`) or a git URL (cloned into
    `~/hatchabot-data/app-sources/`). It resolves the ref (default `HEAD`) to a
-   commit and reads `hatchabot.json` from that commit.
-2. It copies `git archive <sha>` into `releases/<sha>` on the agent's volume.
+   commit and reads `hatchabot.json` from that commit. The code is limited to
+   100 MB (as a tarball): **Inspect** already refuses a commit over it, before
+   the dialog makes an agent or attaches an account. It counts the most the
+   tarball can be from the commit's file list, and packs it to be sure when
+   that is over the limit or attributes can change it (a `.gitattributes` in
+   the commit, or the repository's own `info/attributes`, which a linked
+   worktree shares with its main one).
+2. It copies `git archive <sha>` into `releases/<sha>` on the agent's volume,
+   unpacked beside it and moved in whole (an unpack that fails leaves
+   nothing). Only the repository's own attributes shape what is packed: this
+   machine's git settings and attributes files (`core.autocrlf`, `core.eol`,
+   `~/.config/git/attributes`, `/etc/gitattributes`) do not change it.
 3. It stages the new config (asked + filled values, keeping existing ones) in
    `staging/<sha>/`; the live `data/config.json` is not touched yet.
 4. It runs `test` in the new release, with the app's env and `{data_dir}` at
@@ -115,23 +125,38 @@ codebase gets deployed, updated and rolled back from Hatchabot.
    `current` at the new release (atomically).
 6. It re-syncs the tasks: the new ones are added first, then the old ones
    taken off.
-7. It records the app, source, commit and previous commit for the agent.
+7. It clears out older releases (it keeps the newest three, and always the
+   live one and the one before it; only folders named as a release, by their
+   commit's first 12 hex digits, are counted or removed, and unpacks left
+   half done, `<release>.tmp`, go too), then records the
+   app, source, commit and previous commit for the agent. A clear-out that
+   fails is only logged (`app.prune_failed`): the install stands.
 
-A failure in step 5 or 6 puts everything back: `current` at the previous
+A failure in step 5, or in step 6 before the new tasks are on, puts
+everything back: `current` at the previous
 release, its config to the byte (or no config, on a first install), and its
 tasks (new ones taken off, old ones already removed re-added from the previous
 release's `hatchabot.json`). The tasks are put back by listing what the agent
 has, not by what each add or removal answered (one can take effect and still
-answer an error), and listed again to confirm. The record is only written after
-step 6, so the agent, its tasks and the record agree either way; when the
+answer an error), and listed again to confirm. The record is only written in
+step 7, after the clear-out, so the agent, its tasks and the record agree
+either way; when the
 tasks cannot be confirmed (the list cannot be read, or a job will not come off
 or go back), the error says so and what to check (`openclaw cron list --all` in the
 agent's console). When `current` or the config cannot be put back, the staging
 folder (the config it replaced, and the new one) is kept and the operation
 waits on the agent's page for **Use the new release** or **Go back to the
 previous one**, as after a restart. The page says "the running version is
-unchanged" only when the server says so (`unchanged` in the error). Replacing one app with another takes the old app's tasks
-off first and puts them back if the new one fails.
+unchanged" only when the server says so (`unchanged` in the error).
+
+Once the new tasks are on, nothing is put back: putting back only the
+release and its config would leave the new tasks running the old code. A
+failure from there (recording that the tasks are on) leaves the new release,
+its config and its tasks as they went on, and the operation waits on the
+agent's page for **Use the new release** or **Go back to the previous one**;
+the error names the tasks that went on and the step that failed, and never
+says the running version is unchanged. Going back puts back the previous
+release, its config and its tasks.
 
 **One copy per account.** An install is refused (409) when another live agent
 already runs the same app on the account its values name (the mailbox): two
@@ -149,7 +174,19 @@ meanwhile"), and the later change stands.
 
 Replacing an app with another takes the old app's tasks off first and, if the
 new one fails, puts them back as they were (one you had turned off stays off;
-the operation records which, so a restart puts them back the same way).
+the operation records which, so a restart puts them back the same way). Taking
+them off is part of that too: when only some come off, they are all put back.
+When they cannot all be put back and nothing of the new app was left, the
+operation waits on the agent's page for **Put its scheduled tasks back**, as
+after a restart; when the new app is still switched on as well (its own
+switch back failed), it waits for **Use the new release** or **Go back to
+the previous one**: going back puts the old app's tasks back too, and using
+the new release takes them off again (they went back on when the new app
+failed), so the two apps' tasks never run side by side. When the new app's
+tasks went on before the failure, the old app's stay off and the error says
+so; going back puts them back. When
+the new app's own tasks could not be confirmed off, it fails, saying what is
+left: check the agent's task list.
 
 **Update** is the same from step 1 with a newer commit; **rollback** points
 `current` back at the previous release and re-syncs its tasks (if they cannot

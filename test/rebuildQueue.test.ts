@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { beginOperation } from '../src/orchestrator/operations.js';
+import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 
 /**
  * Rebuilding the fleet is a queue: several at a time, and the ones waiting say
@@ -147,5 +147,39 @@ describe('rebuilding the fleet', () => {
       w.releaseAll();
       delete process.env.HATCHABOT_REBUILD_CONCURRENCY;
     }
+  });
+});
+
+describe('the bodies of Rebuild and of a held operation\'s choice (HB-0814)', () => {
+  it('Rebuild: no body is a plain rebuild; a field that is not true or false, or a body that is not an object, is a 400', async () => {
+    const w = await fleet(2);
+    try {
+      const [a, b] = w.ids as [string, string];
+      for (const payload of [{ checkpoint: 'yes' }, { stoppedWaits: 1 }, [true]]) {
+        const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${a}/rebuild`, headers: H, payload: payload as never });
+        expect(r.statusCode, JSON.stringify(payload)).toBe(400);
+      }
+      expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${a}/rebuild`, headers: H, payload: { checkpoint: 'yes' } })).json().error).toMatch(/^checkpoint: /);
+      // Refused before the body is read, as before: one not found is still a 404.
+      expect((await w.f.inject({ method: 'POST', url: '/v1/agents/nobody/rebuild', headers: H, payload: [true] as never })).statusCode).toBe(404);
+      expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${a}/rebuild`, headers: H })).statusCode).toBe(202);
+      w.store['db'].prepare(`UPDATE agents SET state = 'STOPPED' WHERE id = ?`).run(b);
+      const owed = await w.f.inject({ method: 'POST', url: `/v1/agents/${b}/rebuild`, headers: H, payload: { stoppedWaits: true, checkpoint: null } });
+      expect(owed.statusCode).toBe(202);
+      expect(owed.json()).toEqual({ rebuilding: false, atNextStart: true });
+    } finally { w.releaseAll(); }
+  });
+
+  it('a held operation\'s choice: anything but a short action keeps its words', async () => {
+    const w = await fleet(1);
+    try {
+      const op = beginOperation(w.store, 'migrate', w.ids[0]!, { to: 'Desktop' });
+      op.hold('The other Hatchabot did not answer.', { actions: [{ action: 'retry', label: 'Ask again' }], recommended: 'retry' });
+      for (const payload of [undefined, {}, { action: '' }, { action: 7 }, ['retry'], { action: 'x'.repeat(33) }]) {
+        const r = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: H, ...(payload === undefined ? {} : { payload: payload as never }) });
+        expect(r.statusCode, JSON.stringify(payload)).toBe(400);
+        expect(r.json().error).toBe('Say which choice: { "action": "…" } (one of the operation\'s recovery actions).');
+      }
+    } finally { w.releaseAll(); }
   });
 });

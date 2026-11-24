@@ -6,11 +6,11 @@ import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { installErrorHandler } from '../src/api/errorHandler.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
-import { reconcileAgents } from '../src/orchestrator/reconcile.js';
+import { reconcileAgents } from '../src/orchestrator/lifecycle/reconcile.js';
 import { TelegramManualProvisioner } from '../src/channels/telegramManual.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/busy.js';
-import { beginOperation, newBootForTests } from '../src/orchestrator/operations.js';
-import { resumeOperations } from '../src/orchestrator/operationsResume.js';
+import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { beginOperation, newBootForTests } from '../src/orchestrator/lifecycle/operations.js';
+import { resumeOperations } from '../src/orchestrator/lifecycle/operationsResume.js';
 import { HANDOVER_SAYS } from '../src/cli.js';
 
 /**

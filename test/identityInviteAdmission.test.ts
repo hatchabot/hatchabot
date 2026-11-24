@@ -6,7 +6,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerAuth, _resetLoginThrottle } from '../src/api/auth.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { IdentityVerifier } from '../src/api/identity.js';
-import { createInvite, checkInvite } from '../src/orchestrator/invite.js';
+import { createInvite, checkInvite } from '../src/orchestrator/members/invite.js';
 import { MemSecrets } from './support/world.js';
 
 describe('invites use the same identity admission as sign-in (HB-0689)', () => {
@@ -18,6 +18,8 @@ describe('invites use the same identity admission as sign-in (HB-0689)', () => {
       const provider = new MockProvider();
       store.insertHost({ id: 'h1', ownerId: 'user-owner', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
       store.insertAgent({ id: 'a1', ownerId: 'user-owner', name: 'Garden', slug: 'garden', state: 'STOPPED', hostId: 'h1', aiProfileId: 'p1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+      // Asleep: an invite that names nobody may be used on it (stopped by its owner, it is refused: HB-0992).
+      store.setHibernated('a1', new Date().toISOString(), 0);
       let emailVerified = why !== 'unverified email';
       vi.stubEnv('HATCHABOT_ALLOWED_EMAILS', why === 'excluded email' ? 'owner@example.com' : '');
       const verifier = { verify: async () => ({ sub: 'guest', email: 'guest@example.com', emailVerified, expMs: Date.now() + 60_000 }) } as unknown as IdentityVerifier;

@@ -5,10 +5,10 @@ import { gzipSync } from 'node:zlib';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { beginOperation } from '../src/orchestrator/operations.js';
+import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
-import { MAX_FILE_BYTES } from '../src/orchestrator/snapshots.js';
-import { isBusy } from '../src/orchestrator/busy.js';
+import { MAX_FILE_BYTES } from '../src/orchestrator/files/snapshots.js';
+import { isBusy } from '../src/orchestrator/lifecycle/busy.js';
 
 /**
  * Sharing Phase 2a over HTTP: declaring setup fields on an agent, and filling
@@ -1099,6 +1099,65 @@ describe('template-carried schedules', () => {
     expect(res.statusCode).toBe(201);
     const parked = store.getPendingSchedules(res.json().id);
     expect(parked).toEqual([{ name: 'Pre-market briefing', message: 'Post the briefing.', cron: '0 8 * * 1-5', tz: 'America/New_York' }]);
+  });
+
+  it('a machine-login Max source on a runner is refused before an agent is made, as Create refuses it (HB-1122)', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile({ id: 'p-max', ownerId: OWNER, name: 'Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', createdAt: 'now' });
+    store.insertHost({ id: 'h-run', ownerId: OWNER, kind: 'cloud', provider: 'mock', name: 'Runner', settings: {}, createdAt: 'now' });
+    const before = store.listAgents(OWNER).length;
+    const T = gzipSync(Buffer.from(JSON.stringify({
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Away', persona: 'p', sharedMemory: false },
+      files: { 'SOUL.md': 'x', 'AGENTS.md': 'y' },
+      ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [], parameters: [],
+    })));
+    const post = (q: string) => f.inject({ method: 'POST', url: `/v1/agents/import?${q}`, headers: { ...H, 'content-type': 'application/octet-stream' }, payload: T });
+    const res = await post('aiProfileId=p-max&hostId=h-run');
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/^This Claude Max profile uses this machine's login, which can't reach a runner\./);
+    expect(store.listAgents(OWNER)).toHaveLength(before);
+    // On this machine it may, and an API-key source may go to the runner.
+    expect((await post('aiProfileId=p-max&hostId=h1&name=Here')).statusCode).toBe(201);
+    expect((await post('aiProfileId=p1&hostId=h-run&name=There')).statusCode).toBe(201);
+  });
+
+  it('a task with no schedule, a cron expression that cannot run or an unknown time zone is refused by its name, and no agent is made (HB-1018)', async () => {
+    const { store, f } = await world();
+    const before = store.listAgents(OWNER).length;
+    const template = (task: Record<string, unknown>) => gzipSync(Buffer.from(JSON.stringify({
+      format: 'hatchabot-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Sched', persona: 'p', sharedMemory: false },
+      files: { 'SOUL.md': 'x', 'AGENTS.md': 'y' },
+      ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [], parameters: [],
+      schedules: [{ name: 'Pre-market briefing', message: 'Post the briefing.', ...task }],
+    })));
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/import', headers: { ...H, 'content-type': 'application/octet-stream' }, payload: template({}) });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('That template can\'t be used: its scheduled task "Pre-market briefing" has no schedule (a cron expression or an interval).');
+    expect(store.listAgents(OWNER)).toHaveLength(before);
+    // Nor one whose cron expression or time zone no gateway takes: named, and nothing made.
+    for (const [task, why] of [
+      [{ cron: 'every weekday at 8' }, 'has a cron expression that can\'t run ("every weekday at 8")'],
+      [{ cron: '0 25 * * 1-5' }, 'has a cron expression that can\'t run ("0 25 * * 1-5")'],
+      [{ cron: '0 8 * * 1-5', tz: 'Mars/Olympus_Mons' }, 'names a time zone that isn\'t one ("Mars/Olympus_Mons")'],
+    ] as const) {
+      const bad = await f.inject({ method: 'POST', url: '/v1/agents/import?name=Bad', headers: { ...H, 'content-type': 'application/octet-stream' }, payload: template(task) });
+      expect(bad.statusCode).toBe(400);
+      expect(bad.json().error).toBe(`That template can't be used: its scheduled task "Pre-market briefing" ${why}.`);
+    }
+    expect(store.listAgents(OWNER)).toHaveLength(before);
+    // A weekday cron with names, in a real zone, is a schedule; so are a short nickname, a zero-padded step and an offset zone.
+    for (const [i, task] of ([
+      { cron: '30 8 * * MON-FRI', tz: 'America/Toronto' }, { cron: '@daily' }, { cron: '@midnight', tz: '+05:00' }, { cron: '*/05 * * * *', tz: '-0800' },
+    ] as const).entries()) {
+      const fine = await f.inject({ method: 'POST', url: `/v1/agents/import?name=Fine${i}`, headers: { ...H, 'content-type': 'application/octet-stream' }, payload: template(task) });
+      expect(fine.statusCode, JSON.stringify(task)).toBe(201);
+    }
+    // An interval alone is a schedule, as a cron expression alone is.
+    const every = await f.inject({ method: 'POST', url: '/v1/agents/import?name=Every', headers: { ...H, 'content-type': 'application/octet-stream' }, payload: template({ everyMs: 3_600_000 }) });
+    expect(every.statusCode).toBe(201);
+    expect(store.getPendingSchedules(every.json().id)).toEqual([{ name: 'Pre-market briefing', message: 'Post the briefing.', everyMs: 3_600_000 }]);
   });
 });
 

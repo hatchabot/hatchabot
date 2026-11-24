@@ -7,8 +7,8 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { exportAgent, importAgent } from '../src/orchestrator/transfer.js';
-import { parseManifest } from '../src/orchestrator/apps.js';
+import { exportAgent, importAgent } from '../src/orchestrator/transfer/transfer.js';
+import { parseManifest } from '../src/orchestrator/apps/apps.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { MemSecrets } from './support/world.js';

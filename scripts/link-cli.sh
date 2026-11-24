@@ -19,9 +19,41 @@ if [ -f BUNDLE.json ] && [ -x .node/bin/node ]; then
   # escaped, or running the command expanded it a second time (a folder named
   # bundle$HOME, audit #039). uninstall.sh finds the launchers by the same text.
   HERE="$(printf '%s' "$PWD" | sed -e 's/[\\$`"]/\\&/g')"
+  # What is already at $1 is a Hatchabot command, and so this script's to
+  # replace: a launcher it wrote (for any install), or a link that ends at a
+  # Hatchabot CLI (an npm-linked native install's, or hbt linked to one of
+  # these), followed as far as it goes, gone or not. Anything else there is
+  # another program, which a fresh launcher went in over (HB-1077).
+  hatchabot_launcher() { [ -f "$1" ] && grep -q 'written by scripts/link-cli.sh' "$1" 2>/dev/null; }
+  # And as hatchabot only (it wrote no hbt), the launcher the rename from
+  # AgentClaw wrote (scripts/migrate-rename-host.sh): exactly its two lines,
+  # and the checkout it runs gone or a Hatchabot one. Another tool's tsx
+  # wrapper can look much the same (review of HB-1077).
+  renamed_launcher() {
+    local dir
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(wc -l < "$1" | tr -d ' ')" = 2 ] && [ "$(sed -n 1p "$1")" = '#!/usr/bin/env bash' ] || return 1
+    dir="$(sed -n '2s|^cd "\([^"]*\)" && exec node_modules/\.bin/tsx src/cli\.ts "\$@"$|\1|p' "$1")"
+    [ -n "$dir" ] && { [ ! -e "$dir" ] || grep -q '"name": *"hatchabot"' "$dir/package.json" 2>/dev/null; }
+  }
+  hatchabot_command() { # PATH NAME
+    local t
+    if [ -L "$1" ]; then
+      t="$(readlink -f "$1" 2>/dev/null || readlink "$1" 2>/dev/null)" || return 1
+      case "$t" in */bin/hatchabot.mjs) return 0 ;; esac
+      hatchabot_launcher "$t"
+      return
+    fi
+    hatchabot_launcher "$1" || { [ "$2" = hatchabot ] && renamed_launcher "$1"; }
+  }
+  LINKED=""; UNLINKED=0
   for name in hatchabot hbt; do
     if [ "$name" = hbt ] && OTHER="$(command -v hbt 2>/dev/null)" && [ "$OTHER" != "$BIN/hbt" ]; then
       echo "note: another program here is already called hbt ($OTHER), so use the full name: hatchabot."; continue
+    fi
+    if { [ -e "$BIN/$name" ] || [ -L "$BIN/$name" ]; } && ! hatchabot_command "$BIN/$name" "$name"; then
+      if [ "$name" = hbt ]; then echo "note: another program here is already called hbt ($BIN/hbt), so use the full name: hatchabot."; continue; fi
+      echo "$BIN/hatchabot is another program, not Hatchabot's, so it was left as it is and the hatchabot command was not linked. Move it aside, then run ./scripts/link-cli.sh again."
+      UNLINKED=1; continue
     fi
     # A link there (an npm-linked native install's) is replaced, not written
     # through: the redirect followed it and overwrote that install's CLI with
@@ -29,8 +61,9 @@ if [ -f BUNDLE.json ] && [ -x .node/bin/node ]; then
     rm -f "$BIN/$name"
     printf '#!/usr/bin/env bash\n# Hatchabot (%s) — written by scripts/link-cli.sh\nexec "%s/.node/bin/node" "%s/bin/hatchabot.mjs" "$@"\n' "$name" "$HERE" "$HERE" > "$BIN/$name"
     chmod 755 "$BIN/$name"
+    LINKED="${LINKED:+$LINKED, }$BIN/$name"
   done
-  echo "linked: $BIN/hatchabot$([ -x "$BIN/hbt" ] && echo ", $BIN/hbt")"
+  [ -z "$LINKED" ] || echo "linked: $LINKED"
   case ":$PATH:" in
     *":$BIN:"*) ;;
     *)
@@ -44,6 +77,7 @@ if [ -f BUNDLE.json ] && [ -x .node/bin/node ]; then
       done
       echo "Open a new terminal (or run: $LINE) for the change to take effect there." ;;
   esac
+  [ "$UNLINKED" = 0 ] || exit 1
   [ "${1:-}" = --no-doctor ] && exit 0
   echo; "$BIN/hatchabot" doctor || true
   exit 0

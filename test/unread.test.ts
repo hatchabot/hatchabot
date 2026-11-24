@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
-import { consoleActivity, cronJobOfKey, cronRunsSignature, markQuietTasks, quietTaskIds, sessionsReadShell } from '../src/orchestrator/unread.js';
+import { consoleActivity, cronJobOfKey, cronRunsSignature, markQuietTasks, quietTaskIds, sessionsReadShell } from '../src/orchestrator/conversation/unread.js';
 
 describe('unread: what counts as console activity', () => {
   it('counts a web console exchange', () => {

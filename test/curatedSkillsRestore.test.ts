@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentArchiveName, recoverBackupRestore, restoreAgentFromBackup, resumeBackupRestore } from '../src/orchestrator/backups.js';
-import { reapplyCurrentSettings } from '../src/orchestrator/provision.js';
-import { SimulatedCrash } from '../src/orchestrator/operations.js';
+import { agentArchiveName, recoverBackupRestore, restoreAgentFromBackup, resumeBackupRestore } from '../src/orchestrator/backups/backupFiles.js';
+import { reapplyCurrentSettings } from '../src/orchestrator/lifecycle/provision.js';
+import { SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 let directory: string;

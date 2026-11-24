@@ -8,7 +8,7 @@ import { ProviderError } from '../src/providers/provider.js';
 import {
   bumpMemoryCap, defaultMemoryCap, describeMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax,
   memoryBudgetSection, memoryCapChoices, parseMemoryCap,
-} from '../src/orchestrator/memoryCap.js';
+} from '../src/domain/memoryCap.js';
 
 /**
  * The memory cap on an agent's container: fleet default, class default, or

@@ -6,8 +6,8 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { gzipSync } from 'node:zlib';
-import { importAgent, resumeImport } from '../src/orchestrator/transfer.js';
-import { SimulatedCrash } from '../src/orchestrator/operations.js';
+import { importAgent, resumeImport } from '../src/orchestrator/transfer/transfer.js';
+import { SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { MemSecrets } from './support/world.js';

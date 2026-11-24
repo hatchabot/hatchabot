@@ -6,7 +6,7 @@ import { Jar, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { agentRow, at, closeAfterEach, ctx, envNow, extraRoutes, giveWebChat, privCookie, world } from './helpers/publicWorld.js';
 import { publicConfig } from '../src/api/safeguards.js';
 import { guestMay } from '../src/api/publicRoutes.js';
-import { createInvite } from '../src/orchestrator/invite.js';
+import { createInvite } from '../src/orchestrator/members/invite.js';
 import { publicAccessFacts, publicAccessLines } from '../src/doctor.js';
 import { base32Decode, totp } from '../src/api/totp.js';
 

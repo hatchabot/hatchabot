@@ -2,8 +2,8 @@ import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { dockerfileProblem } from '../src/orchestrator/derivedImage.js';
-import { sharePathProblem } from '../src/orchestrator/provision.js';
+import { dockerfileProblem } from '../src/orchestrator/machines/derivedImage.js';
+import { sharePathProblem } from '../src/orchestrator/lifecycle/provision.js';
 import { defaultDbPath, defaultBackupsDir } from '../src/envCompat.js';
 
 describe('sharePathProblem (audit 2026-09-13)', () => {

@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { foldDatedIds } from '../src/orchestrator/modelOptions.js';
+import { foldDatedIds } from '../src/orchestrator/sources/modelOptions.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**

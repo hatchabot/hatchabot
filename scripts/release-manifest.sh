@@ -16,7 +16,7 @@
 #
 # A checked manifest is kept in the data directory (release-manifests/<tag>.json)
 # so a restart offline does not need GitHub. The app reads the same files
-# (src/orchestrator/releaseManifest.ts).
+# (src/providers/releaseManifest.ts).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 

@@ -3,13 +3,13 @@ import Database from 'better-sqlite3';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { execFileSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  BrowserPanels, channelFromChild, PANEL_CDP_METHODS, PANEL_MAX_OPS, PANEL_RELAY_SOURCE,
-  panelAddress, panelCommands, panelSize, panelTransportOk, type BrowserPanelChannel, type PanelEvent,
-} from '../src/orchestrator/browserPanel.js';
+import { BrowserPanels, PANEL_MAX_OPS, panelAddress, panelCommands, panelSize, panelTransportOk, type PanelEvent } from '../src/orchestrator/console/browserPanel.js';
+import { channelFromChild, PANEL_CDP_METHODS, PANEL_RELAY_SOURCE, type BrowserPanelChannel } from '../src/providers/browserPanelRelay.js';
 import { makeWorld, seedRunningAgent, as, type World } from './support/world.js';
 import { registerAuth } from '../src/api/auth.js';
 import { mintSession } from '../src/api/accountsAuth.js';
@@ -223,13 +223,51 @@ describe('a panel: what goes to the browser, and what comes back to the page', (
     p.run([{ history: -1 }]);
     ch.emit({ id: ch.sent.at(-1)!.id, result: history });
     expect(ch.sent.at(-1)).toMatchObject({ method: 'Page.navigateToHistoryEntry', params: { entryId: 7 } });
+    ch.emit({ id: ch.sent.at(-1)!.id, result: {} }); // the browser took it
     p.run([{ history: 1 }]);
     ch.emit({ id: ch.sent.at(-1)!.id, result: history });
     expect(ch.sent.at(-1)).toMatchObject({ method: 'Page.navigateToHistoryEntry', params: { entryId: 9 } });
+    ch.emit({ id: ch.sent.at(-1)!.id, result: {} });
     const n = ch.sent.length;
     p.run([{ history: -1 }]);
     ch.emit({ id: ch.sent.at(-1)!.id, result: { currentIndex: 0, entries: [{ id: 7 }] } });
     expect(ch.sent.length).toBe(n + 1); // only the history was asked
+  });
+
+  it('two Backs in quick succession are two steps: the second reads the history once the first has gone (HB-1037)', () => {
+    const ch = fakeChannel();
+    const panels = new BrowserPanels();
+    const p = panels.get(panels.open('a1', 'o1', ch, size), 'a1', 'o1')!;
+    const at = (currentIndex: number) => ({ currentIndex, entries: [{ id: 10 }, { id: 20 }, { id: 30 }] });
+    const history = () => ch.sent.filter((m) => m.method === 'Page.getNavigationHistory');
+    const went = () => ch.sent.filter((m) => m.method === 'Page.navigateToHistoryEntry').map((m) => m.params?.entryId);
+    p.run([{ history: -1 }]);
+    p.run([{ history: -1 }]); // pressed again before the relay answered the first
+    expect(history()).toHaveLength(1); // the second waits its turn
+    ch.emit({ id: history()[0]!.id, result: at(2) });
+    expect(went()).toEqual([20]);
+    expect(history()).toHaveLength(1);
+    ch.emit({ id: ch.sent.at(-1)!.id, result: {} }); // the browser took the first step
+    expect(history()).toHaveLength(2);
+    ch.emit({ id: history()[1]!.id, result: at(1) });
+    expect(went()).toEqual([20, 10]);
+  });
+
+  it('a step the browser never answers lets the next go after a few seconds; closing drops what waits', () => {
+    vi.useFakeTimers();
+    const ch = fakeChannel();
+    const panels = new BrowserPanels();
+    const p = panels.get(panels.open('a1', 'o1', ch, size), 'a1', 'o1')!;
+    const history = () => ch.sent.filter((m) => m.method === 'Page.getNavigationHistory');
+    p.run([{ history: -1 }, { history: 1 }, { history: 1 }]);
+    expect(history()).toHaveLength(1);
+    vi.advanceTimersByTime(5_000);
+    expect(history()).toHaveLength(2);
+    ch.emit({ id: history()[0]!.id, result: { currentIndex: 1, entries: [{ id: 1 }, { id: 2 }] } }); // too late: nothing
+    expect(ch.sent.some((m) => m.method === 'Page.navigateToHistoryEntry')).toBe(false);
+    p.close('person');
+    vi.advanceTimersByTime(10_000);
+    expect(history()).toHaveLength(2);
   });
 
   it('a new size restarts the screencast at it', () => {
@@ -548,6 +586,36 @@ describe('the routes', () => {
       expect(res.payload).toContain('"t":"closed"');
       expect(relay().closed).toBe(true);
     } finally { await w.f.close(); vi.useRealTimers(); }
+  });
+
+  it('closes the panel of a browser that signed out and hung up before the answer, at once (HB-1405)', async () => {
+    const { w, cookie, relay } = await signedIn();
+    // The sign-out is slow to answer (a loaded machine); the server sees its caller go meanwhile.
+    let reached!: () => void, release!: () => void, serverSaw!: Promise<void>;
+    const entered = new Promise<void>((r) => { reached = r; });
+    const held = new Promise<void>((r) => { release = r; });
+    w.f.addHook('preHandler', async (req) => {
+      if (req.url !== '/v1/logout') return;
+      serverSaw = new Promise<void>((r) => { req.raw.socket.once('close', () => r()); });
+      reached(); await held;
+    });
+    try {
+      const opened = await open(w, {}, { headers: { cookie } });
+      expect(opened.statusCode, opened.body).toBe(201);
+      await w.f.listen({ port: 0, host: '127.0.0.1' });
+      const { port } = w.f.server.address() as AddressInfo;
+      const call = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: '/v1/logout', headers: { cookie } });
+      const hungUp = new Promise<void>((r) => { call.on('error', () => r()); call.on('close', () => r()); });
+      call.end();
+      await entered;
+      // The tab is closed (or its fetch timed out) while the sign-out still works.
+      call.destroy();
+      await hungUp;
+      await serverSaw;
+      release();
+      // Its answer goes to nobody, but the sign-out happened: its panel ends now, not at the 30-second sweep.
+      await vi.waitFor(() => expect(relay().closed).toBe(true), { timeout: 2000, interval: 20 });
+    } finally { await w.f.close(); }
   });
 
   it('asks a bearer-only caller to sign in in a browser (HB-0700)', async () => {

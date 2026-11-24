@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BackupBusyError, pruneBackup } from '../src/orchestrator/backups.js';
+import { BackupBusyError, pruneBackup } from '../src/orchestrator/backups/backupFiles.js';
 import { processAlive } from '../src/domain/processAlive.js';
 
 vi.mock('../src/domain/processAlive.js', () => ({ processAlive: vi.fn() }));

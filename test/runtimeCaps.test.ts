@@ -4,10 +4,10 @@
  * a stub docker, so the list stays truthful without needing docker in CI.
  */
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { probeImageCapabilities } from '../src/orchestrator/runtimeCaps.js';
+import { probeImageCapabilities } from '../src/orchestrator/machines/runtimeCaps.js';
 
 /** A stub docker: `image inspect` prints the id in its folder's `id` file; `run` prints `body`. */
 function stubDocker(body: string, id = 'sha256:0123456789abcdef'): string {
@@ -75,6 +75,23 @@ describe('probeImageCapabilities', () => {
     expect(pair('--pids-limit')).toBe('64');
     expect(pair('--cap-drop')).toBe('ALL');
     expect(pair('--security-opt')).toBe('no-new-privileges');
+  });
+
+  it('callers asking at once for an image not yet probed share one probe container; a failed one is not kept (HB-1020)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'acl-capsdocker-'));
+    const bin = join(dir, 'docker');
+    // `run` takes a moment, logs itself, and fails while a "fail" file is there.
+    writeFileSync(bin, `#!/usr/bin/env bash\nd="$(dirname "$0")"\nif [ "$1" = image ]; then echo sha256:5555555555555555; exit 0; fi\n[ "$1" = run ] && echo run >> "$d/log"\nsleep 0.3\n[ -e "$d/fail" ] && exit 1\necho node=v22\n`, { mode: 0o755 });
+    const runs = () => readFileSync(join(dir, 'log'), 'utf8').trim().split('\n').length;
+    writeFileSync(join(dir, 'fail'), '');
+    const failed = await Promise.allSettled(Array.from({ length: 3 }, () => probeImageCapabilities('test-image-f:1', { docker: bin })));
+    expect(failed.map((r) => r.status)).toEqual(['rejected', 'rejected', 'rejected']);
+    expect(runs()).toBe(1);
+    rmSync(join(dir, 'fail'));
+    const all = await Promise.all(Array.from({ length: 6 }, () => probeImageCapabilities('test-image-f:1', { docker: bin })));
+    expect(runs()).toBe(2);
+    for (const caps of all) expect(caps).toBe(all[0]);
+    expect(all[0]!.tools.node).toBe('v22');
   });
 
   it('a tag rebuilt onto another image is probed again, not answered from the cache (#124)', async () => {

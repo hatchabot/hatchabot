@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,7 @@ import { parseFunnelStatus, targetsPort } from '../src/ops/tailnet.js';
 import { evaluateSafeguards, failingSafeguards } from '../src/api/safeguards.js';
 import { verifyAssertion, verifyRegistration, WebAuthnError } from '../src/api/webauthn.js';
 import { WS_SAMPLE_KEY } from './support/fixtures.js';
+import { Store } from '../src/store/store.js';
 
 /**
  * What a second, independent review of the public listener found
@@ -152,6 +153,230 @@ describe('signing out at the public address ends that sign-in for every copy of 
     await h.pub('/v1/logout', { body: {} });
     expect(h.store.revokedPublicPasses(Date.now())).toEqual([]);
     expect((await h.pub('/v1/agents', { jar: jb })).status).toBe(200);
+  }, 30_000);
+});
+
+describe('a sign-out at the public address that could not be saved (HB-0957)', () => {
+  it('is refused, with the cookies left as they were, and works when tried again', async () => {
+    h = await publicApp();
+    const owner = await h.addAccount('owner', { owner: true });
+    await h.app.publicAccess!.evaluate();
+    const jar = await h.signIn('owner', owner.password, { totpSecret: owner.totpSecret });
+    const copied = jar.header();
+    // The database does not take the revocation (a full disk, say).
+    const revoke = h.store.revokePublicPass.bind(h.store);
+    h.store.revokePublicPass = () => { throw new Error('SQLITE_FULL: database or disk is full'); };
+    const refused = await h.pub('/v1/logout', { body: {}, jar });
+    expect(refused.status).toBe(503);
+    expect(refused.json.error).toContain('could not save the sign-out');
+    expect(jar.header()).toBe(copied); // not told it is signed out: nothing cleared
+    expect(h.store.revokedPublicPasses(Date.now())).toEqual([]);
+    // Tried again once the database takes it: signed out, for every copy, and on the record.
+    h.store.revokePublicPass = revoke;
+    expect((await h.pub('/v1/logout', { body: {}, jar })).status).toBe(200);
+    expect(h.store.revokedPublicPasses(Date.now())).toHaveLength(1);
+    expect(jar.cookies.has('__Host-hatchabot_pub')).toBe(false);
+    expect((await h.pub('/v1/agents', { headers: { cookie: copied } })).status).toBe(401);
+  }, 30_000);
+
+  it('stays refused until it is saved: a request between does not lose it, and it is written once the database takes it', async () => {
+    h = await publicApp();
+    const owner = await h.addAccount('owner', { owner: true });
+    await h.app.publicAccess!.evaluate();
+    const jar = await h.signIn('owner', owner.password, { totpSecret: owner.totpSecret });
+    const copied = jar.header();
+    const revoke = h.store.revokePublicPass.bind(h.store);
+    h.store.revokePublicPass = () => { throw new Error('SQLITE_FULL: database or disk is full'); };
+    expect((await h.pub('/v1/logout', { body: {}, jar })).status).toBe(503);
+    // The page's next poll: not let in (signed out in this process), and its pass kept, so Sign out can be pressed again.
+    expect((await h.pub('/v1/agents', { jar })).status).toBe(401);
+    expect(jar.cookies.has('__Host-hatchabot_pub')).toBe(true);
+    // Pressed again while the database still fails: refused again, never "signed out" with nothing saved.
+    expect((await h.pub('/v1/logout', { body: {}, jar })).status).toBe(503);
+    expect(h.store.revokedPublicPasses(Date.now())).toEqual([]);
+    // The database takes writes again: a pass checked a few seconds later writes the record, with nobody pressing anything.
+    h.store.revokePublicPass = revoke;
+    const real = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => real() + 6_000);
+    try { expect((await h.pub('/v1/agents', { headers: { cookie: copied } })).status).toBe(401); }
+    finally { clock.mockRestore(); }
+    expect(h.store.revokedPublicPasses(Date.now())).toHaveLength(1);
+    // A restart: every copy stays out.
+    const store = h.store;
+    await h.close();
+    h = await publicApp({ store });
+    await h.app.publicAccess!.evaluate();
+    expect((await h.pub('/v1/agents', { headers: { cookie: copied } })).status).toBe(401);
+  }, 30_000);
+
+  it('signed-out passes that could not be read at the start: no pass is good until they are', async () => {
+    const read = Store.prototype.revokedPublicPasses;
+    let failing = true;
+    Store.prototype.revokedPublicPasses = function (this: Store, nowMs: number) {
+      if (failing) throw new Error('disk I/O error (made up)');
+      return read.call(this, nowMs);
+    };
+    try {
+      h = await publicApp();
+      const owner = await h.addAccount('owner', { owner: true });
+      await h.app.publicAccess!.evaluate();
+      const jar = new Jar();
+      expect((await h.pub('/v1/login', { body: { username: 'owner', password: owner.password }, jar })).status).toBe(200);
+      const code = totp(owner.totpSecret!, Date.now() + 30_000);
+      const verify = await h.pub('/v1/second-factor/verify', { body: { code }, jar });
+      expect(verify.status).toBe(401);
+      expect(verify.json.publicSignIn).toBe(true);
+      expect((await h.pub('/v1/agents', { jar })).status).toBe(401);
+      // Read once the database answers.
+      failing = false;
+      const again = await h.signIn('owner', owner.password, { totpSecret: owner.totpSecret });
+      expect((await h.pub('/v1/agents', { jar: again })).status).toBe(200);
+    } finally {
+      Store.prototype.revokedPublicPasses = read;
+    }
+  }, 30_000);
+});
+
+describe('a slow request that began before a second factor was given (HB-0934)', () => {
+  it('does not put back the older pass as it answers: the factor just given still counts', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    h = await publicApp({
+      extra: (app) => app.get('/v1/agents/:id', async () => { entered(); await new Promise<void>((r) => { release = r; }); return { slow: true }; }),
+    });
+    const owner = await h.addAccount('owner', { owner: true });
+    await h.app.publicAccess!.evaluate();
+    const jar = await h.signIn('owner', owner.password, { totpSecret: owner.totpSecret });
+    // Later: the step-up has run out, and the pass was last refreshed over a minute ago.
+    const real = Date.now.bind(Date);
+    let ahead = 11 * 60_000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => real() + ahead);
+    try {
+      expect((await h.pub('/v1/cli-tokens', { body: {}, jar })).json.secondFactor).toBe('step-up');
+      ahead += 2 * 60_000;
+      // A slow read starts with the pass as it is (its refresh is made as it starts)…
+      const before = jar.header();
+      const slow = h.pub('/v1/agents/a1', { jar: new Jar(), headers: { cookie: before } });
+      await inside;
+      // …the second factor is given meanwhile, and a step-up action works…
+      const code = totp(owner.totpSecret!, Date.now());
+      expect((await h.pub('/v1/second-factor/verify', { body: { code }, jar })).status).toBe(200);
+      expect((await h.pub('/v1/cli-tokens', { body: {}, jar })).status).toBe(200);
+      // …then the slow read answers, and the browser keeps what it sends.
+      release();
+      const answered = await slow;
+      expect(answered.status).toBe(200);
+      jar.take(answered.res);
+      const again = await h.pub('/v1/cli-tokens', { body: {}, jar });
+      expect(again.status, JSON.stringify(again.json)).toBe(200);
+      // Still the browser's that gave it: a copy of the cookies taken before has not given it.
+      expect((await h.pub('/v1/cli-tokens', { body: {}, headers: { cookie: before } })).json.secondFactor).toBe('step-up');
+      // Nor does the factor's own cookie count with another sign-in's pass.
+      const other = await h.signIn('owner', owner.password);
+      const factor = `__Host-hatchabot_factor=${jar.cookies.get('__Host-hatchabot_factor')}`;
+      expect(jar.cookies.get('__Host-hatchabot_factor')).toBeTruthy();
+      expect((await h.pub('/v1/agents', { headers: { cookie: `${other.header()}; ${factor}` } })).json.secondFactor).toBe('required');
+    } finally {
+      clock.mockRestore();
+    }
+  }, 30_000);
+});
+
+describe('the public pass and a password change (HB-1245)', () => {
+  const PASS = '__Host-hatchabot_pub', SESSION = '__Host-hatchabot_session';
+  async function world(extra?: NonNullable<Parameters<typeof publicApp>[0]>['extra']) {
+    h = await publicApp({ env: { HATCHABOT_PUBLIC_IDLE_MINUTES: '5' }, extra });
+    await h.addAccount('owner', { owner: true });
+    const m = await h.addAccount('member', { totp: true });
+    await h.app.publicAccess!.evaluate();
+    return { h, m, jar: await h.signIn('member', m.password, { totpSecret: m.totpSecret }) };
+  }
+  const changePassword = (app: PublicApp, jar: Jar, current: string, password: string) =>
+    app.pub('/v1/local-accounts/me/password', { jar, body: { current, password } });
+
+  it('today\'s pass, kept: used, it is written anew and lasts; idle, it ends; a password change hands out a new one and ends the old', async () => {
+    const { h, m, jar } = await world();
+    const real = Date.now.bind(Date);
+    let ahead = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => real() + ahead);
+    try {
+      const first = jar.cookies.get(PASS);
+      ahead = 4 * 60_000;
+      expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
+      expect(jar.cookies.get(PASS)).not.toBe(first); // refreshed as it was used
+      ahead = 8 * 60_000; // five minutes idle from the sign-in, four from the refresh
+      expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
+      // The password changed at the public address: a new session and a new pass, and the old cookies are no one's.
+      const before = jar.header();
+      const changed = await changePassword(h, jar, m.password, 'a-new-password-for-member');
+      expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+      expect(jar.header()).not.toBe(before);
+      expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
+      const old = await h.pub('/v1/agents', { headers: { cookie: before } });
+      expect([old.status, old.json]).toEqual([401, { error: 'auth required' }]);
+      // A pass with another session (here the old pass beside the new session): sign in again at the public address.
+      const mixed = new Jar();
+      mixed.cookies.set(SESSION, jar.cookies.get(SESSION)!);
+      mixed.cookies.set(PASS, new Map(before.split('; ').map((p) => [p.slice(0, p.indexOf('=')), p.slice(p.indexOf('=') + 1)])).get(PASS)!);
+      const r = await h.pub('/v1/agents', { jar: mixed });
+      expect([r.status, r.json]).toEqual([401, { error: 'auth required', publicSignIn: true }]);
+      // Idle past the limit: the same, and the pass is cleared.
+      ahead += 6 * 60_000;
+      const idle = await h.pub('/v1/agents', { jar });
+      expect([idle.status, idle.json]).toEqual([401, { error: 'auth required', publicSignIn: true }]);
+      expect(jar.cookies.has(PASS)).toBe(false);
+    } finally { clock.mockRestore(); }
+  }, 30_000);
+
+  it('a slow request that began before the change does not put the old pass back as it answers', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    const { h, m, jar } = await world((app) => app.get('/v1/agents/:id', async () => { entered(); await new Promise<void>((r) => { release = r; }); return { slow: true }; }));
+    const real = Date.now.bind(Date);
+    let ahead = 2 * 60_000; // the pass was last written over a minute ago: the next request writes it anew
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => real() + ahead);
+    try {
+      const slow = h.pub('/v1/agents/a1', { headers: { cookie: jar.header() } });
+      await inside;
+      expect((await changePassword(h, jar, m.password, 'a-new-password-for-member')).status).toBe(200);
+      expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
+      const minted = jar.cookies.get(PASS);
+      release();
+      const answered = await slow;
+      expect(answered.status).toBe(200);
+      jar.take(answered.res); // the browser keeps what the slow answer sends
+      expect(jar.cookies.get(PASS)).toBe(minted);
+      const after = await h.pub('/v1/agents', { jar });
+      expect([after.status, after.json.me]).toEqual([200, expect.any(String)]);
+      // A request that began and answered after the change still has its pass written anew.
+      ahead += 2 * 60_000;
+      expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
+      expect(jar.cookies.get(PASS)).not.toBe(minted);
+    } finally {
+      release?.();
+      clock.mockRestore();
+    }
+  }, 30_000);
+
+  it('a refresh that cannot read the session as the answer goes out is skipped: the answer stands (HB-1245 review)', async () => {
+    const { h, jar } = await world();
+    const real = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => real() + 2 * 60_000); // a refresh is due
+    const app = h.app as unknown as { principalFromCookieHeader: (c: string | undefined, https: boolean) => unknown };
+    const read = vi.spyOn(app, 'principalFromCookieHeader').mockImplementation(() => { throw new Error('database is locked'); });
+    try {
+      const before = jar.cookies.get(PASS);
+      const r = await h.pub('/v1/agents', { jar });
+      expect([r.status, JSON.stringify(r.json)]).toEqual([200, expect.not.stringContaining('database is locked')]);
+      expect(read).toHaveBeenCalled();
+      expect(jar.cookies.get(PASS)).toBe(before); // not written: the next request writes it
+    } finally {
+      read.mockRestore();
+      clock.mockRestore();
+    }
+    expect((await h.pub('/v1/agents', { jar })).status).toBe(200);
   }, 30_000);
 });
 
@@ -558,6 +783,11 @@ describe('smaller things', () => {
     h.store.rawDb().prepare('UPDATE agents SET owner_id = ? WHERE id = ?').run(owner.id, 'b1');
     expect(h.app.consoleSockets!.revalidate()).toBe(1);
     expect(await closedSoon(s1)).toBe(true);
+    // …and the agent's timeline says why: Bob's standing on it ended (the
+    // standing check), not that its runtime changed (the socket's own
+    // runtime check, which also notices: HB-0821, HB-0867).
+    const closed = h.store.listEvents(['b1'], 20).filter((e) => e.event === 'console.socket_closed');
+    expect(closed.map((e) => e.detail?.why)).toEqual(['no longer allowed on this agent']);
   }, 30_000);
 
   it('giving an agent a folder of this machine needs the second factor again at the public address; the rest of its settings do not', async () => {

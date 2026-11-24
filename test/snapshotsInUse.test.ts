@@ -5,8 +5,8 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { as, makeWorld, seedRunningAgent } from './support/world.js';
-import { captureSnapshot, recoverSnapshotRestore, restoreSnapshot, resumeSnapshotRestore } from '../src/orchestrator/snapshots.js';
-import { setStepHookForTests, SimulatedCrash } from '../src/orchestrator/operations.js';
+import { captureSnapshot, recoverSnapshotRestore, restoreSnapshot, resumeSnapshotRestore } from '../src/orchestrator/files/snapshots.js';
+import { setStepHookForTests, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 
 afterEach(() => setStepHookForTests(undefined));
 

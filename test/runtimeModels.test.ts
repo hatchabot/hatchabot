@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isCatalogued, parseRuntimeModels, runtimeModels } from '../src/orchestrator/runtimeModels.js';
+import { isCatalogued, parseRuntimeModels, runtimeModels } from '../src/orchestrator/sources/runtimeModels.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 
 /**

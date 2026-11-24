@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { sharePathProblem } from '../src/orchestrator/provision.js';
+import { sharePathProblem } from '../src/orchestrator/lifecycle/provision.js';
 
 /**
  * Sharing a folder with an agent is deliberately powerful, so the list of

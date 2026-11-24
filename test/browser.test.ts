@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -8,11 +8,12 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { buildConfigCommands } from '../src/openclaw/configWriter.js';
-import { BROWSER_CDP_URL, BROWSER_START_SCRIPT, BROWSER_FENCE_SCRIPT, BROWSER_FENCE_VERSION, BROWSER_FENCED_V4, BROWSER_FENCED_V6, BROWSER_UID, browserImage, browserSweep, containerOf, browserRefreshDate } from '../src/orchestrator/browser.js';
+import { browserImage, browserSweep, containerOf, browserRefreshDate } from '../src/orchestrator/console/browser.js';
+import { BROWSER_CDP_URL, BROWSER_START_SCRIPT, BROWSER_FENCE_SCRIPT, BROWSER_FENCE_VERSION, BROWSER_FENCED_V4, BROWSER_FENCED_V6, BROWSER_UID } from '../src/providers/browserContainer.js';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 /**
- * Each agent's own browser (src/orchestrator/browser.ts, docs/browser.md):
+ * Each agent's own browser (src/orchestrator/console/browser.ts, docs/browser.md):
  * off by default, its own container in the agent's network namespace, and
  * OpenClaw attached to it. The 2026-10-08 trial: one browsing question was
  * 315K tokens, so it is opt-in per agent.
@@ -187,6 +188,60 @@ describe('sweeps do not pile up (2026-10-09)', () => {
     await browserSweep(w.deps);
     expect(calls).toBe(1);
     expect(w.logs.filter((e) => e === 'browser.start_failed')).toHaveLength(1);
+  });
+});
+
+describe('the minute\'s sweep reads the fleet once per step, not once per browser (HB-1023)', () => {
+  it('thirty browsers: three reads of every agent; each browser still judged by its agent as it is now', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: '1' } as never);
+    const p = new MockProvider();
+    const ids = Array.from({ length: 30 }, (_, i) => `a${String(i).padStart(2, '0')}`);
+    for (const id of ids) {
+      store.insertAgent({ id, ownerId: 'o', name: id, slug: id, state: 'RUNNING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+      store.setAgentRuntimeRef(id, `docker://hatchabot-${id}`);
+      store.setAgentBrowser(id, true);
+      p.browsers.set(`hatchabot-${id}`, true);
+    }
+    store.setAgentState('a01', 'STOPPED'); // stopped: its browser goes
+    p.browsers.set('hatchabot-gone', true); // no agent's at all
+    // While the first browser is being removed, another agent stops: its browser goes too.
+    const stop = p.stopBrowser.bind(p);
+    p.stopBrowser = async (c) => { if (c === 'hatchabot-a01') store.setAgentState('a20', 'STOPPED'); return stop(c); };
+    const reads = vi.spyOn(store, 'listAllActiveAgents');
+    const r = await browserSweep({ store, hostIds: () => ['h1'], providerFor: () => p, state: { sweeping: new Map(), buildFailed: new Map() } });
+    expect(r.removed.sort()).toEqual(['hatchabot-a01-browser', 'hatchabot-a20-browser', 'hatchabot-gone-browser'].sort());
+    expect(r.started).toEqual([]);
+    expect(p.browsers.size).toBe(28);
+    expect(reads.mock.calls.length).toBeLessThanOrEqual(3);
+  });
+});
+
+describe('an agent just started is swept on its own machine first (HB-0949)', () => {
+  it('a slow build on another machine does not hold up its browser; that machine is left to its own sweep', async () => {
+    const store = new Store(new Database(':memory:'));
+    for (const h of ['h1', 'h2']) store.insertHost({ id: h, ownerId: 'o', kind: h === 'h1' ? 'local' : 'runner', provider: 'mock', name: h, settings: {}, createdAt: '1' } as never);
+    for (const [id, host] of [['far', 'h1'], ['near', 'h2']] as const) {
+      store.insertAgent({ id, ownerId: 'o', name: id, slug: id, state: 'RUNNING', aiProfileId: 'p', hostId: host, persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+      store.setAgentRuntimeRef(id, `docker://hatchabot-${id}`);
+      store.setAgentBrowser(id, true);
+    }
+    const slow = new MockProvider(), ready = new MockProvider();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const build = slow.ensureBrowser.bind(slow);
+    slow.ensureBrowser = async (spec) => { await gate; return build(spec); }; // a browser image build, minutes long
+    const state = { sweeping: new Map(), buildFailed: new Map() };
+    const deps = { store, hostIds: () => ['h1', 'h2'], providerFor: (h: string) => (h === 'h1' ? slow : ready), state };
+    const minute = browserSweep(deps); // the minute's sweep, held on h1
+    await new Promise((r) => setTimeout(r, 10));
+    const late = Symbol('still waiting');
+    const r = await Promise.race([browserSweep(deps, 'near'), new Promise((res) => setTimeout(() => res(late), 500))]);
+    expect(r).toEqual({ started: ['hatchabot-near'], removed: [], failed: [] });
+    expect([...ready.browsers.keys()]).toEqual(['hatchabot-near']);
+    release();
+    await minute;
+    expect([...slow.browsers.keys()]).toEqual(['hatchabot-far']);
   });
 });
 

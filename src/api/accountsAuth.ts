@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCb } from 'node:crypto';
 import { promisify } from 'node:util';
-import { loopbackIsRemote } from './auth.js';
+import { loopbackIsRemote, type SharedBucket } from './auth.js';
 import { isPublic } from './trust.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
@@ -227,8 +227,8 @@ export function signInLocalByLink(store: Store, secret: Buffer, req: FastifyRequ
  * Routes for accounts mode. `guard` is the shared throttle from auth.ts so a
  * brute-force attempt is counted the same way in every mode.
  */
-/** The throttle bucket for the first-run setup code: one for the code, whoever asks. */
-const SETUP_BUCKET = '*first-run-setup*';
+/** The throttle bucket for the first-run setup code: one for the code, whoever asks (no typed name is it: HB-1434). */
+const SETUP_BUCKET: SharedBucket = { shared: 'first-run-setup' };
 const HAS_ACCOUNTS = 'This installation already has accounts — sign in instead.';
 /** Compared against when there is no usable account, so every login pays for one scrypt. */
 const DUMMY_HASH = '00'.repeat(32);
@@ -238,7 +238,9 @@ export function registerAccountRoutes(
   app: FastifyInstance,
   deps: AccountsAuthDeps,
   guard: {
-    throttled: (req: FastifyRequest, who?: string, scope?: 'link') => boolean; noteFailure: (req: FastifyRequest, who?: string, scope?: 'link') => void; clearFailures?: (who: string) => void;
+    throttled: (req: FastifyRequest, who?: string | SharedBucket, scope?: 'link') => boolean; clearFailures?: (who: string, ownerId?: string) => void;
+    /** `typed`: a name as someone typed it, which may be nobody's (auth.ts noteFailure). */
+    noteFailure: (req: FastifyRequest, who?: string | SharedBucket, scope?: 'link', opts?: { typed?: boolean }) => void;
     /** auth.ts reserve: a place in the count while a guess is being checked (undefined: refused). */
     reserve?: (req: FastifyRequest, who?: string) => (() => void) | undefined;
   },
@@ -463,7 +465,8 @@ export function registerAccountRoutes(
     const verified = await verifyPassword(password, usable ? account!.pwHash : DUMMY_HASH, usable ? account!.pwSalt : DUMMY_SALT).catch((err: unknown) => { release(); throw err; });
     const ok = usable && verified;
     if (!account || !ok) {
-      guard.noteFailure(req, username || undefined);
+      // Counted whatever the name; the store keeps only so many counts of names that are nobody's (HB-1240).
+      guard.noteFailure(req, username || undefined, undefined, { typed: true });
       release(); // after the miss is counted: the place is never free while the miss is uncounted
       await new Promise((r) => setTimeout(r, 400));
       return reply.code(401).send({ error: 'Wrong username or password' });
@@ -560,7 +563,7 @@ export function registerAccountRoutes(
     const recoveryCode = recovery.code;
     revokeCliTokensOf(account.id);
     // Recovered: the lock-out someone may have run up on this account ends.
-    guard.clearFailures?.(account.username);
+    guard.clearFailures?.(account.username, account.id);
     app.log.warn({ account: account.id }, 'account.recovered_with_code');
     // The new hash signs out every other session; this browser gets a fresh one.
     setSessionCookie(reply, req, mintSession(secret, account.id, pw.hash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));

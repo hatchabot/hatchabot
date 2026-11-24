@@ -5,10 +5,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
-import { agentArchiveName, foreignSet, listBackups, ownerMark, pruneBackup, restoreAgentFromBackup, RestoreError } from '../src/orchestrator/backups.js';
+import { agentArchiveName, foreignSet, listBackups, ownerMark, pruneBackup, restoreAgentFromBackup, RestoreError } from '../src/orchestrator/backups/backupFiles.js';
 import { applyLegacyEnv } from '../src/envCompat.js';
-import { listDrills } from '../src/orchestrator/drills.js';
-import { computeReadiness } from '../src/orchestrator/recoveryReadiness.js';
+import { listDrills } from '../src/orchestrator/backups/drills.js';
+import { computeReadiness } from '../src/orchestrator/backups/recoveryReadiness.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 
@@ -99,6 +99,8 @@ describe('a set of another install, in a shared backup folder (HB-0540)', () => 
     set('2026-11-01', { owner: mark(OURS), archive: agentArchiveName(runtimeRef) });
     await restoreAgentFromBackup({ store, provider }, 'a1', '2026-11-01');
     expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('archive of 2026-11-01');
+    // This install's own set: what adopts carried into it is recorded here (HB-0985).
+    expect(store.mayHoldUnrecordedCarriedTasks('a1')).toBe(false);
   });
 
   it('after a reinstall with a new key, this install\'s older sets are still listed and offered, and restored on a yes (its review)', async () => {
@@ -126,8 +128,11 @@ describe('a set of another install, in a shared backup folder (HB-0540)', () => 
     expect(r.agents[0]!.leftOut.of).toBe(0);
 
     await expect(restoreAgentFromBackup({ store, provider }, 'a1', '2026-11-02')).rejects.toMatchObject({ code: 'other_key' });
+    expect(store.mayHoldUnrecordedCarriedTasks('a1')).toBe(false);
     await restoreAgentFromBackup({ store, provider, otherKey: true }, 'a1', '2026-11-02');
     expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('archive of 2026-11-02');
+    // Its tasks may be copies an adopt carried under the other key's database: matched by look on the next adopt (HB-0985).
+    expect(store.mayHoldUnrecordedCarriedTasks('a1')).toBe(true);
   });
 
   it('with no key of its own, this install cannot tell, and filters nothing', () => {

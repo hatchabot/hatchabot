@@ -21,9 +21,9 @@ describe('one pid-liveness check', () => {
   });
 
   it('the sweep, the backup lock and the embedder use it, with no copy of their own', () => {
-    for (const f of ['src/providers/localDockerProvider.ts', 'src/orchestrator/backups.ts', 'src/embedder/embedder.ts']) {
+    for (const f of ['src/providers/localDockerProvider.ts', 'src/orchestrator/backups/backupFiles.ts', 'src/embedder/embedder.ts']) {
       const src = readFileSync(f, 'utf8');
-      expect(src, f).toMatch(/import \{ processAlive \} from '\.\.\/domain\/processAlive\.js';/);
+      expect(src, f).toMatch(/import \{ processAlive \} from '(?:\.\.\/)+domain\/processAlive\.js';/);
       expect(src, f).not.toMatch(/process\.kill\([^)]*, 0\)/);
     }
   });

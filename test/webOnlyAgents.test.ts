@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { buildRuntimeSpec, createAgentRecord, runProvisionSteps } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec, createAgentRecord, runProvisionSteps } from '../src/orchestrator/lifecycle/provision.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';

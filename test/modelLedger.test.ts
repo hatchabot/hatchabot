@@ -1,20 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { HOUR_FIELDS, USAGE_READER_SCRIPT, type HourField, type WindowModelStats } from '../src/orchestrator/usage.js';
-import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
-import { priceMix } from '../src/orchestrator/modelOptions.js';
+import { HOUR_FIELDS, USAGE_READER_SCRIPT, type HourField, type WindowModelStats } from '../src/orchestrator/usage/usage.js';
+import type { StoredProfile } from '../src/orchestrator/usage/modelScorecard.js';
+import { priceMix } from '../src/orchestrator/sources/modelOptions.js';
 import {
   assessModelChange, backfillModelLedger, evaluateModelChanges, fileGuardProposals, judge, recordChange, rightSizeSavings,
   type ChangeMeta, type ModelFigures,
-} from '../src/orchestrator/modelLedger.js';
+} from '../src/orchestrator/usage/modelLedger.js';
 import { Broker, type ApiClient } from '../src/mgmt/broker.js';
 import { PendingStore, type PendingConfirm } from '../src/mgmt/pendingStore.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
@@ -133,7 +133,7 @@ describe('the usage reader keeps each model\'s counts per hour', () => {
 // ---------------------------------------------------------------------------
 
 /** a1 ran opus for a week before T0 (20 turns, clean), then haiku. */
-function switched(after: Record<number, Partial<Record<HourField, number>>>, readAt: number, meta: Partial<ChangeMeta> = {}) {
+function switched(after: Record<number, Partial<Record<HourField, number>>>, readAt: number, meta: Partial<ChangeMeta> & { from?: string } = {}) {
   const w = baseStore();
   w.add('a1', 'key');
   w.store.setAgentModel('a1', 'claude-haiku-4-5');
@@ -239,6 +239,24 @@ describe('the ledger\'s verdict on a change', () => {
     expect(c.reasons!.join(' ')).not.toMatch(/^0 turns/);
   });
 
+  it('a change older than the newest 500 is judged up to its own next change, not the oldest kept one (HB-1013)', () => {
+    const now = T0 + 25 * DAY;
+    // Haiku from T0: ten clean turns in its first hour. Back to opus at T0+2h; haiku again at
+    // T0+3h, a separate trial of 20 failed turns; opus at T0+4h; then 499 more switches, hourly.
+    const { store, row } = switched({ [T0 + HOUR]: { calls: 10, turns: 10 }, [T0 + 3 * HOUR]: { calls: 20, turns: 20, failed: 20 } }, now);
+    const at = (k: number) => iso(T0 + (k + 1) * HOUR);
+    for (let k = 1; k <= 502; k++) {
+      const toHaiku = k % 2 === 0;
+      store.addModelChange({ id: `mc_k${k}`, agentId: 'a1', ownerId: OWNER, from: toHaiku ? 'claude-opus-4-8' : 'claude-haiku-4-5', to: toHaiku ? 'claude-haiku-4-5' : 'claude-opus-4-8', at: at(k), by: 'owner', via: 'app', source: 'model', outcome: 'pending' });
+    }
+    expect(store.listModelChanges({ agentId: 'a1', limit: 5000 })).toHaveLength(503);
+    evaluateModelChanges(store, now);
+    const c = store.getModelChange(row.id)!;
+    expect((c.after as ModelFigures).turns).toBe(10);
+    expect(c.outcome).toBe('kept-ok');
+    expect(store.getModelChange('mc_k2')!.outcome).toBe('worse');
+  });
+
   it('judge: unknown before uses the absolute bar; a floor of real counts', () => {
     const after = (o: Partial<ModelFigures>) => ({ model: 'm', days: 7, calls: 10, turns: 10, callsPerDay: 1, turnsPerDay: 1, toolCalls: 10, toolsPerTurn: 1, toolTurnShare: 1,
       badTurns: 0, malformed: 0, toolFailed: 0, rateLimited: 0, rates: { badTurn: 0, malformed: 0, toolFail: 0 }, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, basis: 'hours', ...o }) as ModelFigures;
@@ -292,6 +310,33 @@ describe('the quality guard\'s switch-back card', () => {
     expect(fileGuardProposals({ store, now })).toHaveLength(1);
   });
 
+  it('a process that ends between the claim and the card: after the restart the card is filed (HB-0956)', () => {
+    const now = T0 + 8 * DAY;
+    const { store: built, row } = switched(turnsAfter(10, { failed: 3, malformed: 3 }), now);
+    evaluateModelChanges(built, now);
+    // The same database, on disk, as the running process has it.
+    const dir = mkdtempSync(join(tmpdir(), 'hb-guard-'));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    const file = join(dir, 'hatchabot.db');
+    (built as unknown as { db: Database.Database }).db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+    const store = new Store(new Database(file));
+    // The process ends as the card is written: what a restart finds is what
+    // was committed at that instant, read here by another connection.
+    const onDisk = file.replace(/\.db$/, '-at-exit.db');
+    store.putMgmtProposal = () => {
+      const other = new Database(file, { readonly: true });
+      other.exec(`VACUUM INTO '${onDisk.replace(/'/g, "''")}'`);
+      other.close();
+      throw new Error('process ended');
+    };
+    fileGuardProposals({ store, now });
+    const restarted = new Store(new Database(onDisk));
+    expect(restarted.getModelChange(row.id)!.guardProposalId).toBeFalsy();
+    const filed = fileGuardProposals({ store: restarted, now });
+    expect(filed).toHaveLength(1);
+    expect(restarted.getMgmtProposal<PendingConfirm>(filed[0]!)).toMatchObject({ tool: 'set_model', source: 'guard', resolved: { agentId: 'a1', guardOf: row.id } });
+  });
+
   it('an asleep agent: its verdict and card come from its last reading, and it stays asleep', () => {
     const now = T0 + 8 * DAY;
     const { store } = switched(turnsAfter(10, { failed: 3 }), T0 + 2 * DAY);
@@ -330,6 +375,34 @@ describe('the quality guard\'s switch-back card', () => {
     gone.store.setAIProfileModels('key', ['claude-haiku-4-5']);
     expect(fileGuardProposals({ store: gone.store, now })).toEqual([]);
     expect(gone.store.getModelChange(gone.row.id)!.guardProposalId).toBe('none:not-offered');
+  });
+
+  it('worse changes it is done with do not crowd out an older one still waiting for its card (HB-1001)', () => {
+    const now = T0 + 8 * DAY;
+    const { store, row } = switched(turnsAfter(10, { failed: 3, malformed: 3 }), now);
+    evaluateModelChanges(store, now);
+    // 500 newer worse changes, each answered already.
+    for (let i = 0; i < 500; i++) {
+      const id = `mc_done${i}`;
+      store.addModelChange({ id, agentId: 'a1', ownerId: OWNER, from: 'claude-opus-4-8', to: 'claude-haiku-4-5', at: iso(T0 + DAY + i * 60_000), by: 'owner', via: 'app', source: 'model', outcome: 'pending' });
+      store.setModelChangeOutcome(id, 'worse', undefined, ['failed turns'], iso(now));
+      store.claimModelChangeGuard(id, 'none:moved-on');
+    }
+    const filed = fileGuardProposals({ store, now });
+    expect(filed).toHaveLength(1);
+    expect(store.getModelChange(row.id)!.guardProposalId).toBe(filed[0]);
+  });
+
+  it('an old model the source offers under another spelling still gets its card, in the spelling the source offers (HB-1000)', () => {
+    const now = T0 + 8 * DAY;
+    const { store, row } = switched(turnsAfter(10, { failed: 3, malformed: 3 }), now, { from: 'anthropic/claude-opus-4-8' });
+    expect(row.from).toBe('anthropic/claude-opus-4-8');
+    evaluateModelChanges(store, now);
+    expect(store.getModelChange(row.id)!.outcome).toBe('worse');
+    const filed = fileGuardProposals({ store, now });
+    expect(filed).toHaveLength(1);
+    expect(store.getModelChange(row.id)!.guardProposalId).toBe(filed[0]);
+    expect(store.getMgmtProposal<PendingConfirm>(filed[0]!)!.resolved).toMatchObject({ agentId: 'a1', model: 'claude-opus-4-8', guardOf: row.id });
   });
 
   it('confirming the card switches back, and the ledger says Hatchabot\'s guard did it; no container is read for any of it', async () => {
@@ -608,6 +681,45 @@ describe('Right-size: what the cheaper switches saved', () => {
     // The plan carried 10M on haiku this month ($10): the $1 is 1/11 of what it would have been.
     expect(rs.line).toBe("Saved by cheaper models: ≈ $1.00 this month at API prices (9.1% of Max plan's use): on a Claude plan that is room in the plan, not money");
     expect(priceMix('claude-sonnet-5', { input: 1e6, output: 0, cacheRead: 0, cacheWrite: 0 })).toBe(2);
+  });
+
+  it('the hours are put in the machine\'s months, as the report\'s month is: the evening of the 30th west of UTC is still November (HB-1002)', () => {
+    // 02:00Z on 1 December is 21:00 on 30 November in Toronto.
+    const now = Date.parse('2026-12-01T02:00:00Z');
+    const w = baseStore();
+    w.add('api1', 'key');
+    // 1M in on haiku at 01:00Z on the 1st (20:00 on the 30th there): opus $5 − haiku $1.
+    w.store.setModelProfile('api1', profile(now, { 'claude-haiku-4-5': hourly({ [Date.parse('2026-12-01T01:00:00Z')]: { calls: 10, input: 1e6 } }) }), iso(now));
+    recordChange(w.store, { agentId: 'api1', from: 'claude-opus-4-8', to: 'claude-haiku-4-5', at: '2026-11-20T00:00:00.000Z', by: 'owner', via: 'app', source: 'model' }, Date.parse('2026-11-20T00:00:00Z'));
+    const rs = rightSizeSavings(w.store, OWNER, now, 'America/Toronto');
+    expect(rs.month).toBe('2026-11');
+    expect(rs.savingUSD).toBe(4);
+    expect(rs.earlier).toEqual([]);
+    // East of UTC the same hour is already 1 December, and so is the report.
+    const east = rightSizeSavings(w.store, OWNER, now, 'Europe/Berlin');
+    expect(east.month).toBe('2026-12');
+    expect(east.savingUSD).toBe(4);
+  });
+
+  it('a long history is worked out once per change, not once per change per hour (HB-1003)', () => {
+    const now = Date.parse('2026-10-20T12:00:00Z');
+    const w = baseStore();
+    w.add('api1', 'key');
+    // 300 hours on haiku, and 40 switches between haiku and opus through them.
+    const hours: Record<number, Partial<Record<HourField, number>>> = {};
+    for (let i = 0; i < 300; i++) hours[now - (i + 1) * HOUR] = { calls: 1, input: 1e4 };
+    w.store.setModelProfile('api1', profile(now, { 'claude-haiku-4-5': hourly(hours) }), iso(now));
+    for (let i = 0; i < 40; i++) {
+      const toHaiku = i % 2 === 0, at = now - 300 * HOUR + i * 7 * HOUR;
+      recordChange(w.store, { agentId: 'api1', from: toHaiku ? 'claude-opus-4-8' : 'claude-haiku-4-5', to: toHaiku ? 'claude-haiku-4-5' : 'claude-opus-4-8', at: iso(at), by: 'owner', via: 'app', source: 'model' }, at);
+    }
+    const dates = vi.spyOn(Date.prototype, 'toISOString');
+    let rs: ReturnType<typeof rightSizeSavings>, made: number;
+    try { rs = rightSizeSavings(w.store, OWNER, now, 'UTC'); made = dates.mock.calls.length; } finally { dates.mockRestore(); }
+    // 20 haiku periods of 7 hours, 1e4 in each: opus $5 − haiku $1 per million.
+    expect(rs.savingUSD).toBeCloseTo(20 * 7 * 1e4 * 4 / 1e6, 2);
+    // Each change's hours once, not once per bucket (40 changes × 300 hours × 2).
+    expect(made).toBeLessThan(1_000);
   });
 
   it('nothing saved: no line, on the Usage page either', async () => {

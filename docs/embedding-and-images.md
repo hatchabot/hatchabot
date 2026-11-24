@@ -118,12 +118,20 @@ Built as a first-class feature (⚙ Settings → Advanced → Derived images, or
 `docs/features.md` → Derived images):
 
 - **Build** (`POST /v1/images`, `hatchabot image derive`): the owner supplies a
-  name + Dockerfile lines; `src/orchestrator/derivedImage.ts` renders
+  name + Dockerfile lines; `src/orchestrator/machines/derivedImage.ts` renders
   `FROM <base>` + `USER root` + the lines + `USER node` (the root wrap is why
   apt works; the trailing `USER node` is enforced, not optional — an image that
   ended as root would break every agent, since the volume is uid 1000 and Claude
-  Code refuses root). No `--pull`: the base is a local image, never a registry
-  one. Tag: `hatchabot-runtime:derived-<name>`.
+  Code refuses root). It is built to `hatchabot-runtime-check:derived-<name>`
+  (`checkTag`) and takes its own tag only once `docker image inspect` says it
+  runs as `node`, its layers begin with the base's, as read just before the
+  build, and its `org.hatchabot.*` labels are the base's but for the one the
+  build sets, with no `hatchabot.*` one, which a container would take from it
+  (`useBuiltImage`, `labelProblem`): a line that hides the trailing
+  `USER node`, a `FROM` hidden in the lines, or a `LABEL` of Hatchabot's
+  hidden in them, fails the build, and the tag stays on the image it had. A base moved during the build (a promote) fails it too: Rebuild.
+  Delete removes the build's name too, should a stopped build have left it. No `--pull`: the base is a local
+  image, never a registry one. Tag: `hatchabot-runtime:derived-<name>`.
 - **Track** (`derived_images` store table): name, base, Dockerfile, status,
   built-at. The Dockerfile is kept so **Rebuild** reruns it against a promoted
   base after a fleet upgrade.

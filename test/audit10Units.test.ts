@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { msToEvery } from '../src/orchestrator/crons.js';
+import { msToEvery } from '../src/orchestrator/schedules/crons.js';
 import { extractSection, replaceSection } from '../src/openclaw/workspace.js';
 
 describe('msToEvery (10th audit: 20s intervals became "0m")', () => {

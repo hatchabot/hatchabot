@@ -18,7 +18,7 @@ Two requested features, both **extensions of mechanisms that already exist**:
 
 ## What already exists (the foundation)
 
-- **Template format** (`src/orchestrator/template.ts`): a shareable, secret-free
+- **Template format** (`src/orchestrator/transfer/template.ts`): a shareable, secret-free
   copy of an agent — `SOUL.md` + `AGENTS.md` (+ optional `MEMORY.md`), the AI
   vendor, and **declared needs**: `dataNeeds` (data sources it expects) and
   `envNeeds` (env-var *names* the importer supplies). No bot token, no members,

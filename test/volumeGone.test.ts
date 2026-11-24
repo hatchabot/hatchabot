@@ -5,9 +5,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { registerRoutes } from '../src/api/routes.js';
-import { AdoptError, applyWorkspace } from '../src/orchestrator/adopt.js';
-import { AdmitError, denyPairing, grantChannelAccess, RevokeError, revokeMember } from '../src/orchestrator/members.js';
-import { readCoreFile, removeCoreFile, SnapshotError, writeCoreFile } from '../src/orchestrator/snapshots.js';
+import { AdoptError, applyWorkspace } from '../src/orchestrator/transfer/adopt.js';
+import { AdmitError, denyPairing, grantChannelAccess, RevokeError, revokeMember } from '../src/orchestrator/members/members.js';
+import { readCoreFile, removeCoreFile, SnapshotError, writeCoreFile } from '../src/orchestrator/files/snapshots.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 

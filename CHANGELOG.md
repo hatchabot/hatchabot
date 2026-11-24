@@ -2,6 +2,389 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.191.0] — 2026-11-24
+
+### Upgrading
+- Close and reopen the app once to load its new scripts. A proxy or filter in front of Hatchabot must let `/app/` through as it does `/` (docs/troubleshooting.md). Agents need no rebuild.
+- Memory search pauses for a few seconds when Hatchabot first starts after the upgrade, while a part of its service is replaced (on a runner, at that service's next start). If the memory for the memory search service (`HATCHABOT_EMBEDDER_MEMORY`) was changed after the service last started, the service now moves to it: on this machine at that first start, on a runner at the first health check (every 5 minutes) that finds it not busy indexing.
+- Only one Hatchabot server can run on a database. A second one started on the same database (by hand beside the service, or another copy whose `HATCHABOT_DB` names the same file) does not start, and says why. The lock is an empty file beside the database (`hatchabot.sqlite.lock`): leave it there. If a start says it cannot write that file (one left by a server started with sudo), the message names the file and the command that fixes it.
+- Run `hatchabot doctor` after upgrading. It now warns about things that were wrong before but not said: a `#` comment after a value in `.env` (the Linux service reads it as part of the value: put the comment on a line of its own), no `timeout` or `gtimeout` command (on a Mac, `brew install coreutils`), and agents whose memory limits could not be read. It also says when another program answers at Hatchabot's address, and shows the database's schema.
+- If Hatchabot serves HTTPS itself (`HATCHABOT_TLS_CERT`) or listens on one address (`HATCHABOT_BIND`), the `hatchabot` command may still ask plain http on the loopback address, and fail. Set `HATCHABOT_URL` in `~/.config/hatchabot/env` to the address the service listens on (`https://localhost:<port>`, or the `HATCHABOT_BIND` address with its port). An upgrade does not change that file, and running setup again writes the line only when there is none.
+- The daily security check now counts an agent with no group setting as in groups with its members, as its Telegram bot is, once the bot has let someone in, so most Telegram agents show one level higher. Nothing about the agents changed. The first check after the upgrade is the new starting point: it reports nothing against the earlier release.
+- A restart no longer ends a sign-in lockout, or shortens the next one.
+- A backup run by hand with a different `HATCHABOT_SECRET_KEY` exported in the shell is refused before it writes anything: unset it, so the run uses the key in `.env`. Uninstalling reads only the install's `.env`: a database, key or backup folder exported in your shell is ignored. A night's backup that finds an agent being moved, restored or imported leaves that agent out and reports the set incomplete; a later night's takes it, and older sets are pruned as usual, each agent's newest copy kept.
+- If `.env` sets `HATCHABOT_IMAGE`, setup now fetches that image, from the mirror in `HATCHABOT_IMAGE_REGISTRY`, instead of the default one, keeps an image pinned to a tag, and says when it is missing. Upgrades do the same from your next upgrade on: an upgrade runs the script of the release it starts from. Images built in the app go where the fleet looks for them, whatever `HATCHABOT_IMAGE_REPO` says where the service runs.
+- A derived image's lines may now hold only plain text (ordinary letters, digits, punctuation, spaces and tabs) outside `#` comment lines: one saved with other characters keeps running, but is refused at its next rebuild, naming the line; retype the line. The first move of an agent on a derived image to a runner builds that image there once again.
+- Scripts that call Hatchabot's API: a body field of the wrong type, or a body that is not an object, now gets a 400 that says what is wrong.
+- Going back to 2.190.0 works: what this release adds to the database, the older release ignores. From this release on, the database records what each release changed in it, and a release refuses to start on a database a newer one changed in a way it cannot read, naming the release to install. If you roll back to an older release after this one and then upgrade again:
+  - if you adopted a folder into an agent this release made while on the older release, adopting that folder again adds its tasks a second time (the older release keeps no record of them): delete the twins in the agent's Tasks page. An agent the older release made itself is recognised at the next start;
+  - an image you imported under this release and rebuilt under the older one is missing the packages its base had: rebuild it after you upgrade;
+  - changes that were still waiting for an agent when you went back (a model put off while it was busy, a class it was to leave) are carried out at the first start after you upgrade again.
+
+### Security
+- The page runs no inline script. Its script policy is `script-src 'self'` (and Google's sign-in in identity mode), and every script is a file under `/app/`. A proxy that injects scripts into pages must leave Hatchabot's address alone.
+- Settings' runtime answer no longer carries the external memory search server's address to members.
+- Giving an agent a Google account refuses a "no sending" choice that is not true or false. One sent as text (`"yes"`) was read as letting the agent send mail.
+- An image that a move or an import builds from the agent's image recipe (another machine's lines, or a downloaded file's) is used only once it is seen to run as `node`, on its base, with Hatchabot's own labels as its base had them. Otherwise the move or import fails and says why, and nothing takes the image's name.
+- Signing out now ends that browser's open consoles and sign-in panels at once, even when the tab that signed out was closed before the answer came. Before, they stayed open until the next check, up to 30 seconds later.
+- A locked-out account, a locked-out public address (passwords, sign-in links, invitation codes) and the public limit on wrong guesses now stay in force however many made-up names are tried meanwhile, names with line breaks included. About 12,000 made-up names used to end an account's lockout until a restart.
+- A program on the machine that forged forwarded-for addresses shaped like the public address's counts got a hundred sign-in tries instead of ten, and wrote a lockout, a day-long strike and a security record for every address it made up; they now count as ordinary addresses on that side. The public address's strikes are held to the same 10,000 bound as the counts, and a name typed there with a line break in it is recorded as that account.
+- An invitation open to anyone, used while its agent sleeps, no longer lets in someone who had already sent the agent's Telegram bot a direct message: Hatchabot asks Telegram who was waiting and passes them over, and never shows you their knock as the person you invited, however else the door is open; you, and anyone already let in on the agent, are never among those passed over. If more than a hundred messages are waiting, or Telegram can't be asked, the agent's timeline says so and the first message is let in, as before. If nobody got in, you're told someone was passed over, rather than that they never messaged.
+- A name typed at the sign-in no longer counts against the first-run setup code's tries, and a name starting with `*` no longer gets the ten-fold limit of the shared buckets. A flood of made-up addresses no longer clears the setup code's count.
+- A derived image's Dockerfile lines may no longer use `RUN --security` or `RUN --device`, which could run a step outside the build's sandbox or with a device of the machine. RUN's own flags are read as Docker reads them (quotes and escapes taken out, which now covers `--mount` and `--network` too); lines outside `#` comment lines may hold only plain text, and a lone carriage return is refused, so no character Docker reads as a space can hide a flag. A saved image with such a line is refused when it is rebuilt, here or by a move.
+
+### Changed
+- The API answers a body field of the wrong type, or a body that is not an object, with a 400 that says what is wrong. Before, some routes failed with a server error (500), read the field as left out, or went ahead. For example, a CLI token is no longer made from a body that is not an object, and a malformed edit of a problem report that is gone is a 400, not a 404. Sign-in, a second factor's password check and Telegram account recovery answer as before.
+- The database now records what each release changed in it, and a release refuses to start on a database a newer one changed in a way it cannot read, changing nothing and naming the release to install; on a database a newer release only added to, it runs and logs a warning. `hatchabot doctor` shows the database's schema.
+- The server's routes moved out of one file into a file per feature, each with its rules in a service (docs/architecture-map.md says where each is). The move itself changed no path or answer.
+
+### Fixed
+- After a restart, these now take effect where they were lost:
+  - a model changed on an agent's page, by its class or by its budget, just before the restart, is put on, and is no longer forgotten when the agent's runner cannot be reached at that moment. That model, class limits and a memory budget the agent was still owed are put on as soon as that agent itself is free, not only once every other agent's interrupted work (such as a slow move to another Hatchabot) is settled;
+  - an agent that drifted from its class during a class change leaves it;
+  - a class's model waiting for a new image is listed as waiting;
+  - agents are told a memory cap that changed;
+  - a rebuild interrupted after an engine change rebuilds the memory index;
+  - an agent whose bot was removed or swapped just before rebuilds when started, instead of running its old container, which still holds the bot it gave back.
+- The Hatchabot agent's source search can search again straight after an answer, instead of being told other searches are running.
+- A base image build whose log cannot be written (a full or read-only disk) fails and says why, instead of stopping Hatchabot.
+- `uninstall.sh --purge` no longer deletes another install's database when two installs keep their databases in the same folder (`hatchabot-data`, `agentclaw-data` or an install's `data/`). It removes only its own database, keeps the folder, and says what it kept and why.
+- When Discord or Slack is busy, rate-limiting, down, or out of this machine's reach, checking a bot's or app's token (to park it as a spare, or to use it) no longer counts it as a wrong token: Slack's check now says Slack did not answer and to try again, as Discord's does, and a few tries during an outage no longer use up your token checks, so the retry after it recovers is not refused with "Too many token checks".
+- A spare Discord bot or Slack app removed or taken while it was being re-checked no longer comes back in the spare list.
+- Two Discord or Slack bot changes at once no longer undo each other and lose a bot.
+- Changing a Discord or Slack bot while the agent's machine can't be reached now says so and changes nothing, instead of reporting success and losing the old bot; a change that fails after the agent stopped brings it back on its old bot.
+- Changing to a spare Discord bot or Slack app while the platform can't list its rooms no longer closes every room the agent answered in.
+- "Own bots only" now also applies when adding Telegram to an existing agent and when changing its bot.
+- Turning on "Anyone can knock" now says so when the running bot didn't take the change, instead of showing it on while strangers' messages are still dropped.
+- Unlinking your Discord while an agent is moving or rebuilding now waits for it and names it as busy, instead of leaving your Discord approved on the moved copy.
+- Renaming a Discord or Slack bot no longer undoes a room setting changed at the same time.
+- Deleting, archiving or taking Telegram off an agent with many members no longer hangs for minutes when Telegram is slow.
+- Reusing a workspace's bot that is also a spare in the pool is now refused, as pasting its token is.
+- Failed copies of the memory search model to a runner no longer leave files open on this machine; many in a row could leave Hatchabot unable to open files.
+- Moving or exporting an agent on a custom image while Docker hiccups no longer rebuilds that image elsewhere without its extra packages and messaging plugins; it says to try again.
+- A browser that keeps its logins, whose very first start was interrupted, now gets its profile set up on the next start instead of failing every time.
+- After a runner's address is pointed at a different machine, moves and removals check which Docker they actually reach.
+- A release mirror that answers with something huge instead of the release manifest is cut off at 64 KiB instead of filling Hatchabot's memory.
+- A runner added through an SSH config alias (its own HostName, Port or ProxyJump) no longer shows as offline when Docker reaches it fine.
+- Two runners on one machine under different SSH users no longer block each other's restores and file edits, or skip each other's check for a leftover writer.
+- Usage and rate-limit counts no longer skip calls when reading an agent's log fails part way.
+- Retrying or rebuilding an agent whose earlier setup is still running on its files removes that setup first, or says it can't, instead of setting up beside it.
+- Deleting an agent whose browser or saved logins Docker wouldn't remove now says so and can be tried again, instead of reporting it deleted.
+- A clone keeps its source's model when its AI source offers that model; before, it ran on the source's usual model.
+- Adopting an agent that was moved or stopped while its tasks were being carried no longer writes them to the old machine.
+- When an adopted agent's old task list cannot be read, Hatchabot keeps trying and then tells you, instead of quietly bringing no tasks.
+- On a Mac, adopting an agent restarts OpenClaw's gateway with OpenClaw's own command, and nothing changes if that command is missing.
+- Deleting a template import while its setup answers are still being saved is refused for a moment, instead of leaving a saved credential behind.
+- A template import cut off by a restart is undone whole (an accepted share returns to the inbox), never left to build without some of its settings.
+- Sharing, cloning or sending an agent while its definition is being changed waits for that change, so the copy never mixes old and new files.
+- The inbox lists waiting agents quickly, even with many waiting.
+- Downloading, moving or importing a large agent no longer stalls the rest of the app while its file is made or read.
+- Looking for the folders an adopted agent uses no longer stalls the rest of the app.
+- A second Recover context is no longer let in while one is running, after an earlier try found nothing.
+- After a refused rebuild, recover-after-switch no longer runs on the old source.
+- Recover context holds the agent only while its turn really runs: asks, checkpoints and consults wait for it, and a sleep by hand is refused with a reason (not an error) while it runs and allowed as soon as it ends.
+- A proposal whose merge was cut off by a restart goes back on the list.
+- Saving a new source without a rebuild keeps the cap on the model that is running.
+- An interrupted compaction shows as interrupted, not as running for ever.
+- The limit on how many consults run at once now holds when several start together.
+- An agent waiting on its own consult stays held.
+- A deleted, archived or moved agent's call token is refused, and a deletion during a mesh change no longer brings back its grants or token.
+- Last active, unread and Recent no longer jump back after a turn.
+- Automatic rebuilds look at activity as it is at that moment.
+- Opening a long web chat now reads only the end of its history and uses far less of the agent's memory, and downloading or recovering a long history holds only what fits in the download. Both used time and memory that grew with the whole history.
+- Export, Recover context and the context check use far less memory on long histories full of tool calls.
+- Waking an agent no longer puts back the old memory limit when you saved a new one as it woke.
+- A template with two tasks of the same name now adds the second one on Try again, instead of keeping it waiting for good.
+- Removing a private repo and adding it again under the same name now always takes the old deploy key off the agent.
+- Joining a class whose shared AI source was just unshared is now refused, instead of leaving the agent on a source it cannot use.
+- Changing the machine's default file size limit no longer overwrites a limit you just set on one agent.
+- Removing the shared Gemini or search key now says so when it could not be removed, instead of claiming it was.
+- Applying a source's new default model no longer undoes a model you chose for an agent while it was applying.
+- A scheduled task that had nobody to report to is now pointed at you after your first message, even if it was being quieted at that moment.
+- The hourly cost tally no longer stalls the app for seconds on a large fleet.
+- Deleting a Claude plan source no longer turns its past usage into billed API cost on the Usage page.
+- Moving an agent to a local model no longer removes what it spent before from the cost chart.
+- A restart at the wrong moment can no longer lose the quality guard's "switch back" suggestion.
+- In Recommended, a stuck agent's "keep the last 200 lines" button is no longer swapped for a slow summary the Hatchabot agent proposed.
+- When Docker is slow, the resource view no longer starts a new sample on every refresh; one sample serves everyone until it answers.
+- An extra package whose name ends in "-" is refused when you build a base image, because apt reads that as "remove".
+- Derived images can be built when Hatchabot uses a runtime image repository other than the default.
+- Watching a build's log no longer slows the app when a build has written a very large log, and a huge log still shows its end.
+- A base image build that hangs is now stopped completely at its time limit, and stopping or restarting Hatchabot stops a build in progress, so "A base image build is already running" no longer outlasts it.
+- Install image no longer copies an image to a runner when it can't tell which CPU either machine has.
+- Installing the image on a runner with a different CPU now adds this machine's extra packages to it there, instead of leaving them out; when this machine's image list can't be read just then, it installs nothing and says to try again.
+- Install image refuses to put an older OpenClaw on a runner whose agents already run 2026.8 or newer, which would have broken their next rebuild.
+- Building an older OpenClaw as the default is refused when agents already run 2026.8 or newer; build it as a candidate instead.
+- Rebuilding a base image with extra packages, or an engine-free one, is refused while an agent or class is pinned to it, as the standard image already was.
+- An app waiting to install that you change meanwhile now installs with one set of your values, never a mix of the old and new credentials.
+- Testing a repo whose host hangs now answers after its time limit, instead of waiting as long as the hung connection lasts.
+- Testing a repo with an enormous list of branches and tags no longer holds the whole list in memory; past 64 MB it stops reading and says so.
+- Updating an app to a mailbox another agent already runs it on now asks first, even when that agent has the same name as one you confirmed before.
+- Replacing an app whose old scheduled tasks would only partly come off now puts them all back; when they can't go back, the agent's page offers to put them back only if nothing of the new app is left, keeps Use the new release or Go back while the new app is switched on, and otherwise says what is left.
+- An app update whose new version drops a secret setting no longer shows that old secret in its test output or error.
+- A skill instructions update cut off part way (the agent or machine stopped) no longer leaves every later preview and change saying another file action is running.
+- Applying setup values that fail part way with a timeout now puts both files back, so "Nothing was changed" is true.
+- Applying setup values no longer brings back Google accounts, folders or peers you've since removed from an agent, or drops ones you've added.
+- Restoring a snapshot now brings back the setup fields its files were written for, keeps any field the agent's description still uses, and keeps the fields in their order, so Setup values asks for the right ones and no longer leaves {{placeholders}} in the files.
+- Adopting an agent no longer drops a scheduled task that looks like one the agent already has but goes to another chat or comes from another bot, and adopting the same folder again (or a retry) no longer adds a task twice after its copy was pointed at your chat or console.
+- A problem report now hides a password or key that was changed while the report was being put together.
+- The access overview no longer shows a removed member as gone when the agent's chat is open to everybody.
+- Verify now no longer keeps what it found in an agent that was moved, rebuilt or stopped while it looked; it says so instead.
+- Deleting a Google connection now revokes it at Google unless another account here really shares its grant (same Google Cloud project).
+- Reconnecting a Google account while it is being deleted no longer loses the new connection.
+- Back up now no longer stays "running" for good when Docker stops answering: each step has a time limit, the run is stopped after 6 hours, and a stopped run never marks the next one finished.
+- The restore drill no longer hangs when Docker stops answering: each of its Docker calls has a time limit, and it says Docker did not answer and ends. A drill stopped at its time limit always ends, even when Docker does not answer its clean-up, and says when a restore took too long.
+- A backup no longer saves an agent half-restored: an agent being restored, imported or moved is left out of that night's set, and says so; older sets are still pruned, each agent's newest copy kept.
+- Restoring an older backup no longer gives an agent back a Google account that was deleted since.
+- Re-running setup on an install whose Docker is named in .env (rootless Docker, a tenant's daemon) now checks that daemon, instead of stopping with "docker is installed but not usable by this user".
+- Hatchabot now starts even when Docker accepts its startup check and never answers, so the app comes up and can show the Docker problem.
+- A fresh bundle install no longer deletes an existing folder named after the install with .partial on the end (for example ~/hatchabot.partial), and an install stopped part-way no longer leaves its copy beside the install.
+- Installing or relinking Hatchabot no longer replaces another program you already had at ~/.local/bin/hbt (use the full command, hatchabot) or at ~/.local/bin/hatchabot (it says so and stops); the launcher left by the rename from AgentClaw is still replaced.
+- When an upgrade moves to a newer OpenClaw it now fetches the runtime image your install is set to use (HATCHABOT_IMAGE), from the mirror it names (HATCHABOT_IMAGE_REGISTRY), instead of the default one; an image pinned to a tag is left as it is.
+- Two restarts or setups at once no longer both reinstall the dependencies over each other; the second waits for the first and then finds them up to date. An upgrade also knows another one is running whatever time zone each was started in.
+- Text you type in the operator profile while it saves is no longer erased when the save finishes, and opening the tab again during a save no longer brings back the old text.
+- Picking another core file in the editor now asks before it replaces changes you have not saved.
+- Find rooms no longer puts one agent's group chats into another agent's Telegram room when you switch agents while it looks.
+- For a guest, the chat picked last now opens, even when an earlier pick answers later.
+- When a derived image's build log can't be read, the page now waits longer between tries instead of asking again at once in a loop.
+- Adopting an agent no longer deletes it, and takes its bot offline, when the app briefly can't read it or copy its workspace after the bot was handed over.
+- Joining an agent by an invite while it is asleep now works: the agent is woken and your first message is let in. An invite that names its person, or someone already on another of your agents, waits for a stopped agent to be started, up to a week and across a restart; an invite that names nobody is refused while the agent is stopped, and stays good to use once it runs.
+- `hatchabot move` and `hatchabot embedder --host` now refuse a machine name two machines share and list their ids, instead of acting on whichever machine came first.
+- `--timeout` now ends a CLI wait on time even when the server takes a request and never answers it, and a very long timeout no longer breaks the wait.
+- The AgentClaw-to-Hatchabot migration now refuses before changing anything when it can't ask systemd about the old service or a backup of it is running, stops the old service before writing anything, and stops, moving nothing, when the old service does not stop; a run that fails after the stop says how to start AgentClaw again.
+- The AgentClaw-to-Hatchabot migration now refuses when another Hatchabot install is already where it would go, instead of overwriting that install's settings and secret key; running it again after a run of its own that stopped part way still works.
+- Removing an install that has lost its secret key with `--purge --backups` no longer deletes backup sets another install made in a shared backup folder.
+- Uninstalling now goes by the install's .env alone: a key, database or backup folder exported in your shell (another install's, say) is ignored, so a purge can no longer delete another install's backups or database.
+- A backup run by hand now saves the secret key the service actually uses, so a key written with a $ reference (Mac), a # (Linux) or an escaped trailing space no longer gives a backup whose credentials can't be decrypted; a run with another key exported in the shell is refused before anything is written, and Back up now warns when .env's key was changed under the running service.
+- A Markdown file full of indented code fences that never close no longer stalls Hatchabot while it is read.
+- A malformed web page the management agent opens can no longer hold up the whole app while its text is taken out.
+- Tidying .env no longer reorders it when a value uses another setting inside quotes, which could change a password: inside single quotes within double quotes, or inside `${…}`, `$(…)` or backticks within double quotes. A value in bash's `$'…'` quoting leaves the file as it is.
+- A console upgraded from OpenClaw 2026.7 no longer sits on "Approve this browser" with nothing to approve.
+- An embedding call that never finishes sending is ended after 60 seconds, and no longer holds a memory-search slot for five minutes.
+- When the management agent's lockdown is loosened, its key is suspended even if the first attempt fails.
+- A management agent rebuilt during a lockdown check keeps its new key.
+- Public access no longer counts automatic upgrades that are set up for a different Hatchabot install of the same user.
+- Replacing your authenticator app can no longer leave you with no app at all when saving fails.
+- At the public address, a sign-out Hatchabot can't save is now refused, so you can try again, instead of quietly not holding after a restart.
+- At the public address, a second-factor check you just passed is no longer asked for again because a slower page request finished after it.
+- Sign-in lockouts, and how long the next one lasts, now outlive a restart, so a restart no longer gives a guesser ten more tries.
+- The app's offline copy no longer keeps a script from a newer release under an older release's name.
+- A change you confirmed that a restart cut off now says "Interrupted" on its card, instead of vanishing as if it had been done.
+- An adopt of a workspace cut off part way (by a restart during the copy, or a copy that failed) now leaves the agent stopped, and Start refuses it until you choose on its page: Adopt again, or Start it as it is when the folder can no longer be copied from. You can still delete it. An adopt whose copy was whole but whose start failed keeps the agent, and a start a restart cut off is made at the next start of Hatchabot, unless you started or stopped the agent meanwhile.
+- What a skill's Practice spends now counts as the agent's own use: toward its budget and spike warnings, in its source's tokens (a Claude plan's too), and in its Usage, shown as practice. Practice waits while a budget pauses the agent, or once it has spent the budget it is paused at.
+- Removing a runner while the runtime image is being installed on it now waits for the install to finish, instead of removing the runner while the copy goes on there untracked; Install image is refused on a runner that is being removed.
+- Draining a runner no longer marks an agent stopped that moved to another machine while the drain was stopping the others.
+- Adding the same runner twice at once, with its address written two ways (a trailing slash, a capital letter), now adds it once.
+- The runtime status asks npm once when many people look at the same time, instead of once per viewer, and an npm check that failed is tried again after five minutes, instead of hiding "upgrade available" for an hour.
+- A base image built as the new default is made the default only if, when it finishes, no agent that runs the default has moved past it and it can run with the memory search settings you have. Otherwise it is kept as a candidate and you are told why. With the runtime image pinned in HATCHABOT_IMAGE, a default build no longer replaces the pinned image, and Promote and Install image now also check agents pinned to that tag.
+- Several pages loading an image's capabilities at once now start one probe container, not one each.
+- Agent consoles now open on a runner added by an ssh alias with an underscore in it.
+- Status → Resources now counts agents made before the rename, and clearing their peaks clears their cap hits too.
+- A spare Telegram bot taken by an agent while its idle name was being set keeps the agent's name, instead of ending up called "Hatchabot (unassigned)".
+- A Telegram bot's goodbye to a deleted or archived agent's members now goes out before the bot can serve another agent, so its chats no longer read "this bot is now …" followed by "it will not reply here any more".
+- Adding a Telegram bot that is refused because the agent got busy gives a spare back to the pool, instead of leaving it counted as in use; a bot of your own that you pasted stays yours, and pasting it again works.
+- Taking a spare Discord bot or Slack app keeps the servers it was known to be in when the platform does not list them just then, and a spare removed meanwhile is refused instead of connected.
+- Turning "Anyone can knock" on while the agent rebuilds now takes effect when the rebuild ends, instead of at the next rebuild; if its bot does not take the change then, the agent's timeline says so.
+- Change bot onto a spare Discord bot or Slack app tells the people it served before that it now belongs to a different agent.
+- The Telegram card shows the agent's own file limit instead of always 50 MB.
+- A channel card says when its bot's new name is queued and when it will be tried again.
+- After Change bot, the Telegram card shows the new bot's name at once instead of the old one for ten minutes.
+- Re-check on a Telegram card during a Telegram outage or rate limit says to try again, instead of telling you to replace a working token.
+- A Telegram invite no longer lets strangers' knocks through on Discord or Slack, or keeps their doors open.
+- Several open dashboards asking for the same agent's join requests now share one read of its container.
+- Savings counts the evening of the last day of a month in that month, not the next, when the machine is west of UTC.
+- The quality guard offers to switch back when a change made things worse, even when the source names the old model another way.
+- The quality guard reaches every model change that made things worse, however many came before it.
+- A model change's verdict covers only its own time, even on an agent with a long history of switches.
+- The usage trend keeps today's use and cost after your last agent is deleted.
+- A source's refused calls are counted once, even when a usage pass is interrupted.
+- A day's cost on the usage trend stays what it was when an agent later moves to a dearer model.
+- Taking away someone's access hides that agent's cost from them at once.
+- Usage bills an agent to the source it still runs on until its source switch is rebuilt, in the live reading and on the usage trend.
+- The loop watcher keeps working when a loop comes back after many others.
+- A usage spike is still told when the loop that was to explain it ends before its message went out, and is then shown as told on your chat.
+- A cost suggestion for an agent you archived stays in your cards, where you can answer it.
+- Practice runs' spend shows in the fleet usage, the cost badges, the At API prices chart, the request counts, and Recommended's spike and loop costs.
+- Settings → AI reads each agent's usage once, not once per source; the loop watcher reads each household's agents once per pass; and Usage → Savings opens quickly on a long history of model changes.
+- Adopting an agent whose bot was handed over, and which then failed to start, keeps the agent and its bot, on the page and with `hatchabot adopt`, so you can retry it from its card; both say how to finish the adopt and what a Retry does.
+- Adopting with a pasted BotFather token now uses that bot, not a spare one from the bot pool.
+- The password manager is offered the username and password that actually signed in.
+- The join page shows a web-chat join that went through even when signing in right after it fails.
+- A web-chat message sent while the conversation is still loading no longer shows twice.
+- Previewing a text file that has grown large shows its first 2 MB instead of loading all of it.
+- The sign-in screen no longer comes back right after you sign in.
+- On an install with Google sign-in, people with a password account can change their own password and recovery code.
+- An invite that can't be checked for a moment says so, with Try again, instead of calling the link invalid.
+- A Slack or Discord join with no link tells you where to find the agent, instead of saying it isn't running.
+- Opening an agent's voice settings no longer marks its unread replies as read.
+- A guest's unread mark clears once they've read their conversation.
+- A console slow to connect the first time leaves the Approve button, instead of only OpenClaw's command-line steps.
+- Auto placement skips a runner that is offline, and says so when every runner is.
+- On a Mac, the steps to hand a bot over to an adopted agent give OpenClaw's own gateway restart command.
+- A derived image is reported built only once its whole build log is written. A build that runs out of time stops everything it started and ends on time, even when its log can't be written; one that can't start leaves no temporary files behind; and stopping or restarting Hatchabot stops a derived image build under way, even one still starting.
+- Build logs no longer grow without limit: each keeps its first and last lines (4 MB at most), the logs of the two builds before it are kept beside it, and deleting a derived image deletes its logs.
+- A derived image whose lines would make it run as root, start from another image, or set Hatchabot's own labels (`org.hatchabot.…`, `hatchabot.…`) now fails its build, and your agents keep the image they had. A line that plainly sets one of those labels is refused as you save it. The owner's notice quotes only what docker printed as its output; Hatchabot's own reasons are said as such.
+- A clone cut off by a restart is now undone whole, and says to clone it again, instead of being left with only some of its credentials.
+- A clone or a download of an agent its budget had moved to a cheaper model now keeps the model you chose; a clone says when its AI source doesn't offer your model.
+- Forgetting another Hatchabot whose token can't be removed now says so and keeps it listed to try again, instead of reporting it forgotten.
+- A definition push that fails part way now puts back a child's file even when its failed write had landed, and leaves alone one that was never written.
+- A clone or import in progress now counts once against the agent limit, so another agent that fits is no longer refused meanwhile.
+- Bringing in agents on Linux no longer waits forever on a stuck OpenClaw gateway restart; a failed restart says the bots are already off and how to finish.
+- A template whose scheduled task has no schedule, a cron expression that can't run, or a time zone that isn't one is now refused, naming the task, before an agent is made from it; a clone or a copy refused for one says which task stopped it.
+- Scheduled tasks on @daily, @hourly, @weekly, @monthly or @yearly can now be added and edited in the app, and copied with their agent.
+- Importing a template with a machine-login Claude Max source onto a runner is now refused up front, as Create refuses it.
+- Exporting, importing and accepting templates no longer holds up the rest of the app while files are compressed or unpacked, and only two files are unpacked at once.
+- A sleeping agent whose Telegram is slow to answer no longer delays waking the others when a message arrives.
+- The automatic rebuild check now looks at a few agents at a time instead of every container at once, and one check runs at a time.
+- Taking over a hand-built agent's bot while Telegram is off there but the bot's account is still on now says exactly that, and gives the one command that switches the account off; an account name edited by hand is described in words instead of printed into a command.
+- The full log shows the agent you picked, even when you change it before the last one answered.
+- An offline runner or a late backup stays on the machine line and in Alerts when one read of the machine fails.
+- A member who joined on Discord or Slack shows as linked there, not "hasn't messaged yet".
+- Check health shows the agent whose sheet is open, not a slower check of the last one.
+- Saving one budget or alert row keeps what you typed in the others, and two rows saved one after the other both show what was saved.
+- The setup guide no longer wipes a token you are pasting every few seconds.
+- The dashboard stops reading the Discord and Slack spare-bot lists on every poll (about 900 requests an hour per tab).
+- The dashboard reads who is knocking in one request, not one per agent; a request let in or turned away leaves the page at once.
+- A join request turned away no longer comes back for half a minute when the requests were being read at that moment.
+- Pinning an image rebuilds an agent that woke since the page last looked, after asking.
+- Viewed by Status, a section of different states is named for what they share (Failed or blocked, Busy, Waiting on you, Not running or out of reach), not the first agent's state.
+- A second window that stays open follows a sign-in as someone else in another window at its next poll, and never shows the next person's agents under the last person's name meanwhile.
+- Installing or inspecting an App from the same git address twice at once no longer fails one of them, and a clone cut off part way no longer leaves the address unreadable until its cache is cleared, whatever language the machine's git speaks.
+- A mirror folder left half made inside another git repository no longer has its fetch change that repository's branches, and a mirror is no longer removed when a check of it could not run.
+- Inspecting an App, or pressing Update when there is nothing new, no longer packs its whole repository. Inspect still refuses code over the 100 MB limit before anything is made for it: it counts the most the code can take from its file list, and packs it to be sure when attributes could change its size.
+- Code over an App's 100 MB limit is now refused as "The code is over 100 MB; apps are limited to 100 MB." instead of "git archive failed: " with no reason; a release is packed as its commit holds it, whatever this machine's git settings do to line endings, and a pack that runs out of time says it timed out.
+- Update on an App says when it could not read its settings in the agent, instead of saying there is nothing new while a bot or owner field may be out of date. A config.json that is JSON but not an object of settings (`[]`, `5`, `null`) is now refused by an install and by Update, instead of being replaced with the defaults or failing with "Cannot convert undefined or null to object".
+- An App install or update that fails after its scheduled tasks went on now says which tasks are on and which step failed, and waits for you to keep the new release or go back, instead of saying nothing changed while its new tasks ran the old code. An old-release clear-out that fails after an install has finished is only logged, and the install stands.
+- Choosing Use the new release after a replaced App was left waiting now takes the old App's scheduled tasks off, so the two Apps no longer both run on the same account.
+- Clearing out an App's old releases after an install no longer removes the live release when a file in its releases folder has a blank line in its name. Only release folders are counted or removed, half-unpacked folders are cleared, and an unpack that fails no longer leaves one behind.
+- Adding a public repo to a running agent clones just that repo, instead of refreshing every repo the agent already has.
+- Opening a Files folder with thousands of files is faster and no longer holds up the server while it sorts.
+- Uploading a large file in Files no longer makes several copies of it in the server's memory first.
+- The storage sweep keeps an agent's last measurement when du could not count all of its volume (an unreadable folder, or a timeout), and measures it again on the next sweep. A short count no longer replaces a real one or clears a disk warning, and files that go away while it counts (a busy volume) do not fail it.
+- The security check counts an agent with no group setting as in groups with its members, as its Telegram bot is, once the bot admits someone; most Telegram agents show one level higher after the upgrade.
+- The daily security check reports a new powerful capability (sending email, a read-write host folder, its own browser with kept logins) as a change, even when the agent's exposure was already high. The first check after upgrading is the new baseline: nothing is reported against the earlier release's snapshot.
+- The daily security check runs for the machine's owner even before they have an agent.
+- Activity lists a move or restore even when more rebuilds than its rows came after it.
+- `hatchabot doctor` says how many agents' memory limits could not be read, and warns, instead of "none drifted" with nothing read. Agents on a runner that is not answering (asleep or offline), and stopped agents whose container Docker says is not there yet, are said without a warning.
+- An agent's health shows "Config lint: not checked" when its settings check gave no usable answer, instead of "0 checks clean", and Check all no longer calls the settings clean while any could not be checked.
+- Report a problem looks a symptom up in an index of the playbook instead of scanning every entry for each phrase, and a draft's known problems use the same cached copy instead of reading the playbook on each view. A long symptom no longer holds the server.
+- A problem report includes an agent's recent failures however many ordinary lines other agents logged since.
+- A held restore's Put back, and a restore cut off before anything changed, say when the agent could not be started again ("…so it is stopped: start it once its machine answers"), instead of "as it was".
+- A backup set of more than 500 volumes keeps its whole list of captured volumes, so an archive past the 500th can be restored from an incomplete set.
+- A passed restore drill counts as proof for an agent with a long volume name, and for every volume of a set of more than 500.
+- Choosing the manager's AI source as the default for new agents, or for the helper calls, no longer takes away its Talk network access.
+- "Use for links" puts the address it writes in force at once, as its answer says, also when the server started with another HATCHABOT_PUBLIC_URL that the .env no longer names: the page, invitations and reset links name it, and the origin check for older browsers and the sign-in cookie's https check accept it, without a restart. Sign-in links, where they are on, still check the address the server started with (or none) until a restart, and Use for links now says a restart is needed there. Over an address the .env still names it refuses, as before.
+- An agent whose budget pause has ended but whose start on the 1st failed shows as paused, with what it spent that month (for the machine's budget, the whole machine's to the machine's owner only, the agent's own to anyone else), saying Hatchabot tries again each pass; Start ends that pause too.
+- After a restore, the next build makes the weekly token review again when the backup is older than the task, and writes its current wording over an older copy's.
+- Moving or importing an agent on a derived or `-plus-` image rebuilds it only on an image there built the way its base was (the same OpenClaw, Node line, engine and messaging plugins), and judges the agent's OpenClaw by that image. When there is none, it says what differs and how to build one, and builds nothing. An imported image's base packages no longer count against your lines' 8,000 characters and travel on after a Rebuild, and an import whose images change or can't be read while it runs says to try again.
+- A copy exported from a fleet whose images have another name (`HATCHABOT_IMAGE`) now imports, under this fleet's names. An image already here of that name is used only when it is the copy's own; otherwise the import asks, and offers to rebuild this machine's own image of it when its last build failed.
+- A derived image's lines may give a command its own `--network-timeout` or `--mount-point` options. Only `RUN --network` and `RUN --mount` themselves are refused.
+- A derived build stopped or timed out just as its image was being named now finishes naming it and reports what it did, instead of "Build timed out." for an image already in place. One stopped with the service after its image was named is recorded as built.
+- Deleting a derived image, or a version or candidate runtime image, also removes the image a stopped build left under its `-check` name, so it no longer lives on unseen. When docker can't remove it, the Delete changes nothing and says why.
+- Attaching a Google account to an agent that was deleted meanwhile now fails, instead of leaving the account on the deleted agent.
+- Removing a Google connection no longer leaves its stored token behind for good when the secret store fails to delete it: Hatchabot tries again every ten minutes and after a restart.
+- Disconnecting a Google account when Google doesn't answer now keeps trying to remove Hatchabot's access every ten minutes; after seven days and at least a day of tries, it deletes the token and tells you on your chat app how many times it asked and to remove the access by hand.
+- When the last two household accounts holding the same Google account disconnect it at the same time, Hatchabot's access at Google is now revoked, instead of being kept for each other and never revoked.
+- Connecting a Google account while another household account is disconnecting the same one no longer leaves the new connection with a token Google has already ended.
+- An agent with more than 500 conversations now has its stale Claude login pins cleared even when reading a later batch of its conversations fails.
+- A Google (Gemini) source now offers every model its key can use, not only the first page of Google's list.
+- Adding a local model server that has no models pulled yet now says to pull one first, instead of saving a source that cannot answer.
+- An ask to an agent that fails or times out no longer marks the agent's unread messages as read.
+- A distillation whose master is deleted while the child is writing now says so, instead of reporting a proposal nobody can review.
+- While an agent waits for the rebuild that switches its AI source, its context cap, the Cap menu in Usage → Context now and the "Cap it" recommendation all go by the source it still runs.
+- Saving a new default model that would leave a source's list over 16 models, once the models its held agents stay on are counted, is now refused with what you can do to make it fit, with models other accounts' agents keep counted apart, instead of saving a list the editor then refused.
+- If the rename migration stops part way after the new service was started or the database was moved, it now tells you not to start AgentClaw again, because the two would run the same agents, and says so only then (a service still starting "may be starting"). When it stopped between moving the database and linking its old path, it says to link it first.
+- Building a candidate image with extra packages and without its own memory search engine now gets a tag of its own (`<version>-lite-plus-<packages>`), instead of replacing the image with the same packages and its engine.
+- `hatchabot doctor` now says when another program answers where Hatchabot should, instead of reporting the control plane healthy. It knows Hatchabot by its version comment, meta tag or header (behind a proxy that strips comments too), says an answer such as a 404 or 500 with its status instead of "not answering", reads at most a megabyte of a page so a large or malformed one cannot stall it, and prints a page's version only when it looks like one.
+- `hatchabot doctor` no longer reports "No backup set yet" when the backup folder holds a stray file or an unreadable folder named like a date beside good sets, and names a set it cannot read that is newer than the last one it read (one a backup run with sudo made, say).
+- On a fleet whose runtime image is in another repository, `hatchabot image pin`, `try` and `promote` with a bare version or image name now use that repository, instead of `hatchabot-runtime`.
+- A fleet whose default image is pinned by digest (`HATCHABOT_IMAGE=hatchabot-runtime@sha256:…`) names its images in `hatchabot-runtime` again: `hatchabot image pin/try`, derived images, Promote and Delete, the runtime image list, the base build and an imported agent's image used the name `hatchabot-runtime@sha256`, which no image can have.
+- `hatchabot upgrade-image` builds into the repository the service's `.env` names (`HATCHABOT_IMAGE`), not the shell's, and prints the tag the build really writes, such as `<version>-lite` with `--no-engine`, in its candidate and promote hints.
+- `hatchabot image derive` and `image rebuild` stop following a build after `--timeout` minutes (60 by default), the request that starts it included, saying the build goes on and what `image log` and `image list` show, instead of waiting forever on a server that stopped answering.
+- The rename migration refuses at the start when `~/hatchabot-backups` is a link that leads nowhere, instead of failing half way.
+- Recent no longer reads the same conversations every minute and throws them away when an agent has had more than 40 in a week (scheduled tasks, say).
+- A web chat's history now shows two different pictures the agent sent seconds apart as two replies, not one; a picture's delivery copy recorded in the same second is still one reply.
+- Deleting an agent now frees the conversation lists the server kept in memory for it.
+- Letting someone in when the agent's waiting requests could not be read now says "Couldn't read the requests waiting at the agent's door just now — try again in a moment." instead of "That request is no longer pending. Ask them to message again.", also for a plain approve or turn-away on an agent with two apps (which sent a Discord code to Telegram). A pairing store that is busy or damaged counts as a read that failed, not as nobody knocking, so a knock the owner was already told of is not pushed again, and one app's unreadable store no longer stops the owner being told of another app's knock.
+- Copying a Telegram invite now says so when the agent's door could not be opened for the new person, instead of reporting it open for half an hour; two quick presses no longer close the window the second reported open.
+- Joining through a named invite no longer hangs for up to a minute when Telegram can't be reached; the person's first message is checked instead.
+- Starting an agent's browser no longer waits for a slow browser build on another machine.
+- The minute's browser cleanup on a machine with many browsers no longer reads the whole fleet once per browser.
+- Clicking Back twice quickly in an agent's browser panel now goes back two pages, not one.
+- 35 more events in the Setup log and Checks → Logs read in plain words instead of raw names.
+- On a Mac with Homebrew's coreutils, the nightly backup and the restore drill now put a time limit on every Docker call (they looked only for `timeout`, which Homebrew installs as `gtimeout`), and `hatchabot doctor` says when there is neither.
+- Nightly backups prune old sets again after the last agent is deleted, and on an install whose only agents failed their first start. While no agent is known (a new machine using the old one's key and backups folder, before its database is restored), each volume's newest copy is kept.
+- A restore drill run by hand now reads `.env` the way the service and the backup do, so it finds the same backups folder when a value has a `#` in it (Linux) or a `$VARIABLE` (Mac).
+- A restore drill that was killed no longer blocks later drills once the system gives its process number to another program; one whose start time reads differently after the clock was changed still holds its lock for as long as a drill can run.
+- `uninstall --purge` now names what the app kept beside its database, the memory search service's keys among them, when that database is in a folder of your own. It still leaves them in place.
+- `uninstall --purge` now stops and says what to do when `.env` names no database (or there is no `.env`) but the shell's `HATCHABOT_DB` names one that exists, instead of deleting the key that database needs; a purge with no database says none of the install's agents were found or removed, not that they are gone.
+- An upgrade now replaces a runtime image that carries no OpenClaw version (an old or hand-built one) with this release's, as setup already did.
+- An upgrade, a deploy (`hbt deploy`) and a bundle install's upgrade now wait for an install of the dependencies already running in the folder (a restart's) before moving them aside, instead of moving a half-installed set. A rollback that cannot get them back in time leaves the old release's dependencies set aside, says what to run next, and the next upgrade or deploy puts them back first.
+- Setup and upgrade now check and fetch the runtime image named in `HATCHABOT_IMAGE`, from the mirror in `HATCHABOT_IMAGE_REGISTRY`, reading `.env` exactly as the service does; setup no longer always fetches the default one. A pinned image is kept, or named when it is missing.
+- Setup now points the `hatchabot` command at the address the service listens on: https when Hatchabot serves TLS itself, and the address in `HATCHABOT_BIND`.
+- The agent list asks a local model server once for what it has loaded, not once for every agent on it.
+- When OpenClaw refuses to approve a browser for the console, approves only some of the browsers waiting, or cannot be asked which are waiting, Hatchabot now says so or brings the Approve button back, instead of reporting success and leaving you on OpenClaw's pairing screen; approving from two tabs at once no longer shows a failure or "Nothing is waiting".
+- Copying, exporting, sending or deriving an agent while its files are being changed now says it is busy (try again when it ends), as other busy refusals do.
+- Re-check on a spare Telegram bot no longer tells you to delete it when Telegram is rate-limiting or having an outage; it says the bot was not checked and to try again.
+- The bot inventory shows bots as unknown, not dead, while Telegram is rate-limiting or down, so no healthy spare is offered for removal.
+- Deleting, archiving, stopping or moving away an agent on a runner, or removing the runner, now closes the connection Hatchabot opened for its console.
+- Adding or checking a runner looks for the image your agents actually run when HATCHABOT_IMAGE is set, not hatchabot-runtime:latest.
+- Images built from the app always land where the fleet looks for them, even if HATCHABOT_IMAGE_REPO is set where the service runs.
+- A proposal that names many agents, such as setting an agent's peers, now reads your agents once, not once per name.
+- Cancel on a card now answers at once, even while another card's change, such as a rebuild, is still running.
+- The management agent can no longer file more than 20 open cards by asking for two changes at once.
+- A card the management agent files for a suggestion you put off with Not now now shows in the home screen's list, instead of nowhere.
+- Failed sign-ins with made-up usernames no longer fill the database: at most 500 are kept across a restart, and every real account's lockout always is.
+- Changing your password at the public address no longer signs you out when another request was still loading.
+- Sorting a group by last activity reads only that group's agents, several at a time, so it no longer waits on agents in other groups or on runners that are asleep.
+- An icon you choose while automatic icons are being picked (Redo icons too) is kept, and the result counts only the icons it actually set.
+- Saving the memory for the memory search service restarts the service on this machine, and now says when it could not be restarted, instead of reporting the setting applied. The engine now moves to a changed limit, on runners too: at the service's next start, or at the first health check (every 5 minutes) that finds it not busy indexing, however long a re-index keeps it busy; Restart does it at once. If it cannot be moved, memory search keeps serving on the old limit. A start that cannot remove the old engine now says so instead of reporting it started.
+- Testing web search on an agent that has its own Brave key no longer counts the test against the fleet key's monthly credit and cost.
+- Moving every agent back to its own memory search engine checks each runtime image once instead of once per agent, so it answers much sooner on a large fleet.
+- The memory search door no longer keeps rate-limit records for agents that were deleted or re-keyed.
+- Editing a scheduled task while its agent is being moved to another machine, or restored from a copy, now asks you to try again instead of changing the agent's old copy.
+- "Forgot password?" says a reset link was sent only when a bot took it: one Telegram refused (the bot blocked, the chat not found) was logged as sent. A refused message now goes to the next bot the person is linked on, then a Discord bot; when every one surely refused, the new link is withdrawn and one they had still works. A message that timed out, lost its connection once sent, or was answered by a gateway error page (a 502 or 504) may still arrive: its link stays good. All the tries of one ask share the 8 seconds the single try had.
+- The People page no longer keeps deleted agents' conversation readings in memory until a restart.
+- "Let them in again" stays for a member who joined on a chat app and was then given web chat, and reopens the app they joined with; an invite from before a removal no longer counts, so someone removed and let back in for web chat alone is asked for their @handle.
+- "People you already know" shows someone known on Telegram and Discord once, and no longer offers them for an agent they are already on.
+- Task notifications called off at the last moment no longer use up the hourly allowance of phone notifications.
+- The management agent's connections are no longer turned away because of earlier ones that hung up while being checked.
+- Disconnecting agents from each other now removes every connection even while the secret store is failing, instead of stopping halfway.
+- Reconnecting a Google account with an OAuth client of another Google Cloud project now ends the old token's access at Google.
+- A container left behind by a model copy is now cleaned up, instead of keeping an old runtime image on disk for good; a slow model copy on a runner is no longer cut off by that cleanup.
+- Creating or rebuilding an agent after the agents' Docker network was pruned now makes the network again, instead of failing until Hatchabot is restarted, including when two agents are created or rebuilt at the same moment.
+- An agent's logs now show errors where they happened, not all gathered after the rest.
+- When the link to a runner drops during a download or an export, the copy left reading on the runner is now removed, instead of holding the agent's files until it ends.
+- Adding the same runner, AI source or agent twice while the first add is still slow now answers "already being added" until the first is done, and closing the tab of an add no longer keeps its name taken for ten minutes after it finished.
+- A Start cut off by a restart now still finishes what follows it: a Google account or repo source removed while the agent was stopped is taken off its volume, and its setup hook and template tasks still run.
+- An operator profile saved just before a restart now reaches every running agent afterwards, not only those the push had reached before it, including one whose container is still coming up after a reboot; the same goes for other changes that rewrite an agent's managed AGENTS.md sections.
+- An agent a monthly budget paused just as Hatchabot restarted is now started again on the 1st like any other budget pause, instead of being left stopped as if stopped by hand.
+- A new agent's owner, or someone let in by an invite, who writes to its bot for the first time just after Hatchabot restarted is now recognized as that person, instead of showing up as a stranger's request to approve. A restart no longer lengthens or reopens an invite's window; when one ran out while Hatchabot was down, the owner is told.
+- Adding a local model server now accepts a model by its plain name (such as `llama3`) when the server lists it as `llama3:latest`, as Ollama does, and such a model shows as loaded when it is.
+- An agent that this Hatchabot's monthly budget only moved to a cheaper model no longer shows as paused by that budget.
+- The management agent's web search reads a malformed results page quickly, instead of holding up Hatchabot for seconds.
+- Practice now says which OpenClaw version it was refused for and the one it runs on; on an older one it says to rebuild the agent onto the current image.
+- An adopt whose bot hand-over gets no answer, on the page or with `hatchabot adopt`, no longer deletes the agent when the server may have taken the bot: it checks, and keeps the agent when it cannot tell.
+- A browser is remembered as approved for an agent's console only once it really was, so a slow first load still gets the Approve button later.
+- `hatchabot doctor` now warns about a setting with a # comment after its value in .env, which the Linux service reads as part of the value while the Mac's service and restart.sh drop it.
+- A machine following the latest release no longer gives up on a new release after about 80 minutes while it keeps failing to put back a deploy that was cut off, and no longer deploys it on every tick meanwhile: the release keeps its wait, and one set aside stays aside.
+- When Hatchabot serves HTTPS itself with a self-signed or locally made certificate, the hatchabot command on that machine now works instead of failing with 'fetch failed'; it trusts that one certificate, at the install's own address only.
+- Moving to a new machine with the old backups folder no longer prunes the old machine's backup sets once one agent has been made there before its database is restored; `hatchabot doctor` lists such sets with their size.
+- Two package lists that differ only in a dash, such as 'python3 pip' and 'python3-pip', now build runtime images with different tags, so building one no longer replaces the image agents use for the other; a package with a + (such as g++) now gets a tag Docker accepts.
+- Adding a runner when ssh-keygen could not read its key (stopped, crashed, or the key readable by others) now says why and to keep the key, instead of telling you to remove a good key.
+- A Recommended action taken from a page that closed before the answer came now still shows on the agent's timeline.
+- A second Hatchabot server started on the same database (by hand, next to the service) now refuses to start and says why. Before, it swept secrets the running server was still using and marked its operations as cut off. A server that crashed does not stop the next start, and a lock file left by a server run with sudo is named, with the fix.
+- After a restart, a budget's switch to a cheaper model that the agent's runtime refuses is undone. The agent gets its own model back and the budget's next pass tries again. Before, the cheaper model stayed on the record.
+- After a restart, every agent ticked when a source's default model changed gets the new default, including those the change had not reached yet. A bulk switch with "recover after" whose rebuild had not started still recovers the conversation once the agent is rebuilt.
+- An empty memory setting for memory search or for agents (`HATCHABOT_EMBEDDER_MEMORY=` or `HATCHABOT_AGENT_MEMORY=` in .env) now means the default limit (2g and 3g). Before, memory search would not start, or an agent with no limit of its own could not be created.
+- A fleet whose runtime image is in a registry with a port (`registry.example:5000/runtime`) can now make agents, pin images to agents and classes, import derived images, pull a version base, and promote, inspect and delete its image tags; the web app shows the tag, not `5000/…`.
+- `hatchabot upgrade-image` asks the app's own build check before it builds: it refuses a tag agents or classes are pinned to, or a default the agents already on 2026.8 or newer could not read, as Settings does. Signed out, or not the machine's owner, it is refused; a service it cannot ask is warned of before and after the build.
+- Moving an agent pinned to an image no longer takes a runner's own different image of the same name. One is taken when it has the same files, or when either is from before the build-inputs label, and refused, and left as it is, only when both labels show it was built another way (settings written another way, such as plugins in another order, count as the same); the move dialog gives the reason. A derived image now carries a stamp of its base, lines and packages: the copy on the runner is used only when its stamp matches and it is built on the same OpenClaw and engine, otherwise it is built there again; a copy from an older release is built once, and used as it is only when that build cannot run.
+- A sleeping or stopped agent whose network a `docker network prune` removed now starts: it is put back on the agents network, made again. Before, its start failed until it was rebuilt. An agent found on no network is put back before it starts, a management agent only on its own internal network, or the start says to Rebuild.
+- `hatchabot delete --no-recycle` deletes an agent without parking its bot in the Bot pool, so an adopt that was kept and retried can be finished from the command line; a Telegram, Discord or Slack bot leased from a pool still goes back to it. Delete no longer fetches the bot's token, and its note says what becomes of the bot.
+- A nightly backup now tries its saved key on the backed-up credentials. If the key reads none of them, the set says incomplete and no older set is removed, since neither the backup nor the running service could read them. The restore drill passes when the key reads any of them.
+- Installing the runtime image on a runner with another kind of CPU now says how the image it got differs from this machine's (its memory search engine, Node, or built-in messaging plugins), since only extra packages can be rebuilt there.
+
 ## [2.190.0] — 2026-11-19
 
 ### Upgrading

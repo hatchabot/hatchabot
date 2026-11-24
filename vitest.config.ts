@@ -9,7 +9,15 @@ export default defineConfig({
     // a run from here found four of them and ran 17,836 tests, theirs mid-edit
     // (2026-10-23). review-artifacts holds audit probes, not tests.
     exclude: [...configDefaults.exclude, '.claude/**', 'review-artifacts/**'],
-    setupFiles: ['test/support/ownDataFolder.ts'],
+    // No test reaches the real Telegram (test/support/noTelegram.ts, HB-1437).
+    setupFiles: ['test/support/ownDataFolder.ts', 'test/support/noTelegram.ts'],
+    // Thirty seconds for every test, not Vitest's five. CI's runners share this
+    // machine with other projects' jobs (load average 40 to 80), and a test
+    // that loads src/api/routes.ts or runs real scripts then takes 6 to 9 s.
+    // Given file by file (HB-0800, HB-0801, then 31 files), the next file timed
+    // out instead (HB-0816). A test that measures speed asserts its own budget;
+    // a longer allowance on one test still applies.
+    testTimeout: 30_000,
     // Route tests assert authorization by asserting *as* a given owner. The
     // header that allows that is off in production (see src/api/principal.ts).
     env: {

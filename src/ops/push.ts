@@ -87,13 +87,23 @@ export function unannounced(seen: Set<string>, current: readonly string[]): stri
 export class PushBudget {
   #sent = new Map<string, number[]>();
   constructor(readonly perHour = 6, readonly now: () => number = Date.now) {}
-  /** 'send' | 'last' (send, but say it is the last for a while) | 'drop'. */
-  take(ownerId: string): 'send' | 'last' | 'drop' {
-    const t = this.now();
+  /** 'send' | 'last' (send, but say it is the last for a while) | 'drop'. `t`: when, which `giveBack` names. */
+  take(ownerId: string, t = this.now()): 'send' | 'last' | 'drop' {
     const recent = (this.#sent.get(ownerId) ?? []).filter((x) => t - x < 3_600_000);
     if (recent.length >= this.perHour) { this.#sent.set(ownerId, recent); return 'drop'; }
     recent.push(t); this.#sent.set(ownerId, recent);
     return recent.length === this.perHour ? 'last' : 'send';
+  }
+  /**
+   * Give back the slot `take` gave at `at`: its push was called off before
+   * anything was sent (HB-0938). The newest was given back, which is another
+   * push's when one was taken while this one waited, and the hour then ended
+   * by this one's older time, too soon (HB-0938 review).
+   */
+  giveBack(ownerId: string, at: number): void {
+    const recent = this.#sent.get(ownerId);
+    const i = recent?.lastIndexOf(at) ?? -1;
+    if (i >= 0) recent!.splice(i, 1);
   }
 }
 
@@ -109,8 +119,18 @@ export function createOpsPush(deps: OpsPushDeps): OpsPush {
       // Nowhere to push to: not counted, so an owner with no manager bot does
       // not have their hour spent on pushes that could never be sent.
       if (!token && (!deps.sendDiscord || deps.discordLinked?.(ownerId) === false)) return false;
-      const slot = budget.take(ownerId);
+      const at = budget.now();
+      const slot = budget.take(ownerId, at);
       if (slot === 'drop') { deps.log?.('ops.push', { ok: false, error: 'hourly push limit; more is waiting in the app' }); return false; }
+      // A push its caller calls off at the last check sends nothing, so it
+      // gives its slot back: six of them used the hour, and the next real
+      // one was dropped (HB-0938).
+      let calledOff = false;
+      const beforeSend = opts?.beforeSend && (() => {
+        const go = opts.beforeSend!();
+        if (!go && !calledOff) { calledOff = true; budget.giveBack(ownerId, at); }
+        return go;
+      });
       const where = deps.appUrl?.();
       const text = pushText(headline, detail, [
         slot === 'last' ? 'That is the last of these for this hour — anything more waits in the app.' : '',
@@ -119,12 +139,13 @@ export function createOpsPush(deps: OpsPushDeps): OpsPush {
       ]);
       if (!token) {
         // No Telegram to carry it: the manager's Discord bot, when the owner is linked there.
-        const ok = await deps.sendDiscord!(ownerId, text, opts?.beforeSend).catch(() => false);
+        const ok = await deps.sendDiscord!(ownerId, text, beforeSend).catch(() => false);
+        if (calledOff) return false;
         deps.log?.('ops.push', { ok, via: 'discord', ...(ok ? {} : { error: 'no Discord to carry it' }) });
         return ok;
       }
       try {
-        if (opts?.beforeSend && !opts.beforeSend()) return false;
+        if (beforeSend && !beforeSend()) return false;
         const send = deps.fetchImpl ?? fetch;
         const res = await send(`https://api.telegram.org/bot${token}/sendMessage`, {
           method: 'POST',

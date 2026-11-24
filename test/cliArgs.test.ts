@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { durationMinutes, matchAgent, matchTask, parseArgs, pickProfile, writeConfigValue } from '../src/cli.js';
+import { durationMinutes, matchAgent, matchMachine, matchTask, parseArgs, pickProfile, writeConfigValue } from '../src/cli.js';
 
 describe('CLI flags (audit: unknown flags swallowed the next argument)', () => {
   it('knows its on/off flags, so they no longer eat what follows', () => {
@@ -61,6 +61,20 @@ describe('<agent> matching (audit: any id prefix matched)', () => {
     ];
     expect(matchAgent(two, 'agent-first-0000').hit?.id).toBe('agent-first-0000');
     expect(matchAgent(two, 'ledger').hit?.id).toBe('agent-second-0000');
+  });
+});
+
+describe('<machine> matching (HB-1079)', () => {
+  const machines = [{ id: 'h1', name: 'box' }, { id: 'h2', name: '' }, { id: 'h3', name: 'Runner' }, { id: 'h4', name: 'runner' }];
+  it('an id, then the exact name, then the name in any case; two that share it are refused with their ids', () => {
+    expect(matchMachine(machines, 'h3').hit?.id).toBe('h3');
+    expect(matchMachine(machines, 'runner').hit?.id).toBe('h4');
+    expect(matchMachine(machines, 'RUNNER').problem).toBe('"RUNNER" names 2 machines — use its id: h3 (Runner), h4 (runner)');
+    expect(matchMachine(machines, 'nowhere')).toEqual({});
+  });
+  it('nothing, or only spaces, matches no machine, not one with no name (HB-1079 review)', () => {
+    expect(matchMachine(machines, '')).toEqual({});
+    expect(matchMachine(machines, '   ')).toEqual({});
   });
 });
 

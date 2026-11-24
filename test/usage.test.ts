@@ -8,7 +8,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { agentUsage } from '../src/orchestrator/usage.js';
+import { agentUsage } from '../src/orchestrator/usage/usage.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import { fakeUsage } from './helpers/usageFake.js';
 
@@ -282,7 +282,7 @@ describe('the reader script itself (2026-09-28)', () => {
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
     const { execFileSync } = await import('node:child_process');
-    const { USAGE_READER_SCRIPT } = await import('../src/orchestrator/usage.js');
+    const { USAGE_READER_SCRIPT } = await import('../src/orchestrator/usage/usage.js');
     const root = mkdtempSync(join(tmpdir(), 'hb-usage-'));
     mkdirSync(join(root, 'main', 'sessions'), { recursive: true });
     const at = new Date().toISOString();
@@ -309,7 +309,7 @@ describe('the reader script itself (2026-09-28)', () => {
 // as a real reading (review, 2026-09-29).
 describe('the reader script and the agent database (review, 2026-09-29)', () => {
   async function runReader(build: (root: string) => void): Promise<{ code: number; out?: any; stderr: string }> {
-    const { USAGE_READER_SCRIPT } = await import('../src/orchestrator/usage.js');
+    const { USAGE_READER_SCRIPT } = await import('../src/orchestrator/usage/usage.js');
     const root = mkdtempSync(join(tmpdir(), 'hb-usage-db-'));
     build(root);
     const script = USAGE_READER_SCRIPT.replace('"/home/node/.openclaw/agents"', JSON.stringify(root));
@@ -372,7 +372,7 @@ describe('the reader script and the agent database (review, 2026-09-29)', () => 
   });
 
   it('the sampler stores no reading when the read fails', async () => {
-    const { sampleAgentUsage } = await import('../src/orchestrator/sourceUsage.js');
+    const { sampleAgentUsage } = await import('../src/orchestrator/usage/sourceUsage.js');
     const { store, provider } = await world();
     provider.usage.set('*', { code: 3, stdout: '', stderr: 'usage read failed for kitchen: database is locked' });
     await sampleAgentUsage({ store, providerFor: () => provider }, store.getAgent('a1')!);

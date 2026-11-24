@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { RUNTIME_STATE_FILES, catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, tarArgv, uploadAllowed } from '../src/orchestrator/agentFiles.js';
+import { createAgentHome } from '../src/orchestrator/files/agentHome.js';
+import { MAX_FILE_BYTES } from '../src/orchestrator/files/snapshots.js';
+import { RUNTIME_STATE_FILES, catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, tarArgv, uploadAllowed } from '../src/orchestrator/files/agentFiles.js';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -40,6 +42,19 @@ describe('paths the owner may ask for', () => {
     expect(rows[2]!.mtime).toBe(new Date(1790000000500).toISOString());
     expect(downloadName('out/report v2.pdf', 'slug')).toBe('report_v2.pdf');
     expect(downloadName('', 'to-do-agent')).toBe('to-do-agent');
+  });
+  it('a large folder sorts by one collator made once, in the order it always had (HB-1019)', () => {
+    const names = Array.from({ length: 3000 }, (_, i) => `${i % 3 ? 'Log' : 'log'}-${(i * 7919) % 3000}.txt`);
+    const listing = names.map((n, i) => `f\t${i}\t1790000000\t${n}`).join('\0') + '\0';
+    const localeCompare = vi.spyOn(String.prototype, 'localeCompare');
+    let rows: ReturnType<typeof parseListing>;
+    try {
+      rows = parseListing(listing);
+      expect(localeCompare).not.toHaveBeenCalled();
+    } finally { localeCompare.mockRestore(); }
+    const before = [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+    expect(rows.map((r) => r.name)).toEqual(before);
+    expect(parseListing('f\t1\t1\tb10\0f\t1\t1\tB9\0f\t1\t1\ta2\0').map((r) => r.name)).toEqual(['a2', 'B9', 'b10']);
   });
   it('a time a Date cannot hold leaves that entry without one; the folder still lists (#71)', () => {
     const rows = parseListing('f\t1\t1e300\tfar-future.txt\0f\t2\t1790000100\tnotes.md\0');
@@ -345,6 +360,35 @@ describe('uploads and opening in the browser', () => {
     expect(r.statusCode).toBe(200);
     expect(r.headers['content-type']).toBe('image/png');
     expect(r.headers['content-disposition']).toBe(`inline; filename="${'a'.repeat(116)}.png"`);
+  });
+  it('an upload is written as its bytes, not decoded as text first; a core file\'s name is checked as text only within its cap (HB-1125)', async () => {
+    const { store, provider } = await world();
+    const home = createAgentHome({
+      store, providerFor: () => provider, trace: () => () => {}, isArchiving: () => false,
+      turns: { withCoreFilesTurn: (_id: string, fn: () => Promise<unknown>) => fn() } as never, fileMaxBytes: 512 * 1048576,
+    });
+    const agent = store.getAgent('a1')!;
+    /** Bytes that are not UTF-8, which say so if anything decodes them. */
+    const undecodable = (n: number) => {
+      const b = Buffer.alloc(n, 0xff);
+      b.toString = () => { throw new Error('the upload was decoded as text'); };
+      return b;
+    };
+    const put = (dir: string, name: string, body: Buffer) => home.upload(agent, dir, name, body, { overwrite: true, owned: () => store.getAgent('a1') });
+    const picture = undecodable(4 * 1048576);
+    expect(await put('inbox', 'photo.png', picture)).toMatchObject({ ok: true, body: { size: 4 * 1048576 } });
+    expect(provider.written.at(-1)!.bytes).toBe(picture);
+    // A core file's name over its cap: the cap stops it first in the workspace, so its text is never read.
+    const ws = '.openclaw/agents/kitchen/agent';
+    expect((await put(ws, 'SOUL.md', undecodable(MAX_FILE_BYTES + 1))).ok).toBe(true);
+    expect(provider.written.at(-1)!.argv[2]).toContain('exit 7;');
+    expect(provider.written.at(-1)!.argv[2]).not.toContain('exit 8;');
+    // Within its cap: still held to UTF-8 text, and good text passes both.
+    expect((await put(ws, 'SOUL.md', Buffer.from([0x41, 0xc0, 0x80]))).ok).toBe(true);
+    expect(provider.written.at(-1)!.argv[2]).toContain('exit 8;');
+    expect(provider.written.at(-1)!.argv[2]).not.toContain('exit 7;');
+    expect((await put(ws, 'SOUL.md', Buffer.from('# Soul\nKind.\n'))).ok).toBe(true);
+    expect(provider.written.at(-1)!.argv[2]).not.toMatch(/exit [78];/);
   });
   it('an upload lands through a writable one-shot; an existing name is refused until overwrite is asked; never into OpenClaw\'s state', async () => {
     const { f, provider } = await world();

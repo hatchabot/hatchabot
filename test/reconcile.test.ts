@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { reconcileAgents } from '../src/orchestrator/reconcile.js';
-import { clearBusy, markBusy } from '../src/orchestrator/busy.js';
+import { reconcileAgents } from '../src/orchestrator/lifecycle/reconcile.js';
+import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
 import type { AgentState } from '../src/domain/types.js';
-import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
+import { moveAgentToHost } from '../src/orchestrator/transfer/moveHost.js';
 import { makeWorld, seedRunningAgent } from './support/world.js';
 
 async function setup(dbState: AgentState, runtimePhase: 'running' | 'stopped' | 'absent') {

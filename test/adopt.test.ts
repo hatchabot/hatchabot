@@ -9,7 +9,7 @@ import {
   inspectWorkspace,
   botPollState,
   packWorkspace,
-} from '../src/orchestrator/adopt.js';
+} from '../src/orchestrator/transfer/adopt.js';
 
 let ws: string;
 beforeAll(() => {
@@ -221,6 +221,15 @@ describe('reusing the bot a workspace already owns', () => {
     expect(findExistingBot(dir, mk(false))?.enabledInSource).toBe(false);
     // Absent means on, matching how OpenClaw reads it.
     expect(findExistingBot(dir, mk())?.enabledInSource).toBe(true);
+    expect(findExistingBot(dir, mk())?.channelOffInSource).toBe(false);
+    // Telegram off for the whole instance is said beside the account's own switch, not in its place (HB-1031).
+    const off = join(mkdtempSync(join(tmpdir(), 'acl-c-')), 'openclaw.json');
+    writeFileSync(off, JSON.stringify({
+      agents: { list: [{ id: 'a', workspace: dir }] },
+      bindings: [{ agentId: 'a', match: { channel: 'telegram', accountId: 'B' } }],
+      channels: { telegram: { enabled: false, accounts: { B: { botToken: 't' } } } },
+    }));
+    expect(findExistingBot(dir, off)).toMatchObject({ enabledInSource: true, channelOffInSource: true });
   });
 });
 
@@ -255,7 +264,7 @@ describe('applyWorkspace', () => {
   }
 
   it('copies the workspace in and brings a running agent back up', async () => {
-    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const { applyWorkspace } = await import('../src/orchestrator/transfer/adopt.js');
     const w = await agentWorld('RUNNING');
     const res = await applyWorkspace(w.deps as any, 'a1', ws);
     expect(res.files).toBeGreaterThan(0);
@@ -265,7 +274,7 @@ describe('applyWorkspace', () => {
 
   for (const phase of ['running', 'unknown', 'refused'] as const) {
     it(`does not replace workspace files when stopping is unconfirmed (${phase})`, async () => {
-      const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+      const { applyWorkspace } = await import('../src/orchestrator/transfer/adopt.js');
       const w = await agentWorld();
       w.provider.stop = async () => {};
       if (phase === 'unknown') w.provider.status = async () => ({ phase: 'unknown' });
@@ -277,7 +286,7 @@ describe('applyWorkspace', () => {
   }
 
   it('a stored STOPPED label cannot authorize copying over a runtime that is still running', async () => {
-    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const { applyWorkspace } = await import('../src/orchestrator/transfer/adopt.js');
     const w = await agentWorld('STOPPED');
     await w.provider.start(w.runtimeRef);
     w.provider.stop = async () => {};
@@ -287,7 +296,7 @@ describe('applyWorkspace', () => {
   });
 
   it('a lost stop reply proceeds only once the runtime is confirmed down', async () => {
-    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const { applyWorkspace } = await import('../src/orchestrator/transfer/adopt.js');
     const w = await agentWorld();
     const stop = w.provider.stop.bind(w.provider);
     w.provider.stop = async (ref) => { await stop(ref); throw new Error('fixture stop reply lost'); };
@@ -297,13 +306,13 @@ describe('applyWorkspace', () => {
   });
 
   it('refuses an agent that is mid-rebuild — the runtime is not a stable target', async () => {
-    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const { applyWorkspace } = await import('../src/orchestrator/transfer/adopt.js');
     const w = await agentWorld('REBUILDING');
     await expect(applyWorkspace(w.deps as any, 'a1', ws)).rejects.toThrow(/REBUILDING/);
   });
 
   it('leaves the agent STOPPED with a clear message when the copy tears partway', async () => {
-    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const { applyWorkspace } = await import('../src/orchestrator/transfer/adopt.js');
     const w = await agentWorld('RUNNING');
     // The extract is not atomic: a mid-copy failure may leave an arbitrary
     // prefix of the archive over the old files. Booting that half-truth is

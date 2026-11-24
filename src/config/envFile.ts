@@ -38,6 +38,38 @@ export function envValue(raw: string): string {
   return v;
 }
 
+/**
+ * The settings in force whose line goes on with a ` # note` after the value
+ * (HB-0634). systemd keeps the note as part of the value (envValue), and so
+ * does the service on Linux; a shell drops it, and the Mac's launchd job and
+ * restart.sh read the file as a shell does. The same line is two settings,
+ * so the one reading both have is a file with comments on lines of their
+ * own. A shell starts a comment at a `#` after a space or tab that is
+ * neither quoted nor escaped: so a `#` with no space before it (`pa#ss`), one
+ * inside quotes (`"a #1"`), or after an escaped space (`a\ #b`, `a #b` to
+ * both) is part of the value, while `'a' #x 'b'` and `"a" # "b"`, which
+ * start and end with a quote, are two quoted words with a comment between
+ * (review of HB-0634).
+ */
+export function inlineComments(text: string): string[] {
+  const out: string[] = [];
+  for (const [name, raw] of activeValues(text)) if (shellComment(raw)) out.push(name);
+  return out;
+}
+/** Whether a shell reading `NAME=<raw>` takes a comment from it: a space or tab, unquoted and unescaped, then `#`. */
+function shellComment(raw: string): boolean {
+  let quote: string | undefined;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]!;
+    if (quote === "'") { if (c === "'") quote = undefined; continue; }
+    if (c === '\\') { i++; continue; }
+    if (quote === '"') { if (c === '"') quote = undefined; continue; }
+    if (c === "'" || c === '"') quote = c;
+    else if ((c === ' ' || c === '\t') && raw[i + 1] === '#') return true;
+  }
+  return false;
+}
+
 /** `export NAME=value`: a shell-sourced file (the macOS launcher) assigns it in place, in order. */
 const EXPORTED = /^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 
@@ -141,6 +173,7 @@ export function renderEnv(existing: string, opts: { example?: boolean } = {}): s
     '#   Hatchabot keeps this file in order when it starts; your values, and',
     '#   anything it does not know (under "Other settings"), are kept as written.',
     '#   KEY=VALUE only: systemd reads it as is (no ~ or $VAR; absolute paths).',
+    '#   Comments go on their own line: after a value, systemd keeps one in it.',
     ...(opts.example ? ['#   (This is .env.example: the same file for an empty install.)'] : []),
   ];
   for (const g of ENV_GROUPS) {
@@ -217,13 +250,69 @@ function assignments(text: string): string[] {
  * named bare (`$((CUSTOM_PORT+1))`): there every word counts.
  */
 const refs = (v: string) => {
-  const s = v.trim().replace(/'[^']*'/g, '');
+  const s = withoutSingleQuoted(v.trim());
   const bare = /\$\(|`/.test(s) ? [...s.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].map((m) => m[0]) : [];
   return [...[...s.matchAll(/\$\{?[#!]?([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!), ...bare];
 };
+/**
+ * A value without what a shell reads verbatim: the spans in single quotes.
+ * A `'` inside double quotes is a plain character there, and the `$NAME`
+ * between two of them is expanded: taken out with them, a password of
+ * `"prefix'$CUSTOM_SUFFIX'"` was moved above CUSTOM_SUFFIX and read as
+ * `prefix''` (HB-1054). A backslash and what it escapes stay, so an escaped
+ * `$` still counts: a refusal too many leaves the file as it was. Each span
+ * leaves a space, so the name before it ends there (HB-1054).
+ *
+ * Inside double quotes, `${…}`, `$(…)` and a backtick open quotes of their
+ * own (`"${U:-"'$X'"}"`, `"$(echo "'$X'")"`), which this walk does not
+ * follow: it took the inner `"` for the end and the `'…'` after it for single
+ * quotes, so a setting named there was not seen and moved (HB-1241). Met
+ * there, nothing is taken out: every `$NAME` in the value counts.
+ */
+function withoutSingleQuoted(v: string): string {
+  let out = '';
+  let q = '';
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i]!;
+    if (q === "'") { if (c === "'") q = ''; continue; }
+    if (c === '\\') { out += v.slice(i, i + 2); i++; continue; }
+    if (q === '"' && (c === '`' || (c === '$' && (v[i + 1] === '{' || v[i + 1] === '(')))) return v;
+    if (q === '"') { if (c === '"') q = ''; }
+    // A separator in its place: taken out with nothing left, `$CUSTOM_SUFFIX''x` read as `$CUSTOM_SUFFIXx`.
+    else if (c === "'") { q = "'"; out += ' '; continue; }
+    else if (c === '"') q = '"';
+    out += c;
+  }
+  return out;
+}
+
+/**
+ * Whether a value uses bash's $'…' quoting: a `$` outside quotes, not
+ * escaped, before a `'`. Inside quotes, or escaped, `$'` is two plain
+ * characters (`'made-up-secret$'`), and refusing those left a file untidied
+ * with the same warning at every start.
+ */
+function ansiQuoted(v: string): boolean {
+  let q = '';
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i]!;
+    if (q === "'") { if (c === "'") q = ''; continue; }
+    if (c === '\\') { i++; continue; }
+    if (q === '"') { if (c === '"') q = ''; continue; }
+    if (c === '$' && v[i + 1] === "'") return true;
+    if (c === "'" || c === '"') q = c;
+  }
+  return false;
+}
 
 /** The new text for a file, refused unless every value in force stays byte-for-byte the same. */
 export function syncEnvText(existing: string): SyncResult {
+  // Bash's $'…' quoting, where \' does not end the quote, is not read here:
+  // taken for plain single quotes, a value of `$'\'\''$CUSTOM_SUFFIX\'` hid
+  // the setting it names, and moved above that setting it changed (HB-1054).
+  // A file with one is left as it is, unless it is tidy already.
+  const ansi = assignments(existing).map((l) => ASSIGN.exec(l)!).find((m) => ansiQuoted(m[2]!));
+  if (ansi) return renderEnv(existing) === existing ? { ok: true, changed: false } : { ok: false, error: `${ansi[1]} uses $'…' quoting, which this tidy does not read — left as it was` };
   // The message says which: a quote opened part-way is one line to systemd,
   // and refused only for a shell's reading (audit, 2026-10-29).
   const spans = multilineSetting(existing);

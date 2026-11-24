@@ -1,14 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { logKey, parseModelCalls, sampleAgentUsage, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/sourceUsage.js';
-import { aiSourceHealth } from '../src/orchestrator/health.js';
+import { logKey, parseModelCalls, sampleAgentUsage, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/usage/sourceUsage.js';
+import { aiSourceHealth } from '../src/orchestrator/health/health.js';
 import { totalOf } from './helpers/usageFake.js';
-import { runBudgets } from '../src/orchestrator/budgets.js';
-import { HOUR_FIELDS } from '../src/orchestrator/usage.js';
+import { runBudgets } from '../src/orchestrator/usage/budgets.js';
+import { HOUR_FIELDS } from '../src/orchestrator/usage/usage.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 // Lines exactly as OpenClaw writes them (docker logs --timestamps prefix).
@@ -49,6 +49,23 @@ describe('the log cursor, and samples that overlap (#107, #108, #109)', () => {
     // A cursor stored before (milliseconds only) still covers its whole millisecond.
     expect(logKey(`${T}.345Z`)).toBe(`${T}.345999999Z`);
     expect(logKey(`${T}.3Z`)).toBe(`${T}.300000000Z`);
+  });
+
+  it('a cursor write that fails takes its counts with it: the retry counts a refused call once (HB-1096)', async () => {
+    const { store, provider } = await world();
+    const events: string[] = [];
+    const deps = { store, providerFor: () => provider, log: (e: string) => events.push(e) };
+    const a = store.getAgent('a')!;
+    provider.modelCallLines = line(`${T}.100000000Z`, 429);
+    const setCursor = store.setUsageCursor.bind(store);
+    store.setUsageCursor = () => { throw new Error('database is locked'); };
+    await sampleAgentUsage(deps, a, Date.parse('2026-09-15T16:00:00Z'));
+    expect(events).toContain('usage.sample_log_failed');
+    store.setUsageCursor = setCursor;
+    await sampleAgentUsage(deps, a, Date.parse('2026-09-15T16:10:00Z'));
+    const limited = store.modelCallHoursForAgents(new Set(['a']), '2026-09-15T15').reduce((s, h) => s + h.limited, 0);
+    expect(limited).toBe(1);
+    expect(store.usageCursor('a')!.lastTs).toBe(`${T}.100000000Z`);
   });
 
   it('two samples of one agent at once count its calls once (#109)', async () => {
@@ -348,6 +365,20 @@ describe('history follows the source that served it, not the agent', () => {
     expect(after.limitHits7d).toBe(before.limitHits7d); // the record survives the move
     expect(after.window7d.requests).toBe(before.window7d.requests);
     expect(after.agents).toBe(0); // …while "agents on it now" correctly drops
+  });
+});
+
+describe('the cost of a summary (HB-0908)', () => {
+  it('reads each agent\'s cursor once, however many sources there are', async () => {
+    const { store } = await world();
+    for (let i = 0; i < 4; i++) store.insertAIProfile({ id: `k${i}`, ownerId: OWNER, name: `Key ${i}`, vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: `ai/k${i}`, createdAt: 'now' } as any);
+    store.setUsageCursor('a', '2026-09-15T17:00:00.000000000Z', '2026-09-15T17:00:00.000Z', undefined, 'max');
+    const reads = vi.spyOn(store, 'usageCursor');
+    const out = summarizeSourceUsage(store, OWNER, Date.parse('2026-09-15T18:00:00Z'));
+    expect(out).toHaveLength(5);
+    expect(out.find((x) => x.id === 'max')!.lastOkAt).toBe('2026-09-15T17:00:00.000Z');
+    // Three agents (two the owner's, one another account's on the shared source): three reads, not 2 × 3 × 5.
+    expect(reads.mock.calls.length).toBeLessThanOrEqual(3);
   });
 });
 

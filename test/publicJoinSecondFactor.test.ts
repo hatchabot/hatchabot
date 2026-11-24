@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Jar } from './helpers/publicApp.js';
 import { agentRow, at, closeAfterEach, privCookie, world, type World } from './helpers/publicWorld.js';
 import { publicConfig } from '../src/api/safeguards.js';
-import { createInvite } from '../src/orchestrator/invite.js';
+import { createInvite } from '../src/orchestrator/members/invite.js';
 
 /**
  * HB-0400: at the public address, a web-chat invitation refused for want of a

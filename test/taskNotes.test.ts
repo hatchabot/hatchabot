@@ -8,8 +8,8 @@ import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { cronStoreReadShell, readCronStore, type Cron } from '../src/orchestrator/crons.js';
-import { TASK_NOTES_PER_HOUR, dueTaskNotes, taskNoteText } from '../src/orchestrator/taskNotes.js';
+import { cronStoreReadShell, readCronStore, type Cron } from '../src/orchestrator/schedules/crons.js';
+import { TASK_NOTES_PER_HOUR, dueTaskNotes, taskNoteText } from '../src/orchestrator/schedules/taskNotes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**

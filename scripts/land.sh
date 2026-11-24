@@ -8,7 +8,8 @@
 # its checks pass: by GitHub's auto-merge when main's rules require checks
 # and the repository allows it; otherwise (the dev repo has no such rule)
 # it waits for every check itself and merges. Then it brings local main to
-# what landed. Work not yet committed is left as it was.
+# what landed. Work not yet committed is left as it was. Before it pushes,
+# it runs CI's gitleaks scans when gitleaks is installed, and a hit refuses.
 #
 # --no-wait opens the pull request and stops there. That is enough only with
 # GitHub's auto-merge on: otherwise the merge is this script's own, so it exits 3
@@ -53,6 +54,54 @@ BEHIND="$(git rev-list --count HEAD..origin/main)"
 # be rebased"), and turns its auto-merge off: 106 commits failed, 53 landed
 # (2026-10-10). Land the first part, then the rest.
 [ "$AHEAD" -le 100 ] || die "$AHEAD commits are more than GitHub rebase-merges at once (100): land the first part (git reset to an earlier commit, land, then cherry-pick the rest)."
+
+# CI's secrets job scans with gitleaks; its two scans run here first, before
+# anything is pushed (HB-0852): a hit there cost a CI round, and the commits
+# above the one it was in had to be made again. As the job runs them: the new
+# commits, with the config from origin/main (a change cannot loosen what it is
+# judged by; with none there, this change's); then the tree as plain files in
+# a folder with no config or ignore list, gitleaks' default rules, as the
+# publisher's gate sees a release. Without gitleaks it is said and skipped.
+if command -v gitleaks >/dev/null; then
+  SCAN="$(mktemp -d)"; trap 'rm -rf "$SCAN"' EXIT
+  # The version CI's job pins (the V= of its step), read from the workflow so
+  # the two cannot drift. Another one is said, not refused: the default rules
+  # the tree scan uses change between versions, so this scan may not be CI's.
+  GL_PIN="$({ git show HEAD:.github/workflows/ci.yml 2>/dev/null || true; } | awk '/name: gitleaks on the new commits/ { on = 1 } on && match($0, /V=[0-9][0-9.]*/) { print substr($0, RSTART + 2, RLENGTH - 2); exit }')"
+  GL_HAVE="$({ gitleaks version 2>/dev/null || true; } | awk 'NR == 1 { gsub(/[[:space:]]/, ""); print }')"; GL_HAVE="${GL_HAVE#v}"
+  if [ -z "$GL_PIN" ]; then
+    echo "• CI's gitleaks version was not found in .github/workflows/ci.yml (the V= of its step \"gitleaks on the new commits\"), so this gitleaks (${GL_HAVE:-its version unknown}) was not checked against it."
+  elif [ "$GL_HAVE" != "$GL_PIN" ]; then
+    echo "• gitleaks here is ${GL_HAVE:-of a version it does not say}, but CI's secrets job runs $GL_PIN (.github/workflows/ci.yml): their default rules can differ, so the tree may pass here and not there, or the other way. Install gitleaks $GL_PIN to scan as CI does."
+  fi
+  printf '%s\n' '{{- range . }}{{ .File }}:{{ .StartLine }}: {{ .RuleID }}{{ if .Commit }} (commit {{ printf "%.12s" .Commit }}){{ end }}' '{{ end -}}' > "$SCAN/found.tmpl"
+  CFG=()
+  if git show origin/main:.gitleaks.toml > "$SCAN/gitleaks.toml" 2>/dev/null || git show HEAD:.gitleaks.toml > "$SCAN/gitleaks.toml" 2>/dev/null; then
+    CFG=(--config "$SCAN/gitleaks.toml")
+  fi
+  scanned() {   # scanned WHAT EXIT LOG REPORT: 3 is a hit; any other failure is a scan that did not run
+    [ "$2" = 0 ] && return 0
+    [ "$2" = 3 ] || die "gitleaks could not scan $1, so nothing was pushed: $(tail -n 3 "$3" | sed $'s/\033\\[[0-9;]*m//g' | tr '\n' ' ')(update gitleaks, or uninstall it to land without the scan)."
+    die "gitleaks found what CI's secrets job will refuse, in $1, so nothing was pushed:
+$(sed 's#^tree/##; s/^/  /' "$4")
+Change the value (a made-up one must not look like a key either), commit, and land again."
+  }
+  RC=0
+  # Never a config of one's own from the environment: with neither main nor
+  # this change holding one, the default rules, as for the tree.
+  env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML gitleaks git --log-opts="origin/main..HEAD" ${CFG[@]+"${CFG[@]}"} --redact --no-banner --exit-code 3 \
+    --report-format template --report-template "$SCAN/found.tmpl" --report-path "$SCAN/commits.txt" >"$SCAN/commits.log" 2>&1 || RC=$?
+  scanned "the new commits" "$RC" "$SCAN/commits.log" "$SCAN/commits.txt"
+  mkdir -p "$SCAN/dir/tree"
+  git archive HEAD | tar -x -C "$SCAN/dir/tree"
+  RC=0
+  (cd "$SCAN/dir" && env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML gitleaks dir . --redact --no-banner --exit-code 3 \
+    --report-format template --report-template "$SCAN/found.tmpl" --report-path "$SCAN/tree.txt") >"$SCAN/tree.log" 2>&1 || RC=$?
+  scanned "the tree (gitleaks' default rules)" "$RC" "$SCAN/tree.log" "$SCAN/tree.txt"
+  echo "✓ gitleaks: nothing in the new commits or the tree, as CI's secrets job scans them"
+else
+  echo "• gitleaks is not installed, so the secrets scan CI runs was skipped here (CI still runs it)."
+fi
 
 if [ "${HATCHABOT_LAND_DIRECT:-}" = 1 ]; then
   git push -q origin main || die "The push was refused." 1

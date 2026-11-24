@@ -89,8 +89,8 @@ the log says which.
 | e | Only what outsiders need is served there. Every route has a class; an unclassified route is refused. | `src/api/publicRoutes.ts`, enforced in one hook before the handler; `test/publicRoutes.test.ts` sweeps every registered route | Machine-level routes, and any route added later, being reachable by accident |
 | f | Limits and lockouts keyed for public traffic. | `auth.ts` (`throttleKeys`): per address, per account with a lockout that doubles each time (one window, two, four, up to a day), a ceiling on all public failures together; a guess still being checked counts as a miss until it is answered (`reserve`), so a burst cannot outrun the limit; request ceilings per address and overall | Password and code guessing; one visitor locking the owner out of the private address |
 | g | A notice on a sign-in from a new device, to the person and to the owner. | The gate, on the first use of a public sign-in from a browser it has not seen: in the app (home screen) and on Telegram when linked, with the browser, the approximate source, and "sign out everywhere". Limited, so a valid password cannot be used to spam: see "New-device notices" | A break-in going unnoticed |
-| h | Stricter sessions there. | `__Host-` cookies always; the public pass ends after `HATCHABOT_PUBLIC_IDLE_MINUTES` without use (12 hours; the session cookie alone lasts 30 days); step-up for sensitive actions; HSTS, a content security policy, `frame-ancestors`, `nosniff`, `Referrer-Policy: no-referrer` | A session left open; framing; a cookie handed out without `Secure` |
-| i | Automatic upgrades on the `stable` channel. | `src/ops/autoUpgrade.ts`: the `hatchabot-follow-channel` timer is enabled, running, follows `stable`, and the machine is not pinned to a version | A public machine that never takes a security fix |
+| h | Stricter sessions there. | `__Host-` cookies always; the public pass ends after `HATCHABOT_PUBLIC_IDLE_MINUTES` without use (12 hours; the session cookie alone lasts 30 days); step-up for sensitive actions; HSTS, a content security policy (`publicCsp`) under which scripts come only from the app's own files (and Google's sign-in, in identity mode) and no inline script runs (HB-0812), `frame-ancestors`, `nosniff`, `Referrer-Policy: no-referrer` | A session left open; framing; a cookie handed out without `Secure`; a script written into a page by a missed escape |
+| i | Automatic upgrades on the `stable` channel. | `src/ops/autoUpgrade.ts`: the `hatchabot-follow-channel` timer is enabled, running, follows `stable`, upgrades this install (its folder, links resolved, not another install of the same user's), and the machine is not pinned to a version | A public machine that never takes a security fix |
 | j | A record of every public sign-in, failure burst, second factor added, removed or reset, and the switch going on or off. | `security_log` in the database; Settings → You → Reach it from anywhere → Record | Not knowing what happened afterwards |
 
 ### Who needs a second factor
@@ -228,7 +228,8 @@ has no second factor yet, so the owner can send each a reset link.
   address, with that address. Asked for at the private address, an owner's
   link is made for the private address. Members' recovery works at both.
 - **"Forgot password?" asked from the internet is held tight**
-  (`POST /v1/local-accounts/recover`). A username: once an hour, three times
+  (`POST /v1/local-accounts/recover`; its counts are in
+  `src/orchestrator/accounts/telegramRecovery.ts`). A username: once an hour, three times
   a day. An address (an IPv6 /64): five asks an hour. All visitors together:
   thirty an hour. **A link that is still good is never replaced**: a stranger
   asking again cannot kill the link the person was just sent, nor an owner's
@@ -263,7 +264,16 @@ last used and when the second factor was last given, under which generation
 of the person's factors (`second_factor_generations`: a reset, a removed
 factor or a replaced authenticator app moves it on, and a second factor given
 under an older one no longer counts). Without a valid one the public address
-answers "sign in". So:
+answers "sign in". When the second factor was given is also kept in a third
+cookie, `__Host-hatchabot_factor`, bound to that pass and written only when
+the factor is given: the pass is written anew as requests are used, and a
+slow one that began before the factor was given used to send the older pass
+last, which asked for the factor again at once (HB-0934). The later of the two
+counts. That refresh is written as a request is answered, and only while the
+pass is still the browser's: its session still signs the person in and it has
+not been signed out. Written as the request started, a slow one that began
+before a password change sent the old pass back after the change had handed
+out the new one, and the browser was signed out (HB-1245). So:
 
 - a session from the private address does not carry over to the public one
   (cookies are shared between ports of one host, so the cookie itself would);
@@ -369,7 +379,7 @@ closes the connection (the listener otherwise allows a request ten minutes,
 for a signed-in upload). The public listener holds at most 512 connections
 at once; more are refused at the door, so a flood there cannot take the
 process's memory or file descriptors, and with them the private address. `/v1/config` leaves out the private address and the
-provider's notice there.
+provider's notice there (`publicConfigView` in `src/orchestrator/reach/appConfig.ts`).
 
 Reads of lists that show no credential are **signed-in**, so the app's home
 screen works without asking for the second factor every few minutes; every
@@ -393,7 +403,7 @@ Hatchabot first", so it says nothing about any account.
 Every open socket is closed when a safeguard goes off and when public access
 is turned off.
 
-**An open console does not outlive what let it in** (`src/api/consoleSockets.ts`).
+**An open console does not outlive what let it in** (`src/orchestrator/console/consoleSockets.ts`).
 A WebSocket is checked when it opens and is then two sockets spliced together,
 so every open one is remembered with the cookies it was opened with and judged
 again by the same rules: after every request that changed something, and
@@ -626,7 +636,8 @@ chosen here:
    second-factor prompt, a passkey made at the private HTTPS address used at
    `:8443` (same host, different port: the RP ID allows it, the origin list
    includes it) and that the browser really asks for the PIN or biometric,
-   the page under the content security policy, the console and web chat
+   the page under the content security policy (the `console` live test's C0
+   checks that one each release: docs/live-tests.md), the console and web chat
    through Funnel (WebSockets), HSTS's effect on the plain-HTTP tailnet
    address. Then that the owner's reset link and recovery code are refused
    there with the plain message, and work at the private address.

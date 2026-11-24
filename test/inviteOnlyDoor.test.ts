@@ -61,7 +61,7 @@ describe('the invite-only door', () => {
 
 describe('the security report names who can reach an agent', () => {
   it('lists members by name, marks an invitee who has not linked yet', async () => {
-    const { computePosture } = await import('../src/orchestrator/posture.js');
+    const { computePosture } = await import('../src/orchestrator/health/posture.js');
     const s = world();
     s.insertMembership({ id: 'mo', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active', displayName: 'Chris' } as never);
     s.bindMembershipChannelUser('a1', OWNER, '111');
@@ -81,7 +81,7 @@ describe('the security report names who can reach an agent', () => {
 
 describe('a window held open for a named person', () => {
   it('only that @handle or id is claimable; anyone else knocking is not', async () => {
-    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const { claimFirstContact } = await import('../src/orchestrator/members/claim.js');
     const s = world();
     s.insertMembership({ id: 'm1', agentId: 'a1', userId: 'user-guest', role: 'user', status: 'active' } as never);
 
@@ -159,7 +159,7 @@ describe('adding someone you already know', () => {
 
 describe('the door rests shut', () => {
   it('a claim window opens it to pairing and closes it again', async () => {
-    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const { claimFirstContact } = await import('../src/orchestrator/members/claim.js');
     const s = world();
     s.insertMembership({ id: 'm1', agentId: 'a1', userId: 'user-guest', role: 'user', status: 'active' } as never);
     // Somebody is already allowed, so the door has somewhere to rest.
@@ -197,7 +197,7 @@ describe('the door rests shut', () => {
   });
 
   it('stays in pairing when the agent is open to anyone', async () => {
-    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const { claimFirstContact } = await import('../src/orchestrator/members/claim.js');
     const s = world();
     s.setAllowKnocks('a1', true);
     s.insertMembership({ id: 'm0', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active' } as never);
@@ -296,7 +296,7 @@ describe('the first person into a fresh agent', () => {
 
 describe('the 30th audit: two windows on one agent', () => {
   it('the owner\'s first-contact window and an invitee\'s coexist: the first to bind does not shut the door on the other', async () => {
-    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const { claimFirstContact } = await import('../src/orchestrator/members/claim.js');
     const s = world();
     s.insertMembership({ id: 'm0', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active' } as never);
     s.insertMembership({ id: 'm1', agentId: 'a1', userId: 'user-guest', role: 'user', status: 'active' } as never);

@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { backupFacts, browserFacts, checkoutFacts, doctorReport, envMap, probeControlPlane, releaseBehind, serviceBackupMark, type DoctorFacts } from '../src/doctor.js';
-import { ownerMark } from '../src/orchestrator/backups.js';
+import { backupFacts, browserFacts, checkoutFacts, doctorReport, envMap, metaVersion, probeControlPlane, releaseBehind, serviceBackupMark, type DoctorFacts } from '../src/doctor.js';
+import { ownerMark } from '../src/orchestrator/backups/backupFiles.js';
 import { scriptEnv } from './helpers/scriptEnv.js';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:https';
+import { createServer as createHttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -43,6 +44,11 @@ describe('hatchabot doctor report', () => {
     expect(lines.find((l) => /Tailscale not installed/.test(l.text))?.level).toBe('warn');
     // the image check is skipped when docker itself is down (no double-reporting)
     expect(lines.some((l) => /Runtime image .* missing/.test(l.text))).toBe(false);
+  });
+  it('warns when there is no timeout command (a Mac without coreutils): the backup and the drill have no time limit then (HB-1208)', () => {
+    const line = doctorReport({ ...healthy, timeLimit: false }).find((l) => /timeout or gtimeout/.test(l.text));
+    expect(line).toMatchObject({ level: 'warn', fix: expect.stringMatching(/brew install coreutils/) });
+    for (const timeLimit of [true, undefined]) expect(doctorReport({ ...healthy, timeLimit }).some((l) => /timeout or gtimeout/.test(l.text))).toBe(false);
   });
   it('warns on stale backups and identity mode without a password is fine', () => {
     const lines = doctorReport({ ...healthy, envFile: { ...healthy.envFile, password: false, authMode: 'identity' }, backups: { dir: '/b', lastSet: '2026-09-01', ageDays: 12 } });
@@ -225,10 +231,123 @@ describe.skipIf(!haveOpenssl)('hatchabot doctor probes a TLS install without tur
     expect(await probeControlPlane(url, own.certPath)).toEqual({ url, ok: true, version: '9.9.9' });
     expect(process.env.NODE_TLS_REJECT_UNAUTHORIZED).toBe(before);
   });
+  it('over HTTPS too, a page with none of Hatchabot\'s marks is another program\'s, and its header alone is Hatchabot\'s (review of HB-1111)', async () => {
+    let headers: Record<string, string> = {};
+    const plain = createServer({ key: own.key, cert: own.cert }, (_req, res) => { res.writeHead(200, { 'content-type': 'text/html', ...headers }); res.end('<html><title>Another program</title></html>'); });
+    await new Promise<void>((r) => plain.listen(0, '127.0.0.1', r));
+    const at = `https://127.0.0.1:${(plain.address() as { port: number }).port}`;
+    try {
+      expect(await probeControlPlane(at, own.certPath)).toEqual({ url: at, ok: false, other: true });
+      headers = { 'x-hatchabot-version': '9.9.9' };
+      expect(await probeControlPlane(at, own.certPath)).toEqual({ url: at, ok: true, version: '9.9.9' });
+    } finally { plain.closeAllConnections(); plain.close(); }
+  });
   it('another certificate, or none, is not trusted: the probe fails closed', async () => {
     expect(await probeControlPlane(url, other.certPath)).toMatchObject({ url, ok: false, error: expect.stringMatching(/self.signed|certificate|unable to verify/i) });
     expect(await probeControlPlane(url, undefined)).toMatchObject({ url, ok: false });
     expect(await probeControlPlane(url, join(dir, 'missing.crt'))).toMatchObject({ url, ok: false });
+  });
+});
+
+describe('another program answering where the control plane should is not taken for it (HB-1111)', () => {
+  it('a 200 whose page names no Hatchabot version is reported as something else, apart from an address that does not answer', async () => {
+    let page = '<html><title>Welcome to a fixture web server</title></html>';
+    const server = createHttpServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(page); });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const other = await probeControlPlane(url);
+      expect(other).toMatchObject({ url, ok: false, other: true });
+      const line = doctorReport({ ...healthy, controlPlane: other }).find((l) => /answers at|answering at/.test(l.text));
+      expect(line).toMatchObject({ level: 'fail', text: `Something other than Hatchabot answers at ${url}: its page does not name a Hatchabot version` });
+      expect(line!.fix).toMatch(/Another program has the port, or a proxy sends this address elsewhere/);
+      // Hatchabot's own page, as versionMarkup writes it.
+      page = '<html><head><meta name="hatchabot-version" content="9.9.9"><!-- HATCHABOT_VERSION="9.9.9" --></head></html>';
+      expect(await probeControlPlane(url)).toEqual({ url, ok: true, version: '9.9.9' });
+    } finally { server.closeAllConnections(); server.close(); }
+    // Nothing there at all is still "not answering".
+    const gone = await probeControlPlane(url);
+    expect(gone).toMatchObject({ url, ok: false });
+    expect(gone.other).toBeUndefined();
+    expect(doctorReport({ ...healthy, controlPlane: gone }).some((l) => l.text.startsWith(`Control plane not answering at ${url}`))).toBe(true);
+  });
+
+  it('a hostile page is read in time: the meta tag looked for tag by tag, in its head (review of HB-1111)', async () => {
+    const timed = <T,>(f: () => T) => { const t0 = performance.now(); const v = f(); return { v, ms: performance.now() - t0 }; };
+    // A page of tags that never end until its last character: each looked to the end for its ">".
+    const hostile = '<meta '.repeat(40_000) + '>';
+    expect(timed(() => metaVersion(hostile))).toEqual({ v: undefined, ms: expect.any(Number) });
+    expect(timed(() => metaVersion(hostile)).ms).toBeLessThan(250);
+    expect(timed(() => metaVersion(`<head>${'<meta name="x" '.repeat(20_000)}>`)).ms).toBeLessThan(250);
+    // A tag longer than any of Hatchabot's is passed over; one after the head is not the page's.
+    expect(metaVersion(`<meta name="hatchabot-version" ${' '.repeat(3000)} content="9.9.9">`)).toBeUndefined();
+    expect(metaVersion('<head></head><body><meta name="hatchabot-version" content="9.9.9">')).toBeUndefined();
+    expect(metaVersion('<head><meta charset="utf-8"><meta name="hatchabot-version" content="9.9.9"></head>')).toBe('9.9.9');
+  });
+
+  it('the plain probe reads a megabyte of a body at most, as the HTTPS one keeps (review of HB-1111)', async () => {
+    // A body far past a megabyte, of tags that never end.
+    const big = createHttpServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      const chunk = '<meta '.repeat(10_000);
+      for (let i = 0; i < 80; i++) res.write(chunk); // 4.8 MB
+      res.end('>');
+    });
+    await new Promise<void>((r) => big.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(big.address() as { port: number }).port}`;
+    try {
+      const t0 = performance.now();
+      expect(await probeControlPlane(url)).toEqual({ url, ok: false, other: true });
+      expect(performance.now() - t0).toBeLessThan(3000);
+    } finally { big.closeAllConnections(); big.close(); }
+  });
+
+  it('a mark that is no version is none: its text is never printed (review of HB-1111)', async () => {
+    let page = '';
+    let headers: Record<string, string> = {};
+    const server = createHttpServer((_req, res) => { res.writeHead(200, { 'content-type': 'text/html', ...headers }); res.end(page); });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      for (const bad of ['\u001b[2J\u001b[31mowned', '9.9.9 (yes, really)', '1'.repeat(41)]) {
+        page = `<head><meta name="hatchabot-version" content="${bad}"><!-- HATCHABOT_VERSION="${bad}" --></head>`;
+        const cp = await probeControlPlane(url);
+        expect(cp, JSON.stringify(bad)).toEqual({ url, ok: false, other: true });
+        expect(doctorReport({ ...healthy, controlPlane: cp }).map((l) => l.text).join('\n')).not.toContain('\u001b');
+      }
+      // A good mark after a bad one still counts; and a version up to forty characters, as versionWord writes them.
+      page = `<!-- HATCHABOT_VERSION="\u001b[0m" --><head><meta name="hatchabot-version" content="2.191.0-rc.1+build_7"></head>`;
+      expect(await probeControlPlane(url)).toEqual({ url, ok: true, version: '2.191.0-rc.1+build_7' });
+      page = '<html></html>';
+      headers = { 'x-hatchabot-version': '9.9.9; rm -rf' };
+      expect(await probeControlPlane(url)).toEqual({ url, ok: false, other: true });
+      headers = { 'x-hatchabot-version': '1'.repeat(40) };
+      expect(await probeControlPlane(url)).toEqual({ url, ok: true, version: '1'.repeat(40) });
+    } finally { server.closeAllConnections(); server.close(); }
+  });
+
+  it('Hatchabot is known by any of its marks: a page a proxy stripped of comments, or its header alone; another answer says its status (review of HB-1111)', async () => {
+    let answer: { status: number; page: string; headers?: Record<string, string> } = { status: 200, page: '' };
+    const server = createHttpServer((_req, res) => { res.writeHead(answer.status, { 'content-type': 'text/html', ...answer.headers }); res.end(answer.page); });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const line = async () => doctorReport({ ...healthy, controlPlane: await probeControlPlane(url) }).find((l) => / at http/.test(l.text))!;
+    try {
+      answer = { status: 200, page: '<html><head><meta name="hatchabot-version" content="9.9.9"></head></html>' };
+      expect(await probeControlPlane(url)).toEqual({ url, ok: true, version: '9.9.9' });
+      answer = { status: 200, page: '<html><head><meta content=9.9.8 name=hatchabot-version></head></html>' };
+      expect(await probeControlPlane(url)).toEqual({ url, ok: true, version: '9.9.8' });
+      answer = { status: 200, page: '<html></html>', headers: { 'x-hatchabot-version': '9.9.7' } };
+      expect(await probeControlPlane(url)).toEqual({ url, ok: true, version: '9.9.7' });
+      // Another meta tag is not Hatchabot's.
+      answer = { status: 200, page: '<meta name="generator" content="9.9.9">' };
+      expect(await probeControlPlane(url)).toMatchObject({ ok: false, other: true });
+      answer = { status: 404, page: '<html>Not found</html>' };
+      expect(await probeControlPlane(url)).toEqual({ url, ok: false, status: 404 });
+      expect(await line()).toMatchObject({ level: 'fail', text: `Something answers 404 at ${url}, and its page does not name a Hatchabot version`, fix: expect.stringMatching(/Another program has the port/) });
+      answer = { status: 500, page: '<!-- HATCHABOT_VERSION="9.9.9" -->' };
+      expect(await line()).toMatchObject({ level: 'fail', text: `Control plane answers 500 at ${url} (v9.9.9)`, fix: expect.stringMatching(/journalctl/) });
+    } finally { server.closeAllConnections(); server.close(); }
   });
 });
 
@@ -268,6 +387,93 @@ describe('doctor reads a backup set\'s age as the app does (HB-0386)', () => {
       // None of its own: no newest set, not the other's.
       expect(backupFacts(dir, now, ownerMark('a-third-made-up-key')).lastSet).toBeUndefined();
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('lists the sets the last run kept only for volumes no agent here has had, with their size and how to remove one (review of HB-1380)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-kept-'));
+    try {
+      for (const d of ['2026-11-20', '2026-10-01', '2026-10-02']) { mkdirSync(join(dir, d)); writeFileSync(join(dir, d, 'hatchabot.sqlite'), ''); }
+      writeFileSync(join(dir, '2026-10-01', 'hatchabot-kitchen-1-vol.tgz'), Buffer.alloc(2_500_000));
+      writeFileSync(join(dir, '2026-10-02', 'hatchabot-garden-2-vol.tgz'), Buffer.alloc(1));
+      // The newest set's record: two still there, one deleted since, and a name that is no set.
+      writeFileSync(join(dir, '2026-11-20', 'backup-status.json'), JSON.stringify({
+        state: 'complete', captured: [],
+        keptUnlisted: { '2026-10-01': ['hatchabot-kitchen-1-vol'], '2026-10-02': ['hatchabot-garden-2-vol', 'hatchabot-notes-3-vol'], '2026-09-01': ['hatchabot-old-4-vol'], '../elsewhere': ['x'] },
+      }));
+      const now = new Date(2026, 10, 20, 12, 0).getTime();
+      const facts = backupFacts(dir, now, undefined);
+      expect(facts.keptUnlisted).toEqual([
+        { set: '2026-10-02', volumes: ['hatchabot-garden-2-vol', 'hatchabot-notes-3-vol'], bytes: 1 },
+        { set: '2026-10-01', volumes: ['hatchabot-kitchen-1-vol'], bytes: 2_500_000 },
+      ]);
+      const line = doctorReport({ ...healthy, backups: facts }).find((l) => /no agent here has had/.test(l.text));
+      expect(line).toEqual({
+        level: 'warn',
+        text: '2 backup sets are kept past HATCHABOT_BACKUP_KEEP_DAYS only for volumes no agent here has had, 3 MB in all: 2026-10-02 (under 1 MB: hatchabot-garden-2-vol, hatchabot-notes-3-vol); 2026-10-01 (3 MB: hatchabot-kitchen-1-vol). Another machine\'s agents, or a database not restored yet: they stay until a restored database names them, or you remove them',
+        fix: `Restore the database they belong to (README.md, "Restoring from backup"), and they go by age as usual; or remove one you do not need: rm -r ${dir}/2026-10-02`,
+      });
+      // A newer run that failed, and so pruned nothing, names none: the last
+      // that pruned still says what is kept.
+      mkdirSync(join(dir, '2026-11-21')); writeFileSync(join(dir, '2026-11-21', 'hatchabot.sqlite'), '');
+      writeFileSync(join(dir, '2026-11-21', 'backup-status.json'), JSON.stringify({ state: 'incomplete', failedVolumes: ['hatchabot-kitchen-1-vol'] }));
+      expect(backupFacts(dir, now, undefined)).toMatchObject({ lastSet: '2026-11-21', complete: false, keptUnlisted: facts.keptUnlisted });
+      // None kept for that: no line.
+      writeFileSync(join(dir, '2026-11-21', 'backup-status.json'), JSON.stringify({ state: 'complete', keptUnlisted: {} }));
+      expect(backupFacts(dir, now, undefined).keptUnlisted).toBeUndefined();
+      expect(doctorReport({ ...healthy, backups: backupFacts(dir, now, undefined) }).some((l) => /no agent here has had/.test(l.text))).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('quotes each path it prints in a command, so one pasted acts on that path alone (review of HB-1380)', () => {
+    const facts = (dir: string): DoctorFacts['backups'] => ({ dir, lastSet: '2026-11-03', ageDays: 0, unreadable: ['2026-11-05'], keptUnlisted: [{ set: '2026-10-01', volumes: [], bytes: 1 }] });
+    // What a shell makes of the printed words: printf alone, in a bare environment.
+    const words = (args: string) => spawnSync('bash', ['--noprofile', '--norc', '-c', `printf '%s\\n' ${args}`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }).stdout;
+    for (const dir of ['/home/u/backups 2', "/home/u/it's $HOME", '/home/u/backups']) {
+      const lines = doctorReport({ ...healthy, backups: facts(dir) });
+      const unread = lines.find((l) => /could not be read/.test(l.text))!.fix!;
+      const kept = lines.find((l) => /no agent here has had/.test(l.text))!.fix!;
+      expect(words(/^ls -ld (.+) — one made/.exec(unread)![1]!), dir).toBe(`${dir}/2026-11-05\n`);
+      expect(words(/chown -R \$\(id -un\) (.+)$/.exec(unread)![1]!), dir).toBe(`${dir}/2026-11-05\n`);
+      expect(words(/rm -r (.+)$/.exec(kept)![1]!), dir).toBe(`${dir}/2026-10-01\n`);
+    }
+    // A plain path is printed as it is.
+    expect(doctorReport({ ...healthy, backups: facts('/home/u/backups') }).find((l) => /no agent here has had/.test(l.text))!.fix).toMatch(/rm -r \/home\/u\/backups\/2026-10-01$/);
+  });
+
+  it('a file named like a date is passed over: the good sets still count (HB-1118)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-badset-'));
+    try {
+      for (const d of ['2026-11-01', '2026-11-03']) { mkdirSync(join(dir, d)); writeFileSync(join(dir, d, 'hatchabot.sqlite'), ''); }
+      const now = new Date(2026, 10, 4, 12).getTime();
+      expect(backupFacts(dir, now, undefined)).toEqual({ dir, lastSet: '2026-11-03', ageDays: 1 });
+      // Newer than either, and no set: nothing to say of it.
+      writeFileSync(join(dir, '2026-11-04'), 'not a set');
+      expect(backupFacts(dir, now, undefined)).toEqual({ dir, lastSet: '2026-11-03', ageDays: 1 });
+      const lines = doctorReport({ ...healthy, backups: backupFacts(dir, now, undefined) }).filter((l) => /[Bb]ackup/.test(l.text));
+      expect(lines).toEqual([{ level: 'ok', text: 'Backups: last set 2026-11-03' }]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  // Root reads any folder, so there is none it cannot read.
+  it.skipIf(process.getuid?.() === 0)('a newer set this user cannot read is passed over and named; an older one it cannot read is not news (review of HB-1118)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-unreadable-'));
+    const locked = ['2026-11-02', '2026-11-05'];
+    try {
+      for (const d of ['2026-11-01', '2026-11-03', ...locked]) { mkdirSync(join(dir, d)); writeFileSync(join(dir, d, 'hatchabot.sqlite'), ''); }
+      for (const d of locked) chmodSync(join(dir, d), 0o000); // a root-made set, as a backup run with sudo leaves one
+      const now = new Date(2026, 10, 6, 12).getTime();
+      const facts = backupFacts(dir, now, undefined);
+      expect(facts).toEqual({ dir, lastSet: '2026-11-03', ageDays: 3, unreadable: ['2026-11-05'] });
+      const lines = doctorReport({ ...healthy, backups: facts }).filter((l) => /[Bb]ackup/.test(l.text));
+      expect(lines.map((l) => l.level)).toEqual(['warn', 'warn']); // three days old, and the newer one unread
+      expect(lines[1]).toMatchObject({ text: `Backup set 2026-11-05 in ${dir} could not be read: newer than the last set read (2026-11-03)`, fix: expect.stringContaining(`sudo chown -R $(id -un) ${dir}/2026-11-05`) });
+      // None read at all: still named.
+      chmodSync(join(dir, '2026-11-01'), 0o000); chmodSync(join(dir, '2026-11-03'), 0o000);
+      expect(backupFacts(dir, now, undefined)).toEqual({ dir, unreadable: ['2026-11-05', '2026-11-03', '2026-11-02', '2026-11-01'] });
+    } finally {
+      for (const d of ['2026-11-01', '2026-11-03', ...locked]) { try { chmodSync(join(dir, d), 0o755); } catch { /* not made */ } }
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('an install from before the rename: its AGENTCLAW_SECRET_KEY in the env file marks its own sets (tenth review)', () => {

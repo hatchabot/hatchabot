@@ -280,8 +280,9 @@ public_ci_note() {
 }
 # The live tests (docs/live-tests.md): the unit suite and CI fake Docker,
 # OpenClaw and the machines; these do not. Each is due when it has never
-# passed, or a file in its area changed since the release it last passed on
-# (docs/live-test-runs.md). Not for a rollback, as with CI.
+# passed, a file in its area changed since the release it last passed on, or
+# a run since then failed (docs/live-test-runs.md). Not for a rollback, as
+# with CI.
 live_gate() {
   if [ "${HATCHABOT_PROMOTE_IGNORE_LIVE:-}" = 1 ]; then echo "⚠ Live tests not checked (HATCHABOT_PROMOTE_IGNORE_LIVE=1)."; return 0; fi
   [ -f scripts/live.mjs ] || return 0

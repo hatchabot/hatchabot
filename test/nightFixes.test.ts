@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { botPollState } from '../src/orchestrator/adopt.js';
+import { botPollState } from '../src/orchestrator/transfer/adopt.js';
 import { DISCORD_ID } from './support/fixtures.js';
 
 // Night review, 2026-09-27: regressions for the fixes made that night.
@@ -48,7 +48,7 @@ describe('switching to family accounts keeps the owner\'s links (night review)',
 describe('big files are written on stdin, not in one shell argument (night review)', () => {
   it('a 150 KB MEMORY.md goes through the volume write; a small one through the shell', async () => {
     const { MockProvider } = await import('../src/providers/mockProvider.js');
-    const { writeCoreFile } = await import('../src/orchestrator/snapshots.js');
+    const { writeCoreFile } = await import('../src/orchestrator/files/snapshots.js');
     const provider = new MockProvider();
     const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'kitchen', workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } }, env: {} });
     const big = 'x'.repeat(150_000);
@@ -104,7 +104,7 @@ describe('night review: route refusals', () => {
 
 describe('git URLs (night review)', () => {
   it('an ssh:// URL on another port than 22 is not accepted (it used to be cloned from 22)', async () => {
-    const { normalizeGitUrl } = await import('../src/orchestrator/gitSource.js');
+    const { normalizeGitUrl } = await import('../src/orchestrator/apps/gitSource.js');
     expect(normalizeGitUrl('ssh://git@gitea.example.com:2222/me/notes.git')).toBeNull();
     expect(normalizeGitUrl('ssh://git@gitea.example.com:22/me/notes.git')?.sshUrl).toBe('git@gitea.example.com:me/notes.git');
     expect(normalizeGitUrl('ssh://git@gitea.example.com/me/notes.git')?.repoName).toBe('notes');
@@ -118,7 +118,7 @@ describe('removing a member clears their room access too (night review)', () => 
     const { execFileSync } = await import('node:child_process');
     const { tmpdir } = await import('node:os');
     const { Store } = await import('../src/store/store.js');
-    const { revokeMember } = await import('../src/orchestrator/members.js');
+    const { revokeMember } = await import('../src/orchestrator/members/members.js');
     const store = new Store(new Database(':memory:'));
     store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'b', settings: {}, createdAt: 'now' } as never);
     store.insertAgent({ id: 'a1', ownerId: 'o', name: 'A', slug: 'a', state: 'STOPPED', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now', runtimeRef: 'r1' } as never);
@@ -147,7 +147,7 @@ describe('removing a member clears their room access too (night review)', () => 
 
 describe('live model refs (night review)', () => {
   it('an OpenAI source gets openai/, as the build writes it', async () => {
-    const { prefixedModelRef } = await import('../src/orchestrator/provision.js');
+    const { prefixedModelRef } = await import('../src/orchestrator/lifecycle/provision.js');
     expect(prefixedModelRef({}, { vendor: 'openai', model: 'gpt-5' })).toBe('openai/gpt-5');
     expect(prefixedModelRef({}, { vendor: 'anthropic', model: 'claude-opus-4-8' })).toBe('anthropic/claude-opus-4-8');
   });
@@ -155,7 +155,7 @@ describe('live model refs (night review)', () => {
 
 describe('derived image lines (night review)', () => {
   it('a keyword split across a line continuation is still refused, as BuildKit joins it', async () => {
-    const { dockerfileProblem } = await import('../src/orchestrator/derivedImage.js');
+    const { dockerfileProblem } = await import('../src/orchestrator/machines/derivedImage.js');
     expect(dockerfileProblem('RUN --net\\\nwork=host curl http://127.0.0.1:11434/')).toMatch(/--network/);
     expect(dockerfileProblem('FR\\\nOM alpine')).toMatch(/FROM/);
     expect(dockerfileProblem('RUN --mo\\\nunt=type=bind,source=/,target=/h cat /h/x')).toMatch(/--mount/);
@@ -168,7 +168,7 @@ describe('derived image lines (night review)', () => {
 
 describe('image recipes (night review)', () => {
   it('a derived image whose edit has not built gives no recipe (its lines are not what the agent runs)', async () => {
-    const { recipeFor } = await import('../src/orchestrator/imageRecipe.js');
+    const { recipeFor } = await import('../src/orchestrator/machines/imageRecipe.js');
     const source = { listImageTags: async () => [] } as never;
     const rec = (status: string) => ({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.6', dockerfile: 'RUN true', status }) as never;
     expect(await recipeFor(source, 'hatchabot-runtime:derived-media', () => rec('FAILED'))).toMatchObject({ problem: expect.stringMatching(/has not built/) });

@@ -7,8 +7,10 @@ import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import * as runnerSetup from '../src/orchestrator/runnerSetup.js';
+import * as runnerSetup from '../src/orchestrator/machines/runnerSetup.js';
+import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { ConnectorError, type ChannelConnector } from '../src/channels/connector.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import { MemSecrets, OWNER, as, seedRunningAgent, type World } from './support/world.js';
 
 /**
@@ -47,7 +49,9 @@ const fakeTelegram: typeof fetch = async (input) => {
   const url = String(input);
   const token = /\/bot([^/]+)\/getMe/.exec(url)?.[1] ?? '';
   const body = telegramAnswers.get(token) ?? { ok: false };
-  return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  // Telegram's status is its error_code (401 for a refused token), when the answer names one.
+  const status = (body as { error_code?: number }).error_code ?? 200;
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 };
 
 interface Ctx extends World { builds: string[]; dataDir: string }
@@ -172,6 +176,17 @@ describe('copying the runtime image to a runner', () => {
       expect(install).toHaveBeenCalledTimes(1);
     } finally { tags.mockRestore(); install.mockRestore(); }
   });
+
+  it('a script that waits is told how the published image a runner on another CPU got differs (HB-1189)', async () => {
+    const w = await world();
+    w.store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'remote', provider: 'mock', name: 'Runner', settings: { dockerHost: 'ssh://runner.example' }, createdAt: 'now' } as never);
+    const install = vi.spyOn(runnerSetup, 'installRuntimeImage').mockResolvedValue({ ok: true, pulled: 'registry.example.org/runtime:2026.9.8', differs: "the published image is built on node:24-slim, not node:22-bookworm" });
+    try {
+      const r = await w.f.inject({ method: 'POST', url: '/v1/hosts/h2/install-image', headers: as(), payload: { wait: true } });
+      expect(r.statusCode).toBe(200);
+      expect(r.json()).toEqual({ installed: true, differs: "It is not built quite as this machine's image is: the published image is built on node:24-slim, not node:22-bookworm. Only extra packages can be built again on a runner of another CPU; agents there run it as it is." });
+    } finally { install.mockRestore(); }
+  });
 });
 
 describe('the embedding service: stop and restart', () => {
@@ -227,7 +242,7 @@ describe('re-checking a parked Telegram bot', () => {
     expect(r.json()).toMatchObject({ username: 'sparebot', alive: true, botName: 'Spare' });
     expect(r.json().warnings[0]).toMatch(/Groups are off/);
 
-    telegramAnswers.set('fake-token-A', { ok: false });
+    telegramAnswers.set('fake-token-A', { ok: false, error_code: 401, description: 'Unauthorized' });
     expect((await w.f.inject({ method: 'POST', url: '/v1/pool/SpareBot/recheck', headers: as() })).json().alive).toBe(false);
 
     await w.secrets.delete('telegram/bot/sparebot');
@@ -408,6 +423,20 @@ describe('forgetting a peer server', () => {
     expect(w.secrets.map.has('peer/pe1')).toBe(false);
     expect((await w.f.inject({ method: 'DELETE', url: '/v1/peers/pe1', headers: as() })).statusCode).toBe(404);
   });
+
+  it('a token that cannot be removed keeps the peer, and the answer says so (HB-1024)', async () => {
+    const w = await world();
+    w.store.insertPeer({ id: 'pe1', ownerId: OWNER, name: 'laptop', url: 'https://laptop.example.com', secretRef: 'peer/pe1', createdAt: 'now' });
+    await w.secrets.put('peer/pe1', 'fake-peer-token');
+    const del = w.secrets.delete.bind(w.secrets);
+    w.secrets.delete = async () => { throw new Error('disk is read-only'); };
+    const r = await w.f.inject({ method: 'DELETE', url: '/v1/peers/pe1', headers: as() });
+    w.secrets.delete = del;
+    expect(r.statusCode).toBe(500);
+    expect(r.json().error).toBe("Couldn't remove laptop's token here (disk is read-only). It is still listed: forget it again.");
+    expect(w.store.getPeer(OWNER, 'pe1')).toBeDefined();
+    expect(w.secrets.map.has('peer/pe1')).toBe(true);
+  });
 });
 
 describe('unlinking my chat identities', () => {
@@ -476,6 +505,72 @@ describe('unlinking my chat identities', () => {
     expect(byRef[w.store.getAgent(b)!.runtimeRef!]).not.toContain('111111111111111111');
     expect(w.store.agentsWithIdentity(OWNER, 'discord')).toEqual([]);
   });
+  it('Discord: each agent is scrubbed and unbound under its lifecycle lock, so a move cannot start in between (HB-1090)', async () => {
+    const w = await world();
+    const a = await seedRunningAgent(w, { id: 'a1', slug: 'one', accountId: 'onebot' });
+    w.store.insertChannel({ id: 'dc-a1', agentId: a, kind: 'discord', accountId: 'app-a1', secretRef: 'chan/dc', deepLink: 'https://discord.example/x', createdAt: 'now' });
+    expect(w.store.bindMemberIdentity(a, OWNER, 'discord', '111111111111111111')).toBe(true);
+    const { whileBusy, AgentBusyError } = await import('../src/orchestrator/lifecycle/busy.js');
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const scrubbedOn: string[] = [];
+    w.provider.execShellOnVolume = (async (ref: string) => { scrubbedOn.push(ref); entered(); await gate; return { code: 0, stdout: '', stderr: '' }; }) as never;
+    const unlink = Promise.resolve(w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as() }));
+    try {
+      await reached;
+      // A move (or rebuild) asks for the agent while the scrub waits on its volume: refused.
+      await expect(whileBusy(a, async () => 'moved')).rejects.toBeInstanceOf(AgentBusyError);
+    } finally { release(); }
+    const r = await unlink;
+    expect(r.json()).toEqual({ unlinked: true, agents: 1 });
+    expect(scrubbedOn).toEqual([w.store.getAgent(a)!.runtimeRef]);
+    expect(w.store.memberIdentities(a, OWNER).discord).toBeUndefined();
+  });
+  it('Discord: an agent busy with a move keeps its link and says so; unlinking again afterwards finishes it (HB-1090)', async () => {
+    const w = await world();
+    const a = await seedRunningAgent(w, { id: 'a1', slug: 'one', accountId: 'onebot' });
+    const b = await seedRunningAgent(w, { id: 'a2', slug: 'two', name: 'Garden', accountId: 'twobot' });
+    for (const id of [a, b]) w.store.insertChannel({ id: `dc-${id}`, agentId: id, kind: 'discord', accountId: `app-${id}`, secretRef: `chan/${id}`, deepLink: 'https://discord.example/x', createdAt: 'now' });
+    expect(w.store.bindMemberIdentity(a, OWNER, 'discord', '111111111111111111')).toBe(true);
+    expect(w.store.bindMemberIdentity(b, OWNER, 'discord', '111111111111111111')).toBe(true);
+    const { markBusy, clearBusy } = await import('../src/orchestrator/lifecycle/busy.js');
+    markBusy(a);
+    try {
+      const r = await w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as() });
+      expect(r.statusCode, r.body).toBe(409);
+      expect(r.json()).toMatchObject({ unlinked: false, agents: 1, busy: ['Kitchen'] });
+      expect(r.json().error).toMatch(/Kitchen yet: it is busy/);
+      expect(w.store.memberIdentities(a, OWNER).discord).toBe('111111111111111111');
+      expect(w.store.memberIdentities(b, OWNER).discord).toBeUndefined();
+    } finally { clearBusy(a); }
+    expect((await w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as() })).json()).toEqual({ unlinked: true, agents: 1 });
+    expect(w.store.memberIdentities(a, OWNER).discord).toBeUndefined();
+  });
+  it('Discord: one agent busy and another unreachable: each is named for what it is (HB-1090)', async () => {
+    const w = await world();
+    const a = await seedRunningAgent(w, { id: 'a1', slug: 'one', accountId: 'onebot' });
+    const b = await seedRunningAgent(w, { id: 'a2', slug: 'two', name: 'Garden', accountId: 'twobot' });
+    for (const id of [a, b]) w.store.insertChannel({ id: `dc-${id}`, agentId: id, kind: 'discord', accountId: `app-${id}`, secretRef: `chan/${id}`, deepLink: 'https://discord.example/x', createdAt: 'now' });
+    expect(w.store.bindMemberIdentity(a, OWNER, 'discord', '111111111111111111')).toBe(true);
+    expect(w.store.bindMemberIdentity(b, OWNER, 'discord', '111111111111111111')).toBe(true);
+    w.provider.execShellOnVolume = (async () => ({ code: 1, stdout: '', stderr: 'runner offline' })) as never;
+    const { markBusy, clearBusy } = await import('../src/orchestrator/lifecycle/busy.js');
+    markBusy(a);
+    try {
+      const r = await w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as() });
+      expect(r.statusCode, r.body).toBe(502);
+      expect(r.json()).toMatchObject({ unlinked: false, agents: 0, busy: ['Kitchen'] });
+      expect(r.json().failed.sort()).toEqual(['Garden', 'Kitchen']);
+      const said = r.json().error as string;
+      // The unreachable one is asked about its machine; the busy one is not.
+      expect(said).toMatch(/could not be removed from Garden — is the machine it runs on awake\?/);
+      expect(said).not.toMatch(/Kitchen[^.]*awake/);
+      expect(said).toMatch(/Kitchen is busy with another change \(a move or a rebuild\) and still knows it: unlink again in a moment\./);
+      expect(w.store.memberIdentities(a, OWNER).discord).toBe('111111111111111111');
+      expect(w.store.memberIdentities(b, OWNER).discord).toBe('111111111111111111');
+    } finally { clearBusy(a); }
+  });
 });
 
 describe('sending an agent to someone\'s inbox', () => {
@@ -538,6 +633,8 @@ describe('"anyone can knock"', () => {
   it('flips the flag live on a running agent, refuses junk, and hides foreign agents', async () => {
     const w = await world();
     const id = await seedRunningAgent(w);
+    // What the real policy write answers when it changed the config.
+    w.provider.execResponses.set('sh-volume', { code: 0, stdout: 'set\n', stderr: '' });
     expect(w.store.getAgent(id)?.allowKnocks).toBe(false);
     const before = w.provider.execLog.length;
     const on = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(), payload: { on: true } });
@@ -549,6 +646,111 @@ describe('"anyone can knock"', () => {
     expect(w.store.getAgent(id)?.allowKnocks).toBe(false);
     expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(), payload: { on: 'yes' } })).statusCode).toBe(400);
     expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(OTHER), payload: { on: true } })).statusCode).toBe(404);
+  });
+
+  it('a running bot that does not take the change: refused, the setting stays as it was, a door it did open rests again (HB-0995)', async () => {
+    const w = await world();
+    const id = await seedRunningAgent(w);
+    // A second app, so one door can open and the next fail.
+    w.store.insertChannel({ id: 'c-discord', agentId: id, kind: 'discord', accountId: '1234567890123456789', secretRef: 'chan/d', deepLink: 'https://x', createdAt: 'now' });
+    w.store.bindMemberIdentity(id, w.owner, 'discord', '111111111111111111');
+    const writes: string[] = [];
+    w.provider.execShellOnVolume = (async (_ref: string, script: string) => {
+      const target = /const t = (\{.*?\});/.exec(script)?.[1];
+      const t = target ? JSON.parse(target) as { channel: string; policy: string } : undefined;
+      if (t) writes.push(`${t.channel}:${t.policy}`);
+      // Telegram's volume answers; Discord's write fails, as an unavailable volume does.
+      return t?.channel === 'discord' ? { code: 1, stdout: '', stderr: 'volume unavailable' } : { code: 0, stdout: 'set\n', stderr: '' };
+    }) as never;
+    const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(), payload: { on: true } });
+    expect(r.statusCode, r.body).toBe(502);
+    expect(r.json()).toMatchObject({ allowKnocks: false, error: expect.stringContaining('invite only') });
+    expect(w.store.getAgent(id)?.allowKnocks).toBe(false);
+    // Telegram opened, Discord refused, Telegram rested again.
+    expect(writes).toEqual(['telegram:pairing', 'discord:pairing', 'telegram:allowlist', 'discord:allowlist']);
+    // Every volume answering: on, as before.
+    w.provider.execShellOnVolume = (async () => ({ code: 0, stdout: 'set\n', stderr: '' })) as never;
+    const ok = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(), payload: { on: true } });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json()).toEqual({ allowKnocks: true });
+    expect(w.store.getAgent(id)?.allowKnocks).toBe(true);
+  });
+
+  it('an app its running config does not have (an image without its plugin) is nothing to open, not a refusal (HB-0995)', async () => {
+    for (const absent of ['no-account', 'no-config']) {
+      const w = await world();
+      // An agent of its own: what an earlier test asserted on a1's volume is remembered (dmPolicyMemo.ts).
+      const id = await seedRunningAgent(w, { id: `knock-${absent}`, slug: `knock-${absent}` });
+      w.store.insertChannel({ id: 'c-discord', agentId: id, kind: 'discord', accountId: '1234567890123456789', secretRef: 'chan/d', deepLink: 'https://x', createdAt: 'now' });
+      const writes: string[] = [];
+      w.provider.execShellOnVolume = (async (_ref: string, script: string) => {
+        const target = /const t = (\{.*?\});/.exec(script)?.[1];
+        const t = target ? JSON.parse(target) as { channel: string; policy: string } : undefined;
+        if (t) writes.push(`${t.channel}:${t.policy}`);
+        // What the real script prints when the config has no Discord account (or no config at all).
+        return { code: 0, stdout: t?.channel === 'discord' ? `${absent}\n` : 'set\n', stderr: '' };
+      }) as never;
+      const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(), payload: { on: true } });
+      expect(r.statusCode, `${absent}: ${r.body}`).toBe(200);
+      expect(r.json()).toEqual({ allowKnocks: true });
+      expect(w.store.getAgent(id)?.allowKnocks).toBe(true);
+      // Telegram was opened, and not rested again.
+      expect(writes).toEqual(['telegram:pairing', 'discord:pairing']);
+    }
+  });
+
+  it('turned on while it rebuilds: the door opens on what runs once the rebuild ends (HB-1156)', async () => {
+    const w = await world();
+    const id = await seedRunningAgent(w, { id: 'knock-rebuild', slug: 'knock-rebuild' });
+    const writes: string[] = [];
+    w.provider.execShellOnVolume = (async (_ref: string, script: string) => {
+      const target = /const t = (\{.*?\});/.exec(script)?.[1];
+      const t = target ? JSON.parse(target) as { channel: string; policy: string } : undefined;
+      if (t) writes.push(`${t.channel}:${t.policy}`);
+      return { code: 0, stdout: 'set\n', stderr: '' };
+    }) as never;
+    // A rebuild under way, its config (with the door shut) already written.
+    w.store.setAgentState(id, 'REBUILDING');
+    markBusy(id);
+    try {
+      const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(), payload: { on: true } });
+      expect(r.statusCode, r.body).toBe(200);
+      expect(r.json()).toEqual({ allowKnocks: true });
+      expect(writes).toEqual([]); // nothing running to write to yet
+      w.store.setAgentState(id, 'RUNNING');
+    } finally { clearBusy(id); }
+    await vi.waitFor(() => expect(writes).toEqual(['telegram:pairing']));
+    expect(w.store.getAgent(id)?.allowKnocks).toBe(true);
+  });
+
+  it('turned on while it rebuilds, and its bot then refuses the door: the setting stays as answered, and its timeline says the door did not open (HB-1156)', async () => {
+    const w = await world();
+    const id = await seedRunningAgent(w, { id: 'knock-rebuild-refused', slug: 'knock-rebuild-refused' });
+    w.provider.execShellOnVolume = (async () => ({ code: 1, stdout: '', stderr: 'volume unavailable' })) as never;
+    w.store.setAgentState(id, 'REBUILDING');
+    markBusy(id);
+    try {
+      const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(), payload: { on: true } });
+      expect(r.statusCode).toBe(200);
+      expect(r.json()).toEqual({ allowKnocks: true });
+      w.store.setAgentState(id, 'RUNNING');
+    } finally { clearBusy(id); }
+    const failed = () => w.store.listEvents([id]).find((e) => e.event === 'agent.knock_door_failed');
+    await vi.waitFor(() => expect(failed()).toBeTruthy());
+    expect(failed()?.detail).toMatchObject({ kind: 'telegram', why: expect.any(String) });
+    expect(eventLabel('agent.knock_door_failed', failed()!.detail)).toMatch(/did not take the change .* Rebuild it/);
+    // Kept on, as the owner was answered: its next build writes the door from it.
+    expect(w.store.getAgent(id)?.allowKnocks).toBe(true);
+  });
+
+  it('a stopped agent saves the choice for its next build, with nothing to write live', async () => {
+    const w = await world();
+    const id = await seedRunningAgent(w);
+    w.store.setAgentState(id, 'STOPPED');
+    w.provider.execShellOnVolume = (async () => ({ code: 1, stdout: '', stderr: 'not reached' })) as never;
+    const r = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(), payload: { on: true } });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(w.store.getAgent(id)?.allowKnocks).toBe(true);
   });
 });
 

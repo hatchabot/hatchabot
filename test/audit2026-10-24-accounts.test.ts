@@ -11,10 +11,10 @@ import { as, makeWorld, MemSecrets, seedRunningAgent, type World } from './suppo
 import { Store } from '../src/store/store.js';
 import { importsTook } from '../src/providers/mockProvider.js';
 import { registerMgmtChat } from '../src/api/mgmtChat.js';
-import * as gitSource from '../src/orchestrator/gitSource.js';
-import { GOOGLE_CLIENT_REF, materializeConnection } from '../src/orchestrator/googleConnections.js';
-import { exportTemplate, parseTemplate } from '../src/orchestrator/template.js';
-import { MAX_DATA_SOURCES } from '../src/orchestrator/dataSourceLimits.js';
+import * as gitSource from '../src/orchestrator/apps/gitSource.js';
+import { GOOGLE_CLIENT_REF, materializeConnection } from '../src/orchestrator/google/googleConnections.js';
+import { exportTemplate, parseTemplate } from '../src/orchestrator/transfer/template.js';
+import { MAX_DATA_SOURCES } from '../src/orchestrator/apps/dataSourceLimits.js';
 import { Broker, followOperation } from '../src/mgmt/broker.js';
 import { HttpApiClient } from '../src/mgmt/apiClient.js';
 import { PendingStore, type PendingConfirm } from '../src/mgmt/pendingStore.js';

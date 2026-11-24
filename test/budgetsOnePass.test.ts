@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
-import { MACHINE, runBudgets, type BudgetDeps } from '../src/orchestrator/budgets.js';
+import { MACHINE, runBudgets, type BudgetDeps } from '../src/orchestrator/usage/budgets.js';
 
 const dbs: Database.Database[] = [];
 afterEach(() => { for (const db of dbs.splice(0)) db.close(); });

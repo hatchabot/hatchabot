@@ -147,9 +147,8 @@ TRIES="$STATE/follow-channel-tries-$KEY"
 for r in failed tries; do
   [ ! -f "$STATE/follow-channel-$r" ] || [ -e "$STATE/follow-channel-$r-$KEY" ] || mv -f "$STATE/follow-channel-$r" "$STATE/follow-channel-$r-$KEY" || true
 done
-# A release set aside stays aside, but not with a cut swap or a killed
-# upgrade to repair: upgrade.sh puts the earlier release back first, then
-# tries this one once more.
+# A release set aside stays aside, and one whose last try failed waits its
+# turn, a cut swap or a killed upgrade to repair or not (below).
 if ! repair_due && [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
 # A release whose install keeps failing waits longer each time, then is set
 # aside; a full disk waits the same way, never counted against it: the try
@@ -165,6 +164,33 @@ if ! { [ -r scripts/follow-tries.sh ] && . scripts/follow-tries.sh && declare -F
   forget_tries() { :; }
 fi
 tries_open "$TRIES" "hatchabot-follow-channel-tries-$KEY" "$TARGET"
+# With an upgrade cut off part-way, on a tick the release is not due (set
+# aside, or within its wait) upgrade.sh repairs it and does nothing more, as
+# when the release cannot be looked up; nothing is counted. A full upgrade
+# repairs it too, so it ran in its place on every tick: one that kept
+# failing with the record left ran every ten minutes, and set aside was
+# tried again on the next (review of HB-0637). A pin's record alone is no
+# cut: that upgrade.sh sees through, or takes back.
+cut_due() { [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ]; }
+# disk_waiting: 0 while the wait after the disk's last failure lasts (an
+# hour at most), from that failure (T_DLAST), as follow-latest.sh has it.
+# A repair the disk stopped (5) is counted the disk's (note_try 2), not a
+# try of the release, nor its clock moved: uncounted, it ran every ten
+# minutes while the disk stayed full (review of HB-0637).
+disk_waiting() { [ "$T_DISK" -gt 0 ] && ( T_COUNT="$T_DISK"; T_LAST="${T_DLAST:-$T_LAST}"; tries_waiting ); }
+TAG_HELD=""
+if [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then TAG_HELD="was set aside, so it is not tried again; the channel's next release will be"
+elif tries_waiting; then TAG_HELD="is tried again later"; fi
+if [ -n "$TAG_HELD" ] && cut_due; then
+  ! disk_waiting || exit 0
+  echo "$TARGET $TAG_HELD. This tick repairs the upgrade that was cut off, and only that."
+  rc=0; HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_REPAIR_ONLY=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL" || rc=$?
+  if [ "$rc" = 5 ]; then
+    note_try 2
+    echo "Repairing the upgrade that was cut off could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $TARGET."
+  fi
+  case "$rc" in 0|4) exit 0 ;; *) exit 1 ;; esac
+fi
 repair_due || ! tries_waiting || exit 0
 # set_aside RELEASE SAID AFTER: RELEASE is not tried again (FAILED names it)
 # and its record of tries goes; SAID and AFTER are said. FAILED is written
@@ -212,8 +238,8 @@ else
   elif [ "$rc" = 3 ] && [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then
     set_aside "$TARGET" "Upgrading to $TARGET did not complete $MAX_TRIES times in a row." "It will not be retried; the channel's next release will be (or run: hatchabot upgrade $CHANNEL)."
   elif [ "$rc" = 3 ]; then
-    note_try 0
     echo "Upgrading to $TARGET did not complete (see above); it will be tried again later ($((T_COUNT + 1 - T_DISK)) of $MAX_TRIES)."
+    note_try 0
   elif [ "$rc" = 5 ]; then
     note_try 1
     echo "Upgrading to $TARGET could not start on this machine's disk (see above); it will be tried again later. This does not count against $TARGET."

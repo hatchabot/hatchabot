@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { EMBED_MODEL_PATH, EMBED_PLUGIN_DIR } from '../src/openclaw/configWriter.js';
+import { readPage } from '../scripts/page-source.mjs';
 
 /**
  * Cross-file drift guards (audit 2026-09-02). Each pair here is two files that
@@ -59,20 +60,20 @@ describe('claude-opus-5 must stay banished from offered model lists', () => {
   // fleet default and every conversation broke on compaction. The server list
   // was fixed; the web copy resurrected it (found by audit). Pin both.
   it('web and e2e never offer it', () => {
-    const web = read('web/index.html');
+    const web = readPage('web/index.html');
     const models = /const CLAUDE_MODELS = \[([\s\S]*?)\]/.exec(web)?.[1] ?? '';
     expect(models).not.toContain('claude-opus-5');
     expect(read('scripts/e2e.ts')).not.toContain('claude-opus-5');
   });
 
   it('web offers every curated model the server would stock', () => {
-    // CURATED_ANTHROPIC_MODELS in routes.ts is the server-side source of
-    // truth; the web fallback list must at least cover it.
-    const routes = read('src/api/routes.ts');
+    // CURATED_ANTHROPIC_MODELS in the AI sources service is the server-side
+    // source of truth; the web fallback list must at least cover it.
+    const routes = read('src/orchestrator/sources/aiSources.ts');
     const curated = [...(/CURATED_ANTHROPIC_MODELS = \[([\s\S]*?)\]/.exec(routes)?.[1] ?? '')
       .matchAll(/'([^']+)'/g)].map((m) => m[1]);
     expect(curated.length).toBeGreaterThan(2);
-    const webModels = /const CLAUDE_MODELS = \[([\s\S]*?)\]/.exec(read('web/index.html'))?.[1] ?? '';
+    const webModels = /const CLAUDE_MODELS = \[([\s\S]*?)\]/.exec(readPage('web/index.html'))?.[1] ?? '';
     for (const m of curated) expect(webModels).toContain(`'${m}'`);
   });
 });
@@ -83,7 +84,7 @@ describe('mgmt SETUP_FIELD json-schema ↔ TemplateParamSchema zod (audit 2026-0
   // shapes the broker then rejects (or worse, never offered valid ones).
   it('type enums and bounds agree', async () => {
     const { MANIFEST } = await import('../src/mgmt/tools.js');
-    const { TemplateParamSchema } = await import('../src/orchestrator/template.js');
+    const { TemplateParamSchema } = await import('../src/domain/templateParams.js');
     const createTool = MANIFEST.find((t) => t.name === 'create_agent')!;
     const field = (createTool.input_schema.properties as any).fields.items;
     const zodShape = (TemplateParamSchema as any).def.schema?.shape ?? (TemplateParamSchema as any).shape;
@@ -112,9 +113,9 @@ describe('AUTHORING_TOOLS ↔ manifest (audit 2026-09-03)', () => {
 
 describe('fleet search key: provision injection ↔ web hint', () => {
   it('the injected env name and the UI hint agree on BRAVE_API_KEY', async () => {
-    const prov = read('src/orchestrator/provision.ts');
+    const prov = read('src/orchestrator/lifecycle/provision.ts');
     expect(prov).toContain("BRAVE_API_KEY: searchKey");
-    expect(read('web/index.html')).toContain('BRAVE_API_KEY');
+    expect(readPage('web/index.html')).toContain('BRAVE_API_KEY');
   });
 });
 
@@ -187,7 +188,7 @@ describe('a changed app icon actually reaches browsers', () => {
   // do — a renamed install kept the old icon in the tab for days. The ?v= on
   // the link and the SW cache name have to move together.
   it('the icon href carries a version and the SW caches that exact URL', () => {
-    const html = read('web/index.html');
+    const html = readPage('web/index.html');
     const sw = read('web/sw.js');
     const version = /href="\/icons\/icon-192\.png\?v=(\d+)"/.exec(html)?.[1];
     expect(version, 'icon link must carry ?v=').toBeTruthy();
@@ -203,7 +204,7 @@ describe('action buttons never refuse in silence (UI audit 2026-09-17)', () => {
   // one-off: bulk-action buttons that `return` when nothing is selected, with
   // no message. To the person clicking, that is a broken button.
   it('the bulk-action handlers say why they refused', () => {
-    const web = read('web/index.html');
+    const web = readPage('web/index.html');
     const handlers = [
       'faApply', 'moveAgentsApply', 'runMigrate', 'bringInSelected',
       'attachConnection', 'applyModelToSelected',
@@ -251,8 +252,8 @@ describe('icon palette: agentIcons.ts ↔ the v2 home screen', () => {
   // import edge: if they drift, an icon's colour changes the moment the server
   // stores one.
   it('the page carries the same palette, in the same order', async () => {
-    const { ICON_PALETTE } = await import('../src/orchestrator/agentIcons.js');
-    const html = read('web/index.html');
+    const { ICON_PALETTE } = await import('../src/orchestrator/homeScreen/agentIcons.js');
+    const html = readPage('web/index.html');
     const m = html.match(/const V2_PALETTE = \[([^\]]+)\]/);
     expect(m).toBeTruthy();
     const page = [...m![1]!.matchAll(/'(#[0-9a-f]{6})'/gi)].map((x) => x[1]);
@@ -266,7 +267,7 @@ describe('console session: the page ↔ configWriter agent ids', () => {
   // page must open `agent:<slug>:main` — the session Telegram DMs use — which
   // relies on OpenClaw's agent id being the slug, as configWriter adds it.
   it('openGateway opens the agent’s own session, keyed by slug', () => {
-    const html = read('web/index.html');
+    const html = readPage('web/index.html');
     expect(html).toMatch(/\/ui\/chat\?session=\$\{session\}/);
     expect(html).toContain('`agent:${slug}:main`');
     expect(read('src/openclaw/configWriter.ts')).toMatch(/'agents',\s*'add'/);
@@ -281,7 +282,9 @@ describe('every event the code records has plain words', () => {
     const files: string[] = [];
     const walk = (d: string) => { for (const f of readdirSync(d)) { const p = join(d, f); if (statSync(p).isDirectory()) walk(p); else if (p.endsWith('.ts')) files.push(p); } };
     walk('src');
-    const re = /(?:trace\([^()]*\)|\blog\??|recordEvent|\.event|logEvent|emit)\(\s*'([a-z][a-z0-9_]*\.[a-z0-9_.]+)'/g;
+    // `log?.(…)` too: written `\blog\??\(`, it read only `log(` and `log?(`,
+    // and 35 names went by unlabelled.
+    const re = /(?:trace\([^()]*\)|\blog|recordEvent|\.event|logEvent|emit)(?:\?\.)?\(\s*'([a-z][a-z0-9_]*\.[a-z0-9_.]+)'/g;
     const missing = new Set<string>();
     for (const f of files) for (const m of readFileSync(f, 'utf8').matchAll(re)) if (eventLabel(m[1]!) === m[1]) missing.add(m[1]!);
     expect([...missing].sort()).toEqual([]);

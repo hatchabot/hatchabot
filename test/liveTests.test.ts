@@ -84,6 +84,22 @@ describe('when a live test is due', () => {
   it('never passed: due', () => {
     expect(dueFor('v1', [], T1, repo())).toEqual([{ test: 'alpha', why: expect.stringMatching(/never passed/) }]);
   });
+  it('a folder in an area counts by what changed in each of its files near the words named (web/app/, HB-0811)', () => {
+    const dir = repo();
+    const env = { HOME: dir, PATH: process.env.PATH ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+    const git = (...a: string[]) => { const r = spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' }); if (r.status !== 0) throw new Error(r.stderr); };
+    mkdirSync(join(dir, 'web', 'app'), { recursive: true });
+    writeFileSync(join(dir, 'web', 'app', 'a.js'), 'function shown() {}\n'); writeFileSync(join(dir, 'web', 'app', 'b.js'), 'function openVoice() {\n  return 1;\n}\n');
+    git('add', '.'); git('commit', '-q', '-m', 'v4'); git('tag', 'v4');
+    writeFileSync(join(dir, 'web', 'app', 'a.js'), 'function shown() { return 2; }\n');
+    git('add', '.'); git('commit', '-q', '-m', 'v5'); git('tag', 'v5');
+    writeFileSync(join(dir, 'web', 'app', 'b.js'), 'function openVoice() {\n  return 2;\n}\n');
+    git('add', '.'); git('commit', '-q', '-m', 'v6'); git('tag', 'v6');
+    const T = [{ name: 'alpha', cmd: ['node', 'a.mjs'], area: [{ path: 'web/app/', near: /Voice/ }] }];
+    expect(dueFor('v5', [run('v4')], T, dir)).toEqual([]);
+    expect(dueFor('v6', [run('v5')], T, dir)).toEqual([{ test: 'alpha', why: expect.stringMatching(/web\/app\/b\.js \(where it uses it\)/) }]);
+  });
   it('passed on this release: not due', () => {
     expect(dueFor('v2', [run('v2')], T1, repo())).toEqual([]);
   });
@@ -116,6 +132,30 @@ describe('when a live test is due', () => {
     // Every-release tests too.
     const every = [{ name: 'alpha', cmd: ['node', 'a.mjs'], area: [], everyRelease: true }];
     expect(dueFor('v3', [run('v3'), run('v3', 'fail')], every, r)).toEqual([{ test: 'alpha', why: 'its latest run on v3 failed' }]);
+  });
+  it('a failure on a release between its last pass and this one stays due, though nothing in its area changed since (HB-1069)', () => {
+    const r = repo();
+    const env = { HOME: r, PATH: process.env.PATH ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+    const git = (...a: string[]) => { const x = spawnSync('git', a, { cwd: r, env, encoding: 'utf8' }); if (x.status !== 0) throw new Error(x.stderr); };
+    // v4: another release that changes nothing in the area (docs only).
+    writeFileSync(join(r, 'README.md'), 'more docs'); git('add', '.'); git('commit', '-q', '-m', 'v4'); git('tag', 'v4');
+    const why = 'its latest run on v3 failed, and it has not passed since';
+    // Passed on v2, failed on v3: v4 is held to the failure, not the older pass.
+    expect(dueFor('v4', [run('v2'), run('v3', 'fail')], T1, r)).toEqual([{ test: 'alpha', why }]);
+    // A skip after it tests nothing; a pass on v2 again proves nothing about v3.
+    expect(dueFor('v4', [run('v2'), run('v3', 'fail'), run('v3', 'skip'), run('v2')], T1, r)).toEqual([{ test: 'alpha', why }]);
+    // Passed then failed on the same earlier release: the failure is the latest word.
+    expect(dueFor('v4', [run('v2'), run('v2', 'fail')], T1, r)).toEqual([{ test: 'alpha', why: 'its latest run on v2 failed, and it has not passed since' }]);
+    // A pass after the failure, on its release or a later one, clears it.
+    expect(dueFor('v4', [run('v2'), run('v3', 'fail'), run('v3')], T1, r)).toEqual([]);
+    expect(dueFor('v4', [run('v2'), run('v3', 'fail'), run('v4')], T1, r)).toEqual([]);
+    // A failure before the pass it last passed on is cleared by that pass.
+    expect(dueFor('v4', [run('v2', 'fail'), run('v3')], T1, r)).toEqual([]);
+    // A failure on a later release is not this one's.
+    expect(dueFor('v3', [run('v2'), run('v4', 'fail')], T1, r)).toEqual([]);
+    // When its area changed too, that is what it says, as before.
+    expect(dueFor('v2', [run('v1'), run('v1', 'fail')], T1, r)[0]?.why).toMatch(/changed since it passed on v1/);
   });
   it('a version bump in package.json is not a change; a dependency is', () => {
     const dir = mkdtempSync(join(tmpdir(), 'hb-live-pkg-')); dirs.push(dir);
@@ -380,19 +420,35 @@ describe('review of 2026-10-09: when a test is due', () => {
     }
   });
 
-  it('in the real routes.ts, a change inside each test\'s route is found', () => {
-    const src = readFileSync('src/api/routes.ts', 'utf8');
-    // A git that serves the real file on both sides and a one-line change three lines below the route's path.
-    const fake = (line: number) => (...a: string[]) => (a[0] === 'show'
-      ? { status: 0, stdout: src }
-      : { status: 0, stdout: `diff --git a/x b/x\n@@ -${line + 3} +${line + 3} @@\n-a\n+b\n` });
-    for (const [route, test] of [['/v1/agents/:id/move-host', 'runner-scenarios'], ['/v1/agents/:id/clone', 'transfer'], ['/v1/agents/:id/app/rollback', 'apps'], ['/v1/agents/:id/browser', 'browser']] as const) {
+  it('in the real route files, a change inside each test\'s route is found', () => {
+    // The apps', the browser's, the machines', the event trail's, the moves' and the ask's routes moved to their own files with HB-0808.
+    for (const [route, test, file] of [['/v1/agents/:id/move-host', 'runner-scenarios', 'src/api/transferRoutes.ts'], ['/v1/hosts/:id/install-image', 'runner-scenarios', 'src/api/machineRoutes.ts'], ['/v1/agents/:id/events', 'runner-scenarios', 'src/api/healthRoutes.ts'], ['/v1/agents/:id/clone', 'transfer', 'src/api/transferRoutes.ts'], ['/v1/agents/:id/app/rollback', 'apps', 'src/api/appRoutes.ts'], ['/v1/agents/:id/browser', 'browser', 'src/api/browserRoutes.ts'], ['/v1/agents/:id/ask', 'regress-autonomous', 'src/api/memoryRoutes.ts']] as const) {
+      const src = readFileSync(file, 'utf8');
+      // A git that serves the real file on both sides and a one-line change three lines below the route's path.
+      const fake = (line: number) => (...a: string[]) => (a[0] === 'show'
+        ? { status: 0, stdout: src }
+        : { status: 0, stdout: `diff --git a/x b/x\n@@ -${line + 3} +${line + 3} @@\n-a\n+b\n` });
       const line = src.split('\n').findIndex((l) => l.includes(`'${route}'`)) + 1;
       expect(line, route).toBeGreaterThan(0);
       const near = (LIVE_TESTS as Array<{ name: string; area: Area }>).find((t) => t.name === test)!.area
-        .find((a): a is { path: string; near: RegExp } => typeof a !== 'string' && a.path === 'src/api/routes.ts')!.near;
-      expect(touches(fake(line), 'a', 'b', 'src/api/routes.ts', near), route).toBe(true);
+        .find((a): a is { path: string; near: RegExp } => typeof a !== 'string' && a.path === file)!.near;
+      expect(touches(fake(line), 'a', 'b', file, near), route).toBe(true);
     }
   });
-});
 
+  it('a change to the browser switch of PATCH /v1/agents/:id, in the agent edits service, makes the browser test due (HB-0825)', () => {
+    const file = 'src/orchestrator/lifecycle/agentEdits.ts';
+    const src = readFileSync(file, 'utf8');
+    // The switch's own line edited: what a change to it shows in the diff.
+    const lines = src.split('\n');
+    const line = lines.findIndex((l) => l.includes('store.setAgentBrowser(agent.id, data.browser)')) + 1;
+    expect(line).toBeGreaterThan(0);
+    const fake = (...a: string[]) => (a[0] === 'show'
+      ? { status: 0, stdout: src }
+      : { status: 0, stdout: `diff --git a/x b/x\n@@ -${line} +${line} @@\n-${lines[line - 1]}\n+${lines[line - 1]} // edited\n` });
+    const browser = (LIVE_TESTS as Array<{ name: string; area: Area }>).find((t) => t.name === 'browser')!.area
+      .find((a): a is { path: string; near: RegExp } => typeof a !== 'string' && a.path === file);
+    expect(browser).toBeDefined();
+    expect(touches(fake, 'a', 'b', file, browser!.near)).toBe(true);
+  });
+});

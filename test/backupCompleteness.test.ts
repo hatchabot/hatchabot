@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
-import { agentsMissingFromSet, keepDays, listBackups, readSetStatus } from '../src/orchestrator/backups.js';
+import { agentsMissingFromSet, keepDays, listBackups, readSetStatus } from '../src/orchestrator/backups/backupFiles.js';
+import { usableFor } from '../src/orchestrator/backups/recoveryReadiness.js';
 import { doctorReport, type DoctorFacts } from '../src/doctor.js';
+import { FILES_REPLACED_BY } from '../src/orchestrator/lifecycle/operations.js';
+import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
+import { systemPathWithout } from './helpers/scriptEnv.js';
 
 // Most of this file runs real scripts in a sandbox (shell, git, SQLite,
 // archives): on a busy CI runner process startup alone can pass the five-second
@@ -45,6 +49,20 @@ describe('a set is judged by its run\'s record', () => {
     expect(by['2026-09-24']!.complete).toBeUndefined(); // before the record existed: not flagged
     writeFileSync(join(base, '2026-09-24', 'backup-status.json'), 'not json');
     expect(readSetStatus(join(base, '2026-09-24'))).toEqual({});
+  });
+
+  it('a set of more than 500 volumes keeps every one it captured, so the 501st is usable (HB-0945)', () => {
+    const base = tmp('hb-bk501-');
+    const date = '2026-09-25';
+    mkdirSync(join(base, date));
+    const vols = Array.from({ length: 501 }, (_, i) => `hatchabot-agent-${i}-vol`);
+    for (const v of vols) writeFileSync(join(base, date, `${v}.tgz`), 'x');
+    writeFileSync(join(base, date, 'backup-status.json'), JSON.stringify({
+      state: 'incomplete', startedAt: new Date().toISOString(), failedVolumes: ['hatchabot-other-vol'], orphans: [], captured: vols,
+    }));
+    expect(readSetStatus(join(base, date)).captured).toHaveLength(501);
+    const set = listBackups(base).find((s) => s.date === date)!;
+    expect(usableFor(set, vols[500]!)).toBe(true);
   });
 
   it('doctor warns about an incomplete newest set', () => {
@@ -117,6 +135,9 @@ case "$1 $2" in
   "image inspect") exit 0 ;;
   "info --format") if [ -f "${root}/rootless" ]; then echo '[name=seccomp name=rootless name=cgroupns]'; else echo '[name=seccomp name=cgroupns]'; fi ;;
   run*)
+    # The client passes a TERM on to the container (where the archive's shell,
+    # PID 1, ignores it) and waits, as docker run does unless --sig-proxy=false.
+    case "$*" in *--sig-proxy=false*) ;; *) trap '' TERM ;; esac
     # A slow volume: the run holds its lock long enough for another to look.
     if [ -f "${root}/slow" ]; then sleep 1; fi
     # A held volume: the run waits here, its lock held, until the test removes the file (at most a minute).
@@ -151,6 +172,8 @@ esac
     ...extraEnv,
   });
   const run = (extraEnv: Record<string, string> = {}) => spawnSync('bash', [join(repo, 'scripts', 'backup-volumes.sh')], { encoding: 'utf8', env: env(extraEnv) });
+  /** The same run in a process group of its own, as the app starts it (startBackup): the child, not waited for. */
+  const spawnRun = (extraEnv: Record<string, string> = {}) => spawn('bash', [join(repo, 'scripts', 'backup-volumes.sh')], { env: env(extraEnv), stdio: 'ignore', detached: true });
   /** The same run, not waited for: two at once. */
   const start = (extraEnv: Record<string, string> = {}) => new Promise<{ status: number | null; out: string }>((resolve) => {
     const c = spawn('bash', [join(repo, 'scripts', 'backup-volumes.sh')], { env: env(extraEnv) });
@@ -194,7 +217,7 @@ esac
   };
   /** Today's set directory, as the script names it (before any run made it). */
   const today = () => join(backups, spawnSync('date', ['+%F'], { encoding: 'utf8' }).stdout.trim());
-  return { run, start, bin, root, setDir, fillVolume, repo, onRunners, localLog, remoteLog, oldSet, record, setState, backups, today };
+  return { run, start, spawnRun, bin, root, setDir, fillVolume, repo, onRunners, localLog, remoteLog, oldSet, record, setState, backups, today };
 }
 
 // Complete sandboxed shell/SQLite/archive workflows, not unit-speed work:
@@ -259,7 +282,7 @@ describe('scripts/backup-volumes.sh records how the run ended', { timeout: 30_00
     expect(r.stderr).toMatch(/hatchabot-killed-2-vol failed \(exit 137\)/);
     const runs = w.localLog().split('\n').filter((l) => l.startsWith('run '));
     expect(runs).toHaveLength(2);
-    for (const l of runs) expect(l).toMatch(/^run --rm --name hatchabot-bk-\d+-\d+ --label hatchabot\.oneshot=hatchabot --network none --user root -v /);
+    for (const l of runs) expect(l).toMatch(/^run --rm --name hatchabot-bk-\d+-\d+ --label hatchabot\.oneshot=hatchabot --sig-proxy=false --network none --user root -v /);
     const killed = runs.find((l) => l.includes('killed-2-vol:/data'))!.split(' ')[3];
     const kept = runs.find((l) => l.includes('kitchen-1-vol:/data'))!.split(' ')[3];
     expect(w.localLog()).toContain(`rm -f ${killed}\n`);
@@ -291,7 +314,7 @@ describe('scripts/backup-volumes.sh records how the run ended', { timeout: 30_00
     expect(existsSync(join(w.setDir(), 'hatchabot-garden-4-vol.tgz'))).toBe(false);
     expect(r.stderr).toMatch(/asleep\.test: not answering/);
     // Read-only, no network, the root caches left out, and nothing read from stdin.
-    expect(w.remoteLog()).toMatch(/ssh:\/\/laptop.test run --rm --name hatchabot-bk-\S+ --label hatchabot.oneshot=hatchabot --network none -v agentclaw-book-2-vol:\/vol:ro alpine tar cz --exclude=.\/.openclaw\/cache\/control-ui-assets/);
+    expect(w.remoteLog()).toMatch(/ssh:\/\/laptop.test run --rm --name hatchabot-bk-\S+ --label hatchabot.oneshot=hatchabot --sig-proxy=false --network none -v agentclaw-book-2-vol:\/vol:ro alpine tar cz --exclude=.\/.openclaw\/cache\/control-ui-assets/);
     expect(w.remoteLog()).not.toContain('STDIN');
     expect(w.remoteLog()).not.toContain('--anchored');
     // A sleeping laptop must not stop the pruning of this machine's sets: complete, with it named.
@@ -440,8 +463,12 @@ describe('HATCHABOT_BACKUP_KEEP_DAYS has one reading (HB-0432)', () => {
     process.env.HATCHABOT_BACKUP_KEEP_DAYS = value;
     expect(keepDays()).toBe(14);
     const w = scriptWorld(VOLS, REFS);
-    const young = w.oldSet(['x.tgz'], '2026-01-03', 5); // would go under -mtime +0
-    const old = w.oldSet(['y.tgz'], '2026-01-02', 30);
+    // Both hold older copies of the kitchen's volume (today's set holds its
+    // newest), so the age alone keeps one and prunes the other: a volume no
+    // agent here ever had is kept however old (HB-1380), and the young set
+    // went under -mtime +0 only by its age (review of HB-1380).
+    const young = w.oldSet(['hatchabot-kitchen-1-vol.tgz'], '2026-01-03', 5);
+    const old = w.oldSet(['hatchabot-kitchen-1-vol.tgz'], '2026-01-02', 30);
     const r = w.run({ HATCHABOT_BACKUP_KEEP_DAYS: value });
     expect(r.status, r.stderr).toBe(0);
     if (value) expect(r.stderr).toContain('is not a whole number of days above 0: keeping 14 days');
@@ -575,6 +602,8 @@ describe('scripts/backup-volumes.sh: every agent on this machine is in the set, 
     expect(r.stderr).toMatch(/nothing pruned/);
     expect(w.record()).toMatchObject({ state: 'incomplete', volumes: 2, failed: 1, failedVolumes: ['hatchabot-missing-3-vol'], missing: ['hatchabot-missing-3-vol'] });
     expect(readSetStatus(w.setDir())).toMatchObject({ complete: false, failedVolumes: ['hatchabot-missing-3-vol'] });
+    // Nothing pruned, so nothing said about what the retention keeps: doctor reads an earlier run's (review of HB-1380).
+    expect(w.record()).not.toHaveProperty('keptUnlisted');
     // The missing agent's last good copy survives.
     expect(existsSync(join(old, 'hatchabot-missing-3-vol.tgz'))).toBe(true);
   });
@@ -647,6 +676,102 @@ describe('scripts/backup-volumes.sh: a fleet that lives on runners only (issue #
     expect(w.record()).toMatchObject({ state: 'complete', volumes: 0 });
   });
 
+  it('with its last agent deleted, the database-only set is complete and older sets past the retention are still pruned; another install\'s stay (HB-1110)', () => {
+    const w = scriptWorld([], ['docker://hatchabot-gone-1']);
+    w.setState('docker://hatchabot-gone-1', 'DELETED');
+    const old = w.oldSet(['hatchabot.sqlite', 'secret-key.env', 'hatchabot-gone-1-vol.tgz']);
+    const theirs = w.oldSet(['hatchabot.sqlite', '.backup-owner'], '2026-01-03');
+    writeFileSync(join(theirs, '.backup-owner'), '0123456789abcdef\n'); // another install's mark, written over: the folder keeps its age
+    const recent = w.oldSet(['hatchabot.sqlite'], '2026-01-04', 3);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/No agents yet — database backed up/);
+    expect(w.record()).toMatchObject({ state: 'complete', volumes: 0 });
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(theirs)).toBe(true);
+    expect(existsSync(recent)).toBe(true);
+  });
+
+  it('a new machine set up with the old one\'s key and backups folder, its database not restored yet: no agent known, so each volume\'s newest copy is kept (review of HB-1110)', () => {
+    const w = scriptWorld([], []);
+    const mark = spawnSync('bash', ['-c', '. scripts/backup-owner.sh; HATCHABOT_SECRET_KEY=not-a-real-key key_owner'], { encoding: 'utf8' }).stdout.trim();
+    expect(mark).toMatch(/^[0-9a-f]{8,}$/);
+    // The old machine's sets, this key's own: marked with it (overwritten, so each folder keeps its age).
+    const set = (files: string[], date: string, daysAgo: number) => {
+      const d = w.oldSet(['hatchabot.sqlite', '.backup-owner', ...files], date, daysAgo);
+      writeFileSync(join(d, '.backup-owner'), `${mark}\n`);
+      return d;
+    };
+    const oldest = set(['hatchabot-kitchen-1-vol.tgz'], '2026-01-01', 40);
+    const garden = set(['hatchabot-kitchen-1-vol.tgz', 'hatchabot-garden-2-vol.tgz'], '2026-01-02', 30);
+    const last = set(['hatchabot-kitchen-1-vol.tgz'], '2026-01-03', 20);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.record()).toMatchObject({ state: 'complete', volumes: 0 });
+    expect(existsSync(last)).toBe(true); // the newest copy of the kitchen's volume
+    expect(existsSync(garden)).toBe(true); // the newest copy of the garden's
+    expect(r.stdout).toContain('kept 2026-01-02 past 14 days: the newest copy of hatchabot-garden-2-vol');
+    expect(existsSync(oldest)).toBe(false); // an older copy, as ever
+  });
+
+  it('the same new machine once it knows one agent (made there before the restore): the old machine\'s newest copies are still kept; a deleted agent\'s and older copies go (HB-1380)', () => {
+    const w = scriptWorld(['hatchabot-notes-5-vol'], ['docker://hatchabot-notes-5', 'docker://hatchabot-gone-9']);
+    w.setState('docker://hatchabot-gone-9', 'DELETED');
+    const mark = spawnSync('bash', ['-c', '. scripts/backup-owner.sh; HATCHABOT_SECRET_KEY=not-a-real-key key_owner'], { encoding: 'utf8' }).stdout.trim();
+    const set = (files: string[], date: string, daysAgo: number) => {
+      const d = w.oldSet(['hatchabot.sqlite', '.backup-owner', ...files], date, daysAgo);
+      writeFileSync(join(d, '.backup-owner'), `${mark}\n`);
+      return d;
+    };
+    // The old machine's sets: its kitchen and garden agents, which this registry never listed.
+    const oldest = set(['hatchabot-kitchen-1-vol.tgz'], '2026-01-01', 40);
+    const garden = set(['hatchabot-kitchen-1-vol.tgz', 'hatchabot-garden-2-vol.tgz'], '2026-01-02', 30);
+    const last = set(['hatchabot-kitchen-1-vol.tgz'], '2026-01-03', 20);
+    // A set of this machine's with only an agent it deleted since.
+    const gone = set(['hatchabot-gone-9-vol.tgz'], '2026-01-04', 18);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.record()).toMatchObject({ state: 'complete', volumes: 1 });
+    expect(existsSync(last)).toBe(true); // the newest copy of the kitchen's volume
+    expect(existsSync(garden)).toBe(true); // the newest copy of the garden's
+    expect(r.stdout).toContain('kept 2026-01-02 past 14 days: the newest copy of hatchabot-garden-2-vol\n    (no agent here has had hatchabot-garden-2-vol: another machine\'s, or a database not restored yet; kept until a restored database names it, or you delete the set)');
+    expect(existsSync(oldest)).toBe(false); // an older copy, as ever
+    expect(existsSync(gone)).toBe(false); // the registry says that agent was deleted
+    // The sets kept for those alone are in the run's record, for hatchabot doctor (review of HB-1380).
+    expect(w.record().keptUnlisted).toEqual({ '2026-01-03': ['hatchabot-kitchen-1-vol'], '2026-01-02': ['hatchabot-garden-2-vol'] });
+    // A folder the find takes for a set, named with a quote and a brace: kept
+    // as before, but no part of the record, which stays JSON (review of HB-1380).
+    const odd = set(['hatchabot-notes-6-vol.tgz'], '20"}-01-02', 25);
+    const third = w.run();
+    expect(third.status, third.stdout + third.stderr).toBe(0);
+    expect(existsSync(odd)).toBe(true);
+    expect(w.record().keptUnlisted).toEqual({ '2026-01-03': ['hatchabot-kitchen-1-vol'], '2026-01-02': ['hatchabot-garden-2-vol'] });
+    rmSync(odd, { recursive: true });
+    // Once a restored database names the garden's agent, deleted, its copy goes by age.
+    const db = new Database(join(w.repo, 'data', 'hatchabot.sqlite'));
+    db.prepare(`INSERT INTO agents (id, state, runtime_ref) VALUES ('a-garden', 'DELETED', 'docker://hatchabot-garden-2')`).run();
+    db.close();
+    const again = w.run();
+    expect(again.status, again.stdout + again.stderr).toBe(0);
+    expect(existsSync(garden)).toBe(false);
+    expect(existsSync(last)).toBe(true);
+    expect(w.record().keptUnlisted).toEqual({ '2026-01-03': ['hatchabot-kitchen-1-vol'] });
+  });
+
+  it('only an agent whose failed first start left no volume: the set is complete, older sets are pruned, that agent\'s newest copy kept (review of HB-1110)', () => {
+    const w = scriptWorld([], ['docker://hatchabot-broke-1', 'docker://hatchabot-gone-9']);
+    w.setState('docker://hatchabot-broke-1', 'FAILED');
+    w.setState('docker://hatchabot-gone-9', 'DELETED');
+    const broke = w.oldSet(['hatchabot.sqlite', 'secret-key.env', 'hatchabot-broke-1-vol.tgz'], '2026-01-02');
+    const gone = w.oldSet(['hatchabot.sqlite', 'secret-key.env', 'hatchabot-gone-9-vol.tgz'], '2026-01-03');
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('hatchabot-broke-1-vol: its agent failed to start and has no volume — nothing to back up');
+    expect(w.record()).toMatchObject({ state: 'complete', volumes: 0 });
+    expect(existsSync(broke)).toBe(true);
+    expect(existsSync(gone)).toBe(false);
+  });
+
   it('no volumes and a registry that cannot be read: refused, nothing pruned', () => {
     const w = scriptWorld([], []);
     // A database that copies fine but has no agents table to read.
@@ -683,6 +808,7 @@ describe('scripts/backup-volumes.sh: review of 2026-10-09', () => {
     // A `timeout` whose archive deadline passes for the notes volume: the
     // docker client starts, then is killed (exit 124), as a stalled runner's would be.
     writeFileSync(join(w.bin, 'timeout'), `#!/usr/bin/env bash
+while :; do case "$1" in --foreground) shift ;; -k) shift 2 ;; *) break ;; esac; done
 d="$1"; shift
 if [ "$d" = 3600 ] && [[ "$*" == *hatchabot-notes-3-vol* ]]; then "$@" > /dev/null; exit 124; fi
 exec "$@"
@@ -695,6 +821,7 @@ exec "$@"
     const name = /--name (\S+)/.exec(log[runAt]!)![1]!;
     expect(name).toMatch(/^hatchabot-bk-/);
     expect(log[runAt]).toContain('--label hatchabot.oneshot=hatchabot');
+    expect(log[runAt]).toContain('--sig-proxy=false'); // a TERM ends the client
     const rmAt = log.indexOf(`ssh://laptop.test rm -f ${name}`);
     expect(rmAt, log.join('\n')).toBeGreaterThan(runAt);
     // Removed before the next volume was read.
@@ -977,9 +1104,284 @@ describe('scripts/backup-volumes.sh leaves out what an agent rebuilds (review, 2
   });
 });
 
+/** Whether process `pid` is gone (a zombie its new parent has not reaped yet counts as gone once it cannot be signalled). */
+const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+
+describe('"Back up now" has a time limit, and what it started stops with it (HB-0923)', () => {
+  it('a run held by a Docker that never answers ends failed and says so; its trap\'s own stuck call is killed too', async () => {
+    const { startBackup, backupRunState } = await import('../src/orchestrator/backups/backupFiles.js');
+    const dir = tmp('hb-bk-hung-');
+    const pids = join(dir, 'pids');
+    // Like the real script: a TERM trap, a step that never ends, and an EXIT
+    // trap that makes a docker call of its own (reap_oneshot) after the TERM.
+    const script = join(dir, 'backup.sh');
+    writeFileSync(script, `#!/bin/bash\ntrap 'exit 143' TERM\ntrap 'sleep 30 & echo $! >> "${pids}"; wait $!' EXIT\necho "  ✓ made-up volume one"\nsleep 30\n`, { mode: 0o700 });
+    const saved = process.env.HATCHABOT_BACKUP_SCRIPT;
+    process.env.HATCHABOT_BACKUP_SCRIPT = script;
+    try {
+      let done: { status: string; summary?: string } | undefined;
+      const t0 = Date.now();
+      expect(startBackup(t0, (st) => { done = st; }, { killAfterMs: 300, graceMs: 500 }).status).toBe('running');
+      await vi.waitFor(() => expect(done).toBeTruthy(), { timeout: 10_000, interval: 50 });
+      expect(Date.now() - t0).toBeLessThan(8_000);
+      expect(done).toMatchObject({ status: 'error', summary: expect.stringMatching(/made-up volume one[\s\S]*took longer than its time limit and was stopped: Docker may not be answering/) });
+      expect(backupRunState().status).toBe('error');
+      const left = readFileSync(pids, 'utf8').trim().split('\n').map(Number);
+      await vi.waitFor(() => expect(left.every(gone)).toBe(true), { timeout: 5_000, interval: 50 });
+    } finally { if (saved !== undefined) process.env.HATCHABOT_BACKUP_SCRIPT = saved; else delete process.env.HATCHABOT_BACKUP_SCRIPT; }
+  }, 20_000);
+
+  const realTimeout = spawnSync('bash', ['-c', 'command -v timeout'], { encoding: 'utf8' }).stdout.trim();
+  it.skipIf(!realTimeout)('a step that outlives the time limit (GNU timeout leaves the group) never settles the next run: each run ends once, as itself', async () => {
+    const { startBackup, backupRunState } = await import('../src/orchestrator/backups/backupFiles.js');
+    const dir = tmp('hb-bk-late-');
+    // Run one: a step under a plain `timeout`, which makes its own process group,
+    // so the time limit's TERM and KILL never reach it and it holds the output open.
+    const one = join(dir, 'one.sh');
+    writeFileSync(one, `#!/bin/bash\ntrap 'exit 143' TERM\necho "run one"\n"${realTimeout}" 2 sleep 2\n`, { mode: 0o700 });
+    const two = join(dir, 'two.sh');
+    writeFileSync(two, '#!/bin/bash\nsleep 3\necho "run two done"\n', { mode: 0o700 });
+    const saved = process.env.HATCHABOT_BACKUP_SCRIPT;
+    try {
+      const first: Array<{ status: string }> = [], second: Array<{ status: string; summary?: string }> = [];
+      process.env.HATCHABOT_BACKUP_SCRIPT = one;
+      startBackup(Date.now(), (st) => { first.push(st); }, { killAfterMs: 100, graceMs: 200 });
+      await vi.waitFor(() => expect(first).toHaveLength(1), { timeout: 5_000, interval: 20 });
+      expect(first[0]).toMatchObject({ status: 'error' });
+      process.env.HATCHABOT_BACKUP_SCRIPT = two;
+      expect(startBackup(Date.now(), (st) => { second.push(st); }).status).toBe('running');
+      // Run one's step ends at two seconds, its output with it: run two is still running.
+      await new Promise((r) => setTimeout(r, 2_300));
+      expect(backupRunState().status).toBe('running');
+      expect(second).toEqual([]);
+      await vi.waitFor(() => expect(second).toHaveLength(1), { timeout: 5_000, interval: 20 });
+      expect(second[0]).toMatchObject({ status: 'ok', summary: 'run two done' });
+      expect(backupRunState()).toMatchObject({ status: 'ok', summary: 'run two done' });
+      expect(first).toHaveLength(1);
+    } finally { if (saved !== undefined) process.env.HATCHABOT_BACKUP_SCRIPT = saved; else delete process.env.HATCHABOT_BACKUP_SCRIPT; }
+  }, 20_000);
+
+  it.skipIf(!realTimeout)('stopped at its time limit in an archive under the real timeout: the TERM reaches the docker client, and the trap writes the record, removes its one-shot and frees the lock', async () => {
+    const { scriptDeadline } = await import('../src/orchestrator/backups/backupFiles.js');
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    writeFileSync(join(w.root, 'hold'), ''); // the archive's docker run never answers
+    const c = w.spawnRun();
+    const t0 = Date.now();
+    while (!/^run /m.test(w.localLog()) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
+    expect(w.localLog()).toMatch(/^run /m);
+    // The app's time limit, now: the TERM to the run's group, its KILL long after.
+    let stopped = false;
+    const closed = new Promise<number | null>((r) => c.on('close', (code) => r(code)));
+    const callOff = scriptDeadline(c, 0, 25_000, { term: () => {}, stopped: () => { stopped = true; } });
+    const code = await closed;
+    callOff();
+    expect(stopped).toBe(false); // it ended by itself, its trap run, before anything was killed
+    expect(code).toBe(143);
+    expect(w.record()).toMatchObject({ state: 'incomplete' });
+    expect(existsSync(join(w.setDir(), '.backup-lock'))).toBe(false);
+    expect(w.localLog()).toMatch(/^rm -f hatchabot-bk-/m);
+  }, 40_000);
+
+  it.skipIf(!realTimeout)('every docker call on this machine is bounded: an archive that hangs fails its volume, and the run goes on to its record', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    // timeout as a shim: what it was asked, then the real one with a second's limit.
+    writeFileSync(join(w.bin, 'timeout'), `#!/usr/bin/env bash
+echo "$*" >> "${w.root}/timeout.log"
+o=(); while :; do case "$1" in --foreground) o+=(--foreground); shift ;; -k) o+=(-k 1); shift 2 ;; *) break ;; esac; done
+shift
+exec "${realTimeout}" "\${o[@]}" 1 "$@"
+`, { mode: 0o755 });
+    writeFileSync(join(w.root, 'hold'), ''); // the archive's docker run never answers (its shim waits up to a minute)
+    const t0 = Date.now();
+    const r = w.run();
+    expect(Date.now() - t0).toBeLessThan(25_000);
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toMatch(/hatchabot-kitchen-1-vol: archiving it was still going at this run's six-hour limit — stopped/);
+    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-kitchen-1-vol'] });
+    expect(existsSync(join(w.setDir(), 'hatchabot-kitchen-1-vol.tgz'))).toBe(false);
+    const asked = readFileSync(join(w.root, 'timeout.log'), 'utf8');
+    for (const call of [/^--foreground -k 10 60 docker image inspect /m, /^--foreground -k 10 60 docker info /m, /^--foreground -k 10 120 docker volume ls -q$/m, /^--foreground -k 10 120 docker volume ls -q --filter label=hatchabot\.role=browser-logins$/m, /^--foreground 120 docker rm -f hatchabot-bk-/m]) {
+      expect(asked).toMatch(call);
+    }
+    // An archive has what is left of the run's six hours, not an hour: a big
+    // volume on a slow disk is no hung Docker (review of HB-0923).
+    const archive = Number(/^--foreground -k 10 (\d+) docker run --rm --name hatchabot-bk-/m.exec(asked)?.[1]);
+    expect(archive).toBeGreaterThan(6 * 3600 - 60);
+    expect(archive).toBeLessThanOrEqual(6 * 3600);
+  }, 30_000);
+
+  it.skipIf(!realTimeout)('a Mac with Homebrew\'s coreutils but not its gnubin (gtimeout, no timeout): every docker call is still bounded (HB-1208)', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    // gtimeout as a shim: what it was asked, then the real one with a second's limit.
+    writeFileSync(join(w.bin, 'gtimeout'), `#!/usr/bin/env bash
+echo "$*" >> "${w.root}/gtimeout.log"
+o=(); while :; do case "$1" in --foreground) o+=(--foreground); shift ;; -k) o+=(-k 1); shift 2 ;; *) break ;; esac; done
+shift
+exec "${realTimeout}" "\${o[@]}" 1 "$@"
+`, { mode: 0o755 });
+    symlinkSync(process.execPath, join(w.bin, 'node'));
+    writeFileSync(join(w.root, 'hold'), ''); // the archive's docker run never answers (its shim waits up to a minute)
+    const t0 = Date.now();
+    const r = w.run({ PATH: `${w.bin}:${systemPathWithout(join(w.root, 'system'), ['timeout', 'gtimeout'])}` });
+    expect(Date.now() - t0).toBeLessThan(25_000);
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toMatch(/hatchabot-kitchen-1-vol: archiving it was still going at this run's six-hour limit — stopped/);
+    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-kitchen-1-vol'] });
+    const asked = readFileSync(join(w.root, 'gtimeout.log'), 'utf8');
+    for (const call of [/^--foreground -k 10 60 docker image inspect /m, /^--foreground -k 10 120 docker volume ls -q$/m, /^--foreground -k 10 \d+ docker run --rm --name hatchabot-bk-/m, /^--foreground 120 docker rm -f hatchabot-bk-/m]) {
+      expect(asked).toMatch(call);
+    }
+  }, 30_000);
+
+  it('the script\'s own time limit is the app\'s', async () => {
+    const { BACKUP_KILL_MS } = await import('../src/orchestrator/backups/backupFiles.js');
+    expect(Number(/^RUN_LIMIT_SEC=(\d+)$/m.exec(readFileSync('scripts/backup-volumes.sh', 'utf8'))?.[1]) * 1000).toBe(BACKUP_KILL_MS);
+  });
+});
+
+describe('scripts/backup-volumes.sh takes no volume whose files are being replaced (HB-0922)', () => {
+  /** The registry's operations, as the store keeps them (the columns the script reads); changed when asked for, unless said. */
+  const ops = (repo: string, rows: Array<[agent: string, kind: string, status: string, requestedAt: string, updatedAt?: string]>) => {
+    const db = new Database(join(repo, 'data', 'hatchabot.sqlite'));
+    db.exec(`CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, agent_id TEXT, kind TEXT NOT NULL, status TEXT NOT NULL, requested_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+    rows.forEach(([agent, kind, status, at, upd], i) => db.prepare(`INSERT INTO operations VALUES (?, ?, ?, ?, ?, ?)`).run(`op-${agent}-${i}`, agent, kind, status, at, upd ?? at));
+    db.close();
+  };
+
+  /** Held for the owner's choice, only these leave the files half-replaced (scripts/backup-volumes.sh, replacing). */
+  const HELD_HALF = ['restore-backup', 'restore-snapshot', 'import', 'adopt-workspace'];
+
+  it('an agent in the middle of a restore, an import, a move or any change that replaces its files is left out, and the set is incomplete; a change that ended, or one that does not replace them, is no bar', () => {
+    const kinds = [...FILES_REPLACED_BY];
+    expect(kinds.filter((k) => HELD_HALF.includes(k)).sort()).toEqual([...HELD_HALF].sort());
+    // Each kind running, then each kind held for its owner, then the rest.
+    const rows: Array<[kind: string, status: string]> = [
+      ...kinds.map((k): [string, string] => [k, 'running']),
+      ...kinds.map((k): [string, string] => [k, 'held']),
+      ['move-host', 'interrupted'], // cut off by a restart, not settled yet
+      ['restore-backup', 'succeeded'], // over before the run began
+      ['app-install', 'running'], // adds an app: the agent's files are not replaced
+    ];
+    const refs = rows.map((_, i) => `docker://hatchabot-k${i}`);
+    const w = scriptWorld(refs.map((r) => `${r.slice('docker://'.length)}-vol`), refs);
+    w.onRunners([['ssh://laptop.test', 'docker://hatchabot-notes-3']]);
+    const now = new Date().toISOString(), before = new Date(Date.now() - 3600_000).toISOString();
+    ops(w.repo, [
+      ...rows.map(([k, s], i): [string, string, string, string] => [`a${i}`, k, s, k === 'app-install' ? now : before]),
+      ['r0', 'restore-backup', 'held', before], // on a runner: asked before it is read there
+    ]);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    const out = (k: string, s: string) => FILES_REPLACED_BY.has(k) && (s === 'running' || s === 'interrupted' || (s === 'held' && HELD_HALF.includes(k)));
+    const left = [...rows.flatMap(([k, s], i) => (out(k, s) ? [`hatchabot-k${i}-vol`] : [])), 'hatchabot-notes-3-vol'];
+    const taken = rows.flatMap(([k, s], i) => (out(k, s) ? [] : [`hatchabot-k${i}-vol`]));
+    expect(left).toHaveLength(kinds.length + HELD_HALF.length + 2);
+    const rec = w.record();
+    expect([...rec.failedVolumes].sort()).toEqual([...left].sort());
+    expect(rec.state).toBe('incomplete');
+    expect([...rec.captured].sort()).toEqual([...taken].sort());
+    for (const v of left) expect(existsSync(join(w.setDir(), `${v}.tgz`)), v).toBe(false);
+    for (const v of taken) expect(existsSync(join(w.setDir(), `${v}.tgz`)), v).toBe(true);
+    expect(r.stderr).toContain(`hatchabot-k${kinds.indexOf('restore-backup')}-vol: its agent is in the middle of a restore from a backup, which replaces its files — not in this set (the next backup takes it)`);
+    expect(r.stderr).toContain(`hatchabot-k${kinds.length + kinds.indexOf('import')}-vol: its agent is in the middle of an import`);
+    // An adopt held with its copy torn part way (HB-0980).
+    expect(r.stderr).toContain(`hatchabot-k${kinds.length + kinds.indexOf('adopt-workspace')}-vol: its agent is in the middle of adopting a workspace`);
+    // A move held for its owner (its copy whole on the machine the record names), an
+    // app update held (the agent runs on and changes): taken, not left out night after night.
+    expect(r.stderr).not.toContain(`hatchabot-k${kinds.length + kinds.indexOf('move-host')}-vol:`);
+    expect(r.stderr).not.toContain(`hatchabot-k${kinds.length + kinds.indexOf('app-update')}-vol:`);
+    expect(r.stderr).toContain('hatchabot-notes-3-vol on laptop.test: its agent is in the middle of a restore from a backup');
+    // Not read at all: no archive was started for any of them.
+    for (const v of left) expect(w.localLog() + w.remoteLog(), v).not.toMatch(new RegExp(`run .*${v}:`));
+  }, 60_000);
+
+  it('a volume left out while its files are replaced does not stop the pruning: its own newest copy is kept however old, the others go as usual; a real failure still prunes nothing (review of HB-0922)', () => {
+    const w = scriptWorld(['hatchabot-k0-vol', 'hatchabot-k1-vol'], ['docker://hatchabot-k0', 'docker://hatchabot-k1']);
+    ops(w.repo, [['a0', 'restore-backup', 'held', new Date(Date.now() - 3 * 86_400_000).toISOString()]]);
+    const onlyK0 = w.oldSet(['hatchabot.sqlite', 'hatchabot-k0-vol.tgz'], '2026-01-02', 30);
+    const k1Old = w.oldSet(['hatchabot.sqlite', 'hatchabot-k1-vol.tgz'], '2026-01-03', 29);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-k0-vol'], captured: ['hatchabot-k1-vol'] });
+    expect(existsSync(onlyK0), 'the replaced volume\'s last whole copy').toBe(true);
+    expect(existsSync(k1Old), 'an old set whose volume has a copy today').toBe(false);
+    expect(r.stdout).toContain('kept 2026-01-02 past 14 days: the newest copy of hatchabot-k0-vol');
+    expect(r.stderr).toContain('✗ 1 volume(s) left out while their files were being replaced, 1 succeeded — incomplete backup; older sets pruned as usual, each agent\'s newest copy kept.');
+    expect(r.stderr).not.toContain('nothing pruned');
+
+    // Beside a volume whose archive failed: nothing is pruned, as before.
+    const b = scriptWorld(['hatchabot-k0-vol', 'hatchabot-broken-1-vol', 'hatchabot-k2-vol'], ['docker://hatchabot-k0', 'docker://hatchabot-broken-1', 'docker://hatchabot-k2']);
+    ops(b.repo, [['a0', 'restore-backup', 'running', new Date().toISOString()]]);
+    const k2Old = b.oldSet(['hatchabot.sqlite', 'hatchabot-k2-vol.tgz'], '2026-01-03', 29);
+    const rb = b.run();
+    expect(rb.status, rb.stdout + rb.stderr).toBe(1);
+    expect(rb.stderr).toContain('✗ 2 volume(s) failed or missing, 1 succeeded — incomplete backup, nothing pruned.');
+    expect(existsSync(k2Old)).toBe(true);
+  }, 60_000);
+
+  it('a restore that begins while a volume is being copied: that copy is not kept, and the whole one from earlier today stays', () => {
+    const w = scriptWorld(['hatchabot-k0-vol', 'hatchabot-k1-vol'], ['docker://hatchabot-k0', 'docker://hatchabot-k1']);
+    w.onRunners([['ssh://laptop.test', 'docker://hatchabot-notes-3']]);
+    ops(w.repo, []);
+    // A whole archive of k1 from this morning's run, which this run's record carries over (HB-0433).
+    mkdirSync(w.today(), { recursive: true });
+    writeFileSync(join(w.today(), 'hatchabot-k1-vol.tgz'), 'morning');
+    writeFileSync(join(w.today(), 'backup-status.json'), JSON.stringify({ state: 'complete', startedAt: new Date().toISOString(), captured: ['hatchabot-k1-vol'] }));
+    // docker as before, but reading k1 here, a restore from a snapshot begins and ends on its agent;
+    // reading notes-3 on the runner, a restore from a backup begins there.
+    const real = join(w.bin, 'docker.real');
+    writeFileSync(real, readFileSync(join(w.bin, 'docker')), { mode: 0o755 });
+    writeFileSync(join(w.bin, 'docker'), `#!/usr/bin/env bash
+op=""
+for a in "$@"; do case "$a" in hatchabot-k1-vol:/data:ro) op="a1 restore-snapshot succeeded" ;; hatchabot-notes-3-vol:/vol:ro) op="r0 restore-backup running" ;; esac; done
+if [ -n "$op" ]; then
+  node -e 'const D = require("better-sqlite3"); const db = new D(process.argv[1]); const [a, k, s] = process.argv[2].split(" ");
+    const t = new Date().toISOString(); db.prepare("INSERT INTO operations VALUES (?, ?, ?, ?, ?, ?)").run("op-" + a, a, k, s, t, t);' "${join(w.repo, 'data', 'hatchabot.sqlite')}" "$op"
+fi
+exec "${real}" "$@"
+`, { mode: 0o755 });
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.record()).toMatchObject({ state: 'incomplete' });
+    expect([...w.record().failedVolumes].sort()).toEqual(['hatchabot-k1-vol', 'hatchabot-notes-3-vol']);
+    expect(r.stderr).toContain('hatchabot-k1-vol: while it was being copied, a restore from a snapshot began on its agent, so this copy may be half replaced — not kept (the next backup takes it)');
+    expect(r.stderr).toContain('hatchabot-notes-3-vol on laptop.test: while it was being copied, a restore from a backup began on its agent');
+    expect(readFileSync(join(w.setDir(), 'hatchabot-k1-vol.tgz'), 'utf8')).toBe('morning');
+    expect(existsSync(join(w.setDir(), 'hatchabot-notes-3-vol.tgz'))).toBe(false);
+    expect(existsSync(join(w.setDir(), 'hatchabot-notes-3-vol.tgz.part'))).toBe(false);
+    expect(existsSync(join(w.setDir(), 'hatchabot-k0-vol.tgz'))).toBe(true);
+  }, 60_000);
+
+  it('a rebuild queued before a volume was copied, that started and ended while it was: that copy is not kept; a held move whose question was asked again meanwhile is no bar (review of HB-0922)', () => {
+    const w = scriptWorld(['hatchabot-k0-vol', 'hatchabot-k1-vol', 'hatchabot-k2-vol'], ['docker://hatchabot-k0', 'docker://hatchabot-k1', 'docker://hatchabot-k2']);
+    const anHourAgo = new Date(Date.now() - 3600_000).toISOString();
+    // a1's rebuild waits its turn in the queue; a2's move to another Hatchabot is held for an answer.
+    ops(w.repo, [['a1', 'rebuild', 'queued', anHourAgo], ['a2', 'migrate', 'held', anHourAgo]]);
+    // Reading k1, the rebuild starts and ends; reading k2, the held move is asked again (its row written, held still).
+    const real = join(w.bin, 'docker.real');
+    writeFileSync(real, readFileSync(join(w.bin, 'docker')), { mode: 0o755 });
+    writeFileSync(join(w.bin, 'docker'), `#!/usr/bin/env bash
+op=""
+for a in "$@"; do case "$a" in hatchabot-k1-vol:/data:ro) op="a1 succeeded" ;; hatchabot-k2-vol:/data:ro) op="a2 held" ;; esac; done
+if [ -n "$op" ]; then
+  node -e 'const D = require("better-sqlite3"); const db = new D(process.argv[1]); const [a, s] = process.argv[2].split(" ");
+    db.prepare("UPDATE operations SET status = ?, updated_at = ? WHERE agent_id = ?").run(s, new Date().toISOString(), a);' "${join(w.repo, 'data', 'hatchabot.sqlite')}" "$op"
+fi
+exec "${real}" "$@"
+`, { mode: 0o755 });
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-k1-vol'] });
+    expect([...w.record().captured].sort()).toEqual(['hatchabot-k0-vol', 'hatchabot-k2-vol']);
+    expect(r.stderr).toContain('hatchabot-k1-vol: while it was being copied, a rebuild began on its agent, so this copy may be half replaced — not kept (the next backup takes it)');
+    expect(existsSync(join(w.setDir(), 'hatchabot-k1-vol.tgz'))).toBe(false);
+    expect(existsSync(join(w.setDir(), 'hatchabot-k2-vol.tgz'))).toBe(true);
+  }, 60_000);
+});
+
 describe('the app never runs the real backup script under a test runner (2026-10-03)', () => {
   it('"Back up now" in a test refuses unless the test names its own script', async () => {
-    const { startBackup, backupRunState } = await import('../src/orchestrator/backups.js');
+    const { startBackup, backupRunState } = await import('../src/orchestrator/backups/backupFiles.js');
     const saved = process.env.HATCHABOT_BACKUP_SCRIPT;
     delete process.env.HATCHABOT_BACKUP_SCRIPT;
     try {
@@ -1023,6 +1425,58 @@ it('a missing key does not change an earlier complete run of the same dated set'
   expect(w.run().status).toBe(1);
   expect(w.record().state).toBe('complete');
   expect(readFileSync(keyFile, 'utf8')).toBe(saved);
+});
+
+describe("the saved key is tried on the set's own secrets (HB-1228)", () => {
+  /** Secrets in the install's database, each stored with the key given, as the service stores them. */
+  const store = async (w: ReturnType<typeof scriptWorld>, keys: string[]) => {
+    const db = new Database(join(w.repo, 'data', 'hatchabot.sqlite'));
+    for (const [i, k] of keys.entries()) {
+      await new LocalSecretStore(db, LocalSecretStore.keyFromEnv({ HATCHABOT_SECRET_KEY: k })).put(`channel/made-up-${i}/bot-token`, 'made-up-secret-value');
+    }
+    db.close();
+  };
+
+  it('a key that reads none of them: the volumes are taken, the set says incomplete, and older sets are kept', async () => {
+    const w = scriptWorld(['hatchabot-fixture-1-vol'], ['docker://hatchabot-fixture-1']);
+    const old = w.oldSet(['hatchabot.sqlite', 'secret-key.env', 'hatchabot-fixture-1-vol.tgz']);
+    await store(w, ['another-made-up-key', 'another-made-up-key']);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toContain("✗ The saved HATCHABOT_SECRET_KEY decrypts none of the 2 secrets in the backed-up database: it is not the key they were stored with, so neither this set nor the running service can read them (bot tokens, AI keys). The volumes are still taken; the set will say incomplete, and older backups are kept. Put back the key they were stored with (an older set's secret-key.env may have it), or give the app its tokens and keys again, then back up again.");
+    expect(r.stderr).toContain('✗ 1 volume(s) captured, but the saved key decrypts none of the backed-up secrets — incomplete backup, nothing pruned.');
+    expect(w.record()).toMatchObject({ state: 'incomplete', captured: ['hatchabot-fixture-1-vol'] });
+    expect(existsSync(join(w.setDir(), 'hatchabot-fixture-1-vol.tgz'))).toBe(true);
+    expect(existsSync(old)).toBe(true);
+    expect(r.stdout + r.stderr).not.toContain('not-a-real-key');
+  });
+
+  it('any one it reads will do, beside one from an older key; and no secrets at all is fine', async () => {
+    const mixed = scriptWorld([], []);
+    await store(mixed, ['another-made-up-key', 'not-a-real-key']);
+    const r = mixed.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('✓ saved key reads the backed-up secrets');
+    expect(mixed.record().state).toBe('complete');
+    const none = scriptWorld([], []);
+    await store(none, []);
+    const n = none.run();
+    expect(n.status, n.stdout + n.stderr).toBe(0);
+    expect(none.record().state).toBe('complete');
+    // Said as it is: none to try the key on, not that it read them (HB-1228 review).
+    expect(n.stdout).toContain('✓ the backed-up database holds no secrets: the saved key had none to be tried on');
+    expect(n.stdout).not.toContain('saved key reads');
+  });
+
+  it('a key of 64 hex characters is the raw key, as the service reads it', async () => {
+    const w = scriptWorld([], []);
+    const hex = 'ab'.repeat(32);
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=${hex}\n`);
+    await store(w, [hex]);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.record().state).toBe('complete');
+  });
 });
 
 // The README's restore steps, run as written, after an unclean stop: copying only the

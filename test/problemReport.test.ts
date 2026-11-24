@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -7,7 +7,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { boundInput, buildReport, endpointIdentity, issueUrl, knownProblems, matchKnownProblems, newerRelease, readSource, redactForPublic, searchSource, searchesRunning, sourcePath, type ReportFacts } from '../src/orchestrator/problemReport.js';
+import { boundInput, buildReport, endpointIdentity, issueUrl, knownProblems, matchKnownProblems, newerRelease, readSource, redactForPublic, searchSource, searchesRunning, sourcePath, type ReportFacts } from '../src/orchestrator/diagnostics/problemReport.js';
 
 /**
  * "Report a problem" (docs/field-reports.md): a public GitHub issue made from
@@ -1280,7 +1280,7 @@ describe('the installed source, read-only', () => {
   });
 
   it('reads with line numbers, at most 400 lines; a folder lists its files', () => {
-    const r = readSource(process.cwd(), 'src/orchestrator/problemReport.ts', 1, 5000);
+    const r = readSource(process.cwd(), 'src/orchestrator/diagnostics/problemReport.ts', 1, 5000);
     expect(r.to - r.from).toBe(399 < r.lines ? 399 : r.lines - 1);
     expect(r.text.split('\n')[0]).toMatch(/^1\t/);
     expect(readSource(process.cwd(), 'docs').text).toContain('field-reports.md');
@@ -1303,7 +1303,7 @@ describe('the installed source, read-only', () => {
 
   it('searches the code and docs, capped', async () => {
     const hit = await searchSource(process.cwd(), 'export function redactForPublic');
-    expect(hit.matches.some((m) => m.path === 'src/orchestrator/problemReport.ts')).toBe(true);
+    expect(hit.matches.some((m) => m.path === 'src/orchestrator/diagnostics/problemReport.ts')).toBe(true);
     const many = await searchSource(process.cwd(), 'import', 'src', 5);
     expect(many.matches).toHaveLength(5);
     expect(many.more).toBe(true);
@@ -1327,6 +1327,62 @@ describe('check_known_problem (matchKnownProblems)', () => {
       expect(matchKnownProblems(process.cwd(), q, 'v2.138.0').matches, q).toEqual([]);
     }
   });
+  it('a long symptom is looked up, not compared with every entry phrase by phrase (HB-1099)', () => {
+    // Invented words: a 4000-character error extract with many different runs of three.
+    const vocab = 'agent runner container gateway restart backup volume restore token source failed error could not start the bot chat docker image build owner page check timeout refused host disk memory'.split(' ');
+    const words: string[] = [];
+    for (let i = 0; words.join(' ').length < 4000; i++) words.push(`${vocab[(i * 7) % vocab.length]}${i % 3 ? '' : i}`);
+    const symptom = words.join(' ').slice(0, 4000);
+    matchKnownProblems(process.cwd(), symptom, 'v2.138.0'); // the playbook read and indexed
+    const includes = String.prototype.includes;
+    let scans = 0;
+    String.prototype.includes = function (this: string, ...args: Parameters<typeof includes>) { scans++; return includes.apply(this, args); };
+    try {
+      matchKnownProblems(process.cwd(), symptom, 'v2.138.0');
+    } finally {
+      String.prototype.includes = includes;
+    }
+    // Each run of three against each entry was over 600,000 scans of the entries' text.
+    expect(scans).toBeLessThan(titles.length * 5);
+  });
+
+  it('reads the playbook again when it changes (HB-1099)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-playbook-'));
+    try {
+      mkdirSync(join(dir, 'docs'));
+      const entry = (title: string, words: string) => `### ${title}\n\n- **Symptom:** ${words}\n- **Fixed in:** v2.150.0\n\n`;
+      writeFileSync(join(dir, 'docs', 'troubleshooting.md'), `# Playbook\n\n${entry('The kettle timer says "steam valve stuck open"', 'the kettle timer stops')}`);
+      expect(matchKnownProblems(dir, 'it said "steam valve stuck open" this morning', 'v2.140.0').matches.map((m) => m.title)).toEqual(['The kettle timer says "steam valve stuck open"']);
+      writeFileSync(join(dir, 'docs', 'troubleshooting.md'), `# Playbook\n\n${entry('The garden lights say "photocell reading out of range"', 'the garden lights stay on all day')}`);
+      expect(matchKnownProblems(dir, 'it said "photocell reading out of range" tonight', 'v2.140.0').matches.map((m) => m.title)).toEqual(['The garden lights say "photocell reading out of range"']);
+      expect(matchKnownProblems(dir, 'it said "steam valve stuck open" this morning', 'v2.140.0').matches).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a draft's known problems come from the cached playbook, not a read of it on every GET (HB-1099)", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-playbook-'));
+    try {
+      mkdirSync(join(dir, 'docs'));
+      const file = join(dir, 'docs', 'troubleshooting.md');
+      const entry = (quote: string) => `# Playbook\n\n### The kettle timer says "${quote}"\n\n- **Symptom:** the kettle timer stops\n- **Fixed in:** v2.150.0\n\n`;
+      writeFileSync(file, entry('steam valve stuck open'));
+      const at = 1_790_000_000; // whole seconds: a time the file can be given back exactly
+      utimesSync(file, at, at);
+      expect(knownProblems(dir, 'it said "steam valve stuck open" this morning')).toEqual([{ title: 'The kettle timer says "steam valve stuck open"', fixedIn: 'v2.150.0' }]);
+      // The same size and time: the same version of the file, as far as the cache can tell.
+      writeFileSync(file, entry('steam valve stuck shut'));
+      utimesSync(file, at, at);
+      expect(knownProblems(dir, 'it said "steam valve stuck shut" this morning')).toEqual([]);
+      // Changed as files change: read again.
+      writeFileSync(file, entry('steam valve stuck closed'));
+      expect(knownProblems(dir, 'it said "steam valve stuck closed" this morning').map((k) => k.title)).toEqual(['The kettle timer says "steam valve stuck closed"']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a fix in a newer release than the one installed says so', () => {
     const stale = matchKnownProblems(process.cwd(), 'A runner agent shows as running although its container stopped or is gone', 'v2.133.0').matches[0]!;
     expect(stale).toMatchObject({ fixedIn: 'v2.134.0', fixedInNewerRelease: true });
@@ -1518,6 +1574,14 @@ describe('the installed source: links and bounds', () => {
     expect(await settled).toMatch(/stopped/);
     expect(Date.now() - t0).toBeLessThan(4000);
     // Stopped, not left running.
+    await vi.waitFor(() => expect(searchesRunning()).toBe(0), { timeout: 2000 });
+  });
+
+  it('a search that has answered gives its slot back then, not when its worker has gone (HB-0851)', async () => {
+    expect((await searchSource(app, 'tulips', undefined, 40, 15, { caller: 'one' })).matches).toHaveLength(1);
+    expect(searchesRunning()).toBe(0); // its worker is still exiting: it was 1 here
+    // So one caller can search again and again, one after another, however slowly the workers go.
+    for (let i = 0; i < 4; i++) expect((await searchSource(app, 'tulips', undefined, 40, 15, { caller: 'one' })).matches).toHaveLength(1);
     await vi.waitFor(() => expect(searchesRunning()).toBe(0), { timeout: 2000 });
   });
 

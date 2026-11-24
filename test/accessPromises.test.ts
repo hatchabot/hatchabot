@@ -8,8 +8,9 @@ import { join } from 'node:path';
 import { registerRoutes } from '../src/api/routes.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
-import { closeKnockWindow, holdDoorForKnocks } from '../src/orchestrator/claim.js';
-import { grantChannelAccess, grantRoomAccess } from '../src/orchestrator/members.js';
+import { closeKnockWindow, holdDoorForKnocks, KnockWindowError } from '../src/orchestrator/members/claim.js';
+import { grantChannelAccess, grantRoomAccess } from '../src/orchestrator/members/members.js';
+import { forgetDmPolicy } from '../src/orchestrator/channels/dmPolicyMemo.js';
 import type { Agent } from '../src/domain/types.js';
 
 /**
@@ -34,6 +35,13 @@ async function world(opts: { ops?: boolean } = {}) {
     persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now', ...(opts.ops ? { ops: true } : {}),
   } as unknown as Agent);
   const provider = new MockProvider();
+  // A door write answers as its script does on a volume that has this bot
+  // ("set"); the mock alone answers nothing, which is a write that failed.
+  const onVolume = provider.execShellOnVolume.bind(provider);
+  provider.execShellOnVolume = (async (ref: string, script: string, o?: { readOnly?: boolean }) => {
+    const r = await onVolume(ref, script, o);
+    return /"policy":"(allowlist|pairing)"/.test(script) && r.code === 0 && !r.stdout ? { ...r, stdout: 'set' } : r;
+  }) as never;
   const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {} } as never);
   store.setAgentRuntimeRef('a1', runtimeRef);
   store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'TaxBot', secretRef: 's', deepLink: 'https://t.me/TaxBot', createdAt: 'now' } as never);
@@ -107,6 +115,142 @@ describe('the Telegram invite opens a knock window when sent (finding 1)', () =>
     w.store.setAgentState('a1', 'STOPPED');
     expect((await post(inv.code)).statusCode).toBe(409);
     expect(w.store.pairingWindows('a1')).toEqual([]);
+  });
+
+  it('a door that could not be opened says so, and holds no window open (HB-0953)', async () => {
+    const w = await world();
+    const inv = (await w.f.inject({ method: 'POST', url: '/v1/agents/a1/invites', headers: H, payload: {} })).json();
+    const post = () => w.f.inject({ method: 'POST', url: `/v1/agents/a1/invites/${inv.code}/knock-window`, headers: H });
+    const write = w.provider.execShellOnVolume.bind(w.provider);
+    let broken: { code: number; stdout: string } | undefined = { code: 1, stdout: '' };
+    w.provider.execShellOnVolume = (async (ref: string, script: string, o?: { readOnly?: boolean }) =>
+      broken && /"policy":"pairing"/.test(script) ? { ...broken, stderr: 'made-up docker error' } : write(ref, script, o)) as never;
+
+    const failed = await post();
+    expect(failed.statusCode).toBe(502);
+    expect(failed.json().error).toBe("Couldn't open the agent's door for their message just now — copy the invite again in a moment.");
+    expect(w.store.pairingWindows('a1')).toEqual([]); // nothing said to be open, and the door rest is not held off
+    broken = { code: 0, stdout: 'no-account' };
+    expect((await post()).statusCode).toBe(409);
+    expect(w.store.pairingWindows('a1')).toEqual([]);
+
+    // Pressed again once Docker answers: open, as before.
+    broken = undefined;
+    expect((await post()).json()).toMatchObject({ open: true, minutes: 30 });
+    const [win] = w.store.pairingWindows('a1');
+    // A later press whose write fails leaves that earlier window as it was, not lengthened.
+    forgetDmPolicy('a1');
+    broken = { code: 1, stdout: '' };
+    expect((await post()).statusCode).toBe(502);
+    expect(w.store.pairingWindows('a1')).toEqual([win]);
+  });
+
+  it('two presses of one invite: the first one failing late leaves the second one open (HB-0953)', async () => {
+    const w = await world();
+    const deps = { store: w.store, provider: w.provider };
+    const runtimeRef = w.store.getAgent('a1')!.runtimeRef!;
+    const write = w.provider.execShellOnVolume.bind(w.provider);
+    // Each door write waits until the test says how it went.
+    const held: Array<(r: { code: number; stdout: string }) => void> = [];
+    w.provider.execShellOnVolume = (async (ref: string, script: string, o?: { readOnly?: boolean }) =>
+      /"policy":"pairing"/.test(script)
+        ? new Promise((done) => held.push((r) => done({ ...r, stderr: '' })))
+        : write(ref, script, o)) as never;
+    const press = () => holdDoorForKnocks(deps, { agentId: 'a1', runtimeRef, accountId: 'TaxBot', key: 'inv-1', noTimer: true })
+      .then((r) => r, (e: unknown) => e as Error);
+    const writes = async (n: number) => { while (held.length < n) await new Promise((r) => setImmediate(r)); };
+
+    // B opens while A's write is under way, and so reads A's window as its before.
+    const a = press(); await writes(1);
+    const b = press(); await writes(2);
+    held[1]!({ code: 0, stdout: 'set' });
+    const opened = await b;
+    expect(opened).toMatchObject({ seat: expect.any(String) });
+    held[0]!({ code: 1, stdout: '' });
+    expect(await a).toBeInstanceOf(KnockWindowError);
+    const [win] = w.store.pairingWindows('a1');
+    expect(win).toMatchObject({ until: (opened as { until: string }).until }); // B's window, as B said
+
+    // Both fail, the later one first: nothing is left open.
+    w.store.closePairingWindow('a1');
+    forgetDmPolicy('a1');
+    held.length = 0;
+    const c = press(); await writes(1);
+    const d = press(); await writes(2);
+    held[1]!({ code: 1, stdout: '' });
+    expect(await d).toBeInstanceOf(KnockWindowError);
+    held[0]!({ code: 1, stdout: '' });
+    expect(await c).toBeInstanceOf(KnockWindowError);
+    expect(w.store.pairingWindows('a1')).toEqual([]);
+  });
+
+  describe('a window a failed press puts back closes at its own time (HB-0953)', () => {
+    const rig = async () => {
+      forgetDmPolicy('a1');
+      const w = await world();
+      const deps = { store: w.store, provider: w.provider };
+      const runtimeRef = w.store.getAgent('a1')!.runtimeRef!;
+      const write = w.provider.execShellOnVolume.bind(w.provider);
+      // Each door write that opens waits until the test says how it went.
+      const held: Array<(r: { code: number; stdout: string }) => void> = [];
+      w.provider.execShellOnVolume = (async (ref: string, script: string, o?: { readOnly?: boolean }) =>
+        /"policy":"pairing"/.test(script)
+          ? new Promise((done) => held.push((r) => done({ ...r, stderr: '' })))
+          : write(ref, script, o)) as never;
+      const press = (timeoutMs?: number) => (forgetDmPolicy('a1'), holdDoorForKnocks)(deps, { agentId: 'a1', runtimeRef, accountId: 'TaxBot', key: 'inv-1', ...(timeoutMs ? { timeoutMs } : {}) })
+        .then((r) => r, (e: unknown) => e as Error);
+      const writes = async (n: number) => { while (held.length < n) await new Promise((r) => setImmediate(r)); };
+      const rows = () => w.store.pairingWindows('a1', new Date(0));
+      return { w, press, held, writes, rows };
+    };
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    it('both presses fail, the earlier first: the window put back closes when it ends, and the door rests', async () => {
+      const { w, press, held, writes, rows } = await rig();
+      const a = press(300); await writes(1);
+      const b = press(30 * 60_000); await writes(2);
+      held[0]!({ code: 1, stdout: '' });
+      expect(await a).toBeInstanceOf(KnockWindowError);
+      held[1]!({ code: 1, stdout: '' });
+      expect(await b).toBeInstanceOf(KnockWindowError);
+      expect(rows()).toHaveLength(1); // A's, put back by B, for A's time
+      await wait(1000);
+      expect(rows()).toEqual([]);
+      expect(w.policies().at(-1)).toBe('allowlist');
+    });
+
+    it("an earlier window's timer stood down for a later press that then failed: its spent window is closed, not put back", async () => {
+      const { w, press, held, writes, rows } = await rig();
+      const first = press(300); await writes(1);
+      held[0]!({ code: 0, stdout: 'set' });
+      expect(await first).toMatchObject({ seat: expect.any(String) });
+      const later = press(30 * 60_000); await writes(2);
+      await wait(1100); // the first press's timer fires now, sees the later window, and stands down
+      held[1]!({ code: 1, stdout: '' });
+      expect(await later).toBeInstanceOf(KnockWindowError);
+      expect(rows()).toEqual([]);
+      expect(w.policies().at(-1)).toBe('allowlist'); // the first press's open door is put back to rest
+    });
+  });
+
+  it('letting a knock in when its requests cannot be read says so, not that it is gone (HB-1050)', async () => {
+    const w = await world();
+    w.provider.execShell = (async () => ({ code: 1, stdout: '', stderr: 'docker exec: connection reset' })) as never;
+    const r = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/approve', headers: H, payload: { code: 'MARIA', kind: 'telegram' } });
+    expect([r.statusCode, r.json().error]).toEqual([502, "Couldn't read the requests waiting at the agent's door just now — try again in a moment."]);
+    expect(w.store.listMemberships('a1').filter((m) => m.status === 'active')).toHaveLength(1);
+  });
+
+  it('a plain approve on an agent with two apps whose Discord cannot be read says so, not "no longer pending" (HB-1050)', async () => {
+    const w = await world();
+    w.store.insertChannel({ id: 'c2', agentId: 'a1', kind: 'discord', accountId: '123456789012345678', secretRef: 's2', deepLink: 'https://discord.com/users/x', createdAt: 'now' } as never);
+    w.provider.execShell = (async (_ref: string, script: string) => script.includes('discord-pairing.json')
+      ? { code: 1, stdout: '', stderr: 'docker exec: connection reset' }
+      : { code: 0, stdout: JSON.stringify({ version: 1, requests: [] }), stderr: '' }) as never;
+    for (const url of ['/v1/agents/a1/pairing/approve', '/v1/agents/a1/pairing/deny']) {
+      const r = await w.f.inject({ method: 'POST', url, headers: H, payload: { code: 'DSC1' } });
+      expect([r.statusCode, r.json().error]).toEqual([502, "Couldn't read the requests waiting at the agent's door just now — try again in a moment."]);
+    }
   });
 
   it('closes itself on time and puts the door back to silence', async () => {

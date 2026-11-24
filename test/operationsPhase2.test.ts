@@ -15,15 +15,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { agentArchiveName, restoreAgentFromBackup, restoreSafetyDir } from '../src/orchestrator/backups.js';
-import { captureSnapshot, restoreSnapshot, resumeSnapshotRestore } from '../src/orchestrator/snapshots.js';
-import { archiveAgent } from '../src/orchestrator/archive.js';
-import { clearBusy } from '../src/orchestrator/busy.js';
+import { agentArchiveName, restoreAgentFromBackup, restoreSafetyDir } from '../src/orchestrator/backups/backupFiles.js';
+import { captureSnapshot, restoreSnapshot, resumeSnapshotRestore } from '../src/orchestrator/files/snapshots.js';
+import { archiveAgent } from '../src/orchestrator/lifecycle/archive.js';
+import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
 import {
   beginOperation, markInterrupted, newBootForTests, operationRefusal, setStepHookForTests, SimulatedCrash, STEPS,
-} from '../src/orchestrator/operations.js';
-import { recoverOperation, resumeOperations, retryHeldOperations, type ResumeContext } from '../src/orchestrator/operationsResume.js';
-import { reconcileAgents } from '../src/orchestrator/reconcile.js';
+} from '../src/orchestrator/lifecycle/operations.js';
+import { recoverOperation, resumeOperations, retryHeldOperations, type ResumeContext } from '../src/orchestrator/lifecycle/operationsResume.js';
+import { reconcileAgents } from '../src/orchestrator/lifecycle/reconcile.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { as, MemSecrets, makeWorld, seedRunningAgent, type World } from './support/world.js';

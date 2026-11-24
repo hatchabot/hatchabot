@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { eventLabel, IN_PROGRESS } from '../src/orchestrator/eventLabels.js';
+import { eventLabel, IN_PROGRESS } from '../src/orchestrator/health/eventLabels.js';
 
 /**
  * The Setup log: an agent's own event trail in plain words, and — while it

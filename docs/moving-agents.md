@@ -65,11 +65,11 @@ many agents you can run — not CPU or memory. A workspace you are adopting
 almost always already owns a bot, so:
 
 ```sh
-hatchabot adopt ~/.openclaw/workspace-event-planner "Event Planner" --reuse-bot
+hatchabot adopt ~/.openclaw/workspace-meal-planner "Meal Planner" --reuse-bot
 ```
 
 takes that bot over. It costs no new slot, and everyone who already messages
-`@CnfAdvBot` keeps the same conversation instead of being handed a stranger.
+`@MealPlannerBot` keeps the same conversation instead of being handed a stranger.
 The people on its allowlist come across as members too, so nobody — including
 you — has to pair with an agent they were already talking to. (In the web
 adopt flow this is the **"Take over its bot @…"** checkbox, on by default.)
@@ -79,9 +79,15 @@ the old instance still has that bot switched on, and tells you how to hand it
 over:
 
 ```sh
-openclaw config set channels.telegram.accounts.CnfAdvBot.enabled false
-systemctl --user restart openclaw-gateway
+openclaw config set channels.telegram.accounts.MealPlannerBot.enabled false
+systemctl --user restart openclaw-gateway   # on Linux
+openclaw gateway restart                    # on a Mac
 ```
+
+The restart line is the gateway restart Hatchabot itself uses when it hands a
+bot over: on Linux, OpenClaw's systemd user unit (`openclaw-gateway`, or the
+one `HATCHABOT_OPENCLAW_GATEWAY_UNIT` names); on a Mac, OpenClaw's own
+command, since launchd runs its gateway there.
 
 It checks the old instance's own config for this, not Telegram: a poller
 resting between long-polls is indistinguishable from no poller at all, so

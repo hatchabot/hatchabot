@@ -470,6 +470,50 @@ describe('fences that do not balance never cost the agent text (HB-0520)', () =>
       expect(performance.now() - t).toBeLessThan(3000);
     }
   });
+
+  it('many deep fences that never close are read in one pass, not once each to the end of the file (HB-0921)', () => {
+    // Legal Markdown well inside a file's size limit: each line an indented
+    // fence with an info string, so none closes another.
+    const doc = '    ```example\n'.repeat(25_000);
+    const t = performance.now();
+    const read = readFences(doc);
+    expect(performance.now() - t).toBeLessThan(2000);
+    expect(read.indented.every((x) => !x)).toBe(true);
+    expect(replaceSection(doc, DATA_SOURCES_HEADING, SEC)).toContain(DATA_SOURCES_HEADING);
+  });
+
+  it('deep fences read in one pass mean what they did: a deep fence opens only where something after it closes it (HB-0921)', () => {
+    // The reading before HB-0921, kept here to compare with: a deep fence
+    // still open at the end of the file is text, and the rest is read again
+    // from the line after it.
+    const before = (lines: string[], exact: boolean): boolean[] => {
+      const any = /^[ \t]*(`{3,}|~{3,})(.*)$/;
+      const shallow = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+      const inFence: boolean[] = [];
+      const text = new Set<number>();
+      let open: { ch: string; len: number; at: number; deep: boolean } | null = null;
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i]!.replace(/\r$/, '');
+        const m = any.exec(l);
+        if (open === null) {
+          inFence[i] = false;
+          if (m && !text.has(i)) open = { ch: m[1]![0]!, len: m[1]!.length, at: i, deep: !shallow.test(l) };
+        } else {
+          inFence[i] = true;
+          if (m && m[1]![0] === open.ch && (exact ? m[1]!.length === open.len : m[1]!.length >= open.len) && m[2]!.trim() === '') open = null;
+        }
+        if (i === lines.length - 1 && open?.deep) { text.add(open.at); i = open.at; open = null; }
+      }
+      return inFence;
+    };
+    const kinds = ['```', '````', '~~~', '    ```', '    ````', '\t~~~', '    ```js', '```js', 'text', '## Data sources', '    ~~~~', '  ```\r'];
+    let seed = 7;
+    const rand = (n: number) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n; };
+    for (let round = 0; round < 400; round++) {
+      const lines = Array.from({ length: 1 + rand(14) }, () => kinds[rand(kinds.length)]!);
+      expect(readFences(lines.join('\n')).indented, lines.join(' | ')).toEqual(before(lines, false));
+    }
+  });
 });
 
 describe('removeSection', () => {

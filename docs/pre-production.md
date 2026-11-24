@@ -43,7 +43,7 @@ A Claude Max AI source came in two flavours:
 
 **What is in the code now:**
 
-- `buildRuntimeSpec` (`src/orchestrator/provision.ts`) mounts `claudeAuthDir()`
+- `buildRuntimeSpec` (`src/orchestrator/lifecycle/provision.ts`) mounts `claudeAuthDir()`
   only when `profile.ownerId === agent.ownerId`: the backstop.
 - `PATCH /v1/ai-profiles/:id` refuses to mark a machine-login source shared.
 - Creating an agent, switching its source, a class's source and the bulk

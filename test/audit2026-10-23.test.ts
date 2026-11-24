@@ -8,11 +8,11 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
-import { runBudgets, type BudgetDeps } from '../src/orchestrator/budgets.js';
-import { HOUR_FIELDS, type WindowModelStats } from '../src/orchestrator/usage.js';
-import { exportAgent, importAgent } from '../src/orchestrator/transfer.js';
-import { buildRuntimeSpec } from '../src/orchestrator/provision.js';
-import { sampleAgentUsage } from '../src/orchestrator/sourceUsage.js';
+import { runBudgets, type BudgetDeps } from '../src/orchestrator/usage/budgets.js';
+import { HOUR_FIELDS, type WindowModelStats } from '../src/orchestrator/usage/usage.js';
+import { exportAgent, importAgent } from '../src/orchestrator/transfer/transfer.js';
+import { buildRuntimeSpec } from '../src/orchestrator/lifecycle/provision.js';
+import { sampleAgentUsage } from '../src/orchestrator/usage/sourceUsage.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 
 /**
@@ -134,6 +134,23 @@ describe('a body of the wrong shape answers 400, not 500 (routes-a #3)', () => {
     expect((await w.f.inject({ method: 'PUT', url: `/v1/agent-classes/${made.json().class.id}`, headers: H, payload: { name: { x: 1 } } })).statusCode).toBe(400);
     expect((await w.f.inject({ method: 'POST', url: '/v1/cli-tokens', headers: H, payload: { label: 7 } })).statusCode).toBe(400);
     expect((await w.f.inject({ method: 'POST', url: '/v1/cli-tokens', headers: H, payload: { label: 'x'.repeat(65) } })).statusCode).toBe(400);
+  });
+
+  it('CLI tokens: each field in its own words, label first; a body that is not an object is refused too (HB-0814)', async () => {
+    const w = await routesWorld();
+    const post = (payload: unknown) => w.f.inject({ method: 'POST', url: '/v1/cli-tokens', headers: H, payload: payload as never });
+    expect((await post({ label: null })).json()).toEqual({ error: 'label: a string of up to 64 characters.' });
+    expect((await post({ label: 7, scope: 'all' })).json()).toEqual({ error: 'label: a string of up to 64 characters.' });
+    expect((await post({ scope: 'all' })).json()).toEqual({ error: "scope must be 'rehost' or absent" });
+    expect((await post({ scope: null })).json()).toEqual({ error: "scope must be 'rehost' or absent" });
+    // Was a token with the default label; a 400 now, and nothing is made.
+    const list = await post([1]);
+    expect(list.statusCode).toBe(400);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/cli-tokens', headers: H })).json()).toEqual([]);
+    // No body, or {}: a token labelled CLI, as before.
+    const made = await w.f.inject({ method: 'POST', url: '/v1/cli-tokens', headers: H });
+    expect(made.statusCode).toBe(201);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/cli-tokens', headers: H })).json()).toMatchObject([{ label: 'CLI' }]);
   });
 });
 

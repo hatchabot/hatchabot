@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, keepOnlyTelegramAccountScript } from '../src/orchestrator/members.js';
+import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, keepOnlyTelegramAccountScript } from '../src/orchestrator/members/members.js';
 
 /**
  * The scripts Hatchabot runs on an agent's volume to change its members

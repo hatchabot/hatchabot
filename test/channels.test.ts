@@ -291,7 +291,7 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     expect(Date.parse(parked.rename_after)).toBeGreaterThan(Date.now()); // deferred, not now
   });
 
-  it('a lease taken during the farewell keeps its name: the idle name is parked only on a free bot (2026-10-09)', async () => {
+  it('no lease is taken during the farewell, and one taken after it keeps its name over the idle one (2026-10-09, HB-1048)', async () => {
     let inFarewell!: () => void;
     let letGo!: () => void;
     const entered = new Promise<void>((r) => { inFarewell = r; });
@@ -311,10 +311,12 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
 
     const releasing = pool.release('recycled');
     await entered;
-    // The lease is already cleared: another agent takes the bot meanwhile.
-    await pool.provision({ agentId: 'a2', agentName: 'Second Agent', slug: 'second' });
+    // Held for its farewell: another agent asking meanwhile is not given it,
+    // or its "this bot is now …" came before the farewell (HB-1048).
+    await expect(pool.provision({ agentId: 'a2', agentName: 'Second Agent', slug: 'second' })).rejects.toThrow(/exhausted/);
     letGo();
     await releasing;
+    await pool.provision({ agentId: 'a2', agentName: 'Second Agent', slug: 'second' });
 
     const row = db.prepare(`SELECT leased_to, desired_name FROM telegram_pool WHERE username='recycled'`).get() as any;
     expect(row.leased_to).toBe('a2');
@@ -663,5 +665,39 @@ describe('a re-leased pool bot and its farewells (HB-0051, HB-0039)', () => {
     await pool.release('recycled', { agentId: 'a1' });
     expect(slept).toEqual([]);
     expect(events.find(([e]) => e === 'pool.farewell')?.[1]).toMatchObject({ sent: 2, failed: 1 });
+  });
+
+  it('the farewell has a deadline in all: Telegram timing out for every member holds a release a minute, not five (HB-0989)', async () => {
+    let clock = 1_000_000;
+    let sends = 0;
+    let timingOut = true;
+    const fetchImpl = (async (url: any) => {
+      if (!String(url).endsWith('/sendMessage')) return json({ ok: true });
+      sends++;
+      if (timingOut) { clock += 5000; throw new Error('simulated request timeout'); }
+      return json({ ok: true });
+    }) as unknown as typeof fetch;
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE memberships (agent_id TEXT, channel_user_id TEXT, status TEXT)`);
+    for (let i = 1; i <= 64; i++) db.prepare(`INSERT INTO memberships VALUES ('a1', ?, 'active')`).run(String(7000 + i));
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), {
+      fetchImpl, now: () => clock, sleep: async () => {}, log: (e, d) => events.push([e, d]),
+    });
+    await pool.addToPool('recycled', 'tok');
+    await pool.provision(REQ);
+    const start = clock;
+    sends = 0;
+    await pool.release('recycled', { agentId: 'a1' });
+    expect(clock - start).toBeLessThanOrEqual(60_000);
+    expect(sends).toBe(12);
+    expect(events.find(([e]) => e === 'pool.farewell')?.[1]).toMatchObject({ sent: 0, failed: 64, outOfTime: 52 });
+    // Telegram answering: everyone is told, however many, as before.
+    timingOut = false;
+    await pool.provision(REQ); // (its notice to the people the bot wrote to before is not a farewell)
+    sends = 0; events.length = 0;
+    await pool.release('recycled', { agentId: 'a1' });
+    expect(sends).toBe(64);
+    expect(events.find(([e]) => e === 'pool.farewell')?.[1]).toEqual({ agentId: 'a1', reason: 'deleted', sent: 64, failed: 0 });
   });
 });

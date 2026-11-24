@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { slugify } from '../src/orchestrator/provision.js';
+import { slugify } from '../src/orchestrator/lifecycle/provision.js';
 import { regexpEscape } from '../src/domain/regexpEscape.js';
 
 /** slugify as it was before HB-0617, with the quadratic `-+$` trim, to compare against. */

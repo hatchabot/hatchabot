@@ -150,7 +150,9 @@ export const STUB = `(() => {
     const path = String(typeof input === 'string' ? input : input.url).split('?')[0];
     let body = R[path];
     if (body === undefined) {
-      body = /\\/pairing$/.test(path) ? [] : /\\/members$/.test(path) ? [] : /\\/crons$/.test(path) ? []
+      // A runner's image copy: none under way, as the server says it (an empty answer was taken for one that never
+      // ends, and its follower read every 3 s through every later check: HB-1295).
+      body = /\\/pairing$/.test(path) || path === '/v1/pending' ? [] : /\\/install-image$/.test(path) ? { idle: true } : /\\/members$/.test(path) ? [] : /\\/crons$/.test(path) ? []
         : /\\/peers$/.test(path) ? { peers: [], candidates: [] } : /\\/snapshots$/.test(path) ? [] : {};
     }
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });

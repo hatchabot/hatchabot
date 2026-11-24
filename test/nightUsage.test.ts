@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store, tokenRise } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { sampleAgentUsage, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/sourceUsage.js';
+import { sampleAgentUsage, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/usage/sourceUsage.js';
 import { totalOf } from './helpers/usageFake.js';
-import { runPostureSweep } from '../src/orchestrator/posture.js';
+import { runPostureSweep } from '../src/orchestrator/health/posture.js';
 
 // Night review, 2026-09-27: usage, limits and sweeps.
 
@@ -123,7 +123,7 @@ describe('real usage, backfilled (2026-09-28)', () => {
     const Database = (await import('better-sqlite3')).default;
     const { Store } = await import('../src/store/store.js');
     const { MockProvider } = await import('../src/providers/mockProvider.js');
-    const { sampleAgentUsage } = await import('../src/orchestrator/sourceUsage.js');
+    const { sampleAgentUsage } = await import('../src/orchestrator/usage/sourceUsage.js');
     const store = new Store(new Database(':memory:'));
     const provider = new MockProvider();
     const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'k', workspace: { files: {}, configPatch: { agentId: 'k', authMode: 'api-key' } }, env: {} } as never);

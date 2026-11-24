@@ -11,8 +11,9 @@
  *   node scripts/live.mjs run <name> [--note <text>] [-- <the test's own arguments>]
  *   node scripts/live.mjs gate <tag>                exit 1 when anything is due (promote.sh)
  *
- * A test is due for a release when it has never passed, or when a file in its
- * area changed between the release it last passed on and that one.
+ * A test is due for a release when it has never passed, when a file in its
+ * area changed between the release it last passed on and that one, or when a
+ * run since that pass, up to that release, failed.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, createWriteStream, existsSync, mkdtempSync, readFileSync } from 'node:fs';
@@ -50,67 +51,78 @@ export const LIVE_TESTS = [
     name: 'runner-scenarios', cmd: ['node', 'scripts/runner-scenarios.mjs'], against: 'install', minutes: '20–40', aiTurns: false,
     needs: 'a runner (Settings → Hosts); pass -- --runner "<name>", and --old-image <a pre-2026.8 image on it> once it is current',
     proves: 'moves and rebuilds between this machine and a runner across OpenClaw versions; each machine\'s memory search; Install image',
-    area: ['src/orchestrator/moveHost.ts', 'src/orchestrator/transfer.ts', 'src/orchestrator/runnerSetup.ts', 'src/orchestrator/provision.ts', 'src/embedder', 'src/providers', 'src/openclaw/configWriter.ts', 'scripts/runner-scenarios.mjs',
-      { path: ROUTES, near: /'\/v1\/(hosts|embedder|embed-)|'\/v1\/agents\/:id\/(move-host|rebuild|events)'/ }, { path: STORE, near: /host|embed/i }],
+    area: ['src/orchestrator/transfer/moveHost.ts', 'src/orchestrator/transfer/transfer.ts', 'src/orchestrator/machines/runnerSetup.ts', 'src/orchestrator/machines/hosts.ts', 'src/orchestrator/machines/imageInstalls.ts', 'src/orchestrator/lifecycle/provision.ts', 'src/embedder', 'src/orchestrator/memorySearch/memorySearch.ts', 'src/providers', 'src/openclaw/configWriter.ts', 'scripts/runner-scenarios.mjs',
+      { path: ROUTES, near: /'\/v1\/agents\/:id\/(rebuild|events)'/ }, { path: 'src/api/embedderRoutes.ts', near: /'\/v1\/(embedder|embed-)/ }, { path: 'src/api/machineRoutes.ts', near: /'\/v1\/hosts/ }, { path: 'src/api/healthRoutes.ts', near: /'\/v1\/agents\/:id\/events'/ },
+      // Move-host's route and its rules moved to the moves, import and export service (HB-0808 step 12).
+      'src/orchestrator/transfer/moves.ts', { path: 'src/api/transferRoutes.ts', near: /'\/v1\/agents\/:id\/move-host'/ },
+      // Rebuild's route moved with the agent lifecycle (HB-0808 step 11).
+      { path: 'src/api/lifecycleRoutes.ts', near: /'\/v1\/agents\/:id\/rebuild'/ }, { path: STORE, near: /host|embed/i }],
   },
   {
     name: 'transfer', cmd: ['node', 'scripts/transfer-scenarios.mjs'], against: 'install', minutes: '10–15', aiTurns: false,
     needs: 'room for 3 agents under the account\'s agent limit; Hatchabot 2.150.0+ (web-only clones)',
     proves: 'clone, a template shared with its memory and imported, and download → delete → restore: each copy runs web-only and still finds its notes by meaning',
-    area: ['src/orchestrator/transfer.ts', 'src/orchestrator/template.ts', 'src/orchestrator/provision.ts', 'scripts/transfer-scenarios.mjs', LIB,
-      { path: ROUTES, near: /'\/v1\/agents\/(:id\/)?(clone|export|backup|import|restore)'/ }, { path: CLI, near: /case '(clone|share|export|import|download|backup|restore)'/ }],
+    // Clone, export, download, import and restore are the moves, import and export service's (HB-0808 step 12).
+    area: ['src/orchestrator/transfer/transfer.ts', 'src/orchestrator/transfer/template.ts', 'src/orchestrator/lifecycle/provision.ts', 'src/orchestrator/transfer/copies.ts', 'scripts/transfer-scenarios.mjs', LIB,
+      { path: 'src/api/transferRoutes.ts', near: /'\/v1\/agents\/(:id\/)?(clone|export|backup|import|restore)'/ }, { path: CLI, near: /case '(clone|share|export|import|download|backup|restore)'/ }],
   },
   {
     name: 'apps', cmd: ['node', 'scripts/app-scenarios.mjs'], against: 'install', minutes: '10–15', aiTurns: false,
     needs: 'room for 1 agent under the account\'s agent limit',
     proves: 'an app installs into an agent (its tests run there), its scheduled command runs by itself, updates keep its config, a release with failing tests is refused, rollback and stop work',
-    area: ['src/orchestrator/apps.ts', 'scripts/app-scenarios.mjs', LIB,
-      { path: ROUTES, near: /'\/v1\/(agents\/:id\/app|apps)\b/ }, { path: CLI, near: /case '(app|data)'/ }],
+    area: ['src/orchestrator/apps/apps.ts', 'src/orchestrator/apps/agentApps.ts', 'scripts/app-scenarios.mjs', LIB,
+      { path: 'src/api/appRoutes.ts', near: /'\/v1\/(agents\/:id\/app|apps)\b/ }, { path: CLI, near: /case '(app|data)'/ }],
   },
   {
     name: 'console', cmd: ['node', 'scripts/console-scenarios.mjs'], against: 'install', minutes: '2–5', aiTurns: false,
     needs: 'HATCHABOT_PUBLIC_URL (the HTTPS address other devices use); room for 1 agent',
-    proves: 'a real browser opens an agent\'s console at the public address: a secure context, its app starts, its live connection to the agent opens and carries messages',
-    area: ['src/api/consoleProxy.ts', 'src/api/controlUiRebase.ts', 'src/api/controlUiMath.ts', 'web/control-ui-math.js', 'web/control-ui-math-source.js', 'web/control-ui-math.css', 'src/api/consoleSockets.ts', 'src/orchestrator/consoleAccess.ts', 'src/orchestrator/voice.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs', LIB,
-      { path: ROUTES, near: /\/voice|readVoiceStatus/ }, { path: 'web/index.html', near: /voice|Voice|openGateway|pageSessionEnded/ }],
+    proves: 'the app\'s own page at the public address runs whole under its policy, which runs no inline script (signed out, with Google\'s sign-in in identity mode, and signed in; HB-0812); a real browser opens an agent\'s console there: a secure context, its app starts, its live connection to the agent opens and carries messages',
+    area: ['src/api/publicAccess.ts', 'src/api/pageRoutes.ts', 'web/sw.js', 'src/api/consoleProxy.ts', 'src/api/controlUiRebase.ts', 'src/api/controlUiMath.ts', 'web/control-ui-math.js', 'web/control-ui-math-source.js', 'web/control-ui-math.css', 'src/api/consoleRoutes.ts', 'src/orchestrator/console/consoleGate.ts', 'src/orchestrator/console/consoleSockets.ts', 'src/orchestrator/console/consoleAccess.ts', 'src/orchestrator/voice/voice.ts', 'src/orchestrator/voice/agentVoice.ts', 'src/api/voiceRoutes.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs', LIB,
+      { path: ROUTES, near: /\/voice|readVoiceStatus/ }, { path: 'web/index.html', near: /voice|Voice|openGateway|pageSessionEnded|<script|<meta/ }, { path: 'web/app/', near: /voice|Voice|openGateway|pageSessionEnded|HATCHABOT_VERSION|hatchabot-version|accounts\.google/ }],
   },
   {
     name: 'browser', cmd: ['node', 'scripts/browser-scenarios.mjs'], against: 'install', minutes: '11–16', aiTurns: false,
     needs: 'room for 1 agent; internet from the agents',
     proves: 'an agent\'s own browser: off by default, switched on it opens and reads a real page, holds none of the agent\'s files, refuses scripts and private addresses, can be signed in to a site through the sign-in panel (the agent then carries on signed in), keeps that sign-in through a restart with Keep its logins on and loses it after Forget logins, follows an agent restart, and is removed when switched off, its kept logins with it',
-    area: ['src/orchestrator/browser.ts', 'src/orchestrator/browserPanel.ts', 'src/orchestrator/browserLogins.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs', LIB,
-      { path: ROUTES, near: /browser/i }, { path: 'src/orchestrator/provision.ts', near: /browser/i }, { path: CLI, near: /case '(start|stop)'/ }],
+    area: ['src/orchestrator/console/browser.ts', 'src/orchestrator/console/agentBrowsers.ts', 'src/orchestrator/console/signInPanels.ts', 'src/orchestrator/console/browserPanel.ts', 'src/orchestrator/console/browserLogins.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs', LIB,
+      { path: ROUTES, near: /browser/i }, { path: 'src/orchestrator/lifecycle/agentEdits.ts', near: /browser/i }, { path: 'src/api/browserRoutes.ts', near: /browser/i }, { path: 'src/orchestrator/lifecycle/rebuildQueue.ts', near: /browser/i }, { path: 'src/orchestrator/lifecycle/provision.ts', near: /browser/i }, { path: CLI, near: /case '(start|stop)'/ }],
   },
   {
     name: 'google-plain-request', cmd: ['node_modules/.bin/tsx', 'scripts/google-scenarios.mjs'], against: 'install', minutes: '3–5', aiTurns: 'one',
     needs: 'room for 1 agent; no Google account (a stand-in gog over a made-up mailbox)',
     proves: 'under Code Mode, an agent told of an attached account runs gog for a plain request that names no command, and answers from the result',
-    area: ['docker', 'src/openclaw/workspace.ts', 'src/openclaw/skills.ts', 'scripts/google-scenarios.mjs', LIB, { path: 'src/orchestrator/provision.ts', near: /google/i }],
+    area: ['docker', 'src/openclaw/workspace.ts', 'src/openclaw/skills.ts', 'scripts/google-scenarios.mjs', LIB, { path: 'src/orchestrator/lifecycle/provision.ts', near: /google/i }],
   },
   {
     name: 'skills', cmd: ['node', 'scripts/skills-scenarios.mjs'], against: 'install', minutes: '10–18', aiTurns: 'two',
     needs: 'room for 1 web-only agent and a configured AI source; no Google account or external browser service',
-    proves: 'selection reaches the runtime, customized instructions survive disable/re-enable and explicit replacement/rollback, a plain Code Mode task invokes its skill fixture, and isolated practice observes skill and sample reads',
-    area: ['src/openclaw/skills.ts', 'src/openclaw/workspace.ts', 'src/openclaw/configWriter.ts', 'src/orchestrator/skillsStatus.ts', 'src/orchestrator/skillFiles.ts', 'src/orchestrator/skillTrials.ts', 'src/orchestrator/provision.ts', 'scripts/skills-scenarios.mjs', LIB,
+    proves: 'selection reaches the runtime, customized instructions survive disable/re-enable and explicit replacement/rollback, a plain Code Mode task invokes its skill fixture, and isolated practice observes skill and sample reads, its tokens in the agent\'s usage exactly once',
+    area: ['src/openclaw/skills.ts', 'src/openclaw/workspace.ts', 'src/openclaw/configWriter.ts', 'src/orchestrator/skills/skillsStatus.ts', 'src/orchestrator/skills/skillFiles.ts', 'src/orchestrator/skills/skillTrials.ts', 'src/orchestrator/skills/skills.ts', 'src/api/skillRoutes.ts', 'src/orchestrator/lifecycle/provision.ts', 'scripts/skills-scenarios.mjs', LIB,
+      'src/orchestrator/usage/practiceUsage.ts', { path: 'src/api/usageRoutes.ts', near: /practice/i },
       { path: ROUTES, near: /\/skills|readSkillsStatus/ }, { path: STORE, near: /curatedSkills|curated_skills/i }],
   },
   {
     name: 'candidate-gate', cmd: ['bash', 'scripts/candidate-gate.sh'], defaultArgs: ['hatchabot-runtime:latest'], against: 'install', minutes: '5–10', aiTurns: 'one',
     needs: 'the image to check (default: this machine\'s default image)',
     proves: 'an agent on that image builds, answers, and keeps its memory search and tools',
-    area: ['docker', 'scripts/build-runtime-image.sh', 'scripts/runtime-pins.mjs', 'scripts/candidate-gate.sh', 'src/openclaw', 'src/orchestrator/provision.ts'],
+    area: ['docker', 'scripts/build-runtime-image.sh', 'scripts/runtime-pins.mjs', 'scripts/candidate-gate.sh', 'src/openclaw', 'src/orchestrator/lifecycle/provision.ts'],
   },
   {
     name: 'regress-autonomous', cmd: ['bash', 'scripts/regress-autonomous.sh'], against: 'install', minutes: '10–15', aiTurns: 'about eight',
     needs: 'nothing beyond the live install',
     proves: 'an agent made from the CLI answers, remembers, runs a task on demand and on its schedule, pauses, and keeps both across a restart',
-    area: ['src/openclaw', 'src/orchestrator/provision.ts', 'src/orchestrator/crons.ts', 'src/orchestrator/cronImport.ts', 'src/cli.ts', 'scripts/regress-autonomous.sh'],
+    // The CLI's `tasks` drives the cron routes (scheduleRoutes.ts) and the service's tasks (HB-0808).
+    // Its create, list and delete are the agent lifecycle service's records and list (HB-0808 step 11).
+    // Its `ask` is the memory service's turn (memoryTurns.ts) behind POST /v1/agents/:id/ask (memoryRoutes.ts, HB-0808 step 13).
+    area: ['src/openclaw', 'src/orchestrator/lifecycle/provision.ts', 'src/orchestrator/schedules/crons.ts', 'src/orchestrator/transfer/cronImport.ts', 'src/api/scheduleRoutes.ts', 'src/orchestrator/schedules/tasks.ts', 'src/cli.ts', 'scripts/regress-autonomous.sh',
+      'src/orchestrator/lifecycle/agentRecords.ts', 'src/orchestrator/lifecycle/agentList.ts', { path: 'src/api/lifecycleRoutes.ts', near: /'\/v1\/agents(\/:id)?'/ },
+      'src/orchestrator/memory/memoryTurns.ts', { path: 'src/api/memoryRoutes.ts', near: /'\/v1\/agents\/:id\/ask'/ }],
   },
   {
     name: 'restore-drill', cmd: ['bash', 'scripts/restore-drill.sh'], against: 'install', minutes: '10–60', aiTurns: false,
     needs: 'a nightly backup set (newest by default)',
     proves: 'the newest complete backup restores, every agent\'s archive into its own throwaway volume with no network, without touching the live system; its record lands under <backups>/drills',
-    area: ['scripts/backup-volumes.sh', 'scripts/restore-drill.sh', 'src/orchestrator/backups.ts', 'src/orchestrator/drills.ts', 'src/orchestrator/transfer.ts'],
+    area: ['scripts/backup-volumes.sh', 'scripts/restore-drill.sh', 'src/orchestrator/backups/backupFiles.ts', 'src/orchestrator/backups/drills.ts', 'src/orchestrator/transfer/transfer.ts'],
   },
   {
     name: 'upgrade-check', cmd: ['bash', 'scripts/upgrade-check.sh'], against: 'checkout', minutes: '2–5', aiTurns: false, parallel: true,
@@ -122,7 +134,8 @@ export const LIVE_TESTS = [
     name: 'smoke-adopt', cmd: ['bash', 'scripts/smoke.sh'], against: 'checkout', minutes: '5–10', aiTurns: false,
     needs: 'nothing (a throwaway control plane on its own ports); -- --with-telegram also takes over a bot from .env.smoke',
     proves: 'switching to Hatchabot: an OpenClaw agent is found and adopted web-only, its workspace and tasks arrive, its console answers, its data folder mounts',
-    area: ['src/orchestrator/adopt.ts', 'src/orchestrator/cronImport.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
+    // The adopt routes and the deferred adopts are the moves, import and export service's (HB-0808 step 12).
+    area: ['src/orchestrator/transfer/adopt.ts', 'src/orchestrator/transfer/cronImport.ts', 'src/orchestrator/transfer/adopts.ts', 'src/api/adoptRoutes.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
   },
   {
     name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', endsOnRelease: true, minutes: '20–40', aiTurns: 'about eight',
@@ -225,16 +238,21 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT, arch = process
   for (const t of tests) {
     if (t.onHold) continue;
     const manual = t.arch && t.arch !== arch ? { manual: `runs on an ${t.arch} machine, not this one (${arch})` } : {};
-    const passes = runs.filter((r) => r.test === t.name && r.result === 'pass' && tagExists(r.release) && atOrBefore(r.release, tag));
+    // Its runs on this release and the ones before it (a skip tests nothing).
+    const runsUpTo = runs.filter((r) => r.test === t.name && r.result !== 'skip' && tagExists(r.release) && atOrBefore(r.release, tag));
+    const passes = runsUpTo.filter((r) => r.result === 'pass');
     if (!passes.length) { out.push({ test: t.name, why: 'it has never passed (on this release or an earlier one)', ...manual }); continue; }
     // The latest pass: the release nearest the one being promoted.
     const last = passes.reduce((a, b) => (atOrBefore(a.release, b.release) ? b : a));
-    // Its latest run on this very release failed (a skip tests nothing):
-    // what failed there is not cleared by an earlier pass, on this release
-    // or another one (audit, 2026-10-20). Rows are in the order they ran.
-    const onTag = runs.filter((r) => r.test === t.name && r.release === tag && r.result !== 'skip');
-    const failed = onTag.length > 0 && onTag[onTag.length - 1].result === 'fail'
-      ? { test: t.name, why: `its latest run on ${tag} failed`, ...manual } : null;
+    // A run that failed after that pass, on its release or a later one up to
+    // this one: what failed there is not cleared by the earlier pass (audit,
+    // 2026-10-20) — nor forgotten by a later release that changed nothing in
+    // its area (HB-1069). Rows are in the order they ran.
+    const lastAt = runs.indexOf(last);
+    const since = runsUpTo.filter((r) => r.result === 'fail' && (r.release === last.release ? runs.indexOf(r) > lastAt : atOrBefore(last.release, r.release)));
+    const latestFail = since.length ? since.reduce((a, b) => (atOrBefore(a.release, b.release) ? b : a)) : null;
+    const failed = latestFail
+      ? { test: t.name, why: latestFail.release === tag ? `its latest run on ${tag} failed` : `its latest run on ${latestFail.release} failed, and it has not passed since`, ...manual } : null;
     if (last.release === tag) { if (failed) out.push(failed); continue; }
     // Not tied to files: what it checks (everything GitHub serves) changes
     // with every release.
@@ -245,8 +263,12 @@ export function dueFor(tag, runs, tests = LIVE_TESTS, cwd = ROOT, arch = process
         .filter((f) => !versionOnly(git, last.release, tag, f))
       : [];
     for (const n of t.area.filter((x) => typeof x !== 'string')) {
-      if (changed.includes(n.path)) continue;
-      if (touches(git, last.release, tag, n.path, n.near)) changed.push(`${n.path} (where it uses it)`);
+      // A folder (web/app/, the page's scripts since HB-0811): each of its files that changed.
+      const files = n.path.endsWith('/') ? git('diff', '--name-only', last.release, tag, '--', n.path).stdout.trim().split('\n').filter(Boolean) : [n.path];
+      for (const file of files) {
+        if (changed.includes(file)) continue;
+        if (touches(git, last.release, tag, file, n.near)) { changed.push(`${file} (where it uses it)`); break; }
+      }
     }
     if (changed.length) out.push({ test: t.name, why: `${changed.length} file(s) in its area changed since it passed on ${last.release}: ${changed.slice(0, 4).join(', ')}${changed.length > 4 ? ', …' : ''}`, ...manual });
     else if (failed) out.push(failed);

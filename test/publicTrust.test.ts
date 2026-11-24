@@ -5,6 +5,10 @@ import { Jar, PUBLIC_HOST, publicApp, type PublicApp } from './helpers/publicApp
 import { internalHeaders } from '../src/api/principal.js';
 import { setupCode } from '../src/api/accountsAuth.js';
 import { approximateSource, isPublic, publicClientAddress, publicReplayHeaders } from '../src/api/trust.js';
+import { noteFailure, throttled, _loginThrottleKeys } from '../src/api/auth.js';
+import type { Store } from '../src/store/store.js';
+import { totp } from '../src/api/totp.js';
+import { privCookie } from './helpers/publicWorld.js';
 
 /**
  * Trust classes (docs/public-access.md, safeguard d): what arrives on the
@@ -156,6 +160,16 @@ describe('sign-in limits at the public address', () => {
     expect(JSON.stringify(bursts)).toContain('account owner');
   }, 30_000);
 
+  it('a name typed there with a line break in it is put on the record as that account, not as an address (HB-1389 review)', async () => {
+    const { h } = await ready({ env: { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '2' } });
+    for (const from of ['198.51.100.41', '198.51.100.42']) {
+      expect((await h.pub('/v1/login', { body: { username: 'made-up\nname', password: 'wrong' }, from })).status).toBe(401);
+    }
+    const bursts = h.store.listSecurityLog().filter((e) => e.kind === 'public.failure_burst').map((e) => e.detail.bucket);
+    // Was: "address 198.51.100.x", the address of the miss that filled the name's count.
+    expect(bursts).toEqual(['account made-up\nname']);
+  }, 20_000);
+
   it('a forwarded-for header on the PRIVATE listener from a non-loopback peer is not believed (unchanged)', async () => {
     const { h } = await ready({ env: { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '2' } });
     const bad = (xff: string) => h.app.inject({ method: 'POST', url: '/v1/login', remoteAddress: '192.0.2.50', payload: { username: 'nobody', password: 'x' }, headers: { 'x-forwarded-for': xff } });
@@ -182,6 +196,96 @@ describe('sign-in limits at the public address', () => {
       expect((await bad()).status).toBe(401);
     } finally { Date.now = realNow; }
   }, 30_000);
+
+  it('a lockout, and how often there has been one, outlive a restart (HB-0836)', async () => {
+    const env = { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '2' };
+    let { h: app } = await ready({ env });
+    const bad = () => app.pub('/v1/login', { body: { username: 'victim', password: 'wrong' }, from: '198.51.100.41' });
+    const badHere = () => app.app.inject({ method: 'POST', url: '/v1/login', payload: { username: 'victim', password: 'wrong' } });
+    /** The process ends, and another starts on the same database: nothing of the last one's memory is left. */
+    const restart = async () => {
+      const store = app.store;
+      await app.close();
+      app = h = await publicApp({ env, store });
+      await app.app.publicAccess!.evaluate();
+    };
+    const WINDOW = 15 * 60_000;
+    const realNow = Date.now;
+    try {
+      await bad(); await bad();
+      expect((await bad()).status).toBe(429);
+      // At the private address too: its own count, kept the same way.
+      expect((await badHere()).statusCode).toBe(401);
+      expect((await badHere()).statusCode).toBe(401);
+      expect((await badHere()).statusCode).toBe(429);
+      await restart();
+      expect((await bad()).status).toBe(429); // still locked out
+      expect((await badHere()).statusCode).toBe(429);
+      Date.now = () => realNow() + WINDOW + 1000;
+      expect((await bad()).status).toBe(401); // the first lock is over
+      expect((await bad()).status).toBe(401);
+      expect((await bad()).status).toBe(429);
+      await restart();
+      Date.now = () => realNow() + 2 * WINDOW + 2000;
+      expect((await bad()).status).toBe(429); // one window later: still locked, the second lock doubled across the restart
+      Date.now = () => realNow() + 3 * WINDOW + 3000;
+      expect((await bad()).status).toBe(401);
+    } finally { Date.now = realNow; }
+  }, 60_000);
+
+  it('a recovered account starts clean: its second factor, and how often it was locked out (HB-0836)', async () => {
+    const { h } = await ready({ env: { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '2' } });
+    const member = await h.addAccount('member', { totp: true });
+    const bad = (from: string) => h.pub('/v1/login', { body: { username: 'member', password: 'wrong' }, from });
+    const WINDOW = 15 * 60_000;
+    const realNow = Date.now;
+    try {
+      // Its second factor guessed at by someone who has its password: locked out.
+      const jar = new Jar();
+      expect((await h.pub('/v1/login', { body: { username: 'member', password: member.password }, jar, from: '198.51.100.70' })).status).toBe(200);
+      for (const from of ['198.51.100.70', '198.51.100.71']) expect((await h.pub('/v1/second-factor/verify', { body: { code: '000000' }, jar, from })).status).toBe(401);
+      expect((await h.pub('/v1/second-factor/verify', { body: { code: '000000' }, jar, from: '198.51.100.72' })).status).toBe(429);
+      // Its password guessed at: locked out, once.
+      await bad('198.51.100.73'); await bad('198.51.100.74');
+      expect((await bad('198.51.100.75')).status).toBe(429);
+      // Recovered with its code, at the public address, as a member may be.
+      const cookie = await privCookie(h, 'member', member.password);
+      const code: string = (await h.app.inject({ method: 'POST', url: '/v1/local-accounts/me/recovery-code', headers: { cookie }, payload: { current: member.password } })).json().recoveryCode;
+      const back = new Jar();
+      expect((await h.pub('/v1/local-accounts/recover-with-code', { jar: back, body: { username: 'member', code, password: 'the-member-chose-this' }, from: '198.51.100.76' })).status).toBe(200);
+      // Its second factor is taken again at once…
+      expect((await h.pub('/v1/second-factor/verify', { body: { code: totp(member.totpSecret!, Date.now() + 30_000) }, jar: back, from: '198.51.100.77' })).status).toBe(200);
+      // …and locked out again, its password is for one window, as a first lockout is, not two.
+      await bad('198.51.100.78'); await bad('198.51.100.79');
+      expect((await bad('198.51.100.80')).status).toBe(429);
+      Date.now = () => realNow() + WINDOW + 1000;
+      expect((await bad('198.51.100.81')).status).toBe(401);
+    } finally { Date.now = realNow; }
+  }, 60_000);
+
+  it('a recovery leaves the address\'s own count as it was: a reset button for the address limit is no one\'s (HB-0836)', async () => {
+    const { h } = await ready({ env: { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '2' } });
+    const member = await h.addAccount('member', { totp: true });
+    const WINDOW = 15 * 60_000;
+    const realNow = Date.now;
+    try {
+      // Its second factor guessed at from one address: that address, and the account, locked out.
+      const jar = new Jar();
+      expect((await h.pub('/v1/login', { body: { username: 'member', password: member.password }, jar, from: '198.51.100.90' })).status).toBe(200);
+      for (let i = 0; i < 2; i++) expect((await h.pub('/v1/second-factor/verify', { body: { code: '000000' }, jar, from: '198.51.100.90' })).status).toBe(401);
+      // Recovered with its code: the account's count is cleared, the address's is not.
+      const cookie = await privCookie(h, 'member', member.password);
+      const code: string = (await h.app.inject({ method: 'POST', url: '/v1/local-accounts/me/recovery-code', headers: { cookie }, payload: { current: member.password } })).json().recoveryCode;
+      const back = new Jar();
+      expect((await h.pub('/v1/local-accounts/recover-with-code', { jar: back, body: { username: 'member', code, password: 'the-member-chose-this' }, from: '198.51.100.91' })).status).toBe(200);
+      expect(_loginThrottleKeys()).toEqual(expect.arrayContaining(['2fa:pub:ip:198.51.100.90', '2fa:pub:all'])); // and the public ceiling's count stays too
+      const good = () => ({ code: totp(member.totpSecret!, Date.now() + 30_000) });
+      expect((await h.pub('/v1/second-factor/verify', { body: good(), jar: back, from: '198.51.100.90' })).status).toBe(429); // the address that ran up the misses, until its window ends
+      expect((await h.pub('/v1/second-factor/verify', { body: good(), jar: back, from: '198.51.100.92' })).status).toBe(200); // another address: taken
+      Date.now = () => realNow() + WINDOW + 1000;
+      expect((await h.pub('/v1/second-factor/verify', { body: good(), jar: back, from: '198.51.100.90' })).status).toBe(200); // and that one, once its window is over
+    } finally { Date.now = realNow; }
+  }, 60_000);
 
   it('a ceiling on all public failures together refuses every public sign-in, not the private ones', async () => {
     const { h, owner } = await ready({ env: { HATCHABOT_PUBLIC_FAILS_CEILING: '5', HATCHABOT_LOGIN_FAILS_PER_WINDOW: '10' } });
@@ -320,4 +424,124 @@ describe('who a public request acts as', () => {
     expect((await h.pub('/v1/second-factor/totp/confirm', { jar: linked, body: { id: start.json.id, code: totp(base32Decode(start.json.secret)) } })).status).toBe(200);
     expect((await h.pub('/v1/agents', { jar: linked })).status).toBe(200);
   });
+});
+
+/** A miss, or a look, at the private address from a loopback peer naming `from` as the client: a bucket of its own for each address and name. */
+const peer = (from: string) => ({ ip: '127.0.0.1', headers: { 'x-forwarded-for': from }, server: {}, log: { warn() {} } }) as never;
+const miss = (from: string, who: string | undefined, scope?: 'link' | '2fa') => noteFailure(peer(from), who, scope);
+const asked = (from: string, who: string, scope?: 'link' | '2fa') => throttled(peer(from), who, scope);
+
+describe('the sign-in counts kept across a restart stay few (HB-0836)', () => {
+  const db = (s: Store) => (s as unknown as { db: import('better-sqlite3').Database }).db;
+  const kept = (s: Store) => (db(s).prepare(`SELECT COUNT(*) AS n FROM rate_hits WHERE bucket LIKE 'signin:%'`).get() as { n: number }).n;
+
+  it('only a count that refuses is kept, and the table is pruned by an index, once a minute at most', async () => {
+    h = await publicApp({ env: { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '3' } });
+    // A flood of made-up addresses and names, each missed once: nothing kept, so nothing to read back.
+    for (let i = 0; i < 2000; i++) miss(`203.0.113.${i % 250}-${i}`, `made-up-user-${i}`);
+    expect(kept(h.store)).toBe(0);
+    // A name at its limit: kept, as many misses as it took. Its forwarded-for address is not: a loopback peer makes those up.
+    for (let i = 0; i < 3; i++) miss('198.51.100.60', 'victim');
+    expect(kept(h.store)).toBe(3);
+    // Made-up addresses each locked out by their link and second-factor misses: none kept either.
+    for (let i = 0; i < 200; i++) for (const scope of ['link', '2fa'] as const) for (let j = 0; j < 3; j++) miss(`203.0.113.${i % 250}-${i}`, undefined, scope);
+    expect(kept(h.store)).toBe(3);
+    // Misses past the limit (a burst let through together): no more kept, and written once, not at each.
+    const set = vi.spyOn(h.store, 'setRateCount');
+    try {
+      for (let i = 0; i < 2000; i++) miss(`198.51.100.${100 + (i % 100)}`, 'made-up-burst');
+      expect(kept(h.store)).toBe(6);
+      expect(set.mock.calls.filter(([bucket]) => bucket === 'signin:fail:user:made-up-burst')).toHaveLength(1);
+    } finally { set.mockRestore(); }
+    expect(JSON.stringify(db(h.store).prepare('EXPLAIN QUERY PLAN DELETE FROM rate_hits WHERE at < ?').all(0))).toContain('rate_hits_at');
+    const prepare = vi.spyOn(db(h.store), 'prepare');
+    try {
+      for (let i = 0; i < 50; i++) h.store.setRateCount(`signin:fail:made-up-${i}`, 1, Date.now() + 60_000);
+      expect(prepare.mock.calls.filter(([sql]) => /WHERE at < \?/.test(String(sql))).length).toBeLessThanOrEqual(1);
+    } finally { prepare.mockRestore(); }
+  }, 60_000);
+
+  it('read back under the bound the counts in memory are held to, the account being guessed at kept', async () => {
+    h = await publicApp();
+    const store = h.store;
+    const until = Date.now() + 10 * 60_000;
+    store.transact(() => {
+      for (let i = 0; i < 12_000; i++) store.setRateCount(`signin:fail:pub:ip:203.0.113.${i % 250}-${i}`, 1, until);
+      store.setRateCount('signin:fail:user:victim', 10, until);
+    });
+    await h.close();
+    h = await publicApp({ store });
+    const keys = _loginThrottleKeys();
+    expect(keys.length).toBeLessThanOrEqual(10_000);
+    expect(keys).toContain('user:victim');
+    expect(asked('198.51.100.61', 'victim')).toBe(true); // still locked out
+  }, 60_000);
+});
+
+describe('sign-in lockouts for made-up names (HB-1240)', () => {
+  const ENV = { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '2' };
+  /** /v1/login at the private address, from a client of its own each time (so only the name's count is shared). */
+  const login = (app: PublicApp, username: string, password: string, from: string) =>
+    app.app.inject({ method: 'POST', url: '/v1/login', payload: { username, password }, headers: { 'x-forwarded-for': from } });
+  const restart = async (app: PublicApp): Promise<PublicApp> => {
+    const store = app.store;
+    await app.close();
+    h = await publicApp({ env: ENV, store });
+    return h;
+  };
+
+  it('today\'s refusals, kept: the same words for a name whether or not it is an account, the limit before the password, and both kept across a restart', async () => {
+    let app = h = await publicApp({ env: ENV });
+    const victim = await app.addAccount('victim', { totp: false });
+    for (const [name, pw] of [['victim', 'wrong-one'], ['nobody-here', 'wrong-one']] as const) {
+      for (const from of ['198.51.100.11', '198.51.100.12']) {
+        const r = await login(app, name, pw, from);
+        expect(r.statusCode).toBe(401);
+        expect(r.json()).toEqual({ error: 'Wrong username or password' });
+      }
+    }
+    // Locked: refused before any password is checked, the right one included, in the same words for both.
+    for (const [name, pw] of [['victim', victim.password], ['nobody-here', 'wrong-one'], ['VICTIM', victim.password]] as const) {
+      const r = await login(app, name, pw, '198.51.100.13');
+      expect(r.statusCode).toBe(429);
+      expect(r.json()).toEqual({ error: 'Too many failed attempts — try again later.' });
+    }
+    app = await restart(app);
+    for (const name of ['victim', 'nobody-here']) {
+      const r = await login(app, name, name === 'victim' ? victim.password : 'x', '198.51.100.14');
+      expect(r.statusCode).toBe(429);
+      expect(r.json()).toEqual({ error: 'Too many failed attempts — try again later.' });
+    }
+    // Another account is untouched by both.
+    const other = await app.addAccount('other', { totp: false });
+    expect((await login(app, 'other', other.password, '198.51.100.15')).statusCode).toBe(200);
+  }, 60_000);
+
+  it('the store keeps a bounded number of made-up names, an account\'s count always, and below the bound a restart tells no name from an account', async () => {
+    let app = h = await publicApp({ env: ENV });
+    const victim = await app.addAccount('victim', { totp: false });
+    const kiosk = await app.addAccount('kiosk', { totp: false });
+    const rows = () => ((app.store as unknown as { db: import('better-sqlite3').Database }).db
+      .prepare(`SELECT COUNT(*) AS n FROM rate_hits WHERE bucket LIKE 'signin:fail:%user:%'`).get() as { n: number }).n;
+    /** A typed name missed to its limit (2), as /v1/login counts one, each miss from an address of its own. */
+    let n = 0;
+    const lockOut = (name: string) => { for (let j = 0; j < 2; j++) noteFailure(peer(`203.0.113.${n++ % 250}`), name, undefined, { typed: true }); };
+    // A flood of made-up names: the first 500 kept, as many misses as each took, and no more.
+    for (let i = 0; i < 600; i++) lockOut(`made-up-${i}`);
+    expect(rows()).toBe(500 * 2);
+    // An account locked out after the flood is kept all the same, under any spelling that is its count…
+    lockOut('victim');
+    lockOut('\u212Aiosk'); // a Kelvin sign: lower-cased, its count is kiosk's
+    expect(rows()).toBe(500 * 2 + 2 * 2);
+    // …and so through the route, where a made-up name past the bound is not.
+    for (const from of ['198.51.100.21', '198.51.100.22']) expect((await login(app, 'route-made-up', 'wrong-one', from)).statusCode).toBe(401);
+    expect(rows()).toBe(500 * 2 + 2 * 2);
+    app = await restart(app);
+    const after = async (name: string, pw: string) => (await login(app, name, pw, `198.51.100.${30 + n++ % 50}`)).statusCode;
+    expect(await after('victim', victim.password)).toBe(429);
+    expect(await after('kiosk', kiosk.password)).toBe(429);
+    expect(await after('made-up-0', 'x')).toBe(429); // below the bound: as an account's would be
+    expect(await after('made-up-599', 'x')).toBe(401); // past it: this process's only, so gone with the restart
+    expect(await after('route-made-up', 'x')).toBe(401);
+  }, 60_000);
 });

@@ -16,8 +16,11 @@ cd "$(dirname "$0")/.."
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.9.8}"
 # Where the built image lands. Follows HATCHABOT_IMAGE when that is set, so a
 # server pointed at another repo builds into the repo it actually reads
-# (HATCHABOT_IMAGE_REPO still wins if someone sets it explicitly).
-REPO="${HATCHABOT_IMAGE_REPO:-$(printf '%s' "${HATCHABOT_IMAGE:-hatchabot-runtime:latest}" | sed 's/:[^:/]*$//')}"
+# (HATCHABOT_IMAGE_REPO still wins if someone sets it explicitly). Its digest
+# goes first: a default pinned by digest was read as the repository
+# "<name>@sha256", which no image can be tagged in (review of HB-1182;
+# imageRepository, src/domain/imageRepository.ts).
+REPO="${HATCHABOT_IMAGE_REPO:-$(printf '%s' "${HATCHABOT_IMAGE:-hatchabot-runtime:latest}" | sed -e 's/@[^/]*$//' -e 's/:[^:/]*$//')}"
 
 # The image TAG is normally the OpenClaw version, but the image can change
 # WITHOUT an OpenClaw bump — e.g. baking in the embedding provider, or new base
@@ -33,18 +36,32 @@ DEFAULT_OPENCLAW="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runti
 # names. An image with extras is never the plain version tag: it gets its own
 # name, so a candidate with packages can never be mistaken for the standard one.
 EXTRA_ARG=()
+PLUS=""   # the tag's -plus-… part, when the packages named it
 if [ -n "${EXTRA_PACKAGES:-}" ]; then
-  if ! printf '%s' "${EXTRA_PACKAGES}" | grep -qE '^[a-z0-9][a-z0-9+.-]*( [a-z0-9][a-z0-9+.-]*)*$'; then
-    echo "EXTRA_PACKAGES must be space-separated apt package names." >&2; exit 1
+  # Never a "-" at the end of a name: that is apt's remove operator ("curl-"
+  # removes curl). The app's rule (imageRecipe.ts APT_PACKAGE_NAME), HB-0972.
+  if ! printf '%s' "${EXTRA_PACKAGES}" | grep -qE '^[a-z0-9]([a-z0-9+.-]*[a-z0-9+])?( [a-z0-9]([a-z0-9+.-]*[a-z0-9+])?)*$'; then
+    echo "EXTRA_PACKAGES must be space-separated apt package names (none ending in -, which removes a package)." >&2; exit 1
   fi
   EXTRA_ARG=(--build-arg "EXTRA_PACKAGES=${EXTRA_PACKAGES}")
   if [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ]; then
-    NAMES="$(printf '%s' "${EXTRA_PACKAGES}" | tr ' ' '-')"
-    IMAGE_TAG="${OPENCLAW_VERSION}-plus-$(printf '%s' "$NAMES" | cut -c1-40)"
+    # A + is no character of a tag (g++, libstdc++6): written p. The tag
+    # docker refused, and the app's image name check after it (review of
+    # HB-1346).
+    NAMES="$(printf '%s' "${EXTRA_PACKAGES}" | tr ' +' '-p')"
+    PLUS="-plus-$(printf '%s' "$NAMES" | cut -c1-40)"
     # A list longer than the tag shows ends in a checksum of all of it: two
     # lists alike for forty characters got one tag, and building the second
     # replaced the image agents had pinned for the first (audit, 2026-10-29).
-    [ "${#NAMES}" -le 40 ] || IMAGE_TAG="${IMAGE_TAG}-$(printf '%s' "${EXTRA_PACKAGES}" | cksum | cut -d' ' -f1)"
+    # So does one with a name that holds a character other than a-z, 0-9
+    # and . (the names above hold only those, - and +): its names cannot be
+    # read back from the tag, and "python3 pip" and "python3-pip" both
+    # built -plus-python3-pip (HB-1346). Names of those alone keep their tag.
+    case "${EXTRA_PACKAGES}" in *[-+]*) ODD=1 ;; *) ODD=0 ;; esac
+    if [ "${#NAMES}" -gt 40 ] || [ "$ODD" = 1 ]; then
+      PLUS="${PLUS}-$(printf '%s' "${EXTRA_PACKAGES}" | cksum | cut -d' ' -f1)"
+    fi
+    IMAGE_TAG="${OPENCLAW_VERSION}${PLUS}"
   fi
   BUILD_LOCAL=1   # a published image never carries someone's extra packages
 fi
@@ -57,7 +74,11 @@ PINS="$(dirname "$0")/runtime-pins.mjs"
 # to bake, so those versions build `none` on their own. Leaving the engine out
 # of a version that could bake it gives the image its own tag (-lite), so it
 # is tried on one agent like any other candidate and never mistaken for the
-# standard one.
+# standard one. With packages too, -lite goes before them
+# (<version>-lite-plus-<names>): left to the version tag alone, the packages
+# had already renamed it, and the build with its engine and the one without
+# wrote one tag, the second replacing the first (HB-1120). Before, not after:
+# after, the names "jq" and "jq-lite" would meet again.
 ENGINE_RULE="$(node "$PINS" embed-engine "${OPENCLAW_VERSION}" 2>/dev/null || echo baked)"
 EMBED_ENGINE="${EMBED_ENGINE:-$ENGINE_RULE}"
 case "$EMBED_ENGINE" in baked|none) ;; *) echo "EMBED_ENGINE must be baked or none." >&2; exit 1;; esac
@@ -66,8 +87,8 @@ if [ "$EMBED_ENGINE" = baked ] && [ "$ENGINE_RULE" = none ]; then
   echo "Build it with EMBED_ENGINE=none: its agents use the shared memory search service." >&2
   exit 1
 fi
-if [ "$EMBED_ENGINE" = none ] && [ "$ENGINE_RULE" = baked ] && [ "$IMAGE_TAG" = "$OPENCLAW_VERSION" ]; then
-  IMAGE_TAG="${OPENCLAW_VERSION}-lite"
+if [ "$EMBED_ENGINE" = none ] && [ "$ENGINE_RULE" = baked ] && [ "$IMAGE_TAG" = "${OPENCLAW_VERSION}${PLUS}" ]; then
+  IMAGE_TAG="${OPENCLAW_VERSION}-lite${PLUS}"
 fi
 # Another Node, plugin pins or plugins for the OpenClaw this release publishes
 # make another image than the standard one: like extra packages and -lite, it
@@ -81,8 +102,16 @@ done
 if [ -n "$CUSTOM" ] && [ -z "$TAG_GIVEN" ] && [ "${OPENCLAW_VERSION}" = "${DEFAULT_OPENCLAW}" ]; then
   IMAGE_TAG="${IMAGE_TAG}-custom-$(printf '%s' "$CUSTOM" | cksum | cut -d' ' -f1)"
 fi
+# The same settings, by their names in the image's build-inputs label (HB-0986):
+# with IMAGE_TAG or without, the image says it was built with them, so another
+# machine never takes it for the standard image of its OpenClaw.
+SET_BY_HAND=""
+for pair in NODE_IMAGE:node CHANNEL_PLUGIN_VERSION:channel-plugins BAKED_PLUGINS:plugins PLUGIN_INSTALL:plugin-install LLAMA_CPP_PROVIDER_VERSION:embed-plugin; do
+  v="${pair%%:*}"
+  [ -z "${!v:-}" ] || SET_BY_HAND="${SET_BY_HAND:+${SET_BY_HAND},}${pair#*:}"
+done
 if [ "${DRYRUN:-0}" = 1 ]; then
-  echo "dry run: would build ${REPO}:${IMAGE_TAG} (OpenClaw ${OPENCLAW_VERSION}, engine ${EMBED_ENGINE})"
+  echo "dry run: would build ${REPO}:${IMAGE_TAG} (OpenClaw ${OPENCLAW_VERSION}, engine ${EMBED_ENGINE})${SET_BY_HAND:+, set by hand: ${SET_BY_HAND}}"
   exit 0
 fi
 
@@ -270,6 +299,7 @@ PREV_ID="$(docker image inspect --format '{{.Id}}' "${REPO}:${IMAGE_TAG}" 2>/dev
 docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
   --build-arg "EMBED_ENGINE=${EMBED_ENGINE}" \
+  --build-arg "SET_BY_HAND=${SET_BY_HAND}" \
   ${PLUGIN_ARG[@]+"${PLUGIN_ARG[@]}"} \
   ${NODE_ARG[@]+"${NODE_ARG[@]}"} \
   ${CHANNEL_ARG[@]+"${CHANNEL_ARG[@]}"} \

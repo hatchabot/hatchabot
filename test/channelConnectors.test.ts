@@ -80,20 +80,55 @@ describe('Slack', () => {
     const f = async () => { throw new TypeError('fetch failed'); };
     expect(await refusal(slackConnector(f as never).verify({ botToken: BOT, appToken: APP }))).toMatch(/Couldn't reach Slack/);
   });
+
+  // HB-1262: only Slack's own "no" (ok:false with its error) is a refused token. A rate limit,
+  // a 5xx, Slack's own outage words or a page that is not Slack's JSON says nothing of the
+  // token: busy, as Discord's and Telegram's checks read theirs, so it is not counted.
+  it('a rate limit, an outage or a page that is not Slack\'s is busy, not a refused token, for either token', async () => {
+    const html = (status: number) => () => new Response('<html>made-up proxy page</html>', { status, headers: { 'content-type': 'text/html' } });
+    const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => () => new Response(JSON.stringify(body), { status, headers });
+    const answers: Array<[string, () => Response, RegExp]> = [
+      ['429 ratelimited', json({ ok: false, error: 'ratelimited' }, 429, { 'retry-after': '30' }), /too many requests/],
+      ['503 with no JSON', html(503), /HTTP 503/],
+      ['200 with no JSON', html(200), /HTTP 200/],
+      ['500 fatal_error', json({ ok: false, error: 'fatal_error' }, 500), /HTTP 500/],
+      ['200 service_unavailable', json({ ok: false, error: 'service_unavailable' }), /service_unavailable/],
+      ['200 request_timeout', json({ ok: false, error: 'request_timeout' }), /request_timeout/],
+    ];
+    for (const [what, answer, said] of answers) {
+      for (const method of ['/auth.test', '/apps.connections.open']) {
+        const ok = fakeFetch(slackOk).f;
+        const f = async (url: string, init?: RequestInit) => (url.endsWith(method) ? answer() : ok(url, init));
+        const err = await slackConnector(f as never).verify({ botToken: BOT, appToken: APP }).then(() => undefined, (e: unknown) => e);
+        expect(err, `${what} at ${method}`).toBeInstanceOf(ConnectorError);
+        expect((err as ConnectorError).busy, `${what} at ${method}`).toBe(true);
+        expect((err as ConnectorError).userMessage, `${what} at ${method}`).toMatch(said);
+        expect((err as ConnectorError).userMessage, `${what} at ${method}`).toMatch(/^Slack did not answer properly just now \(.+\), so the (bot|app-level) token was not checked\. Try again in a minute\.$/);
+        expect((err as ConnectorError).userMessage).not.toMatch(/refused/);
+      }
+    }
+    // Slack's own "no" is still a refused token, and counted.
+    for (const [method, error] of [['/auth.test', 'invalid_auth'], ['/auth.test', 'made_up_error'], ['/apps.connections.open', 'invalid_auth'], ['/apps.connections.open', 'made_up_error']] as const) {
+      const { f } = fakeFetch((u, i) => (u.endsWith(method) ? { body: { ok: false, error } } : slackOk(u, i)));
+      const err = await slackConnector(f as never).verify({ botToken: BOT, appToken: APP }).then(() => undefined, (e: unknown) => e) as ConnectorError;
+      expect(err.busy, `${error} at ${method}`).toBe(false);
+      expect(err.userMessage, `${error} at ${method}`).toMatch(/refused/);
+    }
+  });
 });
 
 describe('Discord', () => {
   const ok: Route = (url) => {
-    if (url.endsWith('/users/@me')) return { body: { id: '999000999000999000', username: 'taxbot', bot: true } };
+    if (url.endsWith('/users/@me')) return { body: { id: '999000999000999000', username: 'soccer', bot: true } };
     if (url.endsWith('/applications/@me')) return { body: { id: '123456789012345678', name: 'Budget Tracker', flags: 1 << 19 } };
-    if (url.includes('/users/@me/guilds')) return { body: [{ id: '42', name: 'Krueger Home' }] };
+    if (url.includes('/users/@me/guilds')) return { body: [{ id: '42', name: 'Rivergate FC' }] };
     return { status: 404, body: {} };
   };
 
   it('accepts a bot token and gives both links', async () => {
     const { f, calls } = fakeFetch(ok);
     const v = await discordConnector(f as never).verify({ token: DTOKEN });
-    expect(v).toMatchObject({ accountId: '123456789012345678', displayName: '@taxbot in Krueger Home', warnings: [] });
+    expect(v).toMatchObject({ accountId: '123456789012345678', displayName: '@soccer in Rivergate FC', warnings: [] });
     expect(v.deepLink).toBe('https://discord.com/users/999000999000999000');
     expect(v.addToServerUrl).toContain(`permissions=${DISCORD_BOT_PERMISSIONS}`);
     expect(calls[0]!.auth).toBe(`Bot ${DTOKEN}`);
@@ -137,7 +172,7 @@ describe('Slack: the channels it is in, and a DM from the host (2026-09-25)', ()
 
   it('a Discord server listing that fails keeps the old list instead of emptying it; a busy Discord is not a refused token', async () => {
     const rateLimited: Route = (u) => {
-      if (u.endsWith('/users/@me')) return { body: { id: '999000999000999000', username: 'taxbot', bot: true } };
+      if (u.endsWith('/users/@me')) return { body: { id: '999000999000999000', username: 'soccer', bot: true } };
       if (u.endsWith('/applications/@me')) return { body: { id: '123456789012345678', name: 'Budget Tracker', flags: 1 << 19 } };
       if (u.includes('/users/@me/guilds')) return { status: 429, body: { message: 'You are being rate limited.', retry_after: 2 } };
       return { status: 404, body: {} };

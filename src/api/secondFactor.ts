@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import QRCode from 'qrcode';
+import { z } from 'zod';
 import type { Store, SecondFactorRow } from '../store/store.js';
 import { internalPrincipal } from './principal.js';
 import { isPublic, publicClientAddress } from './trust.js';
@@ -31,6 +32,14 @@ import { b64u, clientDataChallenge, verifyAssertion, verifyRegistration, WebAuth
  * the second factor given in the last few minutes (the gate's step-up) when
  * you have one; your current password when you are adding your first.
  */
+
+/**
+ * DELETE /v1/second-factors/:id: the current password, of any type (HB-0814).
+ * `proveManage` takes only text as a password, so anything else is a wrong
+ * one (401, counted), as before; a body that is not an object is read as
+ * without it.
+ */
+const RemoveFactorBody = z.object({ current: z.unknown().optional() });
 
 const BACKUP_CODES = 10;
 const CHALLENGE_TTL_MS = 5 * 60_000;
@@ -314,13 +323,17 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
       return reply.code(401).send({ error: 'That code is not right. Check the app shows this Hatchabot, and try the next code.' });
     }
     const first = real(ownerId).length === 0;
-    // One authenticator app at a time: the new one replaces the old.
-    let replaced = 0;
-    for (const old of real(ownerId).filter((f) => f.kind === 'totp')) if (store.deleteSecondFactor(ownerId, old.id)) replaced++;
-    // The old app is gone: what was proved with it elsewhere stops counting (this request's own pass is stamped anew below).
-    if (replaced) api.secondFactorsChanged(ownerId);
-    store.confirmSecondFactor(row.id);
-    store.advanceTotpStep(row.id, step);
+    // One authenticator app at a time: the new one replaces the old. In one
+    // transaction: a write that failed after the old app was deleted left
+    // the new one unconfirmed and the person with no app at all (HB-1089).
+    store.transact(() => {
+      let replaced = 0;
+      for (const old of real(ownerId).filter((f) => f.kind === 'totp')) if (store.deleteSecondFactor(ownerId, old.id)) replaced++;
+      // The old app is gone: what was proved with it elsewhere stops counting (this request's own pass is stamped anew below).
+      if (replaced) api.secondFactorsChanged(ownerId);
+      store.confirmSecondFactor(row.id);
+      store.advanceTotpStep(row.id, step);
+    });
     app.log.warn({ ownerId }, 'second_factor.totp_added');
     recordChange(req, 'second_factor.added', ownerId, 'totp');
     api.secondFactorPassed(req, reply);
@@ -399,7 +412,7 @@ export function registerSecondFactorRoutes(app: FastifyInstance, deps: SecondFac
     const row = real(ownerId).find((f) => f.id === req.params.id);
     if (!row) return reply.code(404).send({ error: 'Not found' });
     if (lastOne()) return reply.code(409).send({ error: onlyFactor });
-    if (!(await proveManage(req, reply, ownerId, (req.body as { current?: string } | null)?.current))) return reply;
+    if (!(await proveManage(req, reply, ownerId, RemoveFactorBody.safeParse(req.body).data?.current))) return reply;
     // Judged again after the password check, with nothing awaited between the
     // check and the delete: two removals sent at once each saw the OTHER
     // factor before either was gone, and both went through, leaving public

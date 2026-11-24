@@ -6,13 +6,14 @@ import {
   agentMemoryLimits, defaultSwapAllowance, describeCompressedSwap, dockerMemorySwap, effectiveSwapAllowance,
   formatSwapAllowance, limitsDrift, parseCgroupLimit, parseSwapAllowance, parseSwapProbe, procCgroupPath, SWAP_PROBE_SCRIPT, wantedLimits,
   type CompressedSwap, type LimitsCheckSummary,
-} from '../src/orchestrator/swap.js';
+} from '../src/domain/swap.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { hibernateAgent, resetHibernateState, wakeAgent, type HibernateDeps } from '../src/orchestrator/hibernate.js';
+import { hibernateAgent, resetHibernateState, wakeAgent, type HibernateDeps } from '../src/orchestrator/lifecycle/hibernate.js';
 import { limitsCheckLine, swapLine } from '../src/doctor.js';
 import { parseCgroupMemory } from '../src/providers/provider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
+import { telegramRefuses } from './support/telegramStandIn.js';
 
 /**
  * Compressed swap for agents (swap.ts): an allowance on top of the memory
@@ -427,7 +428,7 @@ describe('every path that makes or starts a container carries the allowance', ()
     const w = await makeWorld();
     w.provider.swapState = ZSWAP_ON;
     const id = await seedRunningAgent(w);
-    const deps: HibernateDeps = { store: w.store, secrets: w.secrets, providerFor: () => w.provider, lastActiveFor: async () => undefined, ownCrons: async () => [], isBusy: () => false, log: () => () => {} };
+    const deps: HibernateDeps = { store: w.store, secrets: w.secrets, providerFor: () => w.provider, lastActiveFor: async () => undefined, ownCrons: async () => [], isBusy: () => false, log: () => () => {}, fetchImpl: telegramRefuses };
     await hibernateAgent(deps, w.store.getAgent(id)!, 'test');
     process.env.HATCHABOT_AGENT_SWAP = '1g'; // changed while it slept
     w.provider.memoryUpdates.length = 0;
@@ -439,6 +440,34 @@ describe('every path that makes or starts a container carries the allowance', ()
     w.provider.memoryUpdates.length = 0;
     expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/start`, headers: as() })).statusCode).toBe(200);
     expect(w.provider.memoryUpdates).toEqual([{ runtimeRef: refOf(w, id), cap: '3g' }]);
+  });
+
+  it('wake: a cap saved during its docker update is not written over by the cap it read (HB-0881)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    const deps = (w.f as unknown as { hibernateDeps: HibernateDeps }).hibernateDeps;
+    await hibernateAgent(deps, w.store.getAgent(id)!, 'test');
+    // The wake's docker update is held; it lands only once let go.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const real = w.provider.updateMemory.bind(w.provider);
+    let first = true;
+    w.provider.updateMemory = async (ref, cap, swap) => {
+      if (first) { first = false; await held; }
+      return real(ref, cap, swap);
+    };
+    w.provider.memoryUpdates.length = 0;
+    const waking = wakeAgent(deps, w.store.getAgent(id)!, 'test');
+    await new Promise((r) => setTimeout(r, 20));
+    // The owner saves 4g meanwhile.
+    const saving = patch(w, id, { memoryCap: '4g' });
+    await new Promise((r) => setTimeout(r, 50));
+    release();
+    expect((await saving).statusCode).toBe(200);
+    expect((await waking).state).toBe('RUNNING');
+    expect(w.store.getAgent(id)!.memoryCap).toBe('4g');
+    // The container ends on the cap the store says, whichever went first.
+    expect(w.provider.memoryUpdates.at(-1)).toMatchObject({ runtimeRef: refOf(w, id), cap: '4g' });
   });
 
   it('the check: a host that gains or loses compressed swap brings the allowance with it; docker\'s record with swap it should not have is corrected', async () => {
@@ -517,7 +546,7 @@ describe('a systemd reload resets memory.swap.max under docker (the Spark, 2026-
 printf '%s\\n' "$*" >> ${JSON.stringify(join(d, 'argv'))}
 args="$*"; case "$args" in -H*) set -- "\${@:3}" ;; esac
 case "$1" in
-  inspect) echo "/hatchabot-kitchen-helper-df918a55|${ID}|true|4242|${3 * GiB}|${3 * GiB}"; echo "/hatchabot-other-11111111|${ID2}|true|0|${2 * GiB}|${2 * GiB}"; echo "/hatchabot-sleepy-22222222|${'d'.repeat(64)}|false|0|${GiB}|${GiB}"; exit 1 ;;
+  inspect) echo "/hatchabot-kitchen-helper-df918a55|${ID}|true|4242|${3 * GiB}|${3 * GiB}"; echo "/hatchabot-other-11111111|${ID2}|true|0|${2 * GiB}|${2 * GiB}"; echo "/hatchabot-sleepy-22222222|${'d'.repeat(64)}|false|0|${GiB}|${GiB}"; echo 'Error: No such object: hatchabot-gone-33333333' >&2; exit 1 ;;
   exec) printf '${3 * GiB}\\nmax\\n' ;;
   info) echo "Ubuntu|[name=seccomp]" ;;
 esac
@@ -530,11 +559,21 @@ exit 0
     expect(live.get(refs[1])?.cgroup).toEqual({ memoryMax: 2 * GiB, swapMax: 0 });
     expect(live.get(refs[2])).toEqual({ running: false, dockerMemory: GiB, dockerMemorySwap: GiB }); // stopped: no cgroup to read
     expect(live.has(refs[3])).toBe(false);
+    // Asked which are not there, it names the one docker said it has not got (HB-1106).
+    const missing = new Set<string>();
+    expect([...(await local.memoryLimitsLive(refs, { missing })).keys()]).toEqual(refs.slice(0, 3));
+    expect(missing).toEqual(new Set([refs[3]]));
     expect(readFileSync(join(d, 'argv'), 'utf8')).not.toContain('exec'); // this machine: files, no process in the agent
     const remote = new LocalDockerProvider({ docker: st, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9', reachProbe: async () => true });
     const r = await remote.memoryLimitsLive(refs.slice(0, 1));
     expect(r.get(refs[0])?.cgroup).toEqual({ memoryMax: 3 * GiB, swapMax: null });
     expect(readFileSync(join(d, 'argv'), 'utf8')).toContain('-H ssh://runner@10.0.0.9 exec hatchabot-kitchen-helper-df918a55 cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.swap.max');
+    // A read that failed as a whole: empty for a caller that did not ask, an error for one that did (HB-1106).
+    const asleep = new LocalDockerProvider({ docker: st, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9', reachProbe: async () => false });
+    expect((await asleep.memoryLimitsLive(refs)).size).toBe(0);
+    const none = new Set<string>();
+    await expect(asleep.memoryLimitsLive(refs, { missing: none })).rejects.toThrow(/docker inspect failed/);
+    expect(none.size).toBe(0);
   });
 
   it('the app finds it, applies the limits again, says so once, counts it for the doctor; after a start it checks that agent', async () => {
@@ -546,7 +585,7 @@ exit 0
     w.provider.cgroupLimits.set(refOf(w, ok2), { memoryMax: 3 * GiB, swapMax: 0 });
     w.provider.cgroupLimits.set(ref, { memoryMax: 3 * GiB, swapMax: null }); // a daemon-reload happened
     w.provider.memoryUpdates.length = 0;
-    expect(await check()).toEqual({ at: expect.any(String), checked: 2, cgroupDrifted: 1, reasserted: 1, failed: 0, notCovered: 0 });
+    expect(await check()).toEqual({ at: expect.any(String), checked: 2, cgroupDrifted: 1, reasserted: 1, failed: 0, notCovered: 0, unread: 0, away: 0, noContainer: 0 });
     expect(w.provider.memoryUpdates).toEqual([{ runtimeRef: ref, cap: '3g' }]);
     expect(w.provider.cgroupLimits.get(ref)).toEqual({ memoryMax: 3 * GiB, swapMax: 0 });
     const ev = w.store.listEvents([id]).filter((e) => e.event === 'runtime.swap_reasserted');

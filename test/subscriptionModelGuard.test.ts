@@ -4,8 +4,8 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { openclawAtLeast, subscriptionModelProblem } from '../src/orchestrator/modelOptions.js';
-import { machineTz } from '../src/orchestrator/budgets.js';
+import { openclawAtLeast, subscriptionModelProblem } from '../src/orchestrator/sources/modelOptions.js';
+import { machineTz } from '../src/orchestrator/usage/budgets.js';
 
 /**
  * On a Claude subscription, OpenClaw up to 2026.9.6 presents itself to

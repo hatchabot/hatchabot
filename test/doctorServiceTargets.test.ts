@@ -7,6 +7,7 @@ import { createServer as createHttpsServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { addressesOf, doctorTarget, envMap, probeControlPlane, serviceDockerEnv, servicePort, serviceUrl } from '../src/doctor.js';
+import { inlineComments } from '../src/config/envFile.js';
 
 /**
  * The deep audit of v2.177.0 (2026-11-07): `hatchabot doctor` asked
@@ -93,6 +94,13 @@ describe('serviceUrl and scripts/restart.sh work out the same listener', () => {
     'HATCHABOT_BIND=[fd00::6]\n',
     "PORT=1\nPORT='2'\n",
   ];
+  // The one way they part: a "# note" after a value, which restart.sh drops
+  // (as the Mac's shell-sourced service does) and systemd keeps in the value.
+  // doctor names each such setting instead (HB-0634).
+  const noted: Array<[string, string[]]> = [
+    ['PORT=9137 # moved off 8080\n', ['PORT']],
+    ['HATCHABOT_BIND=192.0.2.5\t# the LAN\nPORT=9000\n', ['HATCHABOT_BIND']],
+  ];
   it.skipIf(process.platform === 'win32')('for each .env', () => {
     expect(from).toBeGreaterThan(0);
     expect(to).toBeGreaterThan(from);
@@ -107,12 +115,21 @@ describe('serviceUrl and scripts/restart.sh work out the same listener', () => {
         const real = execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
         writeFileSync(join(bin, tool), `#!/bin/sh\nexec ${real} "$@"\n`, { mode: 0o755 });
       }
-      for (const text of cases) {
+      const listener = (text: string) => {
         writeFileSync(join(sandbox, '.env'), text);
-        const shell = execFileSync(bash, ['-c', `set -euo pipefail\n${part}\nprintf '%s' "$LISTENER"`], {
+        return execFileSync(bash, ['-c', `set -euo pipefail\n${part}\nprintf '%s' "$LISTENER"`], {
           cwd: sandbox, encoding: 'utf8', env: { HOME: sandbox, PATH: bin },
         });
+      };
+      for (const text of cases) {
+        const shell = listener(text);
         expect(serviceUrl(envMap(join(sandbox, '.env'))), JSON.stringify(text)).toBe(shell);
+        expect(inlineComments(text), JSON.stringify(text)).toEqual([]);
+      }
+      for (const [text, names] of noted) {
+        const shell = listener(text);
+        expect(serviceUrl(envMap(join(sandbox, '.env'))), JSON.stringify(text)).not.toBe(shell);
+        expect(inlineComments(text), JSON.stringify(text)).toEqual(names);
       }
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
   });

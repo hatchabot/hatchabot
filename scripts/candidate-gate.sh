@@ -131,7 +131,7 @@ s="$(inagent "openclaw sessions list --agent $SLUG --json 2>/dev/null" | json "v
 [ "${s:-0}" -ge 1 ] 2>/dev/null && ok || bad "no session with a numeric updatedAt and the main key"
 
 step "the session records are readable the way the app reads them (sessions.json, or the agent's SQLite from 2026.8)"
-# The same shell src/orchestrator/unread.ts sessionsReadShell() builds.
+# The same shell src/orchestrator/conversation/unread.ts sessionsReadShell() builds.
 B="/home/node/.openclaw/agents/$SLUG"
 recs="$(inagent "if [ -f $B/sessions/sessions.json ]; then cat $B/sessions/sessions.json; elif [ -f $B/agent/openclaw-agent.sqlite ]; then node -e 'const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"$B/agent/openclaw-agent.sqlite\",{readOnly:true});const out={};for(const r of db.prepare(\"select session_key,entry_json from session_nodes\").all()){try{out[r.session_key]=JSON.parse(r.entry_json)}catch(e){}}process.stdout.write(JSON.stringify(out));' 2>/dev/null; fi" | json "v=>{const e=v['agent:$SLUG:main'];return e&&typeof e.updatedAt==='number'?'ok':'no'}")"
 [ "$recs" = ok ] && ok || bad "no main record with a numeric updatedAt ($recs)"

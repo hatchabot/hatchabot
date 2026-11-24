@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isPrivateAddress, makeOpsWeb } from '../src/ops/opsWeb.js';
+import { duckDuckGoResults, isPrivateAddress, makeOpsWeb, strip } from '../src/ops/opsWeb.js';
 
 /** Web search for the jailed management agent: it may search, and open only
  *  what a search returned; never a private address, on any redirect hop. */
@@ -202,6 +202,92 @@ describe('night review, 2026-09-27', () => {
     const r = await opsWeb('o', 'read_result', { n: 1 });
     expect(r.isError).toBeUndefined();
     expect(pulled).toBeLessThan(40); // about 1 MB, not for ever
+  });
+
+  it('a page of "<" with no ">", or of "<script" never closed, is read in time that grows with its size, not its square (HB-1056)', async () => {
+    for (const body of ['<'.repeat(100_000), '<script'.repeat(15_000), `<p>${'<a'.repeat(50_000)}`]) {
+      const { opsWeb } = web({ [SEARCH]: results(['https://slow.example/']), 'https://slow.example/': () => page(body) });
+      await opsWeb('o', 'web_search', { query: 'slow page' });
+      const t = performance.now();
+      const r = await opsWeb('o', 'read_result', { n: 1 });
+      expect(performance.now() - t).toBeLessThan(2000);
+      expect(r.isError).toBeUndefined();
+    }
+  });
+});
+
+describe("DuckDuckGo's results page (HB-1238)", () => {
+  /** A search with no Brave key, DuckDuckGo answering `body`. */
+  const ddg = (body: string) => makeOpsWeb({
+    braveKey: async () => undefined,
+    lookup: async () => ['93.184.216.34'],
+    fetchImpl: (async (url: string) => {
+      if (!String(url).startsWith('https://html.duckduckgo.com/html/')) throw new Error('unrouted ' + url);
+      return page(body);
+    }) as any,
+  });
+
+  it('a page of "<a" with no ">", of links never closed, or of class marks with no ">" is read in time that grows with its size', async () => {
+    // Before, each took seconds (the last, cubic: 7 s for its 21 KB), on the server's one thread.
+    for (const body of ['<a '.repeat(40_000), '<a class="result__a" href="https://x.example/">t'.repeat(30_000), '<a class="result__a" '.repeat(1_000)]) {
+      const t = performance.now();
+      const r = await ddg(body)('o', 'web_search', { query: 'slow results' });
+      expect(performance.now() - t, body.slice(0, 40)).toBeLessThan(2000);
+      expect(r.text).toBe('No results.');
+    }
+  });
+
+  it('finds what the two expressions it replaced found, titles, addresses and snippets', async () => {
+    const before = (html: string) => {
+      const out: Array<{ title: string; url: string; snippet: string }> = [];
+      const links = [...html.matchAll(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)];
+      for (let i = 0; i < links.length && out.length < 8; i++) {
+        const m = links[i]!;
+        const rest = html.slice(m.index! + m[0].length, links[i + 1]?.index ?? html.length);
+        const snippet = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/.exec(rest)?.[1] ?? '';
+        let url = m[1]!.replace(/&amp;/g, '&');
+        const uddg = /[?&]uddg=([^&]+)/.exec(url);
+        if (uddg) url = decodeURIComponent(uddg[1]!);
+        if (url.startsWith('//')) url = `https:${url}`;
+        if (/^https?:\/\//.test(url)) out.push({ title: strip(m[2] ?? ''), url, snippet: strip(snippet).slice(0, 300) });
+      }
+      return out;
+    };
+    const parts = ['<a', ' ', '>', '</a>', '<a class="result__a" href="https://a.example/one">', '<a rel="nofollow" class="result__a" href="//b.example/two">',
+      '<a class="result__a" href="/l/?uddg=https%3A%2F%2Fc.example%2Fthree&amp;rut=x">', '<a href="https://d.example/" class="result__a">', '<a class="result__a">',
+      '<abbr class="result__a" href="https://e.example/">', '<a class="result__snippet" href="#">', '<a class="result__snippet">', ' class="result__a"', ' href="https://f.example/"',
+      ' href=""', 'class="result__a"', 'Made-up <b>title</b>', 'a snippet &amp; more', '\n', '<div class="result">', '</div>', '<a href="https://g.example/">', 'İ'];
+    let seed = 7;
+    const rand = (n: number) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n; };
+    let found = 0;
+    for (let round = 0; round < 3000; round++) {
+      const html = Array.from({ length: 1 + rand(14) }, () => parts[rand(parts.length)]!).join('');
+      const want = before(html);
+      found += want.length;
+      expect(duckDuckGoResults(html), html).toEqual(want);
+    }
+    expect(found).toBeGreaterThan(300); // the pages held results to find
+    // A real page's shape, through the search itself.
+    const real = '<div class="result"><h2><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.com%2Fguide&amp;rut=made-up">The <b>Guide</b></a></h2>'
+      + '<a class="result__snippet" href="//duckduckgo.com/l/?uddg=x">How to read the <b>guide</b>.</a></div>';
+    expect((await ddg(real)('o', 'web_search', { query: 'the guide' })).text).toBe('1. The Guide\n   https://docs.example.com/guide\n   How to read the guide .');
+  });
+});
+
+describe('a page\'s text (HB-1056)', () => {
+  it('takes out what the two expressions it replaced took out, and nothing else', () => {
+    const before = (html: string): string => html
+      .replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ').trim();
+    const parts = ['<', '>', '<>', '<p>', '</p>', '<script', '</script>', '<SCRIPT>', '</Script>', '<style x>', '</style>', '<svg', '</svg>', '<noscript>', '</noscript>', 'text', ' ', '\n', '&amp;lt;', '&nbsp;', 'İ', 'ſcript', '<scripts>', '</script >'];
+    let seed = 11;
+    const rand = (n: number) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n; };
+    for (let round = 0; round < 2000; round++) {
+      const html = Array.from({ length: 1 + rand(12) }, () => parts[rand(parts.length)]!).join('');
+      expect(strip(html), html).toBe(before(html));
+    }
   });
 });
 

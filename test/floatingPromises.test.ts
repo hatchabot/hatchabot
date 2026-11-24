@@ -26,13 +26,13 @@ const CANNOT_REJECT: Record<string, string> = {
   runPausedReplies: 'try/catch', refreshDetectedUrl: 'catches the only await',
   retargetCronSweep: 'try/catch per step', quickCronRetarget: 'try/catch per step',
   postureSweep: 'try/catch per step', checkOpsDrift: 'try/catch per agent', runPendingApp: 'try/catch around each run',
-  sink: 'try/catch around the append', explainFailedCheckpoint: 'catches the send',
+  explainFailedCheckpoint: 'catches the send',
   'recentTracker.note': 'note() catches everything', 'opsPush.waiting': 'catches its sends; the rest only reads',
   'opsNotifier.notify': 'its chain ends in .catch',
-  verifyLater: 'two-handler .then', 'api.stopListener': 'nothing in it rejects', 'worker.terminate': 'resolves once the worker has gone',
+  'api.stopListener': 'nothing in it rejects', 'worker.terminate': 'resolves once the worker has gone',
   // void (async () => {...})() whose whole body is inside a try/catch.
   'an async function in src/index.ts': 'the tools restart: try/catch',
-  'an async function in src/orchestrator/compaction.ts': 'the summarise run: try/catch, and failed() catches its own',
+  'an async function in src/orchestrator/memory/compaction.ts': 'the summarise run: try/catch, and failed() catches its own',
   // Not a promise that matters: a Fastify reply is returned for chaining.
   reply: 'not a rejecting promise',
 };

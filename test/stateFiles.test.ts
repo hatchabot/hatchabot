@@ -6,9 +6,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Writable } from 'node:stream';
-import { agentArchiveName, BACKUP_LOCK, backupRunning, dropMoveCopy, pruneBackup, newMoveCopy, recoverBackupRestore, restoreAgentFromBackup, RestoreError, restoreSafetyDir, resumeBackupRestore, sweepMoveCopies } from '../src/orchestrator/backups.js';
-import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
-import { SimulatedCrash } from '../src/orchestrator/operations.js';
+import { agentArchiveName, BACKUP_LOCK, backupRunning, dropMoveCopy, pruneBackup, newMoveCopy, recoverBackupRestore, restoreAgentFromBackup, RestoreError, restoreSafetyDir, resumeBackupRestore, sweepMoveCopies } from '../src/orchestrator/backups/backupFiles.js';
+import { moveAgentToHost } from '../src/orchestrator/transfer/moveHost.js';
+import { MODEL_REVIEW_NAME, reviewMessageHash, syncModelReviewCron } from '../src/orchestrator/usage/modelReview.js';
+import { SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { isDiskFull, OneShotNotGoneError, ProviderError, VolumeGoneError, VolumeUntouchedError } from '../src/providers/provider.js';
@@ -900,6 +901,66 @@ describe('a restore keeps its safety copy on disk', () => {
     expect(seen).toEqual([true]);
     expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('current-memory');
     expect(existsSync(restoreSafetyDir())).toBe(false);
+  });
+
+  it('Put back whose start fails says it is stopped, not that it is as it was (HB-0944)', async () => {
+    const { store, provider, runtimeRef } = await agent('2026-09-08');
+    let opId = '';
+    const importFile = provider.importStateFromFile.bind(provider);
+    provider.importStateFromFile = async () => { throw new SimulatedCrash(); };
+    await restoreAgentFromBackup({ store, provider, onOperation: (id) => { opId = id; } }, 'a1', '2026-09-08').catch(() => {});
+    provider.importStateFromFile = importFile;
+    await resumeBackupRestore({ store, provider }, opId);
+    provider.start = async () => { throw new Error('its machine did not answer'); };
+    await recoverBackupRestore({ store, provider }, opId, 'put-back');
+    expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('current-memory');
+    expect(store.getAgent('a1')!.state).toBe('STOPPED');
+    const op = store.getOperation(opId)!;
+    expect(op.status).toBe('rolled_back');
+    expect(op.outcome).toMatch(/^Put back as it was before the restore from the 2026-09-08 backup\. It could not be started again \(.*its machine did not answer.*\), so it is stopped: start it once its machine answers\.$/);
+  });
+
+  it('a restore cut off before anything changed whose start fails says it is stopped (HB-0944)', async () => {
+    const { store, provider, runtimeRef } = await agent('2026-09-09');
+    let opId = '';
+    provider.exportStateToFile = async () => { throw new SimulatedCrash(); };
+    await restoreAgentFromBackup({ store, provider, onOperation: (id) => { opId = id; } }, 'a1', '2026-09-09').catch(() => {});
+    provider.start = async () => { throw new Error('its machine did not answer'); };
+    await resumeBackupRestore({ store, provider }, opId);
+    expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('current-memory');
+    expect(store.getAgent('a1')!.state).toBe('STOPPED');
+    const op = store.getOperation(opId)!;
+    expect(op.outcome).toMatch(/before anything was changed — its memory is as it was\. It could not be started again .*so it is stopped/);
+    expect(op.outcome).not.toMatch(/— it is as it was/);
+  });
+
+  // The weekly review, as the next build sees it after a restore (modelReview.ts).
+  const manager = { id: 'a1', ownerId: 'o', slug: 'kitchen', ops: true };
+  const cronCalls = (provider: MockProvider, from: number, verb: string) => provider.execLog.slice(from).filter((a) => a[0] === 'cron' && a[1] === verb);
+
+  it('a review task made after the copy is made again by the next build, not kept as if the copy had it (HB-1123)', async () => {
+    const { store, provider, runtimeRef } = await agent('2026-09-10');
+    store.setManagedCron('a1', MODEL_REVIEW_NAME, 'job-made-later', '2026-10-01T09:00:00.000Z', reviewMessageHash());
+    await restoreAgentFromBackup({ store, provider }, 'a1', '2026-09-10');
+    provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"job-again"}', stderr: '' });
+    const n = provider.execLog.length;
+    expect(await syncModelReviewCron({ store, provider }, manager, runtimeRef, 'weekly')).toBe('created');
+    expect(cronCalls(provider, n, 'add')).toHaveLength(1);
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toMatchObject({ jobId: 'job-again', messageHash: reviewMessageHash() });
+  });
+
+  it('one made before the copy has its wording written again, and stays deleted if the owner had deleted it (HB-1123)', async () => {
+    for (const edit of [{ code: 0, stdout: '', stderr: '' }, { code: 1, stdout: '', stderr: 'job not found' }]) {
+      const { store, provider, runtimeRef } = await agent('2026-09-11');
+      store.setManagedCron('a1', MODEL_REVIEW_NAME, 'job-before', '2026-08-01T09:00:00.000Z', reviewMessageHash());
+      await restoreAgentFromBackup({ store, provider }, 'a1', '2026-09-11');
+      provider.execResponses.set('cron edit', edit);
+      const n = provider.execLog.length;
+      expect(await syncModelReviewCron({ store, provider }, manager, runtimeRef, 'weekly')).toBe(edit.code === 0 ? 'updated' : 'kept');
+      expect(cronCalls(provider, n, 'edit').map((a) => a[2])).toEqual(['job-before']);
+      expect(cronCalls(provider, n, 'add')).toEqual([]);
+      expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toEqual({ jobId: 'job-before', at: '2026-08-01T09:00:00.000Z', messageHash: reviewMessageHash() });
+    }
   });
 });
 

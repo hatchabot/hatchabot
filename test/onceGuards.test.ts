@@ -1,7 +1,9 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { makeWorld, as } from './support/world.js';
 
 /**
@@ -58,6 +60,58 @@ describe('Add, clicked twice, adds one (HB-0062)', () => {
     g.open();
     expect((await first).statusCode).toBe(201);
     expect(w.store.listAIProfiles(w.owner).filter((p) => p.name === 'Kitchen key')).toHaveLength(1);
+  });
+
+  it('held while its request still works, however long that takes (HB-0630)', async () => {
+    const w = await makeWorld();
+    const g = gate();
+    const put = w.secrets.put.bind(w.secrets);
+    let puts = 0;
+    w.secrets.put = async (r: string, v: string) => { if (r.startsWith('ai-profile/') && puts++ === 0) await g.wait(); return put(r, v); };
+    const add = () => w.f.inject({ method: 'POST', url: '/v1/ai-profiles', headers: as(), payload: { name: 'Kitchen key', vendor: 'anthropic', kind: 'api_key', model: 'claude-haiku-4-5', apiKey: MADE_UP } });
+    const first = add();
+    await g.entered;
+    // Eleven minutes on, the first still at work: its hold was let go at ten.
+    const later = Date.now() + 11 * 60_000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => later);
+    try {
+      const second = await add();
+      expect(second.statusCode).toBe(409);
+      expect(second.json().error).toBe('Kitchen key is already being added.');
+    } finally { clock.mockRestore(); }
+    g.open();
+    expect((await first).statusCode).toBe(201);
+    expect(w.store.listAIProfiles(w.owner).filter((p) => p.name === 'Kitchen key')).toHaveLength(1);
+  });
+
+  it('a caller that hung up: its hold goes when its request has answered, not ten minutes later (HB-0630)', async () => {
+    const w = await makeWorld();
+    const g = gate();
+    const put = w.secrets.put.bind(w.secrets);
+    let puts = 0;
+    w.secrets.put = async (r: string, v: string) => { if (r.startsWith('ai-profile/') && puts++ === 0) await g.wait(); return put(r, v); };
+    await w.f.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const { port } = w.f.server.address() as AddressInfo;
+      const body = JSON.stringify({ name: 'Kitchen key', vendor: 'anthropic', kind: 'api_key', model: 'claude-haiku-4-5', apiKey: MADE_UP });
+      const call = request({ host: '127.0.0.1', port, method: 'POST', path: '/v1/ai-profiles', headers: { ...as(), 'content-type': 'application/json' } });
+      const hungUp = new Promise<void>((r) => { call.on('error', () => r()); call.on('close', () => r()); });
+      call.end(body);
+      await g.entered;
+      // The caller goes away while its request still works (a tab closed, a fetch timed out).
+      call.destroy();
+      await hungUp;
+      // Still at work: still held.
+      const meanwhile = await w.f.inject({ method: 'POST', url: '/v1/ai-profiles', headers: as(), payload: JSON.parse(body) });
+      expect(meanwhile.json().error).toBe('Kitchen key is already being added.');
+      g.open();
+      await vi.waitFor(() => expect(w.store.listAIProfiles(w.owner).filter((p) => p.name === 'Kitchen key')).toHaveLength(1));
+      // Its request has answered, to nobody: the name is free again, at once.
+      await vi.waitFor(async () => {
+        const again = await w.f.inject({ method: 'POST', url: '/v1/ai-profiles', headers: as(), payload: { ...JSON.parse(body), name: 'Kitchen key' } });
+        expect(again.json().error).not.toBe('Kitchen key is already being added.');
+      }, { timeout: 2000, interval: 20 });
+    } finally { await w.f.close(); }
   });
 
   it('a memory-service guest key', async () => {

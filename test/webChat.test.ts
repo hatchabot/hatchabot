@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, mkdirSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
@@ -10,7 +10,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { registerAuth, _resetLoginThrottle } from '../src/api/auth.js';
 import { hashPassword } from '../src/api/accountsAuth.js';
-import { HISTORY_SCRIPT, historyScript, stripWebChatPrefix, webChatPrefix, webChatSessionKey, webChatStoreKey } from '../src/orchestrator/webChat.js';
+import { HISTORY_SCRIPT, historyScript, stripWebChatPrefix, webChatPrefix, webChatSessionKey, webChatStoreKey } from '../src/orchestrator/conversation/webChat.js';
 import { MemSecrets } from './support/world.js';
 
 /**
@@ -147,7 +147,7 @@ describe('who may chat on the web', () => {
 
   it('409 while the agent is busy or stopped; a failed or slow turn says so without its detail', async () => {
     const w = await world();
-    const { markBusy, clearBusy } = await import('../src/orchestrator/busy.js');
+    const { markBusy, clearBusy } = await import('../src/orchestrator/lifecycle/busy.js');
     markBusy('a1');
     try { expect((await w.chat(SAM, 'hi')).statusCode).toBe(409); } finally { clearBusy('a1'); }
     w.provider.webChatReply = { code: 1, stdout: '', stderr: 'gateway said no, with config detail' };
@@ -364,8 +364,191 @@ describe('the in-container reader on 2026.7: what was missing or merged', () => 
       expect(read().delivery).toEqual({ checked: [messageId], received: [] }); // known other session
       writeFileSync(join(sd, 'old-session.trajectory.jsonl'), JSON.stringify({ type: 'session.started', sessionKey: key }));
       expect(read().delivery).toEqual({ checked: [messageId], received: [messageId] });
-      const disappear = `const actualRead = require('fs').readFileSync; require('fs').readFileSync = function(file, ...args) { if (String(file).endsWith('${reset}')) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return actualRead.call(this, file, ...args); };\n`;
+      // Gone between the listing and the read (it is read a chunk at a time, from an open).
+      const disappear = `const actualOpen = require('fs').openSync; require('fs').openSync = function(file, ...args) { if (String(file).endsWith('${reset}')) throw Object.assign(new Error('gone'), { code: 'ENOENT' }); return actualOpen.call(this, file, ...args); };\n`;
       expect(read(disappear).delivery).toEqual({ checked: [], received: [] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps only the newest messages as it reads: the same newest, in order, from a long history (HB-0897)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-bounded-'));
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'now' } }));
+      writeFileSync(join(sd, 'now.trajectory.jsonl'), JSON.stringify({ type: 'session.started', sessionKey: key }));
+      writeFileSync(join(sd, 'old.trajectory.jsonl'), JSON.stringify({ type: 'session.started', sessionKey: key }));
+      const at = (n: number) => new Date(Date.UTC(2026, 8, 1) + n * 60_000).toISOString();
+      const ev = (id: string, role: string, text: string, n: number) => JSON.stringify({ type: 'message', id, timestamp: at(n), message: { role, content: text } });
+      // The current conversation is read last but holds messages older than the reset's newest ones.
+      const old: string[] = [], now: string[] = [];
+      for (let n = 0; n < 400; n++) old.push(ev(`o${n}`, n % 2 ? 'assistant' : 'user', n % 2 ? `answer ${n}` : `[Sam via the web app]\nquestion ${n}`, 2 * n));
+      for (let n = 0; n < 400; n++) now.push(ev(`c${n}`, n % 2 ? 'assistant' : 'user', n % 2 ? `answer ${n}` : `[Sam via the web app]\nnow ${n}`, 2 * n + 1));
+      now.push(ev('c-mirror', 'assistant', 'answer 399', 799)); // a delivered reply recorded twice
+      now.push(JSON.stringify({ type: 'message', id: 'c-tool', timestamp: at(900), message: { role: 'toolResult', content: 'x'.repeat(5000) } }));
+      writeFileSync(join(sd, 'old.jsonl.reset.2026-09-02T00-00-00'), old.join('\n'));
+      writeFileSync(join(sd, 'now.jsonl'), now.join('\n'));
+      const read = (cap: number) => JSON.parse(execFileSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: String(cap) }, encoding: 'utf8' })).messages as Array<{ text: string; at: string }>;
+      const all = read(500);
+      expect(all).toHaveLength(500);
+      expect(all.at(-1)).toEqual({ role: 'assistant', text: 'answer 399', at: at(799) }); // its mirror is not a second one
+      expect(all.map((m) => Date.parse(m.at))).toEqual([...all.map((m) => Date.parse(m.at))].sort((x, y) => x - y));
+      for (const cap of [1, 7, 100]) expect(read(cap)).toEqual(all.slice(-cap));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('reads a long, tool-heavy history in bounded memory (HB-0897)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-memory-'));
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'big' } }));
+      const pad = 'y'.repeat(2000);
+      const rows: string[] = [];
+      for (let n = 0; n < 24_000; n++) {
+        const ts = new Date(Date.UTC(2026, 8, 1) + n * 1000).toISOString();
+        rows.push(n % 3 === 2
+          ? JSON.stringify({ type: 'message', id: `t${n}`, timestamp: ts, message: { role: 'toolResult', content: [{ type: 'text', text: pad }] } })
+          : JSON.stringify({ type: 'message', id: `m${n}`, timestamp: ts, message: { role: n % 3 ? 'assistant' : 'user', content: (n % 3 ? '' : '[Sam via the web app]\n') + `message ${n} ${pad}` } }));
+      }
+      writeFileSync(join(sd, 'big.jsonl'), rows.join('\n'));
+      const r = spawnSync(process.execPath, ['--max-old-space-size=40', '-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '100' }, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+      expect(r.status).toBe(0);
+      const out = JSON.parse(r.stdout).messages as Array<{ text: string }>;
+      expect(out).toHaveLength(100);
+      expect(out.at(-1)!.text).toMatch(/^message 23998 /);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('reads a long chat from its end: what is older than the newest it shows is not read (HB-1172)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-tail-'));
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'long' } }));
+      const at = (n: number) => new Date(Date.UTC(2026, 8, 1) + n * 60_000).toISOString();
+      const rows: string[] = [];
+      for (let n = 0; n < 400; n++) rows.push(JSON.stringify({ type: 'message', id: `m${n}`, timestamp: at(n), message: { role: n % 2 ? 'assistant' : 'user', content: (n % 2 ? '' : '[Sam via the web app]\n') + `message ${n}` } }));
+      // A gigabyte of older history before the newest 400 (a hole: it takes
+      // no disk). A reader that starts at the top has all of it to get through.
+      const file = join(sd, 'long.jsonl');
+      writeFileSync(file, '');
+      truncateSync(file, 1 << 30);
+      appendFileSync(file, '\n' + rows.join('\n'));
+      const r = spawnSync(process.execPath, ['--max-old-space-size=40', '-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '100' }, encoding: 'utf8', timeout: 60_000 });
+      expect(r.status, r.stderr).toBe(0);
+      const out = JSON.parse(r.stdout).messages as Array<{ text: string }>;
+      expect(out).toHaveLength(100);
+      expect(out[0]!.text).toMatch(/\nmessage 300$/);
+      expect(out.at(-1)!.text).toBe('message 399');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('stopping where nothing older can show shows what reading all of it does (HB-1172)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-same-'));
+    const found = '11223344-5566-4777-8888-99aabbccddee', missing = '22334455-6677-4888-9999-aabbccddeeff';
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'now' } }));
+      for (const id of ['r1', 'r2']) writeFileSync(join(sd, `${id}.trajectory.jsonl`), JSON.stringify({ type: 'session.started', sessionKey: key }));
+      const t0 = Date.UTC(2026, 8, 1), min = 60_000;
+      let n = 0;
+      const ev = (role: string, content: unknown, ms: number, extra: object = {}) =>
+        JSON.stringify({ type: 'message', id: `e${n++}`, timestamp: new Date(t0 + ms).toISOString(), message: { role, content, ...extra } });
+      const png = (data: string) => [{ type: 'image', data, mimeType: 'image/png' }];
+      // Three conversations whose times overlap, each a question and its
+      // answer a minute, with tool output, a NO_REPLY, a delivered copy, two
+      // pictures seconds apart, and a step back in time now and then.
+      const talk = (tag: string, from: number, count: number) => {
+        const rows: string[] = [];
+        for (let k = 0; k < count; k++) {
+          const ms = (from + k) * min - (k % 37 === 36 ? 20 * min : 0);
+          rows.push(ev('user', `[Sam via the web app${tag === 'r1' && k === 3 ? `; message ${found}` : ''}]\n${tag} ${k}`, ms));
+          rows.push(ev('toolResult', 'x'.repeat(300), ms + 1000));
+          rows.push(ev('assistant', k % 5 ? `${tag} answer ${k}` : 'Done.', ms + 2000));
+          if (k % 7 === 0) rows.push(ev('assistant', `${tag} answer ${k}`, ms + 2000, { model: 'delivery-mirror', openclawDeliveryMirror: true }));
+          if (k % 11 === 0) rows.push(ev('assistant', 'NO_REPLY', ms + 3000), ev('assistant', png('QQ=='), ms + 4000), ev('assistant', png('Qg=='), ms + 9000));
+        }
+        return rows;
+      };
+      // r1 ends on "Done." and r2 begins with it, ten seconds on: one reply.
+      const r1 = talk('r1', 0, 201), r2 = [ev('assistant', 'Done.', 200 * min + 12_000), ...talk('r2', 120, 200)];
+      writeFileSync(join(sd, 'r1.jsonl.reset.2026-09-02T00-00-00'), r1.join('\n'));
+      writeFileSync(join(sd, 'r2.jsonl.reset.2026-09-03T00-00-00'), r2.join('\n'));
+      writeFileSync(join(sd, 'now.jsonl'), talk('now', 60, 300).join('\n'));
+      const read = (cap: number, pending = '') => JSON.parse(execFileSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: String(cap), PENDING: pending }, encoding: 'utf8' }));
+      const all = read(100_000);
+      expect(all.messages.length).toBeGreaterThan(1500);
+      const copy = new Date(t0 + 200 * min + 12_000).toISOString();
+      expect(all.messages.filter((m: { at: string }) => m.at === copy)).toEqual([]);
+      for (const cap of [1, 2, 5, 40, 300]) expect(read(cap).messages).toEqual(all.messages.slice(-cap));
+      // A delivery not found yet is looked for in all of it; one found far back is found.
+      const looked = read(100_000, `${found},${missing}`).delivery;
+      expect(looked).toEqual({ checked: [found, missing], received: [found] });
+      expect(read(5, `${found},${missing}`).delivery).toEqual(looked);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('an event recorded twice keeps the place of its first copy, as reading oldest first did (HB-1172)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-copy-'));
+    try {
+      mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+      const db = new Database(join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite'));
+      db.exec(`CREATE TABLE session_windows (session_id TEXT PRIMARY KEY, session_key TEXT NOT NULL);
+        CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, created_at INTEGER, event_json TEXT, event_zstd BLOB);
+        CREATE TABLE session_transcript_archives (session_id TEXT, session_key TEXT, encoding TEXT, archive_blob BLOB);`);
+      const key = webChatStoreKey('kitchen', SAM);
+      db.prepare('INSERT INTO session_windows VALUES (?, ?)').run('w1', key);
+      const ev = (id: string, role: string, text: string, ts: string) => JSON.stringify({ type: 'message', id, timestamp: ts, message: { role, content: text } });
+      const rows = [
+        ev('a1', 'assistant', 'Done.', '2026-09-29T10:00:00Z'),
+        ev('u1', 'user', '[Sam via the web app]\nand the shed?', '2026-09-29T10:00:20Z'),
+        ev('a2', 'assistant', 'Done.', '2026-09-29T10:00:30Z'),
+      ];
+      rows.forEach((row, i) => db.prepare('INSERT INTO transcript_events (session_id, seq, event_json) VALUES (?, ?, ?)').run('w1', i + 1, row));
+      // The window, part way to the archive: its question is in both.
+      db.prepare('INSERT INTO session_transcript_archives VALUES (?, ?, ?, ?)').run('w0', key, 'identity', Buffer.from([rows[1], ev('a3', 'assistant', 'Later.', '2026-09-29T10:05:00Z')].join('\n')));
+      db.close();
+      for (const cap of ['2', '100']) {
+        const out = JSON.parse(execFileSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: cap }, encoding: 'utf8' }));
+        // Its first copy, between the two replies, keeps them two.
+        expect(out.messages.map((m: { text: string }) => m.text)).toEqual(['Done.', '[Sam via the web app]\nand the shed?', 'Done.', 'Later.'].slice(-Number(cap)));
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('read again for a copy, a long history takes the memory the old reader took, no more (HB-1172)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-copymem-'));
+    try {
+      mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+      const db = new Database(join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite'));
+      db.exec(`CREATE TABLE session_windows (session_id TEXT PRIMARY KEY, session_key TEXT NOT NULL);
+        CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, created_at INTEGER, event_json TEXT, event_zstd BLOB, PRIMARY KEY (session_id, seq));
+        CREATE TABLE session_transcript_archives (session_id TEXT, session_key TEXT, encoding TEXT, archive_blob BLOB);`);
+      const key = webChatStoreKey('kitchen', SAM);
+      db.prepare('INSERT INTO session_windows VALUES (?, ?)').run('w0', key);
+      db.prepare('INSERT INTO session_windows VALUES (?, ?)').run('w1', key);
+      const t0 = Date.UTC(2026, 0, 1);
+      const ev = (id: string, n: number, ms: number) => JSON.stringify({ type: 'message', id, timestamp: new Date(t0 + ms).toISOString(), message: { role: n % 2 ? 'assistant' : 'user', content: n % 2 ? `answer ${n}` : `[Sam via the web app]\nq ${n}` } });
+      const put = db.prepare('INSERT INTO transcript_events (session_id, seq, event_json) VALUES (?, ?, ?)');
+      const N = 200_000, now: string[] = [];
+      for (let n = 0; n < 400; n++) now.push(ev(`now-${n}`, n, (N + 1000 + n) * 60_000));
+      db.transaction(() => {
+        for (let n = 0; n < N; n++) put.run('w0', n + 1, ev(`old-${n.toString(36).padStart(8, '0')}`, n, n * 60_000));
+        now.forEach((row, n) => put.run('w1', n + 1, row));
+      })();
+      // The current window part way to its archive: its first 300 in both.
+      db.prepare('INSERT INTO session_transcript_archives VALUES (?, ?, ?, ?)').run('w1', key, 'identity', Buffer.from(now.slice(0, 300).join('\n')));
+      db.close();
+      // The old reader, oldest first, held one set of the ids in 24 MB; the
+      // copies counted, with a place for each id, did not fit.
+      const r = spawnSync(process.execPath, ['--max-old-space-size=24', '-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '100' }, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+      expect(r.status, r.stderr.slice(0, 300)).toBe(0);
+      const out = JSON.parse(r.stdout).messages as Array<{ text: string }>;
+      expect(out).toHaveLength(100);
+      expect(out[0]!.text).toBe('[Sam via the web app]\nq 300');
+      expect(out.at(-1)!.text).toBe('answer 399');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -439,6 +622,44 @@ describe('the in-container reader on 2026.7: what was missing or merged', () => 
         ['[image]', '2026-09-20T10:00:05.000Z'],
         ['Bins go out tonight.', '2026-09-21T18:00:00.000Z'],
         ['Bins go out tonight.', '2026-09-28T18:00:00.000Z'],
+      ]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('two different pictures seconds apart are two replies; the same picture twice, or a copy marked as a delivery, is one (HB-0912)', () => {
+    const { root, sd, key } = setup();
+    try {
+      const png = (data: string) => [{ type: 'image', data, mimeType: 'image/png' }];
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 's' } }));
+      writeFileSync(join(sd, 's.jsonl'), [
+        ev('e1', 'user', '[Sam via the web app]\ndraw the garden, then the shed', '2026-09-20T10:00:00.000Z'),
+        ev('e2', 'assistant', png('Z2FyZGVu'), '2026-09-20T10:00:05.000Z'),
+        ev('e3', 'assistant', png('c2hlZA=='), '2026-09-20T10:00:15.000Z'),
+        ev('e4', 'assistant', png('c2hlZA=='), '2026-09-20T10:00:15.000Z'),
+        JSON.stringify({ type: 'message', id: 'e5', timestamp: '2026-09-20T10:00:16.000Z', message: { role: 'assistant', model: 'delivery-mirror', openclawDeliveryMirror: true, content: [{ type: 'image', url: 'https://example.invalid/shed.png' }] } }),
+      ].join('\n'));
+      const r = run(root, key);
+      expect(JSON.parse(r.stdout).messages.map((m: { text: string; at: string }) => [m.text, m.at])).toEqual([
+        ['[Sam via the web app]\ndraw the garden, then the shed', '2026-09-20T10:00:00.000Z'],
+        ['[image]', '2026-09-20T10:00:05.000Z'],
+        ['[image]', '2026-09-20T10:00:15.000Z'],
+      ]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('a delivery copy recorded before its reply, in the same second, is still one reply (HB-0912)', () => {
+    const { root, sd, key } = setup();
+    try {
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 's' } }));
+      writeFileSync(join(sd, 's.jsonl'), [
+        ev('e1', 'user', '[Sam via the web app]\ndraw the shed', '2026-09-20T10:00:00.000Z'),
+        JSON.stringify({ type: 'message', id: 'e2', timestamp: '2026-09-20T10:00:15.000Z', message: { role: 'assistant', model: 'delivery-mirror', openclawDeliveryMirror: true, content: [{ type: 'image', url: 'https://example.invalid/shed.png' }] } }),
+        ev('e3', 'assistant', [{ type: 'image', data: 'c2hlZA==', mimeType: 'image/png' }], '2026-09-20T10:00:15.000Z'),
+      ].join('\n'));
+      const r = run(root, key);
+      expect(JSON.parse(r.stdout).messages.map((m: { text: string; at: string }) => [m.text, m.at])).toEqual([
+        ['[Sam via the web app]\ndraw the shed', '2026-09-20T10:00:00.000Z'],
+        ['[image]', '2026-09-20T10:00:15.000Z'],
       ]);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

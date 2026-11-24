@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CURATED_SKILLS } from '../src/openclaw/skills.js';
-import { MAX_SKILL_FILE_BYTES, mutateSkillFile, readSkillFile, SkillFileError, skillFileScript, type SkillFileContext } from '../src/orchestrator/skillFiles.js';
+import { MAX_SKILL_FILE_BYTES, mutateSkillFile, readSkillFile, SkillFileError, skillFileScript, type SkillFileContext } from '../src/orchestrator/skills/skillFiles.js';
 import type { ExecResult } from '../src/providers/provider.js';
 
 const ID = 'hatchabot-writing';
@@ -284,5 +284,79 @@ describe('unsafe paths, malformed history and failed providers', () => {
     await expect(w.read()).rejects.toMatchObject({ code: 'volume_missing' });
     w.provider.execShell = async () => { throw new Error('private provider path'); };
     await expect(w.read()).rejects.toMatchObject({ code: 'unavailable' });
+  });
+});
+
+describe('a lock left by an operation that was cut off (HB-0958)', () => {
+  const lockOf = (w: ReturnType<typeof world>) => join(w.historyDir, `${ID}.lock`);
+  const boot = () => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  const startOf = (pid: number) => { const s = readFileSync(`/proc/${pid}/stat`, 'utf8'); return s.slice(s.lastIndexOf(')') + 2).split(' ')[19]; };
+  const leave = (w: ReturnType<typeof world>, owner?: unknown, minutesAgo = 0) => {
+    mkdirSync(lockOf(w), { recursive: true });
+    if (owner !== undefined) writeFileSync(join(lockOf(w), 'owner'), JSON.stringify(owner));
+    const at = new Date(Date.now() - minutesAgo * 60_000);
+    utimesSync(lockOf(w), at, at);
+  };
+  const asides = (w: ReturnType<typeof world>) => readdirSync(w.historyDir).filter((n) => n.includes('.lock'));
+
+  it('a change killed while it holds the lock does not refuse the next preview or change', async () => {
+    const w = world('original instructions'), before = await w.read();
+    w.transform((script) => script.replace("      before = get();\n      if (before.revision", "      process.kill(process.pid, 'SIGKILL');\n      before = get();\n      if (before.revision"));
+    await expect(w.change('replace', before.revision)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(lstatSync(lockOf(w)).isDirectory()).toBe(true);
+    w.transform((script) => script);
+    const again = await w.read();
+    expect(again).toMatchObject({ state: 'untracked', installed: { content: 'original instructions' } });
+    w.context.onVolume = true;
+    expect((await w.read()).revision).toBe(again.revision);
+    w.context.onVolume = false;
+    expect(await w.change('replace', again.revision)).toMatchObject({ state: 'current', canRollback: true });
+    expect(asides(w)).toEqual([]);
+    expect(await w.change('rollback')).toMatchObject({ installed: { content: 'original instructions' } });
+    expect(asides(w)).toEqual([]);
+  });
+
+  it.each([
+    { kind: 'with no owner file', owner: undefined },
+    { kind: 'from another pid namespace', owner: () => ({ boot: boot(), ns: 'pid:[4000000001]', pid: 1, start: '1' }) },
+  ])('a lock $kind stands for its lease, then gives way', async ({ owner }) => {
+    const w = world('keep');
+    leave(w, typeof owner === 'function' ? owner() : owner);
+    await expect(w.read()).rejects.toMatchObject({ code: 'conflict' });
+    await expect(w.change('replace', sha('x'.repeat(64)).slice(0, 64))).rejects.toMatchObject({ code: 'conflict' });
+    expect(existsSync(lockOf(w))).toBe(true);
+    const at = new Date(Date.now() - 3 * 60_000); utimesSync(lockOf(w), at, at);
+    w.context.onVolume = true;
+    const seen = await w.read();
+    expect(seen).toMatchObject({ state: 'untracked', installed: { content: 'keep' } });
+    expect(existsSync(lockOf(w))).toBe(true);
+    w.context.onVolume = false;
+    expect(await w.change('replace', seen.revision)).toMatchObject({ state: 'current' });
+    expect(asides(w)).toEqual([]);
+  });
+
+  it('a lock from before the machine restarted gives way at once', async () => {
+    const w = world('keep');
+    leave(w, { boot: 'a-boot-before-this-one', ns: readlinkSync('/proc/self/ns/pid'), pid: process.pid, start: startOf(process.pid) });
+    expect(await w.change('replace')).toMatchObject({ state: 'current' });
+    expect(asides(w)).toEqual([]);
+  });
+
+  it('a lock whose process still runs stands, however old', async () => {
+    const w = world('keep');
+    leave(w, { boot: boot(), ns: readlinkSync('/proc/self/ns/pid'), pid: process.pid, start: startOf(process.pid) }, 60);
+    await expect(w.read()).rejects.toMatchObject({ code: 'conflict' });
+    expect(readFileSync(w.path, 'utf8')).toBe('keep');
+    expect(existsSync(lockOf(w))).toBe(true);
+  });
+
+  it('an operation whose lock was taken from it writes nothing more, and leaves the other lock alone', async () => {
+    const w = world('keep'), before = await w.read();
+    const takeOver = "fs.renameSync(pathAt(history, input.id + '.lock'), pathAt(history, 'moved-lock')); fs.mkdirSync(pathAt(history, input.id + '.lock'));";
+    w.transform((script) => script.replace('atomic(history, name, JSON.stringify(next));', takeOver + ' atomic(history, name, JSON.stringify(next));'));
+    await expect(w.change('replace', before.revision)).rejects.toMatchObject({ code: 'conflict' });
+    expect(existsSync(w.historyPath)).toBe(false);
+    expect(readFileSync(w.path, 'utf8')).toBe('keep');
+    expect(lstatSync(lockOf(w)).isDirectory()).toBe(true);
   });
 });

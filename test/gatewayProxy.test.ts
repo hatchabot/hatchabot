@@ -6,6 +6,7 @@ import { connect } from 'node:net';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import { WS_SAMPLE_KEY } from './support/fixtures.js';
 
@@ -301,6 +302,34 @@ describe('approving the console for a new browser', () => {
     }
   });
 
+  it('a pending read that could read neither the store nor the CLI says so, never "nothing waiting" (HB-1134 review)', async () => {
+    // The page takes a definite 0 just after an approval for "another approval took it": a read that
+    // failed (a runner or runtime failing, HB-1134's own case) gave the same 0, and the reason was lost.
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    try {
+      const { app, provider } = await setup();
+      const H = { 'x-hatchabot-owner': OWNER };
+      provider.execResponses.set('sh', { code: 124, stdout: '', stderr: 'timed out' });
+      for (const cli of [{ code: 124, stdout: '', stderr: 'timed out' }, { code: 0, stdout: 'not json', stderr: '' }, { code: 0, stdout: 'null', stderr: '' }]) {
+        provider.execResponses.set('devices list --json', cli);
+        const pending = await app.inject({ method: 'GET', url: '/v1/agents/a1/console/pending', headers: H });
+        expect(pending.statusCode, `${cli.stdout}: ${pending.body}`).toBe(502);
+        expect(pending.json().error).toMatch(/could not read which browsers are waiting/i);
+        const approve = await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: H });
+        expect(approve.statusCode, approve.body).toBe(502);
+        expect(approve.json().error).toBe(pending.json().error);
+      }
+      expect(provider.execLog.some((a) => a[0] === 'devices' && a[1] === 'approve')).toBe(false);
+      // The CLI's own empty list is a definite nothing waiting.
+      provider.execResponses.set('devices list --json', { code: 0, stdout: JSON.stringify({ pending: [], paired: [] }), stderr: '' });
+      expect((await app.inject({ method: 'GET', url: '/v1/agents/a1/console/pending', headers: H })).json()).toEqual({ pending: 0 });
+      expect((await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: H })).statusCode).toBe(409);
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
+    }
+  });
+
   it('rows the shell read from the store are used as they are (no CLI)', async () => {
     const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
     process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
@@ -313,6 +342,58 @@ describe('approving the console for a new browser', () => {
       const res = await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': OWNER } });
       expect(res.json().approved).toBe(1);
       expect(provider.execLog.filter((a) => a[0] === 'devices' && a[1] === 'approve')).toEqual([['devices', 'approve', 'db-0000-1111']]);
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
+    }
+  });
+
+  it('a request found that OpenClaw would not approve is a failure, not 200 with nothing approved (HB-1134)', async () => {
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    try {
+      const { app, provider, store } = await setup();
+      provider.execResponses.set('devices approve', { code: 1, stdout: '', stderr: 'Error: the device store is read-only (made up for the test)' });
+      const res = await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(res.statusCode, res.body).toBe(502);
+      expect(res.json().error).toMatch(/did not approve this browser.*Try again/);
+      expect(res.json().error).not.toMatch(/read-only/); // the container's words go to the timeline only
+      expect(store.listEvents(['a1']).find((e) => e.event === 'console.device_approved')?.detail).toMatchObject({ approved: 0, requested: 1, failed: 1, error: 'Error: the device store is read-only (made up for the test)' });
+      // One of two approved: approved, with the other counted.
+      const now = Date.now();
+      provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify([{ requestId: 'first-0000-1111', ts: now - 1000 }, { requestId: 'second-2222-3333', ts: now - 500 }]), stderr: '' });
+      const exec = provider.exec.bind(provider);
+      provider.exec = async (ref, argv, opts) => argv[1] === 'approve' && argv[2] === 'second-2222-3333' ? { code: 1, stdout: '', stderr: 'failed' } : exec(ref, argv, opts);
+      provider.execResponses.set('devices approve', { code: 0, stdout: '', stderr: '' });
+      const partly = await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(partly.statusCode, partly.body).toBe(200);
+      expect(partly.json()).toEqual({ approved: 1, failed: 1 });
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
+    }
+  });
+
+  it("the timeline counts the devices that could not be approved, and gives OpenClaw's error, not the noise it printed after (HB-1134 review)", async () => {
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    try {
+      const { app, provider, store } = await setup();
+      const now = Date.now();
+      provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify([{ requestId: 'first-0000-1111', ts: now - 1000 }, { requestId: 'second-2222-3333', ts: now - 500 }]), stderr: '' });
+      // Its reason on stderr; its progress lines on stdout, which came last.
+      provider.execResponses.set('devices approve', { code: 1, stdout: 'Looking up the request…\nDone.', stderr: 'Error: the device store is read-only (made up for the test)\n' });
+      const res = await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(res.statusCode, res.body).toBe(502);
+      const ev = store.listEvents(['a1']).find((e) => e.event === 'console.device_approved')!;
+      expect(ev.detail).toMatchObject({ approved: 0, requested: 2, failed: 2, error: 'Error: the device store is read-only (made up for the test)' });
+      expect(eventLabel(ev.event, ev.detail)).toBe('2 console devices could not be approved: Error: the device store is read-only (made up for the test)');
+      // Nothing on stderr: stdout's last line is all there is.
+      provider.execResponses.set('devices approve', { code: 1, stdout: 'Request not found.', stderr: '' });
+      await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(store.listEvents(['a1']).filter((e) => e.event === 'console.device_approved').map((e) => e.detail?.error)).toContain('Request not found.');
+      expect(eventLabel('console.device_approved', { approved: 0, requested: 1, failed: 1, error: 'refused' })).toBe('a console device could not be approved: refused');
+      expect(eventLabel('console.device_approved', { approved: 1, requested: 2, failed: 1, error: 'refused' })).toBe('console device approved; 1 more could not be approved: refused');
+      expect(eventLabel('console.device_approved', { approved: 2, requested: 5, failed: 3, error: 'refused' })).toBe('2 console devices approved; 3 more could not be approved: refused');
+      expect(eventLabel('console.device_approved', { approved: 1, requested: 1 })).toBe('console device approved');
     } finally {
       if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
     }

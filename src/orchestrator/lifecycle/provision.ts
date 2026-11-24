@@ -1,0 +1,2436 @@
+import { ensureOpsServer } from '../../ops/opsServer.js';
+import { newAgentBudget, newAgentStep } from '../usage/budgets.js';
+import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../../config/claudePlan.js';
+import { clearOpsDrift } from '../../ops/opsDrift.js';
+import { randomBytes } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { homedir, hostname as osHostname } from 'node:os';
+import { lstatSync, realpathSync } from 'node:fs';
+import { basename, dirname, resolve } from 'node:path';
+import { SourceGoneError, type Store } from '../../store/store.js';
+import { embedDefault } from '../../embedder/embedder.js';
+import { needsPortHeal, switchableModelCommands, type ConfigCommand } from '../../openclaw/configWriter.js';
+import type { SecretStore } from '../../secrets/secretStore.js';
+import type { ChannelRooms, OpenClawConfigPatch, RuntimeProvider, RuntimeSpec } from '../../providers/provider.js';
+import { ProviderError } from '../../providers/provider.js';
+import { sampleAgentUsage } from '../usage/sourceUsage.js';
+import type { ChannelProvisioner, ProvisionedChannel } from '../../channels/channel.js';
+import { ChannelSetupRequired } from '../../channels/channel.js';
+import { DOORMAN_EMBED_PORT } from '../../ops/doorman.js';
+import { agentTimeZone } from '../schedules/timezone.js';
+import { AgentBusyError, freedWithin, OWED_BUSY_WAIT_MS, OWED_BUSY_WAITS, whileBusy } from './busy.js';
+import { rethrowIfCrash } from './operations.js';
+import { notifyAgentChat } from '../../channels/notify.js';
+import { autoSnapshot, workspacePath, writeFileInAgent } from '../files/snapshots.js';
+import { addCron, conversationDeliverySupported, cronTargetFor, listCrons, type Cron } from '../schedules/crons.js';
+import { syncModelReviewCron } from '../usage/modelReview.js';
+import { channelTimeoutEnv } from '../channels/channelTimeout.js';
+import { syncContextCap } from '../memory/compaction.js';
+import { clearStaleRuntimePins } from '../sources/runtimePins.js';
+import { attachedGoogleAccounts, syncConnections } from '../google/googleConnections.js';
+import { verifyAgentAccess } from '../google/accessOverview.js';
+import { forgetDmPolicy } from '../channels/dmPolicyMemo.js';
+import { buildWorkspaceSeed, dataSourcesSection, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, memoryPolicySection, operatorSection, peerOneLine, peerToolsSection, extractSection, fenceDisagreement, readFences, removeSection, replaceSection, scheduledResultsSection, unsureSections, PEERS_HEADING, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING, toolsMdWithoutInstallSection, withInstallSection } from '../../openclaw/workspace.js';
+import { effectiveMemoryCap, memoryBudgetSection } from '../../domain/memoryCap.js';
+import { agentMemoryLimits } from '../../domain/swap.js';
+
+/**
+ * The `call-agent` tool installed on agents granted peers: consults a peer by
+ * name (resolved via ~/.openclaw/peers.json) through the control plane, using
+ * the agent's injected call token, and prints the reply. Node so JSON handling
+ * and fetch are clean; base64-shipped onto the volume.
+ */
+const CALL_AGENT_SCRIPT = `#!/usr/bin/env node
+const fs = require('fs');
+const [peer, msg] = process.argv.slice(2);
+if (!peer || !msg) { console.error('usage: call-agent "<peer name>" "<message>"'); process.exit(2); }
+const url = process.env.HATCHABOT_INTERNAL_URL ?? process.env.AGENTCLAW_INTERNAL_URL, tok = process.env.HATCHABOT_AGENT_TOKEN ?? process.env.AGENTCLAW_AGENT_TOKEN; // pre-rename containers carry the old names
+if (!url || !tok) { console.error('This agent has no peers configured.'); process.exit(1); }
+let peers = [];
+try { peers = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/peers.json', 'utf8')); } catch {}
+const q = peer.toLowerCase();
+const hit = peers.find((p) => p.name.toLowerCase() === q) || peers.find((p) => p.name.toLowerCase().includes(q));
+if (!hit) { console.error('Unknown peer "' + peer + '". Available: ' + peers.map((p) => p.name).join(', ')); process.exit(1); }
+(async () => {
+  try {
+    const r = await fetch(url + '/v1/agents/' + hit.id + '/message', {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + tok, 'content-type': 'application/json' },
+      body: JSON.stringify({ text: msg }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { console.error('consult failed: ' + (j.error || r.status)); process.exit(1); }
+    console.log(j.reply || '(no reply)');
+  } catch (e) { console.error('consult error: ' + e.message); process.exit(1); }
+})();
+`;
+
+/**
+ * Fleet-wide search key (Brave), following the media-key pattern: stored
+ * once, injected into every agent at provision as BRAVE_API_KEY — upgrading
+ * the whole fleet's search provider from the keyless DuckDuckGo baseline. A
+ * per-agent BRAVE_API_KEY env var overrides it (spread order below).
+ * Verified in the runtime dist that OpenClaw reads this name (2026-09-04).
+ */
+export const SEARCH_KEY_REF = 'media/brave-api-key';
+import { buildGitRemovalScript, buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from '../apps/gitSource.js';
+import { folderMountNameProblem } from '../apps/dataSourceLimits.js';
+import type { Agent, Channel, Host } from '../../domain/types.js';
+import { ownSearchKeys, readWebSearch, searchProviderFor } from '../settings/webSearch.js';
+import { briefCause } from '../../domain/redact.js';
+import { opsToolsFingerprint } from '../../ops/opsTools.js';
+import { opsSection, OPS_MANAGED_HEADINGS, OPS_RENAMED_HEADINGS } from '../../ops/opsAgent.js';
+import { consoleAllowUsers, consoleIdentityEnabled } from '../console/consoleAccess.js';
+import { consoleIdentity, supportsConsoleIdentity } from '../../openclaw/consoleIdentity.js';
+
+export interface CreateAgentInput {
+  ownerId: string;
+  name: string;
+  persona?: string;
+  aiProfileId: string;
+  hostId: string;
+  /** Only the Hatchabot agent: it can have no members, so its memory is its owner's alone. */
+  ownerOnlyMemory?: boolean;
+  /** Optional per-agent model override (cloud only); absent = profile default. */
+  model?: string;
+}
+
+/** The cap this agent's container gets (memoryCap.ts): its own, its class's, or the fleet default. */
+export function memoryCapFor(store: Store, agent: Agent): string {
+  return effectiveMemoryCap(agent, agent.classId ? store.getAgentClass(agent.classId) : undefined);
+}
+
+export interface ProvisionDeps {
+  store: Store;
+  secrets: SecretStore;
+  provider: RuntimeProvider;
+  channel: ChannelProvisioner;
+  /** Injected so tests don't sleep. */
+  sleep?: (ms: number) => Promise<void>;
+  log?: (event: string, detail: Record<string, unknown>) => void;
+  /**
+   * Ask the agent to distil the live conversation into MEMORY.md before this
+   * rebuild replaces the container. Set when the rebuild will change the AI
+   * backend (a source switch), which makes OpenClaw reset the thread — the
+   * summary is what survives the reset. Best-effort; never blocks the rebuild.
+   */
+  checkpointMemory?: boolean;
+  /** Called once the checkpoint turn is over (it may have failed): the caller frees its checkpoint slot for the next agent. */
+  afterCheckpoint?: () => void;
+  /**
+   * The machine's embedding service (src/embedder), for agents switched to
+   * it: bring it up, and mint this agent's key. Absent (a runner, a test):
+   * the agent is built on the baked engine and told so.
+   */
+  embedder?: {
+    /** Bring the service up if need be and mint this agent's key — or, with an
+     *  external server configured, that server's address, key and model. */
+    /** A key for the agent on the memory search service of the machine it is being built on (a runner has its own). */
+    credentialsFor(agentId: string, hostId?: string): Promise<{ baseUrl: string; token: string; model: string }>;
+    /** Rewrite these machines' door key files from the store now (a move that rolled back put a key back). */
+    syncKeys?(hostIds: Array<string | null>): Promise<void>;
+  };
+  /** Post a line to the agent's chat (default: Telegram via notifyAgentChat).
+   *  Injectable so tests stay off the network. */
+  notify?: (agentId: string, text: string) => Promise<unknown>;
+  /**
+   * No pool bot free and no token pasted: carry on web-only (as `hbt
+   * skip-telegram` does) instead of parking on "paste a bot token". For the
+   * flows that never asked the owner about Telegram — an unarchive, a clone,
+   * a template import — where a dry pool is a surprise rather than a choice
+   * (2026-10-07: an unarchived agent sat in PROVISIONING for want of a bot).
+   * Create keeps parking: its form and the CLI ask, so a token is coming.
+   */
+  webOnlyIfNoBot?: boolean;
+}
+
+export interface ProvisionResult {
+  agent: Agent;
+  deepLink?: string;
+  /** Set when the channel needs a human step before we can continue. */
+  setupRequired?: { instructions: string; resumeToken: string };
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Step 2 of §11.1: create the agent record and return fast, so the app can
+ * render a live progress card while runProvisionSteps() does the slow work.
+ */
+export function createAgentRecord(store: Store, input: CreateAgentInput): Agent {
+  // Read in the same tick as the insert below: gone, the creator says so (409).
+  const profile = store.getAIProfile(input.aiProfileId);
+  if (!profile) throw new SourceGoneError();
+  const host = store.getHost(input.hostId);
+  if (!host) throw new Error(`No such host: ${input.hostId}`);
+
+  const now = new Date().toISOString();
+  const slug = slugify(input.name);
+  // A deleted agent's tombstone row still holds UNIQUE(owner_id, slug) —
+  // free it so names are reusable after deletion.
+  store.releaseDeletedSlug(input.ownerId, slug);
+  const agent: Agent = {
+    id: randomUUID(),
+    ownerId: input.ownerId,
+    name: input.name,
+    slug,
+    state: 'PROVISIONING',
+    aiProfileId: profile.id,
+    hostId: host.id,
+    persona: input.persona ?? '',
+    // Always shared: OpenClaw gives an agent one memory, reachable from every
+    // conversation, so "private to each person" could not be kept (2026-09-29).
+    sharedMemory: !input.ownerOnlyMemory,
+    // Only meaningful for cloud profiles; effectiveModel() ignores it for local.
+    model: profile.vendor === 'local' ? undefined : input.model || undefined,
+    // sortOrder is left to the store, which lands a new agent FIRST in its
+    // section with no ties (see Store.firstSortOrder) — you watch the thing you
+    // just made, and it shouldn't be below the whole fleet.
+    createdAt: now,
+    updatedAt: now,
+  };
+  store.insertAgent(agent);
+  // The machine's monthly budget for new agents (budgets.ts), if it has one.
+  const budget = newAgentBudget();
+  if (budget) store.setBudget(agent.id, agent.ownerId, budget.usd, budget.atLimit, now, 'default');
+  // …and "tell me every $X" for new agents (a new agent has spent nothing: it counts from the first multiple).
+  const step = newAgentStep();
+  if (step) store.setSpendAlert(agent.id, agent.ownerId, step, now, 'default');
+  // The fleet default for memory search: shared once the owner flipped it
+  // (Status → Tools); only where the service is — this machine.
+  if (embedDefault() === 'shared' && host.kind === 'local') store.setAgentEmbedMode(agent.id, 'shared');
+
+  // Owner is a member from the start — the allowlist has to contain somebody.
+  // And if any earlier agent already bound their Telegram identity, carry it
+  // over: seeded into allowFrom, their first message just works — the pairing
+  // dance ("access not configured", a code, a second message) happens once
+  // per person, not once per agent.
+  const known = store.knownChannelUserId(input.ownerId);
+  store.insertMembership({
+    id: randomUUID(),
+    agentId: agent.id,
+    userId: input.ownerId,
+    role: 'owner',
+    ...(known ? { channelUserId: known } : {}),
+    status: 'active',
+    joinedAt: now,
+  });
+
+  return agent;
+}
+
+/**
+ * Steps 3–8 of §11.1, resumable. Safe to call again after a crash, a FAILED
+ * state (retry), or a parked human step (bot token arrived): every step is
+ * idempotent, and on hard failure everything created in this run is rolled
+ * back so nothing keeps billing or stays leased (§11.3).
+ */
+/**
+ * An agent whose channel step must skip the bot pool: its owner unchecked
+ * "use a pool bot" at creation. Kept for it in the store (`agent_holds`,
+ * 'skip-pool'), written with its row, until the step's outcome is on its
+ * record: parked for a token (pendingAction, which drives every retry from
+ * then on) or given its bot. It was a Set in memory, taken out as the step
+ * began: a process that ended between the two left a setup whose Retry
+ * leased the pool bot its owner had declined (HB-0837).
+ */
+export const SKIP_POOL = 'skip-pool' as const;
+
+/** SecretStore ref for the fleet-wide media-understanding key (Gemini) —
+ *  voice-note transcription for every agent. See buildRuntimeSpec. */
+export const MEDIA_KEY_REF = 'media/gemini-api-key';
+
+/**
+ * Step 3's lease: a pool bot, a pasted token, or — when the caller allows it
+ * (deps.webOnlyIfNoBot) and neither is there — no bot at all. Then the agent
+ * becomes web-only, exactly as `hbt skip-telegram` / the "go on without one"
+ * button make it, and undefined comes back. A pool skipped on purpose (the
+ * owner asked for a bespoke bot) still parks: that token is on its way.
+ */
+async function provisionChannelOrGoWebOnly(
+  deps: ProvisionDeps,
+  agent: Agent,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<ProvisionedChannel | undefined> {
+  // Let go once the step's outcome is on the record (runProvisionStepsInner:
+  // parked, or its bot's row made), so a later Retry follows the persisted
+  // pendingAction, not this.
+  const skipPool = deps.store.agentHold(agent.id, SKIP_POOL) !== undefined || undefined;
+  try {
+    return await deps.channel.provision({
+      agentId: agent.id,
+      agentName: agent.name,
+      slug: agent.slug,
+      ownerId: agent.ownerId,
+      skipPool,
+      ownBotsOnly: deps.store.ownerPrefs(agent.ownerId).ownBotsOnly,
+    });
+  } catch (err) {
+    if (!(err instanceof ChannelSetupRequired) || !deps.webOnlyIfNoBot || skipPool) throw err;
+    deps.store.setAgentWebOnly(agent.id, true);
+    deps.store.setAgentPendingAction(agent.id, null);
+    // `auto` is what the list reads to tell the owner (GET /v1/agents → telegramSkipped).
+    log('telegram.skipped', { agentId: agent.id, why: 'no bot free', auto: true });
+    return undefined;
+  }
+}
+
+/**
+ * `busyHeld`: the caller already holds the agent's busy flag (an owner's
+ * "Try again" on a held operation runs under it), so it is not taken again.
+ */
+export async function runProvisionSteps(
+  deps: ProvisionDeps,
+  agentId: string,
+  opts: { busyHeld?: boolean } = {},
+): Promise<ProvisionResult> {
+  if (opts.busyHeld) return runProvisionStepsInner(deps, agentId);
+  return whileBusy(agentId, () => runProvisionStepsInner(deps, agentId));
+}
+
+async function runProvisionStepsInner(
+  deps: ProvisionDeps,
+  agentId: string,
+): Promise<ProvisionResult> {
+  const { store, provider, channel } = deps;
+  const log = deps.log ?? (() => {});
+  const sleep = deps.sleep ?? defaultSleep;
+
+  let agent = store.getAgent(agentId);
+  if (!agent) throw new Error(`No such agent: ${agentId}`);
+  if (agent.state === 'FAILED') {
+    agent = store.setAgentState(agentId, 'PROVISIONING'); // retry path
+  }
+  if (agent.state !== 'PROVISIONING') {
+    return { agent }; // already live (or being deleted) — nothing to do
+  }
+
+  const rollback: Array<() => Promise<void>> = [];
+  // Whether the bot-token step was answered already when this run began its
+  // bot step: then the answer is this run's to take, and not finding it means
+  // asking again. One answered after that came while this run looked.
+  let answeredAtStart = false;
+
+  try {
+    // Step 3: messaging identity.
+    let provisioned = store.getChannelForAgent(agentId);
+    if (!provisioned && agent.webOnly) {
+      // No Telegram: reached only through Hatchabot. Nothing to lease. A
+      // bot-token step answered with "go on without one" is done here, by
+      // setup, not by the route that took the answer.
+      if (agent.pendingAction) store.setAgentPendingAction(agentId, null);
+      log('channel.skipped', { agentId, reason: 'web-only' });
+    } else if (!provisioned) {
+      answeredAtStart = !!store.getAgent(agentId)?.pendingAction?.received;
+      const result = await provisionChannelOrGoWebOnly(deps, agent, log);
+      if (!result) {
+        // No bot was free: it goes on without Telegram (provisionChannelOrGoWebOnly).
+        agent = store.getAgent(agentId) ?? agent;
+      } else {
+        // A Telegram bot token may only ever be polled by ONE runtime: two
+        // copies flip-flop every message between them. The API checks this when
+        // a token is pasted, but a rejected token can still be sitting in the
+        // provisioner's pending map, so a later Retry would arrive here holding
+        // an identity that belongs to somebody else. This is the last gate
+        // before it becomes a real channel row, so check it here too.
+        const clash = store.findAgentUsingAccount(result.accountId);
+        if (clash && clash.id !== agentId) {
+          // Deliberately NOT released: release() deletes the stored token for
+          // this account, and that token is the OTHER agent's credential.
+          throw new ChannelConflictError(
+            `@${result.accountId} already belongs to "${clash.name}". Each agent needs its ` +
+              `own bot — create another with @BotFather and paste that token instead.`,
+          );
+        }
+        rollback.push(async () => {
+          // Not a farewell: it can be retried, and memory is intact on a restore (HB-0412).
+          await channel.release(result.accountId, { reason: 'setup-failed', agentId });
+          store.deleteChannelForAgent(agentId);
+        });
+        provisioned = {
+          id: randomUUID(),
+          agentId,
+          kind: channel.kind,
+          accountId: result.accountId,
+          secretRef: result.secretRef,
+          deepLink: result.deepLink,
+          createdAt: new Date().toISOString(),
+        };
+        const made = provisioned;
+        // Any parked human step is done: setup took the token. The step is
+        // cleared here, not when the token is pasted, so an agent is never
+        // left setting up with no step and no setup running (HB-0542).
+        // With its bot's row, and "skip the pool" let go with them: it has
+        // its bot, and a mark left behind would send a later setup of this
+        // agent (a restore from the archive) past the pool too.
+        store.transact(() => {
+          store.insertChannel(made);
+          store.setAgentPendingAction(agentId, null);
+          store.clearAgentHold(agentId, SKIP_POOL);
+        });
+        log('channel.provisioned', { agentId, accountId: provisioned.accountId });
+      }
+    } else {
+      // Already has its identity — but the rename at lease time is best-effort
+      // (Telegram limits how often a bot may be renamed), and one that lost
+      // that race left a recycled bot advertising "Hatchabot (unassigned)"
+      // with no way back. Retry and Rebuild both land here, so the bot heals
+      // itself instead of staying mislabelled for the life of the agent.
+      await channel.syncDisplayName?.(provisioned.accountId, agent.name).catch(() => {});
+    }
+    // It has its bot (one it had, or a pool bot leased as a token came in): a
+    // token still held is not that bot's (the manual path takes its own), and
+    // held, it would win over the pool at the next attach (composite.ts).
+    if (provisioned && await channel.waitingFor?.(agentId).catch(() => false)) channel.discardPending?.(agentId);
+
+    // Step 5: render config + workspace.
+    const spec = await buildRuntimeSpec(deps, agentId);
+
+    // Step 4: runtime + persistent volume.
+    log('runtime.seeding', { agentId, migrating: needsPortHeal(spec.workspace.configPatch.openclawVersion) });
+    // Purge ONLY storage this run created. On a retry, spec.previousRef makes
+    // provision() reuse the existing volume — purging it there destroys the
+    // agent's memory permanently, turning a transient failure (slow boot,
+    // port clash, image missing) into irreversible loss.
+    const createdStorage = !spec.previousRef;
+    let runtimeRef: string;
+    try {
+      ({ runtimeRef } = await provider.provision(spec));
+    } catch (err) {
+      // provision() makes the volume before its seed or its container can
+      // fail: with no ref, nothing purged it and Delete, finding none, left it
+      // behind (audit #101). Its name is known; one that cannot be removed now
+      // is kept on the agent, so Delete finishes the job.
+      const made = createdStorage ? provider.runtimeRefFor?.({ agentId, slug: agent.slug }) : undefined;
+      if (made) {
+        rollback.push(Object.assign(async () => {
+          try { await provider.destroy(made, { purge: true }); }
+          catch (cleanupErr) { store.setAgentRuntimeRef(agentId, made); throw cleanupErr; }
+        }, { holdsBot: true }));
+      }
+      throw err;
+    }
+    forgetDmPolicy(agentId); // the seed wrote the channel config afresh
+    recordApplied(store, agentId, spec);
+    store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
+    rollback.push(Object.assign(() => provider.destroy(runtimeRef, { purge: createdStorage }), { holdsBot: true }));
+    store.setAgentRuntimeRef(agentId, runtimeRef);
+    log('runtime.provisioned', { agentId, runtimeRef });
+
+    // Step 6: boot.
+    await provider.start(runtimeRef);
+    log('runtime.started', { agentId, runtimeRef });
+
+    // Step 7: health check. Generous, because a retry boots an agent that may
+    // have months of sessions to load — and timing out here used to trigger a
+    // rollback that purged its volume.
+    await waitForHealthy(provider, runtimeRef, sleep, 120);
+    log('runtime.healthy', { agentId, runtimeRef });
+    // Sessions pinned to a runtime this seed no longer names (runtimePins.ts).
+    await clearStaleRuntimePins(provider, runtimeRef, agent.slug, (e, d) => log(e, { agentId, ...d }))
+      .catch((err) => log('runtime.pin_failed', { agentId, error: String(err).slice(0, 200) }));
+
+    // Step 7.5: clone/refresh git data sources onto the volume, then tell the
+    // agent where they landed (AGENTS.md "## Data sources").
+    // Removed sources first: their keys come off before any source is (re)synced.
+    await scrubRemovedDataSources(deps, agentId, runtimeRef, true, log).catch(() => false);
+    await syncGitDataSources(deps, agentId, runtimeRef, log);
+    // Step 7.6: attached platform connections (Google via gog) land on the
+    // volume — best-effort per connection; a Google hiccup never fails a
+    // build, and import is idempotent so the next provision heals it.
+    await syncConnections({ store, secrets: deps.secrets, provider, log }, agentId, runtimeRef)
+      .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
+    await syncDataSourceDocs(deps, agentId, runtimeRef, log);
+    await syncInstallDocs(deps, agentId, runtimeRef, log);
+    // What it can reach, looked at in the new container (access overview) — read-only, best-effort,
+    // and not awaited: a slow probe must never hold up a build (2026-10-09).
+    void verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
+    // Its context cap (compaction.ts), re-applied for the model it runs now.
+    await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
+      .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
+    await runRebuildHook(deps, agentId, runtimeRef, log);
+    // Step 7.9: let the agent stop moving before anyone can talk to it — a
+    // message that lands mid-settle has started a fresh session.
+    await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
+    await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
+
+    // Step 7.95: template-carried schedules (applyPendingSchedules).
+    await applyPendingSchedules(deps, store.getAgent(agentId) ?? agent, runtimeRef, log);
+    // The management agent's weekly model review: made once, removed when
+    // HATCHABOT_MODEL_REVIEW=off (modelReview.ts). Best-effort.
+    if (agent.ops) {
+      await syncModelReviewCron({ store, provider, log }, agent, runtimeRef)
+        .catch((err) => log('schedule.model_review_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
+    }
+
+    // A clone's daily notes and USER.md are on the volume now. Kept as seeds,
+    // a note the agent later deleted would come back at every rebuild
+    // (2026-09-30).
+    store.dropCarriedMemorySeed(agentId);
+
+    // Step 8: live.
+    const live = store.setAgentState(agentId, 'RUNNING');
+    return { agent: live, deepLink: provisioned?.deepLink };
+  } catch (err) {
+    // A channel that needs a human step is not a failure — the agent parks in
+    // PROVISIONING with a pendingAction the app renders; once the user acts,
+    // provisioning resumes right here.
+    if (err instanceof ChannelSetupRequired) {
+      // Answered while this run looked (a token, or "go on without one"), as
+      // the record says: the step stays answered, and the setup the answer
+      // queued after this run takes it (routes.ts provisionWhenFree). An
+      // answer this run was given and did not find, and no answer, ask the
+      // owner. A failed setup drops the mark (below).
+      const now = store.getAgent(agentId);
+      const answered = !!now?.pendingAction?.received && (!answeredAtStart || !!now.webOnly);
+      // Parked (or answered): the record drives what comes next, and "skip the pool" has done its work.
+      store.transact(() => {
+        if (!answered) store.setAgentPendingAction(agentId, {
+          type: 'bot_token',
+          instructions: err.instructions,
+        });
+        store.clearAgentHold(agentId, SKIP_POOL);
+      });
+      log('channel.setup_required', { agentId });
+      return {
+        agent: store.getAgent(agentId)!,
+        setupRequired: { instructions: err.instructions, resumeToken: err.resumeToken },
+      };
+    }
+
+    const reason = userMessageFor(err);
+    log('provision.failed', { agentId, reason, error: String(err) });
+    forgetEmbedDecision(agentId);
+
+    // Roll back newest-first so nothing keeps billing or stays leased.
+    for (const undo of rollback.reverse()) {
+      try {
+        await undo();
+      } catch (cleanupErr) {
+        log('rollback.failed', { agentId, error: String(cleanupErr) });
+        // A container that could not be removed may still be polling its
+        // bot: handing the bot back to the pool now would give it to the next
+        // agent too. Stop here; the agent stays FAILED with the bot attached,
+        // and Delete finishes the job (night review, 2026-09-27).
+        if ((undo as { holdsBot?: boolean }).holdsBot) break;
+      }
+    }
+
+    store.setAgentState(agentId, 'FAILED', reason);
+    // An answered step was this setup's to take: it failed, so the answer is
+    // not waiting any more (a held token stays held for the Retry).
+    if (store.getAgent(agentId)?.pendingAction?.received) store.setAgentPendingAction(agentId, null);
+    return { agent: store.getAgent(agentId)! };
+  }
+}
+
+/**
+ * Renders the full RuntimeSpec for an agent from its current registry state.
+ * Used by fresh provisioning, retry, and rebuild — secrets are resolved as
+ * late as possible and only ever live in the spec handed to the provider.
+ */
+/**
+ * The agent owner's own chat ids, as OpenClaw command owners. Nobody known
+ * yet: a placeholder that matches no one, because an EMPTY list lets OpenClaw
+ * make the first person approved the owner (2026-09-29).
+ */
+export function commandOwnersFor(store: Store, agent: { id: string; ownerId: string }): string[] {
+  const ids = store.memberIdentities(agent.id, agent.ownerId);
+  const out: string[] = [];
+  const tg = ids.telegram ?? store.knownChannelUserId(agent.ownerId);
+  if (tg && /^\d{1,32}$/.test(tg)) out.push(`telegram:${tg}`);
+  for (const kind of ['discord', 'slack'] as const) {
+    const id = ids[kind];
+    if (id && /^[A-Za-z0-9]{1,40}$/.test(id)) out.push(`${kind}:${id}`);
+  }
+  return out.length ? out : ['telegram:0'];
+}
+
+export async function buildRuntimeSpec(
+  deps: ProvisionDeps,
+  agentId: string,
+  // Move builds the target spec BEFORE flipping the store's hostId (so a crash
+  // mid-move can't strand the record on a host that has no data yet) — this
+  // overrides which host the spec resolves against, without a store mutation.
+  hostOverride?: Host,
+): Promise<RuntimeSpec> {
+  const { store, secrets } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) throw new Error(`No such agent: ${agentId}`);
+  const profile = store.getAIProfile(agent.aiProfileId);
+  if (!profile) throw new Error('Its AI source is gone — pick another under the agent\'s settings, then rebuild.');
+  // The rule at selection, again at build time: a source another account
+  // stopped sharing after this agent chose it must not land its credential
+  // in this container at a later rebuild (30th audit). An agent already
+  // running on it keeps it until it moves; a build is the moment it moves.
+  if (profile.ownerId !== agent.ownerId && !profile.shared) {
+    throw new Error('Its AI source is no longer shared with you — pick another under the agent\'s settings, then rebuild.');
+  }
+  const host = hostOverride ?? store.getHost(agent.hostId)!;
+  const channelRow = store.getChannelForAgent(agentId);
+  if (!channelRow && !agent.webOnly) throw new Error(`Agent ${agentId} has no channel yet`);
+
+  const botToken = channelRow ? await secrets.get(channelRow.secretRef) : undefined;
+  // A local model server needs no credential of any kind: no key to inject,
+  // no ~/.claude to mount, nothing that can leak. It is the only vendor where
+  // "your data never leaves the machine" is literally true.
+  const local = profile.vendor === 'local';
+  const subscription = !local && profile.kind === 'subscription';
+  // A subscription (Claude Max) profile authenticates one of two ways, and only
+  // one of them travels. A `claude setup-token` (profile.secretRef present) is
+  // injected as CLAUDE_CODE_OAUTH_TOKEN — pure data, so it rides to any host, a
+  // runner included. The machine-login flavour instead bind-mounts the CONTROL
+  // PLANE'S ~/.claude, which a remote daemon can't see; that one stays local.
+  // A hosted Hatchabot takes Claude by API key only. The API refuses new plan
+  // sources there; this catches the ones that already exist (made before
+  // managed mode was set, or brought in by an import or restore), at the one
+  // place every build, rebuild, move and clone passes through.
+  if (subscription && !claudePlanAllowed()) throw new Error(`${CLAUDE_PLAN_HOSTED} Pick an API-key source under the agent's settings, then rebuild.`);
+  if (subscription && host.kind !== 'local' && !profile.secretRef) {
+    // Enforced at the API too; belt and suspenders here because this is the
+    // last gate before a credential decision. See docs/ai-profiles.md.
+    throw new Error(
+      "This Claude Max profile uses this machine's login, which only reaches agents on this " +
+        'machine. To run Max on a runner, add a setup-token profile (`claude setup-token`).',
+    );
+  }
+  // Where-am-I orientation: agents get MOVED between machines, and "which
+  // host are you on?" asked in Telegram deserves a true answer. The container
+  // hostname becomes `<agent>.<host>` (so a plain `hostname` answers), and
+  // HATCHABOT_HOST_NAME carries the human-readable host name for scripts.
+  // Both refresh on every rebuild/move because provision re-renders the spec.
+  const hostLabel = host.kind === 'local' ? osHostname() : host.name;
+  const hostSlug = hostLabel.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || 'host';
+  // Linux caps a hostname at 64 bytes: a long slug plus a long host name made a
+  // container that could not start (audit, 2026-10-23). The agent's part wins.
+  const containerHostname = `${agent.slug.slice(0, 63)}.${hostSlug}`.slice(0, 63).replace(/[.-]+$/, '') || agent.slug.slice(0, 63);
+
+  const modelKey =
+    subscription || local ? undefined : await secrets.get(requireRef(profile.secretRef));
+
+  // Voice & media understanding: OpenClaw transcribes inbound voice notes by
+  // sending audio to an audio-capable model (Gemini). One server-level key —
+  // set in Settings → AI sources, stored like any credential — lights this up
+  // for every agent. Injected HERE (not the Environment tab: GEMINI_* is
+  // reserved there on purpose) and only when the profile doesn't already
+  // provide it (a google-vendor profile's own key wins via spread order).
+  const mediaKey = await secrets.get(MEDIA_KEY_REF).catch(() => undefined);
+  const searchKey = await secrets.get(SEARCH_KEY_REF).catch(() => undefined);
+  // Subscription with a stored secret = a `claude setup-token` token (macOS
+  // hosts, where the login lives in the Keychain and can't be file-mounted).
+  // Claude Code reads it from CLAUDE_CODE_OAUTH_TOKEN; no ~/.claude mount.
+  const oauthToken =
+    subscription && profile.secretRef ? await secrets.get(profile.secretRef) : undefined;
+  if (local && !profile.baseUrl) {
+    throw new Error('Local AI profile has no model server URL');
+  }
+
+  // Always pairing mode, never a hard allowlist: pairing already enforces
+  // §12.4 (only approved senders chat; strangers get a pending request), AND
+  // it keeps the door open for invitees who join after a rebuild — a hard
+  // allowlist would silently reject their first contact. allowFrom seeds the
+  // known members on fresh volumes.
+  const allowFrom = store.listAllowedChannelUserIds(agentId);
+  // Slack and Discord: written only when the image carries the plugin. A row
+  // whose plugin is missing (an agent pinned to an older image) is left out of
+  // this build rather than failing it; the Messaging tab says why.
+  const slackRow = store.getChannelForAgent(agentId, 'slack');
+  const discordRow = store.getChannelForAgent(agentId, 'discord');
+  let channelPlugins: string[] = [];
+  let bakedPlugins: string[] = [];
+  let pluginInstall: 'link' | 'npm' | undefined;
+  let openclawVersion: string | undefined;
+  let engineless = false;
+  try {
+    const info = await deps.provider.currentImageInfo(agent.image ?? undefined);
+    channelPlugins = info.channels ?? [];
+    bakedPlugins = info.plugins ?? [];
+    pluginInstall = info.pluginInstall;
+    openclawVersion = info.openclawVersion;
+    engineless = info.embedEngine === 'none';
+  } catch { /* no image info: no new channels this build */ }
+
+  // Memory search engine. `shared` is the service on the machine the agent is
+  // built on — this one's, or a runner's own (before 2.147 runners had none,
+  // and every 2026.9 agent was refused a runner). When it cannot be had (the
+  // service down), the agent is built on the baked engine — never left
+  // without one — and the reason is on its record.
+  // An image with no engine of its own (label embed-engine=none: OpenClaw
+  // 2026.8+, or a -lite build) has only the shared service: the agent is
+  // built on it whatever its switch says, and the build refuses rather than
+  // leave it without memory search.
+  const wantShared = agent.embedMode === 'shared' || engineless;
+  let embed: OpenClawConfigPatch['embed'];
+  let bakedWhy: string | undefined;
+  if (wantShared && !deps.embedder) bakedWhy = 'no memory search service is available on this path';
+  else if (wantShared) {
+    try {
+      embed = await deps.embedder!.credentialsFor(agentId, host.id);
+    } catch (err) {
+      bakedWhy = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    }
+  }
+  if (engineless && !embed) {
+    deps.log?.('embed.engineless_refused', { agentId, why: bakedWhy });
+    throw new ProviderError(`image ${agent.image ?? 'default'} has no embedding engine and the shared service is unavailable: ${bakedWhy}`,
+      `Its image has no memory search engine of its own, and the shared memory search service cannot be had (${bakedWhy}). Start the service (Settings → Hosts), or pin the agent to an image that carries an engine.`);
+  }
+  if (engineless && agent.embedMode !== 'shared') {
+    // The record says what the agent runs on, not what the switch once said.
+    deps.log?.('embed.forced_shared', { agentId, image: agent.image ?? 'default' });
+    store.setAgentEmbedMode(agentId, 'shared');
+  }
+  if (bakedWhy) {
+    deps.log?.('embed.baked_instead', { agentId, why: bakedWhy });
+    // On the record, where the agent's engine row can show it — the log alone
+    // left the row promising a switch that would not happen (27th audit).
+    store.setAgentEmbedIndex(agentId, null, `built on its own engine — ${bakedWhy}`);
+  }
+  embedDecision.set(agentId, { used: embed ? 'shared' : 'baked', before: agent.appliedEmbedMode ?? 'baked', openclawVersion });
+  const roomsOf = (c: Channel): ChannelRooms => {
+    const r = (c.settings?.rooms ?? {}) as { mode?: string; roomId?: unknown };
+    if (r.mode === 'members') return { mode: 'members' };
+    return r.mode === 'room' && typeof r.roomId === 'string' && r.roomId ? { mode: 'room', roomId: r.roomId } : { mode: 'off' };
+  };
+  /** The servers a Discord bot was in at its last check — the rooms of `members` mode. */
+  const serversOf = (c: Channel): string[] => {
+    const list = (c.settings?.servers ?? []) as Array<{ id?: unknown }>;
+    return Array.isArray(list) ? list.map((g) => String(g?.id ?? '')).filter(Boolean) : [];
+  };
+  // The same door rule as Telegram (below): allowlist once somebody is
+  // admitted, pairing only while nobody is or the owner allows knocks. Discord
+  // was hardwired to pairing, so anyone sharing a server could always knock
+  // (2026-09-25).
+  // An open claim window keeps its door open through a rebuild: written as
+  // allowlist, the invitee's first message was dropped (night review).
+  const windowOpen = (kind: string) => store.pairingWindows(agent.id).some((w) => w.seat.startsWith(`${kind}:`));
+  const doorFor = (allowFrom: string[], kind: string): 'pairing' | 'allowlist' => !allowFrom.length || agent.allowKnocks || windowOpen(kind) ? 'pairing' : 'allowlist';
+  let slack: OpenClawConfigPatch['slack'];
+  if (slackRow && channelPlugins.includes('slack')) {
+    const t = JSON.parse(await secrets.get(slackRow.secretRef)) as { botToken: string; appToken: string };
+    const allowFrom = store.listAllowedChannelUserIds(agentId, 'slack');
+    slack = { botToken: t.botToken, appToken: t.appToken, dmPolicy: doorFor(allowFrom, 'slack'), allowFrom, rooms: roomsOf(slackRow), servers: serversOf(slackRow) };
+  }
+  let discord: OpenClawConfigPatch['discord'];
+  if (discordRow && channelPlugins.includes('discord')) {
+    const allowFrom = store.listAllowedChannelUserIds(agentId, 'discord');
+    discord = {
+      token: await secrets.get(discordRow.secretRef), applicationId: discordRow.accountId,
+      dmPolicy: doorFor(allowFrom, 'discord'), allowFrom, rooms: roomsOf(discordRow), servers: serversOf(discordRow),
+    };
+  }
+  // Debug door: each agent's Control UI published on a stable host port
+  // behind a per-agent gateway token.
+  const gateway = store.ensureGatewayAccess(agentId);
+  // The console with identities (openclaw/consoleIdentity.ts): the owner and
+  // the people given web chat reach OpenClaw's own console, each named by
+  // Hatchabot's proxy. Not the management agent (its console stays the
+  // owner's, behind the token), not an OpenClaw without named roles.
+  const consoleSpec: OpenClawConfigPatch['console'] = !agent.ops && consoleIdentityEnabled() && supportsConsoleIdentity(openclawVersion)
+    ? {
+      trustedProxies: [await deps.provider.agentProxySource?.().catch(() => undefined)].filter((x): x is string => !!x),
+      ownerIdentity: consoleIdentity(gateway.token, 'owner', agent.ownerId),
+      guestIdentities: consoleAllowUsers(store, agent, gateway.token).slice(1),
+    }
+    : undefined;
+  // Owner-set env vars (e.g. an API key the agent's own tools need). Their
+  // values are secrets; fetch them here. The managed AI credentials are spread
+  // AFTER these below, so a same-named var can never shadow the agent's own AI
+  // auth (the API also refuses those names up front).
+  const perAgentEnv: Record<string, string> = {};
+  for (const e of store.listAgentEnv(agentId)) {
+    perAgentEnv[e.name] = await secrets.get(e.secretRef);
+  }
+  // Agent-to-agent: an agent granted peers gets its call token + the address it
+  // reaches the control plane on, so its `call-agent` tool can consult them.
+  const peerIds = store.listAgentPeers(agentId);
+  const callToken = peerIds.length ? await secrets.get(`agent-call-token/${agentId}`).catch(() => undefined) : undefined;
+  if (callToken) {
+    perAgentEnv.HATCHABOT_AGENT_TOKEN = callToken;
+    // Where the agent reaches this Hatchabot: the address containers see this
+    // machine at, and the port this instance listens on (several instances
+    // share a rootless host, each on its own port).
+    perAgentEnv.HATCHABOT_INTERNAL_URL = process.env.HATCHABOT_INTERNAL_URL
+      ?? `http://${(await deps.provider.hostAddressForAgents?.()) ?? '172.17.0.1'}:${process.env.PORT?.trim() || 8080}`;
+  }
+  // The management agent: a fresh propose-only key on every build, and the
+  // address of the ops server — its tools and its only way to its AI provider.
+  let ops: { mcpUrl: string; token: string; proxyUrl: string; host: string } | undefined;
+  if (agent.ops) {
+    const token = randomBytes(32).toString('base64url');
+    // The doorman's own key: what it says first on every connection to the
+    // door, so the door knows a doorman from any other container on a host
+    // where addresses cannot tell (opsServer.ts). Not on the manager's volume.
+    const doormanKey = randomBytes(24).toString('base64url');
+    store.setOpsToken(agentId, agent.ownerId, token, doormanKey);
+    clearOpsDrift(agentId); // this build re-asserts the lockdown
+    // Its tools come from Hatchabot, and OpenClaw reads that list once at
+    // start-up: remember which tool list it was built against so an upgrade
+    // that changes it can restart it instead of leaving it describing tools it
+    // no longer has. Keyed on the list, not the version (review, 2026-09-29).
+    store.setAppliedAppVersion(agentId, opsToolsFingerprint());
+    // Hatchabot's door listens on THIS machine's loopback, and the agent
+    // reaches it through its doorman — the one arrangement that works the same
+    // on Linux and on Docker Desktop, where the host cannot listen on a Docker
+    // address at all (docs/ops-agent-design.md).
+    const at = await ensureOpsServer([await deps.provider.hostGatewayAddress?.()]);
+    // The memory search door, when the manager uses the shared service: its
+    // port rides on the doorman, and the agent is pointed at the doorman.
+    const embedUrl = embed ? (() => { try { return new URL(embed.baseUrl); } catch { return undefined; } })() : undefined;
+    const embedPort = embedUrl ? Number(embedUrl.port) || (embedUrl.protocol === 'https:' ? 443 : 80) : undefined;
+    const jail = deps.provider.ensureOpsJail
+      ? await deps.provider.ensureOpsJail({
+        agentId, slug: agent.slug, runtimeRef: agent.runtimeRef,
+        opsPort: at.port, consolePort: gateway.port, embedPort, doormanKey,
+      })
+      : { doorHost: at.host, doorPort: at.port }; // providers without networks (mock)
+    if (embed && embedUrl && deps.provider.ensureOpsJail) embed = { ...embed, baseUrl: `http://${jail.doorHost}:${DOORMAN_EMBED_PORT}${embedUrl.pathname === '/' ? '' : embedUrl.pathname}` };
+    ops = {
+      host: jail.doorHost,
+      token,
+      mcpUrl: `http://${jail.doorHost}:${jail.doorPort}/mcp`,
+      proxyUrl: `http://ops:${token}@${jail.doorHost}:${jail.doorPort}`,
+    };
+    Object.assign(perAgentEnv, {
+      HTTPS_PROXY: ops.proxyUrl, https_proxy: ops.proxyUrl,
+      NO_PROXY: `${jail.doorHost},localhost,127.0.0.1`, no_proxy: `${jail.doorHost},localhost,127.0.0.1`,
+      NODE_USE_ENV_PROXY: '1',
+    });
+    // It consults nobody directly (no route to the main port); drop A2A env.
+    delete perAgentEnv.HATCHABOT_AGENT_TOKEN;
+    delete perAgentEnv.HATCHABOT_INTERNAL_URL;
+  }
+  // Every shared folder is judged again at every build, not only when it was
+  // added: an agent that swapped a folder inside another share for a symlink
+  // to ~/.ssh got it mounted at the next rebuild (night review, 2026-09-28).
+  // Refused here, before anything is stopped, the agent keeps running.
+  for (const p of [
+    ...(agent.sharedPaths ?? []),
+    ...store.listDataSources(agent.id).filter((d) => d.kind === 'folder' && d.hostPath).map((d) => d.hostPath!),
+  ]) {
+    const problem = sharePathProblem(p);
+    if (problem) throw new ProviderError(`shared folder refused at build: ${problem}`, `A shared folder is no longer safe to mount: ${problem} Remove it from the agent's Data, then rebuild.`);
+  }
+  // A folder brought in from OpenClaw is mounted at its own path: judged as a
+  // place inside the container too, and judged again here like every share
+  // (it was left out of the check above, HB-0053).
+  for (const d of store.listDataSources(agent.id)) {
+    if (d.kind !== 'folder' || !d.hostPath) continue;
+    const problem = folderMountNameProblem(d.mountName) || (d.mountAtHostPath ? hostPathTargetProblem(d.hostPath) : undefined);
+    if (problem) throw new ProviderError(`shared folder refused at build: ${problem}`, `A shared folder is no longer safe to mount: ${problem} Remove it from the agent's Data, then rebuild.`);
+  }
+  const seedFiles = store.getAgentSeed(agentId);
+  const limits = agentMemoryLimits(store, agent);
+  const spec: RuntimeSpec = {
+    agentId,
+    slug: agent.slug,
+    isolated: agent.ops || undefined,
+    // Pinned image, when the agent has one — a candidate under test, or a
+    // derived image with extra system packages. Absent = provider default.
+    image: agent.image,
+    // Its own cap, else its class's, else the fleet default (memoryCap.ts),
+    // and the swap it may use on top where the host compresses swap (swap.ts).
+    memory: limits.memory,
+    memorySwap: limits.swap,
+    previousRef: agent.runtimeRef,
+    ports: [{ host: gateway.port, container: 18789 }],
+    workspace: {
+      files: buildWorkspaceSeed({
+        agentName: agent.name,
+        slug: agent.slug,
+        persona: agent.persona,
+        sharedMemory: agent.sharedMemory,
+        curatedSkills: agent.ops ? undefined : agent.curatedSkills,
+        // A template import stashes its trained SOUL.md/AGENTS.md here; the seed
+        // script only writes files that don't yet exist, so this seeds once.
+        seedFiles,
+      }),
+      // …except over what `agents add` scaffolded moments earlier in the same
+      // first build: on 2026.9 it writes its own SOUL.md, AGENTS.md and
+      // USER.md, and a template's, a clone's and the manager's files never
+      // landed (2026-09-30). The generated SOUL.md and AGENTS.md too: a plain
+      // new agent's "What is it for?" persona lives in that SOUL.md, and on
+      // 2026.9 OpenClaw's generic "Who You Are" file had been winning.
+      replaceScaffold: [...new Set(['SOUL.md', 'AGENTS.md', ...Object.keys(seedFiles)])],
+      configPatch: {
+        agentId: agent.slug,
+        displayName: agent.name,
+        model: effectiveModel(agent, profile),
+        models: profile.models,
+        authMode: subscription ? 'oauth-claude-cli' : 'api-key',
+        cronTriggers: agent.cronTriggers === true,
+        curatedSkills: agent.ops ? undefined : agent.curatedSkills?.slice(),
+        browser: agent.browser === true && !agent.ops,
+        userTimezone: agentTimeZone(),
+        embed,
+        openclawVersion,
+        bakedPlugins,
+        pluginInstall,
+        searchProvider: searchProviderFor({
+          hasFleetKey: !!searchKey,
+          hasOwnKey: ownSearchKeys(store.listAgentEnv(agent.id)).length > 0,
+          state: readWebSearch(store),
+        }),
+        // Model refs are provider-prefixed; a Google profile configured as
+        // `anthropic/gemini-…` provisions healthy and fails on first use.
+        provider: modelProviderOf(profile),
+        // A local model server is reached on the jail's own gateway address.
+        baseUrl: ops && local ? (profile.baseUrl ?? 'http://172.17.0.1:11434/v1').replace(/\/\/172\.17\.0\.1(?=[:/])/, `//${ops.host}`) : profile.baseUrl,
+        ops: ops && { mcpUrl: ops.mcpUrl, token: ops.token },
+        setupToken: oauthToken,
+        gatewayToken: gateway.token,
+        console: consoleSpec,
+        commandOwners: commandOwnersFor(store, agent),
+        ...(agent.filesMaxMb ? { filesMaxMb: agent.filesMaxMb } : {}),
+        // Web-only agents have no bot: configWriter then writes no Telegram
+        // channel at all.
+        telegram: channelRow && botToken ? {
+          accountId: channelRow.accountId,
+          botToken,
+          // `allowlist` is the resting state: a DM from anyone not on the
+          // list is dropped without a word. `pairing` answers a stranger with
+          // "access not configured" and a code, so it is used only when it
+          // has to be — when nobody is on the list yet (a fresh agent that
+          // would otherwise be unreachable), or when the owner deliberately
+          // opened the agent to anyone who finds it. A claim window flips it
+          // to pairing for its 30 minutes and back again (see claim.ts).
+          dmPolicy: !allowFrom.length || agent.allowKnocks || windowOpen('telegram') ? 'pairing' : 'allowlist',
+          allowFrom,
+          groupAccess: agent.groupAccess,
+          richMessages: agent.richMessages !== false,
+          proxy: ops?.proxyUrl,
+        } : undefined,
+        channelPlugins,
+        slack,
+        discord: discord && { ...discord, ...(ops ? { proxy: ops.proxyUrl } : {}) },
+      },
+    },
+    hostname: containerHostname,
+    env: {
+      ...(mediaKey ? { GEMINI_API_KEY: mediaKey } : {}),
+      // Fleet search key first, per-agent env after — an agent's own
+      // BRAVE_API_KEY (its own quota/bill) wins over the household one.
+      // Not for the management agent: a Brave key makes OpenClaw download the
+      // Brave plugin from npm at startup, which its jail refuses — it then never
+      // comes up healthy (seen live, 2026-09-18). It searches through Hatchabot.
+      ...(searchKey && !agent.ops ? { BRAVE_API_KEY: searchKey } : {}),
+      // How long a chat-app message may take to get going before OpenClaw
+      // retries it: 30 minutes, not OpenClaw's 5, so a long /compact is not
+      // retried every 5 minutes for a day (channelTimeout.ts, 2026-10-04).
+      // Before perAgentEnv: the agent's own Environment value wins.
+      // The shell's clock in the agent's zone (an agent's own TZ, below, wins).
+      TZ: agentTimeZone(),
+      ...channelTimeoutEnv(),
+      ...perAgentEnv,
+      // Orientation, not configuration: the human name of the machine this
+      // agent runs on, refreshed by every rebuild/move.
+      HATCHABOT_HOST_NAME: hostLabel,
+      // Its memory budget, so a script can size itself (AGENTS.md says the same).
+      HATCHABOT_MEMORY_CAP: memoryCapFor(store, agent),
+      // Google-connection credentials (gog) live ON THE VOLUME: they refresh
+      // in place and ride Move/backup/export with the agent, while Share
+      // templates never include them. See docs/connections-design.md.
+      GOG_HOME: '/home/node/.openclaw/connections/gog',
+      // $HOME is the agent's persistent volume, so put the conventional
+      // user-install locations on PATH for EVERY process (a login shell isn't
+      // guaranteed — Claude Code spawns plain `bash -c`). This is what makes a
+      // tool the agent installs for itself actually runnable next time.
+      PATH: '/home/node/.local/bin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      NPM_CONFIG_PREFIX: '/home/node/.npm-global',
+      ...(modelKey
+        ? envForProfile(profile.vendor, modelKey)
+        : oauthToken
+          ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken }
+          : {}),
+    },
+    hostMounts: [
+      // A machine-login Max profile is the PROFILE OWNER'S ~/.claude: OAuth
+      // refresh token, every Claude Code transcript, and settings.json (whose
+      // hooks execute as them). Only mount it for the profile owner's OWN
+      // agents — the `profile.ownerId === agent.ownerId` guard (restored for
+      // family-member hardening) means a cross-owner selection never mounts it,
+      // backstopping the route checks in create/switch/share.
+      ...(subscription && !oauthToken && profile.ownerId === agent.ownerId
+        ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
+        : []),
+      // Legacy owner-chosen folders, always read-only. An agent runs with
+      // permission prompts disabled and is reachable by everyone in it, so write
+      // access would make one bad instruction destructive.
+      ...(agent.sharedPaths ?? []).map((p) => ({
+        source: p,
+        target: `/data/${basename(p)}`,
+        readonly: true,
+      })),
+      // Data sources of kind 'folder' — the same bind mount, but access is
+      // per-source: 'rw' drops the :ro flag (gated + warned at the API). (Git
+      // sources are cloned onto the volume in Slice B, not mounted here.)
+      ...store
+        .listDataSources(agent.id)
+        .filter((d) => d.kind === 'folder' && d.hostPath)
+        .map((d) => ({
+          source: d.hostPath!,
+          // Adopted agents bind at the original host path so their existing
+          // absolute references resolve; everything else uses /data/<name>.
+          target: d.mountAtHostPath ? d.hostPath! : `/data/${d.mountName}`,
+          readonly: d.access === 'ro',
+        })),
+    ],
+  };
+  // An own key equal to the fleet's is the fleet's, as the search watch reads it (webSearch.ts).
+  const brave = spec.env.BRAVE_API_KEY;
+  const searchKeyFrom = !brave ? 'none' : perAgentEnv.BRAVE_API_KEY === brave && brave !== searchKey ? 'own' : 'fleet';
+  renderedFrom.set(spec, { profileId: profile.id, model: effectiveModel(agent, profile), searchKey: searchKeyFrom });
+  return spec;
+}
+
+/**
+ * Recreate the runtime from the current image and config while KEEPING the
+ * agent's volume — memory, pairing, and identity survive. This is the upgrade
+ * mechanism (new OpenClaw image) and the unstick mechanism, distinct from
+ * delete (which purges) by construction: previousRef makes the provider reuse
+ * the existing storage, and the seed script never overwrites existing files.
+ */
+/**
+ * Have the agent write the live conversation's durable facts into MEMORY.md,
+ * on the STILL-RUNNING old container, before a rebuild that will reset the
+ * thread. This is OpenClaw's own "promote key facts, don't hoard transcripts"
+ * model, fired at the one moment Hatchabot knows context is about to drop.
+ *
+ * Best-effort by contract: any failure (model down, timeout, CLI hiccup) is
+ * logged and swallowed — a missed summary is a smaller harm than a blocked or
+ * failed switch.
+ */
+export const CHECKPOINT_TIMEOUT_MS = Number(process.env.HATCHABOT_CHECKPOINT_TIMEOUT_MS ?? 180_000);
+
+/**
+ * A fingerprint of what the agent has saved: MEMORY.md's content and the
+ * names and sizes under memory/. Two readings around a checkpoint tell "it
+ * wrote something" from "the turn merely ended" — a turn that exits 0 has
+ * saved nothing if it found nothing worth saving (2026-09-30). One cheap
+ * exec; undefined when it could not be read.
+ */
+export async function memoryFingerprint(provider: RuntimeProvider, runtimeRef: string, slug: string): Promise<string | undefined> {
+  const res = await provider.execShell(
+    runtimeRef,
+    `cd ${JSON.stringify(workspacePath(slug, '.'))} && { cat MEMORY.md 2>/dev/null | sha256sum; find memory -type f -printf '%P %s\\n' 2>/dev/null | LC_ALL=C sort; } | sha256sum | cut -c1-64`,
+  ).catch(() => undefined);
+  const fp = res?.code === 0 ? res.stdout.trim() : '';
+  return /^[0-9a-f]{64}$/.test(fp) ? fp : undefined;
+}
+
+export async function checkpointMemory(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<{ ok: boolean; detail?: string; changed?: boolean }> {
+  const prompt =
+    'System note: please save anything from our recent conversation worth keeping — decisions, ' +
+    'facts about the people you serve, ongoing tasks or context — into your memory (MEMORY.md, ' +
+    'or today\'s file under memory/), so it survives if this chat is later reset. Only durable ' +
+    'things; skip small talk. Reply with just DONE when saved.';
+  try {
+    // Bounded by the provider's own exec timeout (HATCHABOT_DOCKER_TIMEOUT_MS,
+    // 60s default) — a summary is short; a model too slow to finish inside it
+    // is one we'd rather abandon than let delay the rebuild.
+    // A summary turn that writes memory can legitimately take >60s under load;
+    // cutting it mid-turn leaves the container stopped on a broken turn (the
+    // "interrupted by a gateway restart" notice). 3 minutes, its own budget.
+    const before = await memoryFingerprint(provider, runtimeRef, slug);
+    const res = await provider.exec(runtimeRef, ['agent', '--agent', slug, '-m', prompt], { timeoutMs: CHECKPOINT_TIMEOUT_MS });
+    // The checkpoint IS an agent turn, so it needs the AI source to actually
+    // run — an out-of-credits / expired / rate-limited source makes the turn
+    // fail (non-zero), and the summary is NOT written. Report that instead of
+    // pretending it saved, so callers can tell the user the truth.
+    const ok = res.code === 0 && !res.timedOut;
+    // Did it write anything? Unknown (undefined) when either reading failed.
+    const after = ok && before ? await memoryFingerprint(provider, runtimeRef, slug) : undefined;
+    const changed = before && after ? before !== after : undefined;
+    log('memory.checkpointed', { slug, ok, changed, timedOut: !!res.timedOut, tail: (res.stdout || res.stderr).slice(-200) });
+    return {
+      ok,
+      changed,
+      detail: ok ? undefined
+        : res.timedOut ? 'the AI source did not finish in time'
+          : (res.stderr || res.stdout || 'the AI source could not complete the turn (out of credits, expired, or unreachable?)').trim().slice(-180),
+    };
+  } catch (err) {
+    const detail = String((err as Error).message ?? err);
+    log('memory.checkpoint_failed', { slug, error: detail });
+    return { ok: false, detail };
+  }
+}
+
+/**
+ * Rebuilds refused at render time, kept running: the unattended sweep must
+ * not retry them every five minutes (each try takes a snapshot, rotating out
+ * the older ones, and starves the rest of the queue — regression review).
+ * An owner's own Rebuild tries again, and clears it on success.
+ */
+const renderRefused = new Map<string, { at: number; reason: string }>();
+export function renderRefusedRecently(agentId: string, withinMs = 6 * 3_600_000): boolean {
+  const r = renderRefused.get(agentId);
+  return !!r && Date.now() - r.at < withinMs;
+}
+/**
+ * Why the agent's last rebuild was refused at render time, if it was (each
+ * rebuild clears it first). That rebuild leaves the agent running or stopped as it was:
+ * its operation is a failure all the same, not "Rebuilt" (audit #092).
+ */
+export function renderRefusalOf(agentId: string): string | undefined {
+  return renderRefused.get(agentId)?.reason;
+}
+
+/**
+ * Template-carried schedules: declarations parked at import (or for the
+ * manager's morning check) become real gateway crons once the gateway exists.
+ * Best-effort per job; only the ones that failed stay parked, each with why,
+ * for the next provision or rebuild. A rebuild retries them too: setup had
+ * already moved the agent to RUNNING, so a task one gateway hiccup refused at
+ * setup stayed parked for good (audit #017). So do a start, a wake and the
+ * Tasks list's "Try again" (retryPendingSchedules, HB-0231).
+ */
+async function applyPendingSchedules(
+  deps: Pick<ProvisionDeps, 'store' | 'provider'>,
+  agent: Agent,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store, provider } = deps;
+  const agentId = agent.id;
+  const pendingSchedules = store.getPendingSchedules(agentId);
+  if (!pendingSchedules.length) return;
+  // Idempotent by NAME: crons live on the durable volume, so a retry after
+  // a partial failure must skip the ones that already landed — a bare
+  // re-add duplicated every success on each subsequent provision, and the
+  // duplicates fired forever (10th audit). Instead of the all-or-keep
+  // batch, each applied (or already-present) entry is dropped from the
+  // parked list individually; only genuine failures stay parked.
+  // A listing that fails is not an empty list: adding then duplicated a
+  // task whose earlier add landed but whose answer was lost. They stay
+  // parked for the next provision instead (A50, 2026-10-22).
+  const listed = await listCrons(provider, runtimeRef, agent.slug).catch((err) => {
+    log('schedule.list_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+    return undefined;
+  });
+  const stillPending: typeof pendingSchedules = listed ? []
+    : pendingSchedules.map((sch) => ({ ...sch, why: 'its list of tasks could not be read, so it was not added (it may be there already)' }));
+  // A template may carry two tasks of one name (an export keeps the names
+  // the agent had). The ones of this import already added, or waiting still,
+  // are not "another task" for one of their name: the first added, the
+  // second refused once, it was parked as a clash for good (HB-0962).
+  // Each parked task keeps the ones of its name that landed (`beside`).
+  type Declared = { message: string; cron?: string; everyMs?: number; tz?: string };
+  const declared = (d: Declared): Declared => ({ message: d.message, ...(d.cron ? { cron: d.cron } : {}), ...(d.everyMs ? { everyMs: d.everyMs } : {}), ...(d.tz ? { tz: d.tz } : {}) });
+  const landed: Array<Declared & { name: string }> = pendingSchedules.flatMap((s) => (s.beside ?? []).map((b) => ({ ...declared(b), name: s.name })));
+  const ofThisImport = (c: Cron, sch: { name: string }): boolean =>
+    [...pendingSchedules, ...landed].some((d) => d !== sch && d.name === sch.name && sameSchedule(c, d));
+  for (const sch of listed ? pendingSchedules : []) {
+    // Landed already only when the task of that name is this one: another
+    // task that happens to have the name (an hourly "Morning" of the owner's
+    // own) made this one count as added, and it was dropped (HB-0290). Such
+    // a clash stays parked, with why, for the owner to settle.
+    const named = (listed ?? []).filter((c) => !c.system && c.name === sch.name);
+    if (named.some((c) => sameSchedule(c, sch))) {
+      landed.push({ ...declared(sch), name: sch.name });
+      log('schedule.already_present', { agentId, name: sch.name });
+      continue;
+    }
+    if (named.some((c) => !ofThisImport(c, sch))) {
+      stillPending.push({ ...sch, why: NAME_TAKEN_WHY });
+      log('schedule.name_taken', { agentId, name: sch.name });
+      continue;
+    }
+    const out = await addCron(provider, runtimeRef, agent.slug, {
+      name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
+      // Quiet in the template, quiet here; unsaid (older templates) announces.
+      announce: sch.announce !== false,
+      deliverTo: cronTargetFor(store, agent),
+    }).catch(() => ({ ok: false as const, error: 'exec failed' }));
+    if (!out.ok) {
+      const error = String((out as { error?: unknown }).error ?? 'refused');
+      stillPending.push({ ...sch, why: `the agent refused it: ${error.slice(0, 200)}` });
+      log('schedule.apply_failed', { agentId, name: sch.name, error });
+    } else {
+      if (out.quieted && out.id) store.addQuietedCron(agentId, out.id, new Date().toISOString());
+      landed.push({ ...declared(sch), name: sch.name });
+      log('schedule.applied', { agentId, name: sch.name });
+    }
+  }
+  const parked = stillPending.map((sch) => {
+    const { beside: _old, ...rest } = sch;
+    const beside = [...new Map(landed.filter((d) => d.name === sch.name).map((d) => [JSON.stringify(declared(d)), declared(d)])).values()];
+    return beside.length ? { ...rest, beside } : rest;
+  });
+  store.setPendingSchedules(agentId, parked.length ? parked : null);
+}
+
+/** Whether a listed task is a parked declaration as addCron makes it (intervals to the second, as msToEvery sends them). */
+function sameSchedule(c: Cron, sch: { message: string; cron?: string; everyMs?: number; tz?: string }): boolean {
+  if ((c.message ?? '').trim() !== sch.message.trim()) return false;
+  if (sch.cron) return c.scheduleExpr === sch.cron && (!sch.tz || c.scheduleTz === sch.tz);
+  return !!sch.everyMs && !!c.everyMs && Math.round(c.everyMs / 1000) === Math.max(1, Math.round(sch.everyMs / 1000));
+}
+
+/** Why a template task is parked when another task has its name: its owner settles it (HB-0290, HB-0962). */
+export const NAME_TAKEN_WHY = 'another task already has this name (with another schedule or message), so it was not added: rename or remove that one, then Try again';
+
+/**
+ * Parked template tasks, tried again now (HB-0231): the agent must be RUNNING,
+ * and the agent's lock is taken so a rebuild (which tries them itself) is
+ * never doubled. Throws AgentBusyError when something else holds the agent.
+ * Returns the tasks still waiting.
+ */
+export async function retryPendingSchedules(
+  deps: Pick<ProvisionDeps, 'store' | 'provider'>,
+  agentId: string,
+  log: (event: string, detail: Record<string, unknown>) => void = () => {},
+): Promise<ReturnType<Store['getPendingSchedules']>> {
+  const { store } = deps;
+  if (!store.getPendingSchedules(agentId).length) return [];
+  return whileBusy(agentId, async () => {
+    const a = store.getAgent(agentId);
+    if (a?.state === 'RUNNING' && a.runtimeRef) await applyPendingSchedules(deps, a, a.runtimeRef, log);
+    return store.getPendingSchedules(agentId);
+  });
+}
+
+/**
+ * The same once a started or woken agent's gateway answers: until then only
+ * a rebuild retried them, and an agent that is only ever started kept a
+ * task it was given waiting for good (HB-0231). Best-effort. A busy agent
+ * is waited for, a few times (OWED_BUSY_WAITS), and tried again: what held
+ * it was as often the boot's other work for it (its AGENTS.md sync) as a
+ * rebuild, which adds them itself, and the tasks were left for the next
+ * start (HB-0834 review). That wait goes on in the background: this
+ * settles once the agent has been tried, so a caller that waits for it (the
+ * boot's pass, six agents at a time) is not held for an agent that is busy.
+ */
+export async function retryPendingSchedulesWhenUp(
+  /** `stop`: shutdown has begun; a wait for a busy agent ends, and nothing is tried after it. */
+  deps: Pick<ProvisionDeps, 'store' | 'provider'> & { stop?: AbortSignal },
+  agentId: string,
+  log: (event: string, detail: Record<string, unknown>) => void = () => {},
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  attempts = 24,
+  busyWaits = 0,
+): Promise<void> {
+  const { store, provider } = deps;
+  for (let i = 0; i < attempts && store.getPendingSchedules(agentId).length; i++) {
+    const a = store.getAgent(agentId);
+    if (a?.state !== 'RUNNING' || !a.runtimeRef) return;
+    const st = await provider.status(a.runtimeRef).catch(() => undefined);
+    if (st?.phase === 'running' && st.healthy) {
+      const busy = await retryPendingSchedules(deps, agentId, log).then(() => false, (err) => {
+        if (err instanceof AgentBusyError) return true;
+        log('schedule.retry_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+        return false;
+      });
+      if (busy && busyWaits < OWED_BUSY_WAITS) {
+        void freedWithin(agentId, OWED_BUSY_WAIT_MS, deps.stop)
+          .then((freed) => (freed && !deps.stop?.aborted ? retryPendingSchedulesWhenUp(deps, agentId, log, sleep, attempts - i, busyWaits + 1) : undefined))
+          .catch(() => undefined);
+      }
+      return;
+    }
+    if (st?.phase === 'stopped' || st?.phase === 'error') return;
+    await sleep(5000);
+  }
+}
+
+export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {
+  return whileBusy(agentId, () => rebuildAgentInner(deps, agentId));
+}
+
+async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<Agent> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const sleep = deps.sleep ?? defaultSleep;
+  const agent = store.getAgent(agentId);
+  if (!agent?.runtimeRef) throw new Error(`Agent ${agentId} has no runtime to rebuild`);
+  if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
+    throw new Error(`Cannot rebuild from state ${agent.state}`);
+  }
+  let checkpointResult: { ok: boolean; detail?: string } | undefined;
+  // Cheap insurance before we replace the container. This runs HERE (inside the
+  // background task) rather than in the route so the POST returns immediately —
+  // the ~1-2s docker-exec snapshot was what made "Rebuild all" sit silent. It
+  // still happens before stop/replace, and before the REBUILDING flip because
+  // captureSnapshot only reads a RUNNING agent (no-op unless RUNNING).
+  if (agent.state === 'RUNNING') {
+    // The model calls and refusals logged since the last usage sample live in
+    // this container's logs, which the rebuild removes (night review).
+    await sampleAgentUsage({ store, secrets: deps.secrets, providerFor: () => provider }, agent).catch(() => {});
+    await autoSnapshot({ store, provider, log }, agentId, 'pre-rebuild');
+    // Save the conversation into memory BEFORE we touch the container, while
+    // the old AI backend still answers — a source switch resets the thread on
+    // first message under the new backend, and this is what survives it.
+    if (deps.checkpointMemory) {
+      try {
+        checkpointResult = await checkpointMemory(provider, agent.runtimeRef, agent.slug, log);
+      } finally {
+        deps.afterCheckpoint?.();
+      }
+    }
+  }
+  // Render the new spec BEFORE stopping what runs: a refusal at render time
+  // (an engine-free image with the memory service off, an un-shared source,
+  // a missing secret) used to leave a working agent stopped and FAILED. Now
+  // it keeps running and the trail says why (night review, 2026-09-27); a
+  // stopped one stays as it was, its container untouched and Start still
+  // open to it (HB-0419). The manager is the exception: its spec rotates the
+  // door token, which the old container must not keep using, so it stops
+  // first as before.
+  let early: Awaited<ReturnType<typeof buildRuntimeSpec>> | undefined;
+  renderRefused.delete(agentId);
+  const renderedEarly = async (): Promise<boolean> => {
+    try {
+      early = await buildRuntimeSpec(deps, agentId);
+      return true;
+    } catch (err) {
+      const reason = userMessageFor(err);
+      log('rebuild.failed', { agentId, reason, error: String(err), keptAs: agent.state });
+      forgetEmbedDecision(agentId);
+      renderRefused.set(agentId, { at: Date.now(), reason });
+      return false;
+    }
+  };
+  // Stopped, before REBUILDING: nothing leads from there back to STOPPED.
+  if (!agent.ops && agent.state === 'STOPPED' && !(await renderedEarly())) return store.getAgent(agentId)!;
+  // Visible immediately: the chip must not read RUNNING while the container
+  // is being replaced.
+  store.setAgentState(agentId, 'REBUILDING');
+  // A checkpoint that failed (rate-limited / dead source) ended its turn
+  // abnormally right before the stop; OpenClaw then posts "interrupted by a
+  // gateway restart — send that last request again" on boot, which reads as
+  // if it were about the USER's message. Explain it once the agent is back.
+  const explainFailedCheckpoint = async () => {
+    if (!checkpointResult || checkpointResult.ok) return;
+    const send = deps.notify ?? ((id: string, text: string) => notifyAgentChat(store, deps.secrets, id, text));
+    await send(agentId,
+      'ℹ️ Before this restart I tried to save our conversation to memory, but the previous AI source didn\'t finish ' +
+      '(rate-limited or out of tokens). If there is an "interrupted by a gateway restart" note above, ignore it — ' +
+      'that was the save attempt, not your message. Nothing you sent was lost.').catch(() => {});
+  };
+
+  if (!agent.ops && agent.state === 'RUNNING' && !(await renderedEarly())) return store.setAgentState(agentId, 'RUNNING');
+  try {
+    await provider.stop(agent.runtimeRef).catch(() => {}); // may already be stopped
+    const spec = early ?? (await buildRuntimeSpec(deps, agentId));
+    // Deletion may have started while we were stopping. Re-creating the
+    // container now would resurrect a purged agent as an orphan.
+    const current = store.getAgent(agentId);
+    if (!current || current.state === 'DELETING' || current.state === 'DELETED') {
+      log('rebuild.abandoned', { agentId, reason: 'agent is being deleted' });
+      return current ?? agent;
+    }
+    // Each step says what it is, so a card that reads REBUILDING for minutes
+    // can be asked what it is doing (the Setup log; Chris, 2026-09-24).
+    log('runtime.seeding', { agentId, migrating: needsPortHeal(spec.workspace.configPatch.openclawVersion) });
+    const { runtimeRef } = await provider.provision(spec);
+    forgetDmPolicy(agentId); // the seed wrote the channel config afresh
+    log('runtime.provisioned', { agentId, runtimeRef });
+    recordApplied(store, agentId, spec);
+    store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
+    await provider.start(runtimeRef);
+    log('runtime.started', { agentId, runtimeRef });
+    // As generous as a retry's health wait: a rebuild boots an agent with its
+    // whole history to load, and 30s used to fail exactly the agents that had
+    // been used the most.
+    await waitForHealthy(provider, runtimeRef, sleep, 120);
+    log('runtime.healthy', { agentId, runtimeRef });
+    await finishRebuild(deps, agent, runtimeRef, log);
+    const live = store.setAgentState(agentId, 'RUNNING');
+    void explainFailedCheckpoint();
+    return live;
+  } catch (err) {
+    const reason = userMessageFor(err);
+    log('rebuild.failed', { agentId, reason, error: String(err) });
+    forgetEmbedDecision(agentId);
+    // The container may be up and POLLING THE BOT (a health timeout means
+    // "slow", not "dead") while the card says FAILED — and reconcile never
+    // mends running+FAILED. Stop it so a failed rebuild is actually stopped,
+    // which is also what the health-timeout message promises the user.
+    const ref = store.getAgent(agentId)?.runtimeRef;
+    if (ref) await provider.stop(ref).catch(() => {});
+    store.setAgentState(agentId, 'FAILED', reason);
+    return store.getAgent(agentId)!;
+  }
+}
+
+/**
+ * What a rebuild does once its new container answers: its sources,
+ * connections, docs, context cap, rebuild hook, memory index and parked
+ * schedules. Each step leaves what is done as it is, so a rebuild cut off by
+ * a restart after its container came up runs them again (HB-0301).
+ */
+async function finishRebuild(deps: ProvisionDeps, agent: Agent, runtimeRef: string, log: (event: string, detail: Record<string, unknown>) => void): Promise<void> {
+  const { store, provider } = deps;
+  const agentId = agent.id;
+  const sleep = deps.sleep ?? defaultSleep;
+  // Sessions pinned to a runtime this seed no longer names (runtimePins.ts).
+  await clearStaleRuntimePins(provider, runtimeRef, agent.slug, (e, d) => log(e, { agentId, ...d }))
+    .catch((err) => log('runtime.pin_failed', { agentId, error: String(err).slice(0, 200) }));
+  log('runtime.syncing', { agentId });
+  // Removed sources first: their keys come off before any source is (re)synced.
+  await scrubRemovedDataSources(deps, agentId, runtimeRef, true, log).catch(() => false);
+  await syncGitDataSources(deps, agentId, runtimeRef, log);
+  // Step 7.6: attached platform connections (Google via gog) land on the
+  // volume — best-effort per connection; a Google hiccup never fails a
+  // build, and import is idempotent so the next provision heals it.
+  await syncConnections({ store, secrets: deps.secrets, provider, log }, agentId, runtimeRef)
+    .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
+  await syncDataSourceDocs(deps, agentId, runtimeRef, log);
+  await syncInstallDocs(deps, agentId, runtimeRef, log);
+  // What it can reach, looked at in the new container (access overview) — read-only, best-effort,
+  // and not awaited: a slow probe must never hold up a build (2026-10-09).
+  void verifyAgentAccess({ store, secrets: deps.secrets, provider }, agentId, runtimeRef).catch(() => undefined);
+  // Its context cap (compaction.ts), re-applied for the model it runs now.
+  await syncContextCap({ store, provider, log: (e, d) => log(e, { agentId, ...d }) }, store.getAgent(agentId) ?? agent, runtimeRef)
+    .catch((err) => log('token.context_cap_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
+  await runRebuildHook(deps, agentId, runtimeRef, log);
+  log('runtime.settling', { agentId });
+  await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
+  await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
+  // Template tasks a setup could not schedule: retried here (audit #017).
+  await applyPendingSchedules(deps, store.getAgent(agentId) ?? agent, runtimeRef, log);
+  // The weekly model review rides on rebuilds too: a management agent made
+  // before it existed is never provisioned again, only rebuilt (2026-10-03).
+  if (agent.ops) {
+    await syncModelReviewCron({ store, provider, log }, agent, runtimeRef)
+      .catch((err) => log('schedule.model_review_failed', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) }));
+  }
+  log('runtime.rebuilt', { agentId, runtimeRef });
+  store.dropCarriedMemorySeed(agentId); // on the volume now (see provision)
+}
+
+/**
+ * A rebuild cut off by a restart with its new container up and answering:
+ * the steps after health run again, then it is RUNNING. Failing, it ends as
+ * a failed rebuild does: stopped and FAILED, with the reason.
+ */
+export async function finishInterruptedRebuild(
+  deps: ProvisionDeps,
+  agentId: string,
+  opts: { busyHeld?: boolean } = {},
+): Promise<Agent | undefined> {
+  // `busyHeld`: as for runProvisionSteps (an owner's "Try again" already holds it).
+  const run = async (): Promise<Agent | undefined> => {
+    const log = deps.log ?? (() => {});
+    const agent = deps.store.getAgent(agentId);
+    if (!agent?.runtimeRef || agent.state !== 'REBUILDING') return agent;
+    try {
+      await finishRebuild(deps, agent, agent.runtimeRef, log);
+      return deps.store.setAgentState(agentId, 'RUNNING');
+    } catch (err) {
+      rethrowIfCrash(err);
+      const reason = userMessageFor(err);
+      log('rebuild.failed', { agentId, reason, error: String(err) });
+      await deps.provider.stop(agent.runtimeRef).catch(() => {});
+      deps.store.setAgentState(agentId, 'FAILED', reason);
+      return deps.store.getAgent(agentId);
+    }
+  };
+  return opts.busyHeld ? run() : whileBusy(agentId, run);
+}
+
+/** The source and model each spec was rendered with: what recordApplied stamps (audit #094). And whose Brave key it holds (HB-0578 review). */
+const renderedFrom = new WeakMap<RuntimeSpec, { profileId: string; model: string; searchKey: 'own' | 'fleet' | 'none' }>();
+
+/**
+ * Record what the runtime is actually running. Called only after a provider
+ * accepted the rendered spec — recording at render time made a failed rebuild
+ * claim the new model while the old container kept running the old one.
+ * `spec`: the one it accepted. Its source and model are recorded, not the
+ * record as it is by then — a source edited during a slow build was stamped
+ * as applied to a container seeded with the old one (audit #094).
+ */
+export function recordApplied(store: Store, agentId: string, spec?: RuntimeSpec): void {
+  const agent = store.getAgent(agentId);
+  const rendered = spec && renderedFrom.get(spec);
+  const profile = agent && store.getAIProfile(agent.aiProfileId);
+  // A container made from a spec starts its restart and memory counts again and
+  // has the manager's lockdown put back: a later one is new, not what a Clear covered (HB-0409).
+  if (agent && spec) store.dropAttentionAckKeys(agentId, ['restart:', 'memory', 'opsDrift']);
+  if (agent && rendered) store.setAgentApplied(agentId, rendered.profileId, rendered.model);
+  else if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
+  // Whose searches its Brave calls spend, until the next build (sourceUsage.ts attributeBrave).
+  if (agent && rendered) store.recordAppliedSearchKey(agentId, rendered.searchKey);
+  const skills = spec?.workspace.configPatch.curatedSkills;
+  if (agent && !agent.ops && skills !== undefined) store.setAgentCuratedSkillsApplied(agentId, skills);
+  // This container was made from the settings as they are: nothing is owed to
+  // its next start. Only with a spec: a model written onto a stopped agent's
+  // volume (applyModelNow) makes no container, and the old one still lacks the
+  // change, a bot it gave back among them (HB-0411).
+  if (spec && agent?.rebuildOnStart) store.setRebuildOnStart(agentId, null);
+  // Nor does its class's model wait for the image that can run it any more
+  // (lifecycle/classChanges.ts), once its runtime runs that model. A
+  // container made from a spec rendered before the class wrote it (a rebuild
+  // under way then) does not: it still waits for its own rebuild.
+  if (agent) {
+    const waits = store.agentHold(agentId, 'model-waits-image');
+    if (waits !== undefined && store.getAgent(agentId)?.appliedModel === waits) store.clearAgentHold(agentId, 'model-waits-image', waits);
+  }
+  const d = embedDecision.get(agentId);
+  if (d) {
+    // The decision is kept in the store, not in memory, for the re-index
+    // step that follows the build's health and syncs
+    // (reindexMemoryIfSwitched): a restart in those minutes resumes the
+    // build (finishInterruptedRebuild), and a decision held in memory was
+    // gone by then, so a build that had changed the engine came up with
+    // memory search paused (HB-0831). With the stamp of what it runs on, in
+    // one transaction: the stamp alone would read as "nothing changed".
+    store.transact(() => {
+      store.setAgentEmbedApplied(agentId, d.used);
+      store.commitEmbedToken(agentId); // the old key retires now that the new container is accepted
+      store.setAgentHold(agentId, 'embed-reindex', JSON.stringify(d));
+    });
+    embedDecision.delete(agentId);   // consumed: a later live model apply must not stamp a stale one
+  }
+}
+
+/**
+ * This installation's settings (bot, members, model) written over a volume
+ * whose config came from elsewhere — a backup restored, or a restore finished
+ * after a restart: the same second provision Import and Move use.
+ */
+export async function reapplyCurrentSettings(deps: ProvisionDeps, agentId: string): Promise<void> {
+  // A build that was never accepted: its memory-search decision must not be
+  // stamped by a later model change (2026-10-09).
+  let spec: RuntimeSpec;
+  try { spec = await buildRuntimeSpec(deps, agentId); await deps.provider.provision(spec); }
+  catch (err) { forgetEmbedDecision(agentId); throw err; }
+  recordApplied(deps.store, agentId, spec);
+}
+
+/**
+ * A build that never got accepted: its decision must not be applied later
+ * (27th audit). One that was accepted and failed after has its re-index
+ * kept ('embed-reindex'); the next accepted build's decision replaces it.
+ */
+export function forgetEmbedDecision(agentId: string): void {
+  embedDecision.delete(agentId);
+}
+
+type EmbedDecision = { used: 'baked' | 'shared'; before: 'baked' | 'shared'; openclawVersion?: string };
+/**
+ * What buildRuntimeSpec decided about memory search, until the provider
+ * accepts the build: a hand-off inside one build, which ends with the
+ * process (a build cut off before it was accepted is run again, and decides
+ * again). Once accepted it is kept in the store for the re-index step
+ * (`agent_holds`, 'embed-reindex': recordApplied).
+ */
+const embedDecision = new Map<string, EmbedDecision>();
+/** The decision recordApplied kept for the re-index step, or undefined (none kept, or not one this release wrote). */
+function embedToIndex(store: Store, agentId: string): EmbedDecision | undefined {
+  const kept = store.agentHold(agentId, 'embed-reindex');
+  if (!kept) return undefined;
+  try {
+    const d = JSON.parse(kept) as Partial<EmbedDecision> | null;
+    const mode = (m: unknown): m is 'baked' | 'shared' => m === 'baked' || m === 'shared';
+    if (!d || !mode(d.used) || !mode(d.before)) return undefined;
+    return { used: d.used, before: d.before, ...(typeof d.openclawVersion === 'string' ? { openclawVersion: d.openclawVersion } : {}) };
+  } catch { return undefined; }
+}
+
+/** Per agent: how many session files a forced index still left unindexed. */
+const sessionsGapAfterForce = new Map<string, number>();
+
+/** The counts `openclaw memory status` prints: the total line and, under
+ *  "By source", one `memory · a/b files` / `sessions · a/b files` line each. */
+export function memoryIndexCounts(text: string): { total?: [number, number]; memory?: [number, number]; sessions?: [number, number] } {
+  const out: { total?: [number, number]; memory?: [number, number]; sessions?: [number, number] } = {};
+  const t = /Indexed:\s*(\d+)\s*\/\s*(\d+)/i.exec(text);
+  if (t) out.total = [Number(t[1]), Number(t[2])];
+  for (const src of ['memory', 'sessions'] as const) {
+    const m = new RegExp(`^\\s*${src}\\s*[·:\\-]\\s*(\\d+)\\s*/\\s*(\\d+)`, 'im').exec(text);
+    if (m) out[src] = [Number(m[1]), Number(m[2])];
+  }
+  return out;
+}
+
+/**
+ * Whether a 2026.8+ index needs a forced pass. Judged per source (review,
+ * 2026-09-29): the total line always counts the live session transcript,
+ * which OpenClaw indexes on its own schedule, so "3/4" was forcing a full
+ * re-embed on every rebuild. Memory files must all be in; sessions may trail
+ * by the active transcript (or by what the last forced pass left behind).
+ * Only an old OpenClaw without per-source lines falls back to the total.
+ */
+export function memoryIndexIncomplete(text: string, tolerateSessions = 0): boolean {
+  const c = memoryIndexCounts(text);
+  if (c.memory || c.sessions) {
+    if (c.memory && c.memory[0] < c.memory[1]) return true;
+    return !!c.sessions && c.sessions[1] - c.sessions[0] > Math.max(1, tolerateSessions);
+  }
+  return !!c.total && c.total[0] < c.total[1];
+}
+
+/**
+ * Changing the memory-search engine changes OpenClaw's index identity: vector
+ * search pauses until the index is rebuilt, and it does not rebuild itself.
+ * After a build that switched (either way), rebuild it — minutes, in the
+ * container, with a warning on the agent if it fails, never a failed build.
+ */
+export async function reindexMemoryIfSwitched(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store } = deps;
+  // Kept until this step has ended (the index is whole, was rebuilt, or its
+  // failure is on the agent's record): cut off by a restart, the resumed
+  // build finds it here and runs the step again.
+  const kept = store.agentHold(agentId, 'embed-reindex');
+  const d = embedToIndex(store, agentId);
+  const agent = store.getAgent(agentId);
+  try {
+    if (d && agent) await reindexMemory(deps, agent, d, runtimeRef, log);
+  } finally {
+    // Only the one it began with: a build accepted meanwhile kept its own.
+    if (kept !== undefined) { try { store.clearAgentHold(agentId, 'embed-reindex', kept); } catch { /* the database closed under it: kept, and run again */ } }
+  }
+}
+
+async function reindexMemory(
+  deps: ProvisionDeps,
+  agent: Agent,
+  d: EmbedDecision,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store, provider } = deps;
+  const agentId = agent.id;
+  // Only a SWITCH re-indexes — plus a shared agent whose index was never
+  // confirmed. A baked agent with no record is simply how every agent has
+  // always been; treating that as "never indexed" forced a fleet-wide
+  // re-index on the next Rebuild all (27th audit).
+  const switched = d.used !== d.before;
+  const sharedUnconfirmed = d.used === 'shared' && !agent.embedIndexedAt;
+  // On 2026.8+ the memory store itself moved (sessions are indexed too): an
+  // agent carried over from 2026.7 comes up with a partial index ("7/10
+  // files") until one forced pass (To Do Agent, 2026-09-24). Ask first, so
+  // a routine rebuild on 2026.9 costs one status call, not a re-index.
+  let incomplete = false;
+  if (!switched && !sharedUnconfirmed && needsPortHeal(d.openclawVersion)) {
+    const st = await provider.exec(runtimeRef, ['memory', 'status', '--agent', agent.slug], { timeoutMs: 120_000 })
+      .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
+    incomplete = memoryIndexIncomplete(`${st.stdout}\n${st.stderr}`, sessionsGapAfterForce.get(agentId) ?? 0);
+  }
+  if (!switched && !sharedUnconfirmed && !incomplete) return;
+  log('memory.reindex', { agentId, engine: d.used, was: d.before, ...(incomplete ? { why: 'index incomplete' } : {}) });
+  const index = () => provider.exec(runtimeRef, ['memory', 'index', '--force', '--agent', agent.slug], { timeoutMs: 10 * 60_000 })
+    .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
+  let res = await index();
+  if (res.code !== 0) {
+    // A shared engine restarting under load answers 502 for a few seconds
+    // (2026-09-23): one more try after a pause, before it counts as failed.
+    log('memory.reindex_retry', { agentId });
+    await (deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(15_000);
+    res = await index();
+  }
+  if (res.code !== 0) {
+    const error = `memory index failed: ${(res.stderr || res.stdout).trim().slice(-300)}`;
+    store.setAgentEmbedIndex(agentId, null, error);
+    log('memory.reindex_failed', { agentId, error });
+    return;
+  }
+  // Ask OpenClaw itself whether the provider answers; a bad door address or key shows here.
+  const status = await provider.exec(runtimeRef, ['memory', 'status', '--deep', '--agent', agent.slug], { timeoutMs: 120_000 })
+    .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
+  const text = `${status.stdout}\n${status.stderr}`;
+  // What OpenClaw prints when the provider answers: "Embeddings: ready".
+  const ready = status.code === 0 && /embeddings:\s*ready/i.test(text);
+  // What a forced pass could not close (transcripts OpenClaw skips or has not
+  // reached yet) is not a reason to force it again next rebuild.
+  const after = memoryIndexCounts(text).sessions;
+  if (after) sessionsGapAfterForce.set(agentId, Math.max(0, after[1] - after[0]));
+  store.setAgentEmbedIndex(agentId, ready ? new Date().toISOString() : null, ready ? null : `memory search not ready: ${text.trim().slice(-300)}`);
+  log(ready ? 'memory.reindexed' : 'memory.reindex_not_ready', { agentId, engine: d.used });
+}
+
+/**
+ * The model an agent actually runs: its own override if set, else the
+ * profile's default. Local profiles ignore the override — only one model fits
+ * in the GPU's memory, so every local agent follows the profile's one model.
+ *
+ * The override is honoured ONLY while it is still on the profile's menu. A pin
+ * validated when set can go stale later — the owner edits the source and drops
+ * that model, or changes the default. This is the last line that decides what
+ * reaches the runtime, so it falls back to the default rather than write a
+ * model the source can no longer serve (which would green-build then die on
+ * first use). Keeping the guarantee here means it holds no matter how the pin
+ * went stale, not just on the paths we remembered to sweep.
+ */
+export function effectiveModel(
+  agent: { model?: string },
+  profile: { vendor: string; model: string; models?: string[] },
+): string {
+  if (profile.vendor === 'local') return profile.model;
+  if (!agent.model) return profile.model;
+  const menu = [profile.model, ...(profile.models ?? [])];
+  return menu.includes(agent.model) ? agent.model : profile.model;
+}
+
+/** The `<provider>/<model>` ref OpenClaw wants — for a live `openclaw models
+ *  set`, matching how configWriter prefixes the model at provision. */
+export function prefixedModelRef(
+  agent: { model?: string },
+  profile: { vendor: string; model: string; models?: string[] },
+): string {
+  return `${modelProviderOf(profile)}/${effectiveModel(agent, profile)}`;
+}
+
+/**
+ * The provider a source's model refs carry. One mapping for the build and a
+ * live change: OpenAI was missing from the live one, so a model change on an
+ * OpenAI source set `anthropic/gpt-…` (night review, 2026-09-28).
+ */
+export function modelProviderOf(profile: { vendor: string }): 'ollama' | 'google' | 'openai' | 'anthropic' {
+  return profile.vendor === 'local' ? 'ollama' : profile.vendor === 'google' ? 'google' : profile.vendor === 'openai' ? 'openai' : 'anthropic';
+}
+
+/**
+ * The switchable-model commands the build writes for this agent on this
+ * source, for a live write of the same (HB-0666, HB-0668): its model first,
+ * then the source's list, on the claude-cli runtime under a machine-login
+ * subscription (no stored setup token), and the allowlist where the runtime
+ * has one.
+ */
+export function switchableModelsFor(
+  agent: { model?: string },
+  profile: { vendor: string; kind: string; model: string; models?: string[]; secretRef?: string },
+  openclawVersion: string | undefined,
+): ConfigCommand[] {
+  const provider = modelProviderOf(profile);
+  return switchableModelCommands({
+    provider,
+    model: effectiveModel(agent, profile),
+    models: profile.models,
+    claudeCliRuntime: provider === 'anthropic' && profile.kind === 'subscription' && !profile.secretRef,
+    openclawVersion,
+  });
+}
+
+/**
+ * One agent's repo access changes, one at a time: a sync writing a deploy key
+ * and a removal scrubbing it. A sync that had read a key went on to write it
+ * after the removal had scrubbed it and said so, and nothing was left to
+ * retry the scrub (HB-0274).
+ */
+const gitAccessTurns = new Map<string, Promise<unknown>>();
+function inGitAccessTurn<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = gitAccessTurns.get(agentId) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const settled = run.catch(() => undefined);
+  gitAccessTurns.set(agentId, settled);
+  void settled.then(() => { if (gitAccessTurns.get(agentId) === settled) gitAccessTurns.delete(agentId); });
+  return run;
+}
+
+/**
+ * Clone (or refresh) each git data source inside the running container. Runs on
+ * every provision and rebuild, and is idempotent (buildGitSyncScript only clones
+ * when the tree is absent). Best-effort: a repo whose deploy key the owner
+ * hasn't added yet fails to clone — that's theirs to fix (add the key, rebuild),
+ * and it must never fail the whole boot. Errors land in the event log.
+ * `only`: that one source (a public repo just added), not every repo again:
+ * each add refreshed them all, one after another (HB-1126).
+ */
+export async function syncGitDataSources(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  opts: { only?: string } = {},
+): Promise<void> {
+  const { store, secrets, provider } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) return;
+  for (const d of store.listDataSources(agentId)) {
+    if (d.kind !== 'git' || !d.repoUrl) continue;
+    if (opts.only !== undefined && d.id !== opts.only) continue;
+    const publicRepo = isPublicGitUrl(d.repoUrl);
+    const host = /^git@([^:]+):/.exec(d.repoUrl)?.[1];
+    if (!publicRepo && (!d.secretRef || !host)) continue;
+    try {
+      const commit = { name: agent.name, email: `${agent.slug}@hatchabot.local` };
+      // In the agent's turn, and only for a source still there once its key
+      // is read: one removed meanwhile is the removal's to scrub (HB-0274).
+      const res = await inGitAccessTurn(agentId, async () => {
+        const script = publicRepo
+          ? buildPublicGitSyncScript({ mountName: d.mountName, httpsUrl: d.repoUrl! }, commit)
+          : buildGitSyncScript(
+              { mountName: d.mountName, sshUrl: d.repoUrl!, host: host! },
+              Buffer.from(await secrets.get(d.secretRef!), 'utf8').toString('base64'),
+              commit,
+            );
+        const now = store.getDataSource(agentId, d.id);
+        if (!now || now.secretRef !== d.secretRef || now.repoUrl !== d.repoUrl) return undefined;
+        // A deploy key rides in the script: over stdin, off every command line (2026-09-30).
+        return provider.execShell(runtimeRef, script, publicRepo ? undefined : { secret: true });
+      });
+      if (!res) {
+        log('datasource.git_sync_skipped', { agentId, mountName: d.mountName, why: 'removed' });
+      } else if (res.code !== 0) {
+        // Persist the reason on the source, not just in the audit log — a repo
+        // that never cloned (nearly always: its deploy key isn't on the host
+        // yet) has to be visible on the card, or it hides among the successes.
+        store.setDataSourceSync(agentId, d.id, gitSyncReason(res.stderr, publicRepo ? 'public' : 'deploy-key'));
+        log('datasource.git_sync_failed', { agentId, mountName: d.mountName, stderr: res.stderr.slice(0, 300) });
+      } else {
+        store.setDataSourceSync(agentId, d.id); // success clears any old failure
+        log('datasource.git_synced', { agentId, mountName: d.mountName });
+      }
+    } catch (e) {
+      const msg = String((e as Error).message ?? e);
+      store.setDataSourceSync(agentId, d.id, msg.slice(0, 300));
+      log('datasource.git_sync_error', { agentId, mountName: d.mountName, error: msg });
+    }
+  }
+}
+
+/**
+ * Scrub what removed repo sources left behind (store.addDataSourceRemoval):
+ * the deploy key's private half in the secret store, and on the volume the
+ * key file and the clone's ssh config, which let the agent keep pulling and
+ * pushing after "stop sharing" (use-case walk-through, 2026-09-27), and since
+ * v2.167.0 the clone itself, public sources' too (HB-0002). Each half
+ * is settled only once confirmed; a failure stays recorded for the next
+ * start, wake or rebuild (a failed scrub used to be only traced, and the
+ * key stayed with nothing to retry it). `running` picks a docker exec over a
+ * one-shot on the volume. Returns whether every removal is now done.
+ */
+export async function scrubRemovedDataSources(
+  deps: Pick<ProvisionDeps, 'store' | 'secrets' | 'provider'>,
+  agentId: string,
+  runtimeRef: string | null | undefined,
+  running: boolean,
+  log: (event: string, detail: Record<string, unknown>) => void = () => {},
+  opts: { settle?: boolean } = {},
+): Promise<boolean> {
+  return inGitAccessTurn(agentId, () => scrubRemovedNow(deps, agentId, runtimeRef, running, log, opts.settle !== false));
+}
+
+/**
+ * `settle` false scrubs the volume and records nothing: a move scrubs the
+ * copy before it starts, and the copy may yet be thrown away by a rollback
+ * that restarts the source with the key still on it (HB-0317).
+ */
+async function scrubRemovedNow(
+  deps: Pick<ProvisionDeps, 'store' | 'secrets' | 'provider'>,
+  agentId: string,
+  runtimeRef: string | null | undefined,
+  running: boolean,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  settle: boolean,
+): Promise<boolean> {
+  const { store, secrets, provider } = deps;
+  for (const r of store.dataSourceRemovals(agentId)) {
+    if (r.secretRef && settle) {
+      try {
+        await secrets.delete(r.secretRef);
+        store.settleDataSourceRemoval(r.id, { secret: true });
+      } catch (err) {
+        log('datasource.key_left', { agentId, where: 'secret store', error: String((err as Error)?.message ?? err).slice(0, 200) });
+      }
+    }
+    if (!r.mountName) continue;
+    // Never a shape the script can't hold safely (no "..", no leading dot):
+    // nothing of ours is there.
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(r.mountName)) { if (settle) store.settleDataSourceRemoval(r.id, { volume: true }); continue; }
+    // Added again under the same name with a key of its own: its sync writes
+    // the new key over the old one, and scrubbing that would take the new one.
+    // Whether it has is asked of the volume, by the key's hash: the new row
+    // alone used to settle it, its sync not yet run, and the old key stayed
+    // with nothing left to take it off (HB-0963).
+    const again = store.listDataSources(agentId).filter((d) => d.kind === 'git' && d.mountName === r.mountName);
+    const keyed = again.find((d) => !!d.secretRef);
+    let unlessKeySha256: string | undefined;
+    if (keyed) {
+      try { unlessKeySha256 = createHash('sha256').update(await secrets.get(keyed.secretRef!), 'utf8').digest('hex'); } catch (err) {
+        log('datasource.key_left', { agentId, name: r.mountName, where: 'volume', error: String((err as Error)?.message ?? err).slice(0, 200) });
+        continue;
+      }
+    }
+    if (!runtimeRef) continue;
+    // The key, and the clone unless a source of that name (public) owns the
+    // folder now (HB-0002). Judged by what is left, not by each command's exit.
+    const script = buildGitRemovalScript(r.mountName, r.repoUrl, { keepClone: again.length > 0, unlessKeySha256 });
+    const res = await (running ? provider.execShell(runtimeRef, script) : provider.execShellOnVolume(runtimeRef, script)).catch(() => undefined);
+    if (res?.code === 0) {
+      if (!settle) continue;
+      store.settleDataSourceRemoval(r.id, { volume: true });
+      log('datasource.key_removed', { agentId, name: r.mountName, clone: !!r.repoUrl && !again.length });
+    } else {
+      log('datasource.key_left', { agentId, name: r.mountName, where: 'volume' });
+    }
+  }
+  return store.dataSourceRemovals(agentId).length === 0;
+}
+
+/**
+ * What agentsmd.section_unsure last said of each agent: a hash of the file and
+ * the headings. Every sync (each rebuild, each change to its sources, peers or
+ * accounts) found the same fence, and the agent's Activity filled with the
+ * same line (third review of HB-0520). Said again when either changes. At
+ * most UNSURE_SAID_MAX agents, the least lately said going first: nothing
+ * else forgets an agent deleted or archived with its fence unsure (sixth
+ * review); one forgotten is said again at its next sync.
+ */
+const unsureSaid = new Map<string, string>();
+/** The same for syncMemoryBudget's own Memory budget section (agentsmd.sync_unsure): said once per file. */
+const budgetUnsureSaid = new Map<string, string>();
+const UNSURE_SAID_MAX = 200;
+
+/**
+ * Keep AGENTS.md's "## Data sources" section in step with what the agent
+ * actually has mounted/checked out. Without this, adding a repo dropped the
+ * files on the volume and left the agent with no idea they existed — the owner
+ * had to describe the paths by hand. Only that one section is rewritten; the
+ * rest of the file is the user's. Best-effort: a failure here must never fail a
+ * provision or rebuild. True when there is nothing more for it to do: the
+ * sections are on the file (written now, or already), or there is no file
+ * yet (its seed writes them) or no agent; false when its read or its write
+ * failed or did not answer, so a sync owed (routes.ts `syncDocsHeld`) stays
+ * owed (HB-0834 review).
+ */
+export async function syncDataSourceDocs(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  /** `turn`: the per-agent turn its AGENTS.md write waits for, the one a save and the budget's write take (withAgentsMdTurn). */
+  opts: { turn?: <T>(write: () => Promise<T>) => Promise<T> } = {},
+): Promise<boolean> {
+  const { store, provider } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) return true;
+  // Legacy shared folders are read-only mounts and belong in the list too.
+  const sources = [
+    ...(agent.sharedPaths ?? []).map((p) => ({
+      kind: 'folder',
+      access: 'ro',
+      mountName: basename(p.replace(/\/+$/, '')),
+      hostPath: p,
+    })),
+    ...store.listDataSources(agentId),
+  ];
+  const path = `/home/node/.openclaw/agents/${agent.slug}/agent/AGENTS.md`;
+  const q = JSON.stringify(path);
+  try {
+    // Read → compute HERE → write, applying BOTH platform-managed AGENTS.md
+    // sections in ONE read-modify-write: the data-sources list AND the
+    // memory-policy habit. Folding memory-policy in here (rather than a second
+    // sync) means a single write, and it reaches EXISTING agents on rebuild —
+    // not just freshly-seeded ones (2026-09-06: the memory-save/recover
+    // instruction otherwise never landed on agents already created).
+    const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
+    if (read.code !== 0) return false; // not run (its container not up, its machine not answering)
+    if (!read.stdout.trim()) return true; // no file yet — seed owns it
+    // A section its code fences make unsure is left as it is (HB-0520): said
+    // on the agent, so an owner who took an account or a peer away can see why
+    // AGENTS.md still names it, and what to fix.
+    // Each text's fences are read once and passed to every question asked of
+    // it; a section that changes the text reads the new one (seventh review).
+    let next = read.stdout;
+    let fences = readFences(next);
+    const take = (to: string) => { if (to !== next) { next = to; fences = readFences(next); } };
+    const unsure = unsureSections(next, [
+      DATA_SOURCES_HEADING, '## Memory policy', '## Memory budget', OPERATOR_HEADING, INSTALL_HEADING,
+      GOOGLE_ACCOUNTS_HEADING, SCHEDULED_RESULTS_HEADING, PEERS_HEADING, ...(agent.ops ? OPS_MANAGED_HEADINGS : []),
+    ], fences);
+    if (!unsure.length) unsureSaid.delete(agentId);
+    else {
+      const said = createHash('sha256').update(read.stdout).update('\0').update(unsure.join('\n')).digest('hex');
+      if (unsureSaid.get(agentId) !== said) {
+        unsureSaid.delete(agentId);
+        if (unsureSaid.size >= UNSURE_SAID_MAX) unsureSaid.delete(unsureSaid.keys().next().value!);
+        unsureSaid.set(agentId, said);
+        log('agentsmd.section_unsure', { agentId, headings: unsure, ...fenceDisagreement(next, fences) });
+      }
+    }
+    take(replaceSection(next, DATA_SOURCES_HEADING, dataSourcesSection(sources), fences));
+    take(replaceSection(next, '## Memory policy', memoryPolicySection(agent.sharedMemory), fences));
+    // Its memory budget: what its container has, so it sizes jobs to fit.
+    // A section that already says the cap it has now, in either wording, is
+    // left as it is: AGENTS.md is not rewritten for no change. One that does
+    // not is written in the seed's words when its container has just started
+    // on that cap (no `turn`: a seed or a rebuild), and otherwise, in a
+    // running container (a held sync, `turn`), in the live words, as
+    // syncMemoryBudget writes them: the cap changed after it started, so
+    // `HATCHABOT_MEMORY_CAP` in its environment is the old one.
+    const cap = memoryCapFor(store, agent);
+    if (!next.includes(memoryBudgetSection(cap)) && !next.includes(memoryBudgetSection(cap, { live: true }))) {
+      take(replaceSection(next, '## Memory budget', memoryBudgetSection(cap, { live: !!opts.turn }), fences));
+    }
+    // The operator identity: injected so every agent already knows who it serves.
+    take(replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)), fences));
+    // Where to install tools: here, not TOOLS.md, which OpenClaw 2026.9 does not read (HB-0397).
+    take(withInstallSection(next, fences));
+    // The Google accounts it holds: it could not otherwise know (HB-0394).
+    const google = attachedGoogleAccounts(store, agentId);
+    take(google.length ? replaceSection(next, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection(google), fences) : removeSection(next, GOOGLE_ACCOUNTS_HEADING, fences));
+    // Where scheduled results go, for an agent in no chat app only: one asked
+    // in its web chat told its owner it needed Telegram (2026-10-12). Adding or
+    // removing a chat app rebuilds the agent, which brings this back here.
+    if (store.listChannelsForAgent(agentId).length === 0) {
+      const version = await provider.info(runtimeRef).then((i) => i.openclawVersion, () => undefined);
+      take(replaceSection(next, SCHEDULED_RESULTS_HEADING, scheduledResultsSection(agent.slug, conversationDeliverySupported(version)), fences));
+    } else {
+      take(removeSection(next, SCHEDULED_RESULTS_HEADING, fences));
+    }
+    // The management agent's own notes are Hatchabot's: keep the sections that
+    // go stale between releases current on every build, instead of only when
+    // the agent was first created (it refused work it could do, 2026-09-19).
+    if (agent.ops) {
+      // A renamed section takes the old one's place; never both.
+      for (const [was, now] of Object.entries(OPS_RENAMED_HEADINGS)) {
+        if (!next.split('\n').some((l) => l.trimEnd() === was)) continue;
+        take(next.split('\n').some((l) => l.trimEnd() === now) ? removeSection(next, was, fences) : replaceSection(next, was, opsSection(now) ?? '', fences));
+      }
+      for (const heading of OPS_MANAGED_HEADINGS) {
+        const section = opsSection(heading);
+        if (section) take(replaceSection(next, heading, section, fences));
+      }
+    }
+    // Agent-to-agent: install the call-agent tool + peer manifest, and list the
+    // granted peers in AGENTS.md so the agent knows it can consult them.
+    const peers = store.listAgentPeers(agentId).map((id) => store.getAgent(id)).filter((a): a is Agent => !!a && a.state !== 'DELETED');
+    if (peers.length) {
+      take(replaceSection(next, '## Peers', peerToolsSection(peers.map((p) => ({ name: p.name }))), fences));
+      const b64s = Buffer.from(CALL_AGENT_SCRIPT, 'utf8').toString('base64');
+      const b64m = Buffer.from(JSON.stringify(peers.map((p) => ({ name: peerOneLine(p.name), id: p.id }))), 'utf8').toString('base64');
+      await provider
+        .execShell(
+          runtimeRef,
+          `set -e; mkdir -p ~/.local/bin ~/.openclaw; ` +
+            `echo ${JSON.stringify(b64s)} | base64 -d > ~/.local/bin/call-agent && chmod 755 ~/.local/bin/call-agent; ` +
+            `echo ${JSON.stringify(b64m)} | base64 -d > ~/.openclaw/peers.json`,
+        )
+        .catch((e) => log('peer_tools.failed', { agentId, error: String((e as Error).message ?? e) }));
+    } else {
+      // No grant: make sure a previous one isn't still advertised/installed.
+      take(removeSection(next, '## Peers', fences));
+      await provider
+        .execShell(runtimeRef, 'rm -f ~/.local/bin/call-agent ~/.openclaw/peers.json')
+        .catch(() => {});
+    }
+    if (next === read.stdout) return true; // already current: never churn the user's file
+    const b64 = Buffer.from(next, 'utf8').toString('base64');
+    // tmp+mv so a failure can't leave AGENTS.md truncated.
+    // Through the helper: above ~96 KB it goes on stdin (one shell argument
+    // caps at 128 KiB; a big AGENTS.md never synced again — night review).
+    const write = () => writeFileInAgent(provider, runtimeRef, path, b64);
+    const res = await (opts.turn ? opts.turn(write) : write());
+    if (res.code !== 0) { log('agentsmd.sync_failed', { agentId, stderr: res.stderr.slice(0, 300) }); return false; }
+    log('agentsmd.synced', { agentId, sources: sources.length });
+    return true;
+  } catch (e) {
+    log('agentsmd.sync_error', { agentId, error: String((e as Error).message ?? e) });
+    return false;
+  }
+}
+
+/**
+ * Only the "## Memory budget" section of AGENTS.md, rewritten for the cap
+ * the agent's container has now (tellMemoryBudget, HB-0599): read, that
+ * section replaced, and written only if the file is still what was read,
+ * checked and renamed in `turn`, the per-agent turn a save of AGENTS.md
+ * takes (writeFileInAgent's ifUnchanged). It runs without the busy flag, so
+ * it touches nothing else: the agent's peers, its call-agent tool and the
+ * other sections stay with the syncs that hold it (syncDataSourceDocs).
+ * Read as bytes (base64), so the hash checked before the rename is of the
+ * file as it is, and every byte outside the section is written back as it
+ * was, one that is not UTF-8 included.
+ * 'changed': the file changed after it was read; nothing was written.
+ */
+export async function syncMemoryBudget(
+  deps: { store: Store; provider: RuntimeProvider },
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  turn?: <T>(commit: () => Promise<T>) => Promise<T>,
+): Promise<'written' | 'current' | 'changed' | 'failed'> {
+  const { store, provider } = deps;
+  const slug = store.getAgent(agentId)?.slug;
+  if (!slug) return 'failed';
+  const path = workspacePath(slug, 'AGENTS.md');
+  try {
+    const read = await provider.execShell(runtimeRef, `cat ${JSON.stringify(path)} 2>/dev/null | base64`);
+    if (read.code !== 0) return 'failed';
+    const raw = Buffer.from(read.stdout, 'base64');
+    // One char per byte: the section is found by its ASCII heading, and the bytes around it kept.
+    const text = raw.toString('latin1');
+    if (!text.trim()) { budgetUnsureSaid.delete(agentId); return 'current'; } // no file yet — seed owns it
+    // The cap as stored once the file is read: a change since asks again.
+    const agent = store.getAgent(agentId);
+    if (!agent) return 'failed';
+    // A section that already says the cap it has, in either wording (as a
+    // seed wrote it, or as a change of its cap made while it ran wrote it),
+    // is current, as syncDataSourceDocs reads it: not rewritten for no change.
+    const cap = memoryCapFor(store, agent);
+    if ([memoryBudgetSection(cap), memoryBudgetSection(cap, { live: true })].some((said) => raw.includes(Buffer.from(said, 'utf8')))) { budgetUnsureSaid.delete(agentId); return 'current'; }
+    const mark = `hatchabot-memory-budget-${randomUUID()}`;
+    const parts = replaceSection(text, '## Memory budget', mark).split(mark);
+    // A section its code fences leave unsure is left as it is (HB-0520): the
+    // budget is not told there. Said once for this file, as syncDataSourceDocs
+    // says its own: a class edit tells each member, and each would say it again.
+    if (parts.length !== 2) {
+      // The file and the cap it was not told: another cap that fails on the same fence is said too.
+      const said = createHash('sha256').update(raw).update('\0').update(memoryBudgetSection(cap)).digest('hex');
+      if (budgetUnsureSaid.get(agentId) !== said) {
+        budgetUnsureSaid.delete(agentId);
+        if (budgetUnsureSaid.size >= UNSURE_SAID_MAX) budgetUnsureSaid.delete(budgetUnsureSaid.keys().next().value!);
+        budgetUnsureSaid.set(agentId, said);
+        log('agentsmd.sync_unsure', { agentId, heading: '## Memory budget' });
+      }
+      return 'failed';
+    }
+    budgetUnsureSaid.delete(agentId);
+    const [before, after] = parts as [string, string];
+    const next = Buffer.concat([Buffer.from(before, 'latin1'), Buffer.from(memoryBudgetSection(cap, { live: true }), 'utf8'), Buffer.from(after, 'latin1')]);
+    if (next.equals(raw)) return 'current';
+    const sha256 = createHash('sha256').update(raw).digest('hex');
+    const res = await writeFileInAgent(provider, runtimeRef, path, next.toString('base64'), {}, { sha256, hold: turn });
+    if (res.code === 3 && /it changed meanwhile/.test(res.stderr)) { log('agentsmd.sync_raced', { agentId }); return 'changed'; }
+    if (res.code !== 0) { log('agentsmd.sync_failed', { agentId, stderr: res.stderr.slice(0, 300) }); return 'failed'; }
+    log('memory.budget_told', { agentId, cap });
+    return 'written';
+  } catch (e) {
+    log('agentsmd.sync_error', { agentId, error: String((e as Error).message ?? e) });
+    return 'failed';
+  }
+}
+
+/**
+ * Take Hatchabot's install section out of the agent's TOOLS.md, once
+ * syncDataSourceDocs has put it in AGENTS.md (HB-0397): OpenClaw 2026.9 does
+ * not read TOOLS.md, and on an image that still does, two copies would go out
+ * with every call. The agent's own notes in TOOLS.md stay; a file left with
+ * nothing of the agent's (the title Hatchabot gave one it created) is removed.
+ * Nothing is done while AGENTS.md lacks the section (no AGENTS.md yet, a read
+ * that failed): the notes are never in neither file.
+ */
+async function syncInstallDocs(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store, provider } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) return;
+  const dir = `/home/node/.openclaw/agents/${agent.slug}/agent`;
+  const path = `${dir}/TOOLS.md`;
+  const q = JSON.stringify(path);
+  try {
+    const agentsRead = await provider.execShell(runtimeRef, `cat ${JSON.stringify(`${dir}/AGENTS.md`)} 2>/dev/null || true`);
+    if (agentsRead.code !== 0) { log('installdocs.failed', { agentId, stderr: agentsRead.stderr.slice(0, 300) }); return; }
+    // Fence-aware: a heading quoted in an example is not the section.
+    if (!extractSection(agentsRead.stdout, INSTALL_HEADING)) return;
+    // A read that failed (a timeout, a restarting container) is not an empty file.
+    const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
+    if (read.code !== 0) { log('installdocs.failed', { agentId, stderr: read.stderr.slice(0, 300) }); return; }
+    if (!read.stdout) return; // no TOOLS.md: nothing to take out
+    const next = toolsMdWithoutInstallSection(read.stdout);
+    if (next === read.stdout) return; // none of Hatchabot's in it: never churn the agent's file
+    const res = next === null
+      ? await provider.execShell(runtimeRef, `rm -f ${q}`)
+      // Through the helper: above ~96 KB it goes on stdin (one shell argument caps at 128 KiB).
+      : await writeFileInAgent(provider, runtimeRef, path, Buffer.from(next, 'utf8').toString('base64'));
+    if (res.code !== 0) { log('installdocs.failed', { agentId, stderr: res.stderr.slice(0, 300) }); return; }
+    log('installdocs.toolsmd_cleaned', { agentId, removed: next === null });
+  } catch (e) {
+    log('installdocs.error', { agentId, error: String((e as Error).message ?? e) });
+  }
+}
+
+/**
+ * Run the agent's own `~/.openclaw/on-rebuild.sh`, if it wrote one.
+ *
+ * $HOME persists, so state and user-installed tools survive a rebuild by
+ * themselves. What cannot survive is anything installed OUTSIDE $HOME — an apt
+ * package, a system-wide binary — because /usr comes from the image. Rather
+ * than grow a framework for that, the agent records how to reconstitute it in
+ * one script it maintains itself, and we run it after every rebuild.
+ *
+ * Best-effort and bounded: a broken or slow hook must never fail a rebuild or
+ * hold the agent hostage, so failures are logged and the run is capped.
+ */
+export async function runRebuildHook(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { provider } = deps;
+  const hook = '/home/node/.openclaw/on-rebuild.sh';
+  try {
+    // pipefail: the hook's own exit status (or timeout's 124), not tail's 0 —
+    // a failed hook was logged as having run (audit #088).
+    const res = await provider.execShell(
+      runtimeRef,
+      `[ -x ${JSON.stringify(hook)} ] || exit 0; set -o pipefail; timeout 300 bash ${JSON.stringify(hook)} 2>&1 | tail -c 2000`,
+    );
+    // It ran in this container: nothing is owed to its next start (runOwedRebuildHook).
+    if (deps.store?.getAgent(agentId)?.rebuildHookDue) deps.store.setRebuildHookDue(agentId, null);
+    if (res.code === 0 && !res.stdout.trim()) return; // absent, or silent success
+    if (res.code === 0) log('rebuild_hook.ran', { agentId, output: res.stdout.slice(-500) });
+    else log('rebuild_hook.failed', { agentId, code: res.code, output: (res.stdout || res.stderr).slice(-500) });
+  } catch (e) {
+    log('rebuild_hook.error', { agentId, error: String((e as Error).message ?? e) });
+  }
+}
+
+/**
+ * The rebuild hook a container came up without — moved while stopped, it was
+ * not started to run it (audit #087) — run once its gateway answers after a
+ * start, as a rebuild runs it. Best-effort: still owed if it never answers.
+ */
+export async function runOwedRebuildHook(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  if (!deps.store.getAgent(agentId)?.rebuildHookDue) return;
+  try {
+    await waitForHealthy(deps.provider, runtimeRef, deps.sleep ?? defaultSleep, 120);
+  } catch (err) {
+    log('rebuild_hook.error', { agentId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+    return;
+  }
+  await runRebuildHook(deps, agentId, runtimeRef, log);
+}
+
+/** Create + provision in one call — the shape scripts and tests want. */
+export async function provisionAgent(
+  deps: ProvisionDeps,
+  input: CreateAgentInput,
+): Promise<ProvisionResult> {
+  const agent = createAgentRecord(deps.store, input);
+  return runProvisionSteps(deps, agent.id);
+}
+
+/**
+ * Wait until the agent will not throw away its conversation on the first
+ * message.
+ *
+ * Healthy is not the same as ready. An agent restored at 16:24 answered its
+ * health check at 16:24:24 and was messaged 35 seconds later; that message
+ * began a NEW session and the previous thread was archived. The same agent,
+ * messaged five minutes after a restore, carried on exactly where it left off.
+ * The difference is on our side: we call an agent live the moment its gateway
+ * responds, while the things a reply is judged against are still moving — not
+ * least because `runRebuildHook` may have just installed skills, seconds
+ * earlier, on this very code path.
+ *
+ * So this waits for the agent's skill inventory to stop changing: two identical
+ * readings in a row and it is settled. Deliberately a PROXY, not a claim about
+ * the mechanism — the exact trigger inside OpenClaw is still unidentified
+ * (docs/pre-production.md §9), and a probe that waits for the agent to stop
+ * moving is useful whether or not skills are the cause. It is bounded and
+ * never fails a provision: an agent that will not settle goes live anyway,
+ * because a late agent beats a failed one.
+ *
+ * The measurement is logged, so the next question — is this the right proxy,
+ * and how long does settling actually take — is answered by production rather
+ * than by argument.
+ */
+export async function waitForSkillsSettled(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+  sleep: (ms: number) => Promise<void>,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  opts: { intervalMs?: number; timeoutMs?: number } = {},
+): Promise<void> {
+  const intervalMs = opts.intervalMs ?? Number(process.env.HATCHABOT_READY_POLL_MS ?? 3000);
+  const timeoutMs = opts.timeoutMs ?? Number(process.env.HATCHABOT_READY_TIMEOUT_MS ?? 90_000);
+  const started = Date.now();
+  let previous: string | undefined;
+  let polls = 0;
+  while (Date.now() - started < timeoutMs) {
+    polls++;
+    let fingerprint: string;
+    try {
+      const res = await provider.exec(runtimeRef, ['skills', 'check', '--agent', slug]);
+      // A failing probe is itself "not settled" — an agent whose CLI can't yet
+      // answer is exactly the state we're waiting out.
+      fingerprint = res.code === 0 ? createHash('sha256').update(res.stdout).digest('hex') : `err:${res.code}`;
+    } catch (err) {
+      fingerprint = `throw:${String(err).slice(0, 40)}`;
+    }
+    if (previous !== undefined && fingerprint === previous && !fingerprint.startsWith('err')
+        && !fingerprint.startsWith('throw')) {
+      log('runtime.ready', { settled: true, afterHealthyMs: Date.now() - started, polls });
+      return;
+    }
+    previous = fingerprint;
+    await sleep(intervalMs);
+  }
+  // Bounded: going live late is a nuisance, refusing to go live is an outage.
+  log('runtime.ready', { settled: false, afterHealthyMs: Date.now() - started, polls });
+}
+
+export async function waitForHealthy(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  sleep: (ms: number) => Promise<void>,
+  attempts = 30,
+  intervalMs = 1000,
+): Promise<void> {
+  // Time as well as tries: on a stalled daemon each status() waits out the
+  // docker timeout, and 120 tries became two hours holding a rebuild slot and
+  // the busy flag (night review, 2026-09-27). Sleeps are the caller's (tests
+  // pass a no-op), so the deadline counts only real waiting.
+  const deadline = Date.now() + Math.max(attempts * intervalMs, 60_000) * 2;
+  for (let i = 0; i < attempts && Date.now() < deadline; i++) {
+    const status = await provider.status(runtimeRef);
+    if (status.phase === 'running' && status.healthy) return;
+    if (status.phase === 'error') {
+      throw new ProviderError(status.message, 'The agent started but reported an error.');
+    }
+    await sleep(intervalMs);
+  }
+  throw new ProviderError(
+    `runtime ${runtimeRef} never became healthy`,
+    'Your agent started but never came online. We stopped it so it will not keep billing.',
+  );
+}
+
+function requireRef(ref: string | undefined): string {
+  if (!ref) throw new Error('AI profile has no stored credential');
+  return ref;
+}
+
+/**
+ * Where the Claude Code OAuth credential lives on the host. The whole
+ * directory is mounted (not the single file) because the CLI refreshes tokens
+ * by rewriting the file, and a single-file bind mount would detach on rename.
+ */
+/**
+ * Paths that must never be handed to an agent: they would give it the keys to
+ * the whole installation rather than access to your data.
+ */
+export function sharePathProblem(p: string, opts: { home?: string } = {}): string | undefined {
+  const home = opts.home ?? homedir();
+  if (!p.startsWith('/')) return 'Use an absolute path.';
+  let norm = resolve(p).replace(/\/+$/, '') || '/';
+  if (norm === '/') return 'Sharing the whole filesystem is not allowed.';
+  // Docker splits -v on ':' — a colon in the path broke every later rebuild
+  // after the old container was already gone (night review, 2026-09-28).
+  if (norm.includes(':')) return `Refusing ${norm}: a folder name with ":" cannot be shared (Docker reads it as a separator). Rename the folder first.`;
+  // Judge the real location: a symlink inside an already-shared folder must
+  // not become a door to ~/.ssh. Non-existent paths are judged lexically.
+  try {
+    if (lstatSync(norm).isSymbolicLink()) return `Refusing ${norm}: it is a symlink — share the real folder instead.`;
+    norm = realpathSync(norm);
+  } catch { /* not there yet — lexical check below */ }
+  if (norm === home) return 'Sharing your whole home folder is not allowed — pick a folder inside it.';
+  const dataDir = dirname(resolve(process.env.HATCHABOT_DB ?? 'data/hatchabot.sqlite'));
+  // A backup folder of the owner's choosing (a NAS, say) holds the database and
+  // the key that opens every credential in it, as the default one does: the
+  // folder named and where it really is (review, 2026-10-22).
+  const backupDirs: Array<readonly [string, string]> = [];
+  const custom = process.env.HATCHABOT_BACKUP_DIR?.trim();
+  if (custom && custom.startsWith('/')) {
+    const named = resolve(custom).replace(/\/+$/, '') || '/';
+    backupDirs.push([named, 'every backup, including other agents']);
+    try { const real = realpathSync(named); if (real !== named) backupDirs.push([real, 'every backup, including other agents']); } catch { /* not made yet */ }
+  }
+  const forbidden = [
+    ...backupDirs,
+    [resolve(home, '.claude'), 'that holds your Claude credentials'],
+    [resolve(home, '.ssh'), 'that holds your SSH keys'],
+    [resolve(home, '.config/hatchabot'), 'that holds Hatchabot access tokens'],
+    [resolve(home, '.config/agentclaw'), 'that holds Hatchabot access tokens'],
+    ['/etc', 'system configuration'],
+    ['/root', "the root user's home"],
+    ['/var/lib/docker', 'every agent volume, including other agents'],
+    ['/proc', 'kernel state'],
+    ['/sys', 'kernel state'],
+    ['/var/run/docker.sock', 'the Docker socket — root on this machine'],
+    ['/run/docker.sock', 'the Docker socket — root on this machine'],
+    [dataDir, 'the Hatchabot database and secret store'],
+    [resolve(home, 'hatchabot-prod'), 'the Hatchabot installation (.env holds the secret key)'],
+    [resolve(home, 'agentclaw-prod'), 'the Hatchabot installation (.env holds the secret key)'],
+    [resolve(home, 'hatchabot-backups'), 'every backup, including other agents'],
+    [resolve(home, 'agentclaw-backups'), 'every backup, including other agents'],
+    [resolve(home, '.docker'), 'Docker credentials'],
+    [resolve(home, '.aws'), 'cloud credentials'],
+    [resolve(home, '.gnupg'), 'your GPG keys'],
+    [resolve(home, '.kube'), 'cluster credentials'],
+    [resolve(home, '.config'), 'application credentials (share a folder inside it, not the whole thing)'],
+  ] as const;
+  for (const [bad, why] of forbidden) {
+    // Inside a forbidden path, or an ANCESTOR of one (sharing /var hands over docker.sock).
+    if (norm === bad || norm.startsWith(`${bad}/`) || bad.startsWith(`${norm}/`)) return `Refusing ${norm}: ${why}.`;
+  }
+  return undefined;
+}
+
+/**
+ * A folder mounted at its host path lands there inside the container too: never
+ * on or over the agent's own home or the image's system paths, nor in place of
+ * its scratch folders (a folder inside /tmp is fine; /tmp itself is not) (HB-0053).
+ */
+export function hostPathTargetProblem(p: string): string | undefined {
+  const norm = resolve(p).replace(/\/+$/, '') || '/';
+  const within = ['/home/node', '/opt', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/dev', '/proc', '/sys'];
+  const itself = ['/tmp', '/var', '/run'];
+  for (const bad of [...within, ...itself]) {
+    const inside = within.includes(bad) && norm.startsWith(`${bad}/`);
+    if (norm === '/' || norm === bad || inside || bad.startsWith(`${norm}/`)) {
+      return `Refusing ${norm}: inside the agent it would cover ${bad}, which the agent itself runs from. Share it at /data instead.`;
+    }
+  }
+  return undefined;
+}
+
+export function claudeAuthDir(): string {
+  return `${process.env.HOME ?? '/root'}/.claude`;
+}
+
+function envForProfile(vendor: string, key: string): Record<string, string> {
+  switch (vendor) {
+    case 'anthropic':
+      return { ANTHROPIC_API_KEY: key };
+    case 'google':
+      return { GEMINI_API_KEY: key };
+    case 'openai':
+      return { OPENAI_API_KEY: key };
+    default:
+      throw new Error(`Unsupported AI vendor: ${vendor}`);
+  }
+}
+
+function userMessageFor(err: unknown): string {
+  if (err instanceof ProviderError) return err.userMessage;
+  if (err && typeof err === 'object' && 'userMessage' in err) {
+    return String((err as { userMessage: unknown }).userMessage);
+  }
+  // An error nobody wrote a sentence for still has to say something the owner
+  // can act on or send on. The cause is redacted, never raw (docs/audit-2026-09-19.md).
+  const cause = briefCause(err);
+  return cause
+    ? `Something went wrong setting up your agent. Try again? (${cause})`
+    : 'Something went wrong setting up your agent. Try again?';
+}
+
+/** A messaging identity that already belongs to another agent. */
+export class ChannelConflictError extends Error {
+  constructor(readonly userMessage: string) {
+    super(userMessage);
+    this.name = 'ChannelConflictError';
+  }
+}
+
+export function slugify(name: string): string {
+  // Runs are already one '-', so one at each end is all a trim can find; `-+$` there was
+  // quadratic on a long run of dashes (CodeQL js/polynomial-redos, HB-0617).
+  const base = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return base || 'agent';
+}

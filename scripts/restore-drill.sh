@@ -29,17 +29,67 @@
 set -euo pipefail
 [ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
 cd "$(dirname "$0")/.."
+# `timeout`, kept in this run's process group. GNU's puts what it runs in a
+# group of its own, which the app's time limit (it stops the run's group:
+# drills.ts, scriptDeadline) never reached: the step outlived the
+# kill, and the run was killed before its EXIT trap could clean up (review
+# of HB-0924). --foreground keeps it in ours; a timeout without that option
+# (busybox) never leaves the group. On a Mac, Homebrew's coreutils names it
+# gtimeout (timeout only with its gnubin on PATH): looked for under that name
+# too (HB-1208, as backup-volumes.sh). None at all: the app's time limit is
+# the only one, and `hatchabot doctor` says so.
+TO=""
+for t in timeout gtimeout; do
+  command -v "$t" >/dev/null 2>&1 || continue
+  if "$t" --foreground 5 true >/dev/null 2>&1; then TO="$t --foreground"; else TO="$t"; fi
+  break
+done
 
 # A run by hand (./scripts/restore-drill.sh, as the README has it) gets the
 # settings the app runs with, as scripts/backup-volumes.sh does: .env. Without
 # it a backups folder set only there was not found, and the drill looked in
 # ~/hatchabot-backups instead (HB-0324). What the environment already has
-# wins. Read by Node's dotenv parser, never run as shell code.
+# wins. Read as the service reads it on this machine, by the backup's own
+# rules (HB-1065): Node's dotenv parser read a # in a value (Linux) or a
+# $VAR in it (a Mac) as something else, so the drill looked for another
+# folder, or another key's sets, than the backup wrote (HB-1231).
+#  - Linux: systemd's EnvironmentFile rules (the reader is backup-volumes.sh's,
+#    held the same by test/backupKeyLine.test.ts). Nothing runs.
+#  - a Mac: the launchd job sources .env (launchd-plist.sh), so it is sourced
+#    here too, in a subshell. That runs nothing the service does not run at
+#    every start.
 if [ -f .env ]; then
-  while IFS= read -r -d '' kv; do export "$kv"; done < <(node -e '
-    const { parseEnv } = require("node:util");
-    for (const [k, v] of Object.entries(parseEnv(require("node:fs").readFileSync(".env", "utf8"))))
+  if [ "$(uname -s)" = Darwin ]; then
+    NODE_BIN="$(command -v node || true)"
+    while IFS= read -r -d '' kv; do k="${kv%%=*}"; [ -n "${!k+x}" ] || export "$kv"; done < <(
+      set +eu; set -a; . ./.env >/dev/null 2>&1; set +a
+      "$NODE_BIN" -e 'for (const [k, v] of Object.entries(process.env)) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) process.stdout.write(k + "=" + v + "\0");')
+  else
+    while IFS= read -r -d '' kv; do export "$kv"; done < <(node -e '
+    // EnvironmentFile, state by state as systemd reads it (parse_env_file).
+    const systemd = (t) => {
+      const out = {}; let st = "prekey", k = "", v = "", lw = -1;
+      // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
+      // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
+      const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
+      for (const c of t + "\n") {
+        const nl = c === "\n" || c === "\r", ws = /\s/.test(c);
+        if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
+        else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
+        else if (st === "commentesc") st = "comment";
+        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.trimEnd(); st = "prevalue"; } else k += c; }
+        else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
+        else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
+        else if (st === "esc") { st = "value"; if (!nl) v += c; }
+        else if (st === "single") { if (c === "\x27") st = "prevalue"; else v += c; }
+        else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
+        else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
+      }
+      return out;
+    };
+    for (const [k, v] of Object.entries(systemd(require("node:fs").readFileSync(".env", "utf8"))))
       if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && process.env[k] === undefined) process.stdout.write(k + "=" + v + "\0");')
+  fi
 fi
 
 # Pre-rename .env files: alias AGENTCLAW_* → HATCHABOT_* (existing HATCHABOT_* wins).
@@ -151,9 +201,14 @@ prune_records() {
     [ "$kept" -le 30 ] || rm -f "$old" 2>/dev/null || true
   done || true
 }
+# Bounded: run from the EXIT trap, often after the app's time limit sent the
+# TERM, against a daemon that may be what hung. Unbounded, these kept the
+# drill "running" for good (HB-0924). Under two minutes together, inside the
+# three the app gives the trap before it kills what is left (drills.ts).
 cleanup() {
-  [ -n "$DRILL_CT" ] && docker rm -f "$DRILL_CT" >/dev/null 2>&1 || true
-  [ -n "$DRILL_VOL" ] && docker volume rm -f "$DRILL_VOL" >/dev/null 2>&1 || true
+  local t="${TO:+$TO -k 5 45}"
+  [ -n "$DRILL_CT" ] && ${t:+$t} docker rm -f "$DRILL_CT" >/dev/null 2>&1 || true
+  [ -n "$DRILL_VOL" ] && ${t:+$t} docker volume rm -f "$DRILL_VOL" >/dev/null 2>&1 || true
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
 }
 finish() {
@@ -195,6 +250,9 @@ take_lock() {
     echo "  • an earlier drill that was killed left its lock — taken over" >&2
   fi
   echo "$$" > "$lock/pid"
+  # When it started, beside the pid (pid alone is what uninstall.sh and older
+  # drills read): a pid given since to another process is not the holder.
+  proc_start "$$" > "$lock/started" 2>/dev/null || true
   LOCK="$lock"
 }
 holder=""
@@ -207,17 +265,32 @@ pid_alive() {
   case "$e" in *"No such process"*) return 1 ;; esac
   return 0
 }
-# Whether lock $1 is held: its pid lives, or it has no pid yet and is new. A
-# pid that is another user's process (another install's drill in a shared
-# folder) is a drill only for as long as one runs: the app stops its drill at
-# 90 minutes (src/orchestrator/drills.ts, DRILL_KILL_MS). A killed drill's pid
-# that a reboot gave to another user's daemon kept every drill out for as
-# long as that daemon ran.
+# When pid $1 started, as ps says it in UTC (the same in every reader's time
+# zone, as ensure-deps.sh writes its holder); nothing when ps cannot tell.
+proc_start() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' || true; }
+# Whether lock $1 is held: its pid lives, or it has no pid yet and is new.
+# A pid that lives and started when the holder did (the lock's "started") is
+# the holder, however old the lock. Any other pid that lives is a drill only
+# for as long as one runs: the app stops its drill at 90 minutes
+# (src/orchestrator/backups/drills.ts, DRILL_KILL_MS). A killed drill's pid
+# that the system gave since to a long-lived process of this same user kept
+# every drill out for as long as that process ran, with no age bound
+# (HB-1033), as one a reboot gave to another user's daemon did. A start that
+# differs is that bound too, not a lock free at once: ps works the start out
+# from the boot time, which moves when the clock is stepped, and a step
+# during a drill made its own pid read as another's, and two drills restored
+# side by side (review of HB-1033). With no start to go by (a lock an older
+# drill made, or a ps that cannot see the process: another user's), the same.
 lock_busy() {
+  local started now
   holder="$(cat "$1/pid" 2>/dev/null || true)"
   if [ -n "$holder" ]; then
     pid_alive "$holder" || return 1
-    kill -0 "$holder" 2>/dev/null && return 0
+    started="$(cat "$1/started" 2>/dev/null || true)"
+    if [ -n "$started" ]; then
+      now="$(proc_start "$holder")"
+      [ "$now" != "$started" ] || return 0
+    fi
     [ -z "$(find "$1" -maxdepth 0 -mmin +180 2>/dev/null)" ]
     return
   fi
@@ -315,9 +388,10 @@ else
 fi
 
 # --- 2. The secret key -------------------------------------------------------
-# Decrypt a real secret from the backed-up DB with the backed-up key. If this
-# step ever fails, the backup contains bot tokens nobody can read back — the
-# exact disaster the key copy exists to prevent.
+# Decrypt a real secret from the backed-up DB with the backed-up key: any one
+# of them, as backup-volumes.sh checks it. If this step ever fails, the backup
+# contains bot tokens nobody can read back — the exact disaster the key copy
+# exists to prevent.
 if [ ! -f "$BACKUP/secret-key.env" ]; then
   echo "✗ Backup has no secret-key.env — its secrets are unrecoverable without the live .env." >&2
   fail=1
@@ -343,12 +417,17 @@ else
         const saved = parseEnv(readFileSync(process.env.HATCHABOT_DRILL_KEYFILE!, "utf8"));
         const key = LocalSecretStore.keyFromEnv({ HATCHABOT_SECRET_KEY: saved.HATCHABOT_SECRET_KEY ?? saved.AGENTCLAW_SECRET_KEY });
         const db = new Database(process.env.HATCHABOT_DRILL_DB!, { readonly: true });
-        const row = db.prepare("SELECT ref FROM secrets LIMIT 1").get() as { ref: string } | undefined;
-        if (!row) { console.log("  ✓ key parses (no secrets in store to decrypt)"); return; }
+        const rows = db.prepare("SELECT ref FROM secrets").all() as { ref: string }[];
+        if (!rows.length) { console.log("  ✓ key parses (no secrets in store to decrypt)"); return; }
         const store = new LocalSecretStore(db, key);
-        const value = await store.get(row.ref);
-        if (!value) throw new Error("empty secret");
-        console.log(`  ✓ backed-up key decrypts ${row.ref} (${value.length} chars — not shown)`);
+        // Any row it decrypts will do, as backup-volumes.sh checks it (HB-1228):
+        // a secret left from an older key beside the current ones is not
+        // this, and the first row alone failed a set the service reads.
+        for (const row of rows) {
+          const value = await store.get(row.ref).catch(() => undefined);
+          if (value) { console.log(`  ✓ backed-up key decrypts ${row.ref} (${value.length} chars — not shown)`); return; }
+        }
+        throw new Error(`the backed-up key decrypts none of the ${rows.length} secrets`);
       }
       main().catch((e) => { console.error(String(e)); process.exit(1); });
     '; then key_result=ok; else key_result=failed; echo "✗ The backed-up key could NOT decrypt the backed-up secrets" >&2; fail=1; fi
@@ -436,12 +515,33 @@ if [ "$largest" -ge 0 ]; then
 fi
 
 if [ -n "$order" ]; then
-  if ! docker version >/dev/null 2>&1; then
+  # Every docker call here has a time limit, as the restore and the trap's
+  # clean-up have: a daemon that took one of these and never answered held
+  # the drill there, past the restores' hour (HB-1374). A minute each, as
+  # the backup's own short calls have, and two for a volume list, as the
+  # backup gives its own; -k: a client that ignores the TERM is killed. Its
+  # 124, or 137 when it had to be killed, reads as docker not answering.
+  TL="${TO:+$TO -k 10}"
+  DOCKER_CALL_SEC=60
+  dk() { ${TL:+$TL $DOCKER_CALL_SEC} docker "$@"; }
+  dk_ls() { ${TL:+$TL 120} docker "$@"; }
+  unanswered() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
+  dv=0; dk version >/dev/null 2>&1 || dv=$?
+  # The image to restore with: one docker did not say it has is replaced by
+  # debian:stable-slim, but not one it did not answer about. That is docker
+  # not answering, said; the other image may have to be pulled from a
+  # daemon that is not answering.
+  ii=0; [ "$dv" != 0 ] || dk image inspect "$IMAGE" >/dev/null 2>&1 || ii=$?
+  if [ "$dv" != 0 ]; then
     echo "  ✗ docker is not answering — the archives were read, but none could be restored into a throwaway volume." >&2
     for i in $order; do VOL_NOTE[$i]=nodocker; done
     fail=1
+  elif unanswered "$ii"; then
+    echo "  ✗ docker did not answer within $DOCKER_CALL_SEC seconds when asked about the image $IMAGE — the archives were read, but none could be restored into a throwaway volume." >&2
+    for i in $order; do VOL_NOTE[$i]=nodocker; done
+    fail=1
   else
-    if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then IMAGE="debian:stable-slim"; fi
+    [ "$ii" = 0 ] || IMAGE="debian:stable-slim"
     # What a killed drill left behind (its container, its volume) goes first:
     # this backups folder's, which this drill's lock says no drill is using,
     # and any other whose drill's process is gone. Every drill's was removed,
@@ -449,17 +549,18 @@ if [ -n "$order" ]; then
     # The label names the folder (a checksum of its path); "1" is from before.
     mine_ct=""; mine_vol=""
     if [ -n "$LOCK" ]; then
-      mine_ct="$(docker ps -a --filter "label=hatchabot.restore-drill=$DRILL_OWNER" --format '{{.Names}}' 2>/dev/null || true)"
-      mine_vol="$(docker volume ls -q --filter "label=hatchabot.restore-drill=$DRILL_OWNER" 2>/dev/null || true)"
+      mine_ct="$(dk ps -a --filter "label=hatchabot.restore-drill=$DRILL_OWNER" --format '{{.Names}}' 2>/dev/null || true)"
+      mine_vol="$(dk_ls volume ls -q --filter "label=hatchabot.restore-drill=$DRILL_OWNER" 2>/dev/null || true)"
     fi
-    for c in $(docker ps -a --filter label=hatchabot.restore-drill --format '{{.Names}}' 2>/dev/null || true); do
-      if grep -qxF -- "$c" <<<"$mine_ct" || drill_gone "$c"; then docker rm -f "$c" >/dev/null 2>&1 || true; fi
+    for c in $(dk ps -a --filter label=hatchabot.restore-drill --format '{{.Names}}' 2>/dev/null || true); do
+      if grep -qxF -- "$c" <<<"$mine_ct" || drill_gone "$c"; then dk rm -f "$c" >/dev/null 2>&1 || true; fi
     done
-    for v in $(docker volume ls -q --filter label=hatchabot.restore-drill 2>/dev/null || true); do
-      if grep -qxF -- "$v" <<<"$mine_vol" || drill_gone "$v"; then docker volume rm -f "$v" >/dev/null 2>&1 || true; fi
+    for v in $(dk_ls volume ls -q --filter label=hatchabot.restore-drill 2>/dev/null || true); do
+      if grep -qxF -- "$v" <<<"$mine_vol" || drill_gone "$v"; then dk volume rm -f "$v" >/dev/null 2>&1 || true; fi
     done
-    for v in $(docker volume ls -q 2>/dev/null | grep '^acl-restore-drill-' || true); do docker volume rm -f "$v" >/dev/null 2>&1 || true; done
-    T=""; command -v timeout >/dev/null 2>&1 && T="timeout"
+    for v in $(dk_ls volume ls -q 2>/dev/null | grep '^acl-restore-drill-' || true); do dk volume rm -f "$v" >/dev/null 2>&1 || true; done
+    # -k: a docker client that passes the TERM on to the container and waits is killed.
+    T="${TO:+$TO -k 10}"
     restore_start=$SECONDS
     n=0
     for i in $order; do
@@ -472,26 +573,37 @@ if [ -n "$order" ]; then
       n=$((n + 1))
       DRILL_VOL="hatchabot-restore-drill-$$-$n"
       DRILL_CT="hatchabot-restore-drill-$$-$n"
-      rc=0
-      docker volume create --label "hatchabot.restore-drill=$DRILL_OWNER" "$DRILL_VOL" >/dev/null || rc=$?
+      rc=0; made=0
+      dk volume create --label "hatchabot.restore-drill=$DRILL_OWNER" "$DRILL_VOL" >/dev/null || made=$?
       files=""
-      if [ "$rc" -eq 0 ]; then
+      if [ "$made" -eq 0 ]; then
         # As root, then chown — the same rules as the provider's importState:
         # a FRESH volume is root-owned, so extracting as the image's uid-1000
         # user fails on the first mkdir (the new-machine case). The layout
         # check counts files under agents/ in the restored volume.
-        files="$(${T:+$T $PER_RESTORE_SEC} docker run --rm --name "$DRILL_CT" --label "hatchabot.restore-drill=$DRILL_OWNER" \
+        # --sig-proxy=false: a TERM (the time limit's, or the app's) ends the
+        # client; passed on, the container's shell (PID 1) ignored it, and a
+        # restore over its time read as a failed one (exit 137). The
+        # container is removed just below, or by the trap.
+        files="$(${T:+$T $PER_RESTORE_SEC} docker run --rm --name "$DRILL_CT" --label "hatchabot.restore-drill=$DRILL_OWNER" --sig-proxy=false \
           --network none --memory "$LIM_MEMORY" --memory-swap "$LIM_MEMORY" --cpus "$LIM_CPUS" --pids-limit 256 \
           --security-opt no-new-privileges --user root --entrypoint bash \
           -v "$DRILL_VOL:/data" -v "${VOL_TGZ[$i]}:/in/vol.tgz:ro" "$IMAGE" \
           -c 'cd /data && tar xzf /in/vol.tgz --no-same-owner && chown -R 1000:1000 /data && { find /data/.openclaw/agents /data/agents -type f 2>/dev/null | wc -l; }' \
           </dev/null)" || rc=$?
+      else rc="$made"
       fi
-      docker rm -f "$DRILL_CT" >/dev/null 2>&1 || true
-      docker volume rm -f "$DRILL_VOL" >/dev/null 2>&1 || true
+      dk rm -f "$DRILL_CT" >/dev/null 2>&1 || true
+      dk volume rm -f "$DRILL_VOL" >/dev/null 2>&1 || true
       DRILL_CT=""; DRILL_VOL=""
       files="$(printf '%s' "$files" | tr -dc '0-9')"
-      if [ "$rc" -eq 124 ]; then
+      # Its throwaway volume not made in its minute (124, or 137 when the
+      # client had to be killed): docker's, not the restore's 15 minutes,
+      # nor the archive's.
+      if unanswered "$made"; then
+        VOL_REST[$i]=0; VOL_NOTE[$i]=nodocker; fail=1
+        echo "  ✗ $name: docker did not answer within $DOCKER_CALL_SEC seconds when asked for a throwaway volume — not restored" >&2
+      elif [ "$rc" -eq 124 ]; then
         VOL_REST[$i]=0; VOL_NOTE[$i]=timeout; fail=1
         echo "  ✗ $name: restoring it took longer than $((PER_RESTORE_SEC / 60)) minutes — stopped" >&2
       elif [ "$rc" -ne 0 ]; then

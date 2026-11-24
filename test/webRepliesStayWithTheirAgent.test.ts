@@ -10,11 +10,11 @@
  * household's (docs/deck/shot-data.mjs).
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { webcrypto } from 'node:crypto';
+import { readPage } from '../scripts/page-source.mjs';
 
-const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+const html = readPage(new URL('../web/index.html', import.meta.url).pathname); // with its scripts (web/app/, HB-0811)
 const js = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join('\n');
 function source(name: string): string {
   const m = new RegExp(`^(?:async )?function ${name}\\([^\\n]*\\) \\{\\n[\\s\\S]*?^\\}`, 'm').exec(js)
@@ -22,6 +22,8 @@ function source(name: string): string {
   if (!m) throw new Error(`no function ${name} in web/index.html`);
   return m[0];
 }
+/** The page's own onAction (its event-action attributes), with esc as the sandboxes stub it. */
+const onAction = vm.runInNewContext(`(${source('onAction')})`, { esc: (v: unknown) => String(v ?? '') });
 /** A top-level `const name = …;` of the page (to the first line that ends with ";"). */
 function constant(name: string): string {
   const m = new RegExp(`^const ${name} = [\\s\\S]*?;$`, 'm').exec(js);
@@ -78,7 +80,7 @@ function page(names: string[], extra: Record<string, unknown> = {}, consts: stri
     sharingEpoch: 0, sharingView: 0, sharingReads: new WeakMap(), pagePerson: 'synthetic-owner', pagePersonAway: false, pageSignedOut: false,
     api: async (url: string, init?: Init) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, toast: (t: string) => { toasts.push(t); }, refresh: async () => {},
-    esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), fmtBytes: String,
+    esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), onAction, fmtBytes: String,
     v2SheetSaving: () => noop, v2SheetBaseline: noop, V2_SHEET_FORMS: [], onRepoPublic: noop, onParamTypeChange: noop,
     v2CtlDrawn: (el: { defaultValue?: string }) => el.defaultValue ?? '', editAgentId: 'a1', v2AgentId: null, editParamsFills: 0, searchTests: new Set(),
     v2AgentDlg: { open: false }, editDlg: { open: false },
@@ -451,7 +453,7 @@ describe('Files: a picture, a player or a reader at the public address gets the 
     expect(read).toEqual([`${url}&check=1`]);
     expect($('v2Files').innerHTML).toContain(`<iframe src="${url}&inline=1"`);
     // Open in a tab asks the same check first, not the folder.
-    expect($('v2Files').innerHTML).toContain(`sfOpen(event, this, '${url}&check=1')`);
+    expect($('v2Files').innerHTML).toContain(`data-on-click="sfOpen" data-on-click-args="[{"$":"event"},{"$":"el"},"${url}&check=1"]" data-on-click-mods="return"`);
     // The factor not given, or the file refused: said, and no frame.
     const refused = files(PUBLIC, async () => { throw new Error('The second factor was not given.'); });
     await refused.c.v2OpenFile('a1', 'garden', 'map.pdf', 10);
@@ -973,7 +975,7 @@ describe('the Telegram tab: people who use another agent, and a search test, are
     c.editAgentId = 'a1';
     c.api = async (url: string, init?: Init) => { calls.push({ url, ...init }); return init ? {} : [{ userId: 'u-made-up', name: 'Sam' }]; };
     await c.renderKnownPeople();
-    expect($('tgKnownPeople').innerHTML).toContain(`addKnownPerson('a1','u-made-up','Sam')`);
+    expect($('tgKnownPeople').innerHTML).toContain('data-on-click="addKnownPerson" data-on-click-args="["a1","u-made-up","Sam"]"');
     c.editAgentId = 'a2'; // B's forms opened; the Add drawn for A is pressed
     await c.addKnownPerson('a1', 'u-made-up', 'Sam');
     expect(calls.at(-1)).toEqual({ url: '/v1/agents/a1/members/known', method: 'POST', body: { userId: 'u-made-up' } });

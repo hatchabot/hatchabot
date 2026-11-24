@@ -3,7 +3,7 @@ import { connect } from 'node:net';
 import { Jar, PUBLIC_HOST, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { _loginThrottleKeys } from '../src/api/auth.js';
 import { addressBucket } from '../src/api/trust.js';
-import { createInvite } from '../src/orchestrator/invite.js';
+import { createInvite } from '../src/orchestrator/members/invite.js';
 import { evaluateSafeguards, failingSafeguards } from '../src/api/safeguards.js';
 import { parseFunnelStatus, targetsPort } from '../src/ops/tailnet.js';
 import { SESSION_COOKIE_NAME } from '../src/api/sessionCookie.js';
@@ -225,7 +225,7 @@ describe('open sockets do not outlive public access', () => {
 
 describe('smaller things', () => {
   it('the public pass and the device cookie are among the cookies never forwarded to an agent\'s gateway', () => {
-    for (const name of ['__Host-hatchabot_session', 'hatchabot_session', '__Host-hatchabot_pub', '__Host-hatchabot_device']) expect(SESSION_COOKIE_NAME.test(name), name).toBe(true);
+    for (const name of ['__Host-hatchabot_session', 'hatchabot_session', '__Host-hatchabot_pub', '__Host-hatchabot_factor', '__Host-hatchabot_device']) expect(SESSION_COOKIE_NAME.test(name), name).toBe(true);
     for (const name of ['openclaw_session', 'hatchabot_sessionx', 'theme']) expect(SESSION_COOKIE_NAME.test(name), name).toBe(false);
   });
 

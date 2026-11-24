@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { parsePairingList, claimFirstContact } from '../src/orchestrator/claim.js';
+import { parsePairingList, claimFirstContact } from '../src/orchestrator/members/claim.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { canTransition } from '../src/domain/stateMachine.js';
 import { DISCORD_ID } from './support/fixtures.js';
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
-import { beginOperation } from '../src/orchestrator/operations.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
+import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 
 describe('parsePairingList', () => {
   it('parses the 2026.6.11 pairing file shape', () => {
@@ -499,6 +499,40 @@ describe('claimFirstContact', () => {
     expect(store.getMembership('a1', 'u1')?.channelUserId).toBeUndefined();
   });
 
+  it('a window watched again after a restart counts its hour, or its week, from when it first opened, not from the restart (HB-0992 review)', async () => {
+    const MIN = 60_000;
+    for (const named of [false, true]) {
+      const store = new Store(new Database(':memory:'));
+      const provider = new MockProvider();
+      const { runtimeRef } = await provider.provision({
+        agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {},
+      });
+      store.insertAgent({
+        id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'STOPPED',
+        aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+      });
+      store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active', channelUserId: '4242' });
+      store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'u2', role: 'user', status: 'active' });
+      const real = Date.now;
+      let clock = real();
+      Date.now = () => clock;
+      const restart = clock;
+      // Opened 40 minutes before the restart (open to anyone), or a week less an hour before it (named); down since.
+      const openedAt = restart - (named ? 7 * 24 * 60 * MIN - 60 * MIN : 40 * MIN);
+      try {
+        const r = await claimFirstContact({ store, provider, sleep: async (ms) => { clock += ms; } }, {
+          agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u2', timeoutMs: 30 * MIN, pollIntervalMs: 3000, openedAt,
+          ...(named ? { expect: '@made_up_guest' } : {}),
+        });
+        expect(r).toBeNull();
+      } finally { Date.now = real; }
+      // Its hour ends 20 minutes after the restart; its week an hour after it.
+      expect(clock - restart, named ? 'named' : 'open to anyone').toBeGreaterThanOrEqual(named ? 60 * MIN : 20 * MIN);
+      expect(clock - restart, named ? 'named' : 'open to anyone').toBeLessThan(named ? 62 * MIN : 21 * MIN);
+      expect(store.pairingWindows('a1', new Date(0))).toEqual([]);
+    }
+  });
+
   it('a rebuild with 10 s of the window left: the stored window never lapses while it is down, and the door is open again once it is up (HB-0468 review)', async () => {
     const store = new Store(new Database(':memory:'));
     const provider = new MockProvider();
@@ -668,6 +702,20 @@ describe('claimFirstContact', () => {
     expect(claimed).toBe('999');
     expect(events.filter((e) => e === 'claim.read_failed')).toHaveLength(1);
     expect(store.pairingWindowOpen('a1')).toBe(false);
+  });
+
+  it('a pairing read that exits non-zero is tried again and said once, as one that throws is (HB-1050)', async () => {
+    const { store, provider, runtimeRef } = await owner();
+    const execShell = provider.execShell.bind(provider);
+    let n = 0;
+    provider.execShell = async (ref, script, o) => (++n <= 2 ? { code: 1, stdout: '', stderr: 'docker exec: connection reset' } : execShell(ref, script, o));
+    const events: string[] = [];
+    const claimed = await claimFirstContact(
+      { store, provider, sleep: async () => {}, log: (e) => { events.push(e); } },
+      { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 1000, pollIntervalMs: 1 },
+    );
+    expect(claimed).toBe('999');
+    expect(events.filter((e) => e === 'claim.read_failed')).toHaveLength(1);
   });
 
   it('returns null when the window closes with no contact', async () => {
@@ -850,7 +898,7 @@ describe('state machine', () => {
 
 describe('the claim says hello', () => {
   it('greets the owner the moment their first contact binds, so they do not type "hi" twice', async () => {
-    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const { claimFirstContact } = await import('../src/orchestrator/members/claim.js');
     const { Store } = await import('../src/store/store.js');
     const Database = (await import('better-sqlite3')).default;
     const store = new Store(new Database(':memory:'));

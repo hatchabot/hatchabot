@@ -120,6 +120,121 @@ describe('scripts/upgrade.sh', () => {
   }, 20_000);
 });
 
+describe('scripts/upgrade.sh moves node_modules only under the dependencies\' lock (HB-1212)', () => {
+  const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  async function until(what: () => boolean, ms = 30_000) {
+    const end = Date.now() + ms;
+    while (!what()) { if (Date.now() > end) throw new Error('timed out waiting'); await sleepMs(50); }
+  }
+  const started = (cmd: string[], env: Record<string, string>) => {
+    const p = spawn('bash', cmd, { env });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { out += d; });
+    const done = new Promise<number | null>((r) => p.on('close', (code) => r(code)));
+    return { done, out: () => out };
+  };
+
+  it('a restart\'s npm ci under way in the folder: the upgrade waits for it, then moves the whole tree aside, not half of it', async () => {
+    const w = world();
+    // ensure-deps.sh in the install, as a restart runs it (left out of git, as
+    // .git/info/exclude says), its npm ci a shim that empties node_modules as
+    // npm ci does and holds there until the test lets it go (a minute at most).
+    writeFileSync(join(w.install, 'scripts', 'ensure-deps.sh'), readFileSync('scripts/ensure-deps.sh'), { mode: 0o755 });
+    writeFileSync(join(w.install, 'scripts', 'sqlite-driver.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(w.install, 'package-lock.json'), '{"name":"made-up-app","lockfileVersion":3}\n');
+    writeFileSync(join(w.install, '.git', 'info', 'exclude'), 'scripts/ensure-deps.sh\nscripts/sqlite-driver.sh\npackage-lock.json\n');
+    symlinkSync(process.execPath, join(w.bin, 'node'));
+    const release = join(w.root, 'release'), calls = join(w.root, 'npm.log');
+    writeFileSync(join(w.bin, 'npm'), `#!/usr/bin/env bash
+echo begun >> '${calls}'
+rm -rf node_modules; mkdir node_modules; echo x > node_modules/half
+n=0; while [ ! -e '${release}' ] && [ "$n" -lt 1200 ]; do sleep 0.05; n=$((n + 1)); done
+echo x > node_modules/whole
+echo done >> '${calls}'
+`, { mode: 0o755 });
+    // The upgrade's own install step: writes down what it found moved aside.
+    writeFileSync(join(w.bin, 'record-aside'), `#!/usr/bin/env bash\nls node_modules.prev > '${join(w.root, 'aside.log')}'\nmkdir -p node_modules\n`, { mode: 0o755 });
+    const deps = started([join(w.install, 'scripts', 'ensure-deps.sh')], w.env);
+    let up: ReturnType<typeof started> | undefined;
+    let ended = false;
+    let upDone: Promise<number | null> | undefined;
+    try {
+      await until(() => existsSync(calls) && readFileSync(calls, 'utf8').includes('begun'));
+      up = started([join(w.install, 'scripts', 'upgrade.sh'), 'stable'], {
+        ...w.env, HATCHABOT_RESTART_CMD: join(w.bin, 'fake-restart'), HATCHABOT_UPGRADE_IMAGE: '0', HATCHABOT_INSTALL_CMD: join(w.bin, 'record-aside'),
+      });
+      upDone = up.done.then((code) => { ended = true; return code; });
+      // Waiting, or (as before the lock) moving the half-made tree and going on.
+      await until(() => up!.out().includes('Waiting for an install of the dependencies') || ended || existsSync(join(w.root, 'aside.log')));
+      await sleepMs(300);
+      expect(existsSync(join(w.root, 'aside.log')), up.out()).toBe(false); // nothing moved yet
+    } finally {
+      writeFileSync(release, ''); // let the shim go, however the test went
+    }
+    expect(await deps.done, deps.out()).toBe(0);
+    expect(await upDone, up!.out()).toBe(0);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.1.0');
+    // What went aside was the tree npm had finished.
+    expect(readFileSync(join(w.root, 'aside.log'), 'utf8').split('\n').filter(Boolean).sort()).toEqual(['half', 'whole']);
+    expect(readdirSync(join(w.home, '.local', 'state', 'hatchabot')).filter((n) => n.startsWith('deps-'))).toEqual([]); // let go
+  }, 90_000);
+
+  it('a rollback that cannot have the lock leaves the old dependencies aside and says so, and keeps the record: the next run puts them back (review of HB-1212)', () => {
+    const w = world();
+    // Half an hour of one-second waits, made instant: only `sleep 1`, the lock's.
+    const fast = join(w.root, 'fast'); mkdirSync(fast);
+    writeFileSync(join(fast, 'sleep'), '#!/bin/bash\n[ "$1" = 1 ] && exit 0\nexec /bin/sleep "$@"\n', { mode: 0o755 });
+    // An install that fails part-way with another npm holding the lock: this
+    // test's own process stands for it, alive throughout, its start as ps gives it.
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    const state = join(w.home, '.local', 'state', 'hatchabot');
+    writeFileSync(join(w.bin, 'install-held'), `#!/usr/bin/env bash
+L="${state}/deps-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
+mkdir -p "$L"; printf '%s\\n' '${process.pid} ${start}' > "$L/owner"
+mkdir -p node_modules; echo x > node_modules/half
+exit 1
+`, { mode: 0o755 });
+    const r = run(w, { HATCHABOT_DEPS_WAIT_SECS: '3', HATCHABOT_INSTALL_CMD: join(w.bin, 'install-held'), PATH: `${fast}:${w.bin}:/usr/bin:/bin` }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(r.stdout).toContain('has held');
+    expect(r.stdout).toContain("for half an hour, so v1.0.0's were left in node_modules.prev, not put back.");
+    expect(r.stdout).not.toContain('nothing was moved');
+    expect(r.stdout).toContain('Then run hatchabot upgrade: it puts v1.0.0 back first, from its record.');
+    expect(readdirSync(state).filter((n) => n.endsWith('.from'))).toHaveLength(1); // the record stays
+    expect(readdirSync(join(w.install, 'node_modules.prev'))).toEqual(['marker']);
+    expect(restarted(w)).toBe(0);
+    // The npm gone (its lock with it), the next run puts them back before anything else.
+    for (const n of readdirSync(state).filter((x) => x.startsWith('deps-'))) rmSync(join(state, n), { recursive: true });
+    const next = run(w, { HATCHABOT_INSTALL_CMD: 'false' }, ['stable']);
+    expect(next.stdout).toContain('was cut off part-way — putting v1.0.0 back first');
+    expect(next.status, next.stdout + next.stderr).toBe(3);
+    expect(readdirSync(join(w.install, 'node_modules'))).toEqual(['marker']);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+  }, 200_000);
+
+  it('a rollback after a failed restart that cannot have the lock says what to run next, still 1, and keeps the record (review of HB-1212)', () => {
+    const w = world();
+    const fast = join(w.root, 'fast'); mkdirSync(fast);
+    writeFileSync(join(fast, 'sleep'), '#!/bin/bash\n[ "$1" = 1 ] && exit 0\nexec /bin/sleep "$@"\n', { mode: 0o755 });
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    const state = join(w.home, '.local', 'state', 'hatchabot');
+    // The new release's restart fails, with another npm holding the lock meanwhile (this test's process stands for it).
+    writeFileSync(join(w.bin, 'restart-held'), `#!/usr/bin/env bash
+L="${state}/deps-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
+mkdir -p "$L"; printf '%s\\n' '${process.pid} ${start}' > "$L/owner"
+exit 1
+`, { mode: 0o755 });
+    const r = run(w, { HATCHABOT_DEPS_WAIT_SECS: '3', HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: join(w.bin, 'restart-held'), PATH: `${fast}:${w.bin}:/usr/bin:/bin` }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain("for half an hour, so v1.0.0's were left in node_modules.prev, not put back.");
+    expect(r.stdout).toContain('Then run hatchabot upgrade: it puts v1.0.0 back first, from its record.');
+    expect(readdirSync(state).filter((n) => n.endsWith('.from'))).toHaveLength(1); // the record stays
+    expect(readdirSync(join(w.install, 'node_modules.prev'))).toEqual(['marker']);
+  }, 200_000);
+});
+
 describe('scripts/upgrade.sh cut off part-way through the install (HB-0043)', () => {
   /**
    * An install step that leaves half a node_modules and then hangs, as
@@ -413,6 +528,55 @@ describe('the upgrade lock knows its holder (#226)', () => {
     expect(r.stdout).toMatch(/Another upgrade/);
     expect(readFileSync(join(lock, 'owner'), 'utf8').trim()).toBe(holder(process.pid));
     expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+  });
+
+  /** A real upgrade, holding the lock (its install hangs) in time zone `tz`, until `stop`. */
+  async function holding(w: World, tz: string) {
+    const started = join(w.root, 'started');
+    writeFileSync(join(w.bin, 'hanging-step'), hangingStep(started), { mode: 0o755 });
+    const p = spawn('bash', [join(w.install, 'scripts', 'upgrade.sh'), 'stable'], {
+      detached: true, stdio: 'ignore',
+      env: { ...w.env, TZ: tz, HATCHABOT_UPGRADE_IMAGE: '0', HATCHABOT_INSTALL_CMD: join(w.bin, 'hanging-step'), HATCHABOT_RESTART_CMD: join(w.bin, 'fake-restart') },
+    });
+    const ended = new Promise((r) => p.on('exit', r));
+    const t0 = Date.now();
+    while (!existsSync(started)) {
+      if (Date.now() - t0 > 15_000) { process.kill(-p.pid!, 'SIGKILL'); throw new Error('the holder never reached its install'); }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return { stop: async () => { process.kill(-p.pid!, 'SIGTERM'); await ended; } };
+  }
+
+  it('a holder started in another time zone is still the holder: it writes its start in UTC too, and that is what is judged (review of HB-1067)', async () => {
+    const w = world();
+    const h = await holding(w, 'JST-9');
+    try {
+      expect(readFileSync(join(lockOf(w), 'owner.utc'), 'utf8')).toMatch(/^\d+ \w{3} \w{3} +\d+ [\d:]+ \d{4}\n$/);
+      const r = run(w, { HATCHABOT_INSTALL_CMD: 'true', TZ: 'EST5' }, ['stable']);
+      expect(r.status, r.stdout + r.stderr).toBe(4);
+      expect(r.stdout).toMatch(/Another upgrade/);
+    } finally { await h.stop(); }
+  });
+
+  it('a release before this one, in the holder\'s zone, still reads this one\'s holder as running (its owner line is as it always was)', async () => {
+    // The holder check every release from #226 to this one runs (follow-latest.sh's
+    // repair runs an older release's deploy-release.sh against the same lock).
+    const olderCheck = `proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
+lock_left_over() {
+  local owner pid
+  owner="$(cat "$LOCK_PATH/owner" 2>/dev/null)" || owner=""
+  if [ -z "$owner" ]; then [ -n "$(find "$LOCK_PATH" -maxdepth 0 -mmin +60 2>/dev/null)" ]; return; fi
+  pid="\${owner%% *}"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start "$pid")" ]; fi
+}
+if lock_left_over; then echo gone; else echo held; fi`;
+    const w = world();
+    const h = await holding(w, 'JST-9');
+    try {
+      const r = spawnSync('bash', ['-c', olderCheck], { encoding: 'utf8', env: { ...w.env, TZ: 'JST-9', LOCK_PATH: lockOf(w) } });
+      expect(r.stdout.trim(), r.stderr).toBe('held');
+    } finally { await h.stop(); }
   });
 
   it('a lock whose holder is gone is taken at once, young or not; so is one whose pid now belongs to another process', () => {
@@ -1088,7 +1252,7 @@ describe('the runtime image step uses the daemon .env names (HB-0431)', () => {
 
   it('looks and fetches there, the last line of .env winning over the shell', () => {
     const w = imageWorld();
-    writeFileSync(join(w.install, '.env'), "DOCKER_HOST=unix:///tmp/old.sock\nDOCKER_HOST='unix:///tmp/synthetic-tenant.sock' # the tenant\n");
+    writeFileSync(join(w.install, '.env'), "DOCKER_HOST=unix:///tmp/old.sock\nDOCKER_HOST='unix:///tmp/synthetic-tenant.sock'\n");
     w.git(w.install, 'config', 'core.excludesFile', '/dev/null');
     writeFileSync(join(w.install, '.git', 'info', 'exclude'), '.env\n');
     const r = up(w, { DOCKER_HOST: 'unix:///tmp/shell.sock' });
@@ -1101,6 +1265,107 @@ describe('the runtime image step uses the daemon .env names (HB-0431)', () => {
     writeFileSync(join(w.install, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
     expect(up(w).status).toBe(0);
     expect(log(w)).toEqual(['image default', 'fetch default']);
+  });
+  it('a line with spaces around the =: the daemon the service gets on Linux; on a Mac, sourced, it sets none (review of HB-1210)', () => {
+    for (const mac of [false, true]) {
+      const w = imageWorld();
+      writeFileSync(join(w.install, '.git', 'info', 'exclude'), '.env\n');
+      writeFileSync(join(w.install, '.env'), 'DOCKER_HOST = unix:///tmp/synthetic-tenant.sock\n');
+      if (mac) writeFileSync(join(w.bin, 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+      const r = up(w);
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(log(w), String(mac)).toEqual(mac ? ['image default', 'fetch default'] : ['image unix:///tmp/synthetic-tenant.sock', 'fetch unix:///tmp/synthetic-tenant.sock']);
+    }
+  });
+});
+
+describe('the runtime image step uses the image and mirror .env names (HB-0984)', () => {
+  // A release that moves OpenClaw to 2026.9.9. docker writes down which image
+  // it was asked about, and answers with that image's OpenClaw (VERSIONS:
+  // "image=version ..."); the fetch writes down the image and mirror it got.
+  function imageWorld() {
+    const w = world();
+    mkdirSync(join(w.src, 'docker'));
+    writeFileSync(join(w.src, 'docker', 'Dockerfile.runtime'), 'ARG OPENCLAW_VERSION=2026.9.9\n');
+    writeFileSync(join(w.src, 'scripts', 'build-runtime-image.sh'), `#!/usr/bin/env bash\necho "fetch into \${HATCHABOT_IMAGE:-default} from \${HATCHABOT_IMAGE_REGISTRY:-default}" >> ${JSON.stringify(join(w.root, 'docker.log'))}\n`, { mode: 0o755 });
+    w.git(w.src, 'add', '-A'); w.git(w.src, 'commit', '-q', '-m', 'v3'); w.git(w.src, 'tag', 'v1.2.0');
+    w.git(w.src, 'push', '-q', w.origin, 'main', '--tags');
+    writeFileSync(join(w.bin, 'docker'), `#!/usr/bin/env bash
+[ "$1 $2" = "image inspect" ] || exit 0
+echo "inspect $3" >> ${JSON.stringify(join(w.root, 'docker.log'))}
+for pair in \${VERSIONS:-}; do [ "\${pair%%=*}" = "$3" ] && { echo "\${pair#*=}"; exit 0; }; done
+exit 1
+`, { mode: 0o755 });
+    writeFileSync(join(w.install, '.git', 'info', 'exclude'), '.env\n');
+    return w;
+  }
+  const log = (w: World) => (existsSync(join(w.root, 'docker.log')) ? readFileSync(join(w.root, 'docker.log'), 'utf8').trim().split('\n') : []);
+  const up = (w: World, extra: Record<string, string> = {}) => run(w, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_UPGRADE_IMAGE: '1', ...extra }, ['v1.2.0']);
+
+  it('the timer, which has no .env: the image .env names is the one looked at, and fetched from the mirror .env names', () => {
+    const w = imageWorld();
+    writeFileSync(join(w.install, '.env'), 'HATCHABOT_SECRET_KEY=made-up\nHATCHABOT_IMAGE="made-up-runtime:latest"\nHATCHABOT_IMAGE_REGISTRY=registry.example.test/runtime\n');
+    const r = up(w, { VERSIONS: 'hatchabot-runtime:latest=2026.9.9 made-up-runtime:latest=2026.7.1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(log(w)).toEqual(['inspect made-up-runtime:latest', 'fetch into made-up-runtime:latest from registry.example.test/runtime']);
+    expect(r.stdout).toContain('carries OpenClaw 2026.7.1; this release\'s default is 2026.9.9');
+  });
+
+  it('read as the service reads .env, as setup-host.sh reads it: spaces around the = on Linux, a comment off on a Mac (review of HB-1210)', () => {
+    // Linux (systemd): the spaced lines set both. A Mac (bash, sourced): a spaced line is a command and sets nothing; a comment after a value is not part of it.
+    for (const [mac, env, want] of [
+      [false, 'HATCHABOT_IMAGE = made-up-runtime:latest\nHATCHABOT_IMAGE_REGISTRY = registry.example.test/runtime\n', ['inspect made-up-runtime:latest', 'fetch into made-up-runtime:latest from registry.example.test/runtime']],
+      [true, 'HATCHABOT_IMAGE = other-runtime:latest\nHATCHABOT_IMAGE=made-up-runtime:latest # the image\n', ['inspect made-up-runtime:latest', 'fetch into made-up-runtime:latest from default']],
+    ] as const) {
+      const w = imageWorld();
+      writeFileSync(join(w.install, '.env'), `HATCHABOT_SECRET_KEY=made-up\n${env}`);
+      if (mac) writeFileSync(join(w.bin, 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+      const r = up(w, { VERSIONS: 'hatchabot-runtime:latest=2026.9.9 made-up-runtime:latest=2026.7.1' });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(log(w), String(mac)).toEqual(want);
+    }
+  });
+
+  it('a newer image promoted in the repository named: kept, though the default repository is older', () => {
+    for (const env of ['dotenv', 'shell'] as const) {
+      const w = imageWorld();
+      writeFileSync(join(w.install, '.env'), `HATCHABOT_SECRET_KEY=made-up\n${env === 'dotenv' ? 'HATCHABOT_IMAGE=made-up-runtime\n' : ''}`);
+      const r = up(w, { VERSIONS: 'hatchabot-runtime:latest=2026.1.1 made-up-runtime:latest=2026.12.1', ...(env === 'shell' ? { HATCHABOT_IMAGE: 'made-up-runtime:latest' } : {}) });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(log(w), env).toEqual(['inspect made-up-runtime:latest']);
+    }
+  });
+
+  it('an image pinned to another tag in .env: left as it is, nothing fetched', () => {
+    const w = imageWorld();
+    writeFileSync(join(w.install, '.env'), 'HATCHABOT_SECRET_KEY=made-up\nHATCHABOT_IMAGE=made-up-runtime:2026.7.1\n');
+    const r = up(w, { VERSIONS: 'made-up-runtime:2026.7.1=2026.7.1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(log(w)).toEqual([]);
+    expect(r.stdout).toContain('The runtime image is pinned to made-up-runtime:2026.7.1 (HATCHABOT_IMAGE): the upgrade leaves it as it is');
+  });
+
+  it('an image with no OpenClaw version label (old or hand-built) is older, as setup-host.sh has it: fetched over (HB-1211)', () => {
+    const w = imageWorld();
+    writeFileSync(join(w.install, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    // docker as it answers for a label the image does not have.
+    writeFileSync(join(w.bin, 'docker'), `#!/usr/bin/env bash
+[ "$1 $2" = "image inspect" ] || exit 0
+echo "inspect $3" >> ${JSON.stringify(join(w.root, 'docker.log'))}
+echo '<no value>'
+`, { mode: 0o755 });
+    const r = up(w);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(log(w)).toEqual(['inspect hatchabot-runtime:latest', 'fetch into default from default']);
+    expect(r.stdout).toContain('carries OpenClaw nothing; this release\'s default is 2026.9.9');
+  });
+
+  it('none named: hatchabot-runtime:latest from the default registry, as before', () => {
+    const w = imageWorld();
+    writeFileSync(join(w.install, '.env'), 'HATCHABOT_SECRET_KEY=made-up\n');
+    const r = up(w, { VERSIONS: 'hatchabot-runtime:latest=2026.1.1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(log(w)).toEqual(['inspect hatchabot-runtime:latest', 'fetch into default from default']);
   });
 });
 

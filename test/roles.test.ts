@@ -1,11 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { redeemInvite, createInvite, InviteInvalidError } from '../src/orchestrator/invite.js';
+import { redeemInvite, createInvite, InviteInvalidError } from '../src/orchestrator/members/invite.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
+import { telegramRefuses } from './support/telegramStandIn.js';
 
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -45,11 +46,13 @@ async function app(store: Store) {
     secrets: new MemSecrets(),
     providers: new Map([['mock', new MockProvider()]]),
     channel: { pool: { availableCount: () => 0 } } as any,
+    oauthFetch: telegramRefuses, // Telegram, where the routes are handed a fetch for it
   });
   return f;
 }
 
 const as = (u: string) => ({ 'x-hatchabot-owner': u });
+afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('accessRole', () => {
   it('grades owner, member, and stranger', () => {
@@ -437,6 +440,8 @@ describe('the bot pool belongs to whoever minted the bot', () => {
   const poolWorld = () => world();
 
   it('lets a member park a bot of their own', async () => {
+    // The token is checked with Telegram (verifyBotToken, the global fetch): as it answers a made-up one.
+    vi.stubGlobal('fetch', telegramRefuses);
     const f = await app(poolWorld());
     const res = await f.inject({
       method: 'POST', url: '/v1/pool', headers: as(MEMBER),

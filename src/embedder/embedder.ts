@@ -21,7 +21,7 @@ import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync
 import { basename, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import type { RuntimeProvider } from '../providers/provider.js';
+import { EmbedderUntouchedError, type RuntimeProvider } from '../providers/provider.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
 import { processAlive } from '../domain/processAlive.js';
@@ -74,6 +74,14 @@ export interface EmbedderStatus {
   door: ContainerState;
   /** `host:port` agents call, when the door is published. */
   doorAddress?: string;
+  /**
+   * The engine runs on another memory limit than the one asked for now (a
+   * limit changed since it started): the health loop starts it again, and the
+   * start replaces it (HB-1021).
+   */
+  engineMemoryOff?: boolean;
+  /** From a start: it replaced the engine (on another key or memory limit). */
+  engineReplaced?: boolean;
 }
 
 export interface EmbedderServiceOpts {
@@ -353,8 +361,12 @@ export class EmbedderService {
   start(opts: { onlyIfEnabled?: boolean } = {}): Promise<EmbedderView> {
     return this.#serial(() => this.#startLocked(opts));
   }
-  /** The start itself, for a caller that already holds the turn. */
-  async #startLocked(opts: { onlyIfEnabled?: boolean } = {}): Promise<EmbedderView> {
+  /**
+   * The start itself, for a caller that already holds the turn. `limit`: the
+   * health loop's start of an engine off its memory limit, told whether the
+   * engine was replaced.
+   */
+  async #startLocked(opts: { onlyIfEnabled?: boolean; limit?: { replaced?: boolean } } = {}): Promise<EmbedderView> {
     {
       if (opts.onlyIfEnabled && !this.enabled) return this.status();
       if (this.external) throw new Error(`An external embedding server is configured (HATCHABOT_EMBED_URL=${this.external}); nothing to start here.`);
@@ -370,9 +382,14 @@ export class EmbedderService {
         s = await provider.ensureEmbedder(spec);
       } catch (err) {
         // Half up is worse than down: nothing would manage what was left running.
-        await provider.stopEmbedder?.().catch(() => {});
+        // But the limit's start that failed before it changed anything (the old
+        // engine Docker would not remove, a runner's files not copied) took a
+        // service that was serving down, on its old limit (HB-1021 review):
+        // left up instead, and the next tick tries again.
+        if (!(opts.limit && err instanceof EmbedderUntouchedError)) await provider.stopEmbedder?.().catch(() => {});
         throw err;
       }
+      if (opts.limit) opts.limit.replaced = !!s.engineReplaced;
       writeFileSync(this.enabledFile, `${new Date().toISOString()}\n`);
       rmSync(this.stoppedFile, { force: true });
       // The start copied the key files to a runner as they stood. Keys that
@@ -464,6 +481,26 @@ export class EmbedderService {
     const s = await this.status();
     if (s.embedder === 'running' && s.door === 'running') {
       this.syncKeys(); // archive and delete rewrite the file at once (store.onEmbedKeyRetired); this catches any other change
+      // On another memory limit than the one asked for now: a runner's engine
+      // (no boot start visits one), or this machine's after a Restart Docker
+      // refused, kept its old limit until it fell over (HB-1021). A start, not
+      // a restart: it replaces the engine only, keeps the door, and finds
+      // nothing to do where a Restart got there first.
+      if (s.engineMemoryOff) {
+        // At work (a re-index under way): left to it until a tick finds it
+        // idle, as the memory restart below is, with no bound, as there. No
+        // reading at all (stats Docker would not give) is not known busy, and
+        // does not hold the new limit back.
+        const busy = await this.#o.provider().embedderStats?.().catch(() => undefined);
+        if (busy && busy.cpuPct >= 5) return 'ok';
+        const limit: { replaced?: boolean } = {};
+        await this.#serial(() => this.#startLocked({ onlyIfEnabled: true, limit }));
+        // Said as it went: a Stop or a Restart that landed between the look
+        // and the start left nothing to replace.
+        if (!limit.replaced) return this.enabled ? 'ok' : 'off';
+        this.#o.log?.('embedder.limit_restart', {});
+        return 'restarted';
+      }
       // The engine grows under load and never gives the memory back: after
       // the fleet's overnight re-index it sat at its 2 GiB cap, idle, one big
       // request from being killed (2026-09-24; a restart returned it to

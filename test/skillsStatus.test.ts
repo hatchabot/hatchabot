@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CURATED_SKILL_IDS } from '../src/openclaw/skills.js';
-import { readSkillsStatus } from '../src/orchestrator/skillsStatus.js';
+import { readSkillsStatus } from '../src/orchestrator/skills/skillsStatus.js';
 import type { ExecResult } from '../src/providers/provider.js';
 
 const SLUG = 'test-agent';

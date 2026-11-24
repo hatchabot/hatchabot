@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildConfigCommands } from '../src/openclaw/configWriter.js';
-import { filesMb } from '../src/orchestrator/machineDefaults.js';
-import { hibernateAfterMs } from '../src/orchestrator/hibernate.js';
+import { filesMb } from '../src/domain/filesLimit.js';
+import { hibernateAfterMs } from '../src/orchestrator/lifecycle/hibernate.js';
 import { as, makeWorld, seedRunningAgent } from './support/world.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 
@@ -44,6 +44,36 @@ describe('machine defaults', () => {
     }
     expect(readFileSync(f, 'utf8')).toMatch(/^HATCHABOT_FILES_MB_TELEGRAM=20$/m);
     expect(w.store.listEvents([id]).length >= 0).toBe(true);
+  });
+
+  it('a file ceiling an agent is given while the default goes round the fleet is the one its app keeps (HB-0917)', async () => {
+    const w = await makeWorld();
+    envFile();
+    const first = await seedRunningAgent(w);
+    const second = await seedRunningAgent(w, { id: 'a2', name: 'Pantry', slug: 'pantry', accountId: 'pantrybot' });
+    const refOf = (id: string) => w.store.getAgent(id)!.runtimeRef!;
+    // Each config write, by runtime, as it lands; the first agent's is held.
+    const landed: Array<[string, string]> = [];
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const exec = w.provider.exec.bind(w.provider);
+    w.provider.exec = async (ref, argv, opts) => {
+      if (argv[0] === 'config' && argv[2] === 'channels.telegram.mediaMaxMb') {
+        if (ref === refOf(first) && argv[3] === '30') await held;
+        landed.push([ref, argv[3]!]);
+      }
+      return exec(ref, argv, opts);
+    };
+    const putting = w.f.inject({ method: 'PUT', url: '/v1/machine-defaults', headers: as(), payload: { key: 'filesTelegram', value: '30' } });
+    await new Promise((r) => setTimeout(r, 30));
+    // The owner gives the second agent 5 MB of its own meanwhile.
+    const own = await w.f.inject({ method: 'PATCH', url: `/v1/agents/${second}`, headers: as(), payload: { filesMaxMb: 5 } });
+    expect(own.statusCode, own.body).toBe(200);
+    release();
+    expect((await putting).statusCode).toBe(200);
+    expect(w.store.getAgent(second)!.filesMaxMb).toBe(5);
+    expect(landed.filter(([ref]) => ref === refOf(second)).at(-1)).toEqual([refOf(second), '5']);
+    expect(landed.filter(([ref]) => ref === refOf(first)).at(-1)).toEqual([refOf(first), '30']);
   });
 
   it('sleep after: a duration or off, at least 30 minutes, read by the next sweep; nobody but the machine owner may set it', async () => {

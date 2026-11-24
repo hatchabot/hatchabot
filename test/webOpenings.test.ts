@@ -8,18 +8,19 @@
  * the invented household's; addresses are example.org.
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { inlineScripts } from '../scripts/inline-scripts.mjs';
-import { mergeConfig, type AppManifest } from '../src/orchestrator/apps.js';
+import { readPage, readPageScripts } from '../scripts/page-source.mjs';
+import { mergeConfig, type AppManifest } from '../src/orchestrator/apps/apps.js';
 
-const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
-const js = inlineScripts(html).join('\n');
+const html = readPage(new URL('../web/index.html', import.meta.url).pathname); // with its scripts (web/app/, HB-0811)
+const js = readPageScripts(new URL('../web/index.html', import.meta.url).pathname).map((s) => s.code).join('\n');
 function source(name: string): string {
   const m = new RegExp(`^(?:async )?function ${name}\\([^\\n]*\\) \\{\\n[\\s\\S]*?^\\}`, 'm').exec(js);
   if (!m) throw new Error(`no function ${name} in web/index.html`);
   return m[0];
 }
+/** The page's own onAction (its event-action attributes), with esc as the sandboxes stub it. */
+const onAction = vm.runInNewContext(`(${source('onAction')})`, { esc: (v: unknown) => String(v ?? '') });
 
 type El = Record<string, any>;
 function element(): El {
@@ -44,7 +45,7 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
   const toasts: string[] = [];
   const c: any = vm.createContext({
     $, console, Intl, Date, Math, JSON, String, Number, Promise, Set, Map, encodeURIComponent, setTimeout: () => 0, clearTimeout() {},
-    esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''),
+    esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), onAction,
     api: async (url: string, init: { method?: string; body?: unknown } = {}) => { calls.push({ url, ...init }); return {}; },
     toast: (m: string) => toasts.push(m), confirm: () => true, refresh: async () => {},
     hosts: [{ id: 'h1', kind: 'local' }], profiles: [{ id: 'p1', name: 'Household plan' }],
@@ -59,11 +60,11 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
 describe('an agent left DELETING (HB-0265)', () => {
   it('still has Delete at the foot of its Overview, and says it finishes the delete', () => {
     const fn = source('v2Pane');
-    const ctx = { jsq: String, esc: String, v2PlaceInGroup: () => undefined, v2Status: () => ({ why: [] }), TEMPLATE_WHY: 'fixture', v2Mine: () => false,
+    const ctx = { jsq: String, esc: String, onAction, v2PlaceInGroup: () => undefined, v2Status: () => ({ why: [] }), TEMPLATE_WHY: 'fixture', v2Mine: () => false,
       profiles: [], hosts: [], agents: [], agentNotices: () => '', v2OpGoing: () => false, v2ChannelKinds: () => [], V2_NEW_GROUP: 'new', v2Sort: { key: 'manual' } };
     const pane = vm.runInNewContext('(' + fn + ')', ctx);
     const deleting = pane({ id: 'a1', name: 'Homework Helper', state: 'DELETING' }, 'overview');
-    expect(deleting).toContain(`del('a1','Homework Helper')`);
+    expect(deleting).toContain('data-on-click="v2Close del" data-on-click-args="[[],["a1","Homework Helper"]]"');
     expect(deleting).toContain('Delete… finishes it');
     expect(deleting).not.toContain('📥 Archive');
     const stopped = pane({ id: 'a1', name: 'Homework Helper', state: 'STOPPED' }, 'overview');

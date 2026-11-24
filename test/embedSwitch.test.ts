@@ -5,7 +5,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { buildConfigCommands, memoryKeyPrefix } from '../src/openclaw/configWriter.js';
-import { buildRuntimeSpec, memoryIndexIncomplete, rebuildAgent, recordApplied, reindexMemoryIfSwitched, type ProvisionDeps } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec, memoryIndexIncomplete, rebuildAgent, recordApplied, reindexMemoryIfSwitched, type ProvisionDeps } from '../src/orchestrator/lifecycle/provision.js';
 import { embedKeyHash } from '../src/embedder/embedder.js';
 
 /**

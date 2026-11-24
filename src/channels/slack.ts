@@ -56,6 +56,25 @@ export function slackManifest(agentName: string): Record<string, unknown> {
   };
 }
 
+/** Slack's own words for an outage or a limit (its "error" field), which say nothing of the token. */
+const SLACK_BUSY = new Set(['ratelimited', 'request_timeout', 'service_unavailable', 'fatal_error', 'internal_error']);
+
+/**
+ * Slack's own "no" to a token is an answer of its JSON with ok:false and the
+ * error's name (Slack answers a refusal 200). A rate limit (429,
+ * `ratelimited`), a 5xx, Slack's own outage words, or a page that is not
+ * Slack's JSON (a proxy's) says nothing of the token: the token was not
+ * checked, and it is busy, not counted against the token-check allowance, as
+ * Discord's check reads its answers and Telegram's (HB-1038, HB-1260). It was
+ * "Slack refused the bot token (503)", and counted (HB-1262).
+ */
+function slackUnanswered(r: { status: number; body: any }, which: 'bot' | 'app-level'): ConnectorError | undefined {
+  const error = typeof r.body?.error === 'string' ? r.body.error : undefined;
+  if (!(r.status === 429 || r.status >= 500 || typeof r.body?.ok !== 'boolean' || (error && SLACK_BUSY.has(error)))) return undefined;
+  const why = r.status === 429 || error === 'ratelimited' ? 'too many requests' : r.status >= 500 || !error ? `HTTP ${r.status}` : error;
+  return new ConnectorError(`Slack did not answer properly just now (${why}), so the ${which} token was not checked. Try again in a minute.`, true);
+}
+
 export function slackConnector(f: FetchLike = fetch): ChannelConnector {
   const api = (method: string, token: string) =>
     callJson(f, 'Slack', `https://slack.com/api/${method}`, {
@@ -83,6 +102,8 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
       if (!appId) throw new ConnectorError('That app-level token is not in the form Slack issues (xapp-1-A…).');
 
       const auth = await api('auth.test', botToken);
+      const authBusy = auth.body?.ok === true ? undefined : slackUnanswered(auth, 'bot');
+      if (authBusy) throw authBusy;
       if (!auth.body?.ok) {
         const e = String(auth.body?.error ?? auth.status);
         if (e === 'invalid_auth' || e === 'not_authed' || e === 'token_revoked' || e === 'account_inactive') {
@@ -108,6 +129,8 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
       const unchecked = !botApp;
 
       const conn = await api('apps.connections.open', appToken);
+      const connBusy = conn.body?.ok === true ? undefined : slackUnanswered(conn, 'app-level');
+      if (connBusy) throw connBusy;
       if (!conn.body?.ok) {
         const e = String(conn.body?.error ?? conn.status);
         if (e === 'missing_scope') throw new ConnectorError('The app-level token needs the connections:write scope. Make a new one with that scope.');

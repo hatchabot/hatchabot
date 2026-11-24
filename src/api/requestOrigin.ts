@@ -1,5 +1,6 @@
 import { routedPath } from './routedPath.js';
 import { redactUrlForLog } from './requestLog.js';
+import { publicUrlWritten } from '../orchestrator/reach/appAddress.js';
 import type { FastifyInstance } from 'fastify';
 import type { RequestLike } from './sessionCookie.js';
 
@@ -20,7 +21,8 @@ import type { RequestLike } from './sessionCookie.js';
  *    proxy that rewrites Host would otherwise make our own pages look foreign.
  *  - Without it (an older browser), an `Origin` header must name this
  *    machine: the host the browser addressed (Host, or X-Forwarded-Host from
- *    a proxy), or HATCHABOT_PUBLIC_URL's. `Origin: null` (a sandboxed page,
+ *    a proxy), or HATCHABOT_PUBLIC_URL's (or the address Use for links wrote
+ *    since the start). `Origin: null` (a sandboxed page,
  *    such as a file this app serves sandboxed) is refused.
  *  - Neither header: not a browser (the CLI, a runner, another Hatchabot, an
  *    agent's call, the management agent in-process). Passes; those carry
@@ -91,8 +93,9 @@ export function foreignRequest(req: RequestLike, env: NodeJS.ProcessEnv = proces
   const theirs = o.host.toLowerCase();
   const mine = [first(req.headers.host), first(req.headers['x-forwarded-host'])].map((h) => normHost(h, o.protocol));
   // …and its public address (docs/public-access.md), when it has one.
-  for (const name of ['HATCHABOT_PUBLIC_URL', 'HATCHABOT_PUBLIC_ACCESS_URL'] as const) {
-    try { const pub = env[name]?.trim(); if (pub) mine.push(new URL(pub).host.toLowerCase()); } catch { /* unparsable: not ours */ }
+  // The address written for links since the start counts too: it is the setting from the next restart on (HB-1314).
+  for (const pub of [env.HATCHABOT_PUBLIC_URL, env.HATCHABOT_PUBLIC_ACCESS_URL, env === process.env ? publicUrlWritten() : undefined]) {
+    try { if (pub?.trim()) mine.push(new URL(pub.trim()).host.toLowerCase()); } catch { /* unparsable: not ours */ }
   }
   return mine.includes(theirs) ? undefined : `origin: ${theirs}`;
 }

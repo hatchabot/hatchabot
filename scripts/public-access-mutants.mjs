@@ -10,6 +10,7 @@
  *
  *   node scripts/public-access-mutants.mjs            # all mutants
  *   node scripts/public-access-mutants.mjs pass idle  # only those whose name contains a word
+ *   node scripts/public-access-mutants.mjs --check    # only that every entry is well formed (its text there once)
  *
  * It works on a COPY of the tree in a temp directory (node_modules linked),
  * so the checkout is never touched and a crash cannot leave a mutant behind.
@@ -17,7 +18,7 @@
  * the gate, the trust rules or the route table change.
  */
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,6 +39,8 @@ const RECOVERY = 'test/publicRecovery.test.ts';
 const NOTICE_LIMITS = 'test/publicNoticeLimits.test.ts';
 const CRASH = 'test/publicCrash.test.ts';
 const SMALLER = 'test/publicSmaller.test.ts';
+/** The sign-in limits' buckets (HB-1434). */
+const NIGHT = 'test/nightAuth.test.ts';
 
 /**
  * name, file, the guard's exact text, what replaces it, the tests that must then fail,
@@ -66,11 +69,11 @@ const MUTANTS = [
   ['pass: not bound to its session', 'src/api/publicAccess.ts', "if (!safeEqual(pass.sess, want)) return undefined;", '', [GATE]],
   ['pass: the signature is not checked', 'src/api/publicAccess.ts', "if (!safeEqual(sig, want)) return undefined;", '', [GATE]],
   ['pass: never idles out', 'src/api/publicAccess.ts', "if (pass.seen > now + 60_000 || now - pass.seen > publicConfig().idleMs) return undefined;", '', [GATE]],
-  ['pass: a new sign-in inherits the second factor', 'src/api/publicAccess.ts', "if (req.principal && req.routeOptions?.url === '/v1/local-accounts/:id/password') {\n      const old = passOf(req, sessionValue(req));\n      sfAt = old ? factorAt(old, req.principal.ownerId) : 0;\n      g = factorGen(req.principal.ownerId);\n      en = old?.en ?? 0;\n    }", "sfAt = Date.now();", [GATE]],
+  ['pass: a new sign-in inherits the second factor', 'src/api/publicAccess.ts', "if (req.principal && req.routeOptions?.url === '/v1/local-accounts/:id/password') {\n      const old = passOf(req, sessionValue(req));\n      sfAt = old ? factorAt(req, old, req.principal.ownerId) : 0;\n      g = factorGen(req.principal.ownerId);\n      en = old?.en ?? 0;\n    }", "sfAt = Date.now();", [GATE]],
   ['2fa: not asked for at sign-in', 'src/api/publicAccess.ts', "if (need === 'yes' && sfAt === 0) {\n        return reply", "if (false) {\n        return reply", [GATE]],
   ['2fa: step-up never expires', 'src/api/publicAccess.ts', "if (now - sfAt > publicConfig().stepUpMs) {", "if (false) {", [GATE, SF]],
   ['2fa: step-up open to people without a factor', 'src/api/publicAccess.ts', "          if (rule.firstFactorOk) return;\n          return reply.code(403)", "          return;\n          return reply.code(403)", [DEFAULT2FA], undefined, 'Google sign-in'],
-  ['2fa: the socket skips the second factor', 'src/api/publicAccess.ts', "if (need === 'yes' && factorAt(pass, ownerId) === 0) return 'second factor not given';", '', [NOTICES]],
+  ['2fa: the socket skips the second factor', 'src/api/publicAccess.ts', "    if (need === 'yes' && factorAt({ headers }, pass, ownerId) === 0) return 'second factor not given';\n    return undefined;\n  };\n\n  const factorRefusal", "    return undefined;\n  };\n\n  const factorRefusal", [NOTICES]],
   ['2fa: the socket needs no pass', 'src/api/publicAccess.ts', "if (!pass) return 'no public pass';", "if (!pass) return undefined;", [NOTICES]],
   ['2fa: a TOTP code works twice', 'src/api/secondFactor.ts', "if (step !== undefined && store.advanceTotpStep(row.id, step)) { method = 'totp'; break; }", "if (step !== undefined) { method = 'totp'; break; }", [SF]],
   ['2fa: any passkey of anyone', 'src/api/secondFactor.ts', "row.ownerId === ownerId && row.kind === 'passkey'", "row.kind === 'passkey'", [SF]],
@@ -105,32 +108,35 @@ const MUTANTS = [
   ['review: sockets outlive a failed safeguard', 'src/api/publicAccess.ts', "        dropUpgraded(); // open console sockets do not outlive the safeguard\n", "", [REVIEW]],
   ['review: off waits for open sockets', 'src/api/publicAccess.ts', "    dropUpgraded();\n    if (!s) return;\n    await new Promise<void>((resolve) => {\n      s.close(() => resolve());\n      for (const sock of sockets) sock.destroy();\n      sockets.clear();", "    if (!s) return;\n    await new Promise<void>((resolve) => {\n      s.close(() => resolve());\n      s.closeAllConnections?.();", [REVIEW]],
   ['review: a socket-only sign-in is not recorded', 'src/api/publicAccess.ts', "if (!pass.used) firstUse({ headers }, ownerId, pass);", "", [REVIEW]],
-  ['review: usernames are throttle keys at any length', 'src/api/auth.ts', "return w.length <= 64 ? w : `#${createHash('sha256').update(w).digest('hex').slice(0, 32)}`;", "return w;", [REVIEW]],
+  ['review: usernames are throttle keys at any length', 'src/api/auth.ts', "return w.length <= 64 && !w.startsWith('*') ? w : `#${createHash('sha256').update(w).digest('hex').slice(0, 32)}`;", "return w;", [REVIEW]],
+  ['limits: a typed name can be a shared bucket', 'src/api/auth.ts', "w.length <= 64 && !w.startsWith('*') ? w", "w.length <= 64 ? w", [NIGHT], undefined, 'HB-1434'],
+  // A second lock behind the one above (a typed name never makes a shared bucket's key): removing it alone changes nothing, by design.
+  ['limits: a shared bucket is ranked with made-up names', 'src/api/auth.ts', "PUBLIC_KEY.test(k) || SHARED_KEY.test(k) ? 2", "PUBLIC_KEY.test(k) ? 2", [NIGHT], 'equivalent', 'HB-1434'],
   ['review: IPv6 addresses are their own buckets', 'src/api/auth.ts', "const keys = [`pub:ip:${addressBucket(publicClientAddress(req))}`];", "const keys = [`pub:ip:${publicClientAddress(req)}`];", [REVIEW]],
   ['review: the roster lists claim codes publicly', 'src/api/accountsAuth.ts', "claimPath: pending && !isPublic(req) ?", "claimPath: pending ?", [REVIEW]],
   ['review: Files are signed-in', 'src/api/publicRoutes.ts', "r('*', /^\\/v1\\/agents\\/:id\\/fs(\\/file)?$/, 'step-up',", "r('*', /^\\/v1\\/agents\\/:id\\/fs(\\/file)?$/, 'signed-in',", [REVIEW]],
-  ['review: join accepts a session the gate has not passed', 'src/api/routes.ts', "    if (fromCookie && isPublic(req)) {\n      const refused = app.publicAccess", "    if (false) {\n      const refused = app.publicAccess", [REVIEW]],
-  ['review: config tells strangers the private address', 'src/api/routes.ts', "    if (!isPublic(req)) return full;\n    const { appUrl", "    if (true) return full;\n    const { appUrl", [REVIEW]],
-  ['review: the pass and device cookies go to the gateway', 'src/api/sessionCookie.ts', "_(session|pub|device)$/;", "_session$/;", [REVIEW]],
+  ['review: join accepts a session the gate has not passed', 'src/api/memberRoutes.ts', "    if (fromCookie && isPublic(req)) {\n      const refused = app.publicAccess", "    if (false) {\n      const refused = app.publicAccess", [REVIEW]],
+  ['review: config tells strangers the private address', 'src/orchestrator/reach/appConfig.ts', "  if (!fromPublic) return full;\n  const { appUrl", "  if (true) return full;\n  const { appUrl", [REVIEW]],
+  ['review: the pass and device cookies go to the gateway', 'src/api/sessionCookie.ts', "_(session|pub|factor|device)$/;", "_session$/;", [REVIEW]],
   ['review: any factor counts as proof publicly', 'src/api/secondFactor.ts', "if (isPublic(req) && api.secondFactorNeed(ownerId) === 'yes') return true;", "if (isPublic(req) && real(ownerId).length > 0) return true;", [REVIEW]],
   ['review: passkey origins include unserved ports', 'src/api/publicAccess.ts', "const out = new Set<string>([`https://${host}${fp === 443 ? '' : `:${fp}`}`]);", "const out = new Set<string>([`https://${host}`, `https://${host}:8443`, `https://${host}:10000`]);", [REVIEW]],
   // The second review (test/publicReview2.test.ts).
   ['review 2: a burst of guesses outruns the sign-in limit', 'src/api/auth.ts', "    if (counted >= limitFor(k)) return undefined;\n", '', [REVIEW2]],
   ['review 2: a guess in flight is not counted', 'src/api/auth.ts', "const counted = (f && now <= f.until ? f.n : 0) + (pending.get(k) ?? 0);", "const counted = (f && now <= f.until ? f.n : 0);", [REVIEW2]],
   ['review 2: foreground Funnel sessions are not read', 'src/ops/tailnet.ts', "  for (const fg of Object.values(cfg.Foreground ?? {})) if (fg && typeof fg === 'object') read(fg);\n", '', [REVIEW2]],
-  ['review 2: a signed-out pass still works', 'src/api/publicAccess.ts', "    if (revoked.has(passName(pass))) return undefined;\n", '', [REVIEW2]],
-  ['review 2: signing out revokes nothing', 'src/api/publicAccess.ts', "      revoked.add(passName(pass));\n", '', [REVIEW2]],
-  ['review 2: a signed-out pass is not kept across a restart', 'src/api/publicAccess.ts', "try { store?.revokePublicPass(passName(pass), Date.now() + revokedPassMs()); }", "try { /* not kept */ }", [REVIEW2]],
-  ['review 2: open sockets are not re-judged after a change', 'src/api/routes.ts', "    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS' || reply.statusCode >= 400) return;\n    revalidateConsoleSockets();", "    return;", [REVIEW2]],
-  ['review 2: an open socket\'s session is not checked again', 'src/api/routes.ts', "    if (!who || who.ownerId !== s.ownerId) return 'signed out';\n", '', [REVIEW2]],
-  ['review 2: an open public socket is not held to the public rules', 'src/api/routes.ts', "      if (why) return why;\n    }\n    const now = consoleCaller", "    }\n    const now = consoleCaller", [REVIEW2]],
+  ['review 2: a signed-out pass still works', 'src/api/publicAccess.ts', "if (!evenIfSignedOut && (!readRevocations() || revoked.has(passName(pass)))) return undefined;", "if (!evenIfSignedOut && !readRevocations()) return undefined;", [REVIEW2]],
+  ['review 2: signing out revokes nothing', 'src/api/publicAccess.ts', "      revoked.add(name);\n", '', [REVIEW2]],
+  ['review 2: a signed-out pass is not kept across a restart', 'src/api/publicAccess.ts', "try { store?.revokePublicPass(name, until); unsaved.delete(name); }", "try { /* not kept */ unsaved.delete(name); }", [REVIEW2]],
+  ['review 2: open sockets are not re-judged after a change', 'src/api/consoleRoutes.ts', "        if (ended) signedOut(ended);\n      }\n      revalidateConsoleSockets();", "        if (ended) signedOut(ended);\n      }", [REVIEW2]],
+  ['review 2: an open socket\'s session is not checked again', 'src/orchestrator/console/consoleGate.ts', "    if (!who || who.ownerId !== s.ownerId) return 'signed out';\n", '', [REVIEW2]],
+  ['review 2: an open public socket is not held to the public rules', 'src/orchestrator/console/consoleGate.ts', "      if (why) return why;\n    }\n    const now = consoleCaller", "    }\n    const now = consoleCaller", [REVIEW2]],
   ['review 2: an open public socket never idles out', 'src/api/publicAccess.ts', "    if (Date.now() - lastActive > publicConfig().idleMs) return 'idle';\n", '', [REVIEW2]],
-  ['review 2: an open socket outlives the caller\'s standing on the agent', 'src/api/routes.ts', "    if (!now || now.role !== s.role) return 'no longer allowed on this agent';\n", '', [REVIEW2]],
-  ['review 2: a socket that cannot be re-judged is kept', 'src/api/consoleSockets.ts', "catch { why = 'could not be checked'; }", "catch { why = undefined; }", [REVIEW2]],
+  ['review 2: an open socket outlives the caller\'s standing on the agent', 'src/orchestrator/console/consoleGate.ts', "    if (!now || now.role !== s.role) return 'no longer allowed on this agent';\n", '', [REVIEW2]],
+  ['review 2: a socket that cannot be re-judged is kept', 'src/orchestrator/console/consoleSockets.ts', "catch { why = 'could not be checked'; }", "catch { why = undefined; }", [REVIEW2]],
   ['review 2: a factor reset leaves public consoles open', 'src/api/secondFactor.ts', "    app.consoleSockets?.closeFor(target, { publicOnly: true });\n", '', [REVIEW2]],
   ['review 2: removing a factor leaves public consoles open', 'src/api/secondFactor.ts', "    app.consoleSockets?.closeFor(ownerId, { publicOnly: true });\n", '', [REVIEW2]],
   // Issue #9: a second factor given before a reset or a removal must not count again once a new factor is added.
-  ['generation: a factor given before a reset counts again', 'src/api/publicAccess.ts', "(pass.sfAt > 0 && pass.g === factorGen(ownerId) ? pass.sfAt : 0)", "pass.sfAt", [REVIEW2], undefined, 'before a reset or a removal'],
+  ['generation: a factor given before a reset counts again', 'src/api/publicAccess.ts', "return Math.max(pass.sfAt > 0 && pass.g === g ? pass.sfAt : 0, f && f.sfAt > 0 && f.g === g ? f.sfAt : 0);", "return Math.max(pass.sfAt, f?.sfAt ?? 0);", [REVIEW2], undefined, 'before a reset or a removal'],
   ['generation: a reset does not move it', 'src/api/secondFactor.ts', "    api.secondFactorsChanged(target);\n", '', [REVIEW2], undefined, 'before a reset or a removal'],
   ['generation: removing a factor does not move it', 'src/api/secondFactor.ts', "    api.secondFactorsChanged(ownerId, { req, reply });\n", '', [REVIEW2], undefined, 'before a reset or a removal'],
   ['review 2: a factor change is not on the record', 'src/api/secondFactor.ts', "try { store.recordSecurity(kind, ownerId, {", "try { void ({", [REVIEW2]],
@@ -139,7 +145,9 @@ const MUTANTS = [
   ['review 2: sockets are outside the request ceiling', 'src/api/publicAccess.ts', "      if (overCeiling(publicClientAddress(req as never))) { socket.destroy(); return; }\n", '', [REVIEW2]],
   ['review 2: client data that is not an object crashes', 'src/api/webauthn.ts', "  if (c === null || typeof c !== 'object' || Array.isArray(c)) return fail('client data is not an object');\n", '', [REVIEW2]],
   ['review 2: client data fields of any type', 'src/api/webauthn.ts', "  if (typeof c.type !== 'string' || typeof c.challenge !== 'string' || typeof c.origin !== 'string') return fail('client data is malformed');\n", '', [REVIEW2]],
-  ['review 2: host folders need no step-up publicly', 'src/api/routes.ts', "          if (again) return reply.code(again.code).send(again.body);\n", '', [REVIEW2]],
+  // PATCH /v1/agents/:id's checks are the agent edits service's (HB-0825); its route hands it the step-up.
+  ['review 2: host folders need no step-up publicly', 'src/orchestrator/lifecycle/agentEdits.ts', "        if (again) return again;\n", '', [REVIEW2]],
+  ['review 2: the route hands no step-up for host folders', 'src/api/lifecycleRoutes.ts', "          if (!again) return undefined;\n", "          if (again) return undefined;\n", [REVIEW2]],
   ['review 2: a stale judgement says serving after off', 'src/api/publicAccess.ts', "  const evaluate = async (): Promise<SafeguardCheck[]> => {\n    const [autoUpgrade, funnelOnPrivatePort] = await Promise.all([\n      probes.autoUpgrade().catch((err: unknown) => ({ ok: false, why: `Automatic upgrades could not be checked (${String((err as Error)?.message ?? err).slice(0, 80)}).` })),\n      probes.funnelOnPrivatePort(mainPort()).catch(() => undefined),\n    ]);\n    // Read AFTER the probes answered: a judgement that began while public\n    // access was on must not say \"serving\" once it has been turned off.\n    const cfg = publicConfig();", "  const evaluate = async (): Promise<SafeguardCheck[]> => {\n    const cfg = publicConfig();\n    const [autoUpgrade, funnelOnPrivatePort] = await Promise.all([\n      probes.autoUpgrade().catch((err: unknown) => ({ ok: false, why: `Automatic upgrades could not be checked (${String((err as Error)?.message ?? err).slice(0, 80)}).` })),\n      probes.funnelOnPrivatePort(mainPort()).catch(() => undefined),\n    ]);\n    // Read AFTER the probes answered: a judgement that began while public\n    // access was on must not say \"serving\" once it has been turned off.", [REVIEW2]],
   ['review 2: a password alone adds the first factor publicly', 'src/api/publicAccess.ts', "          if (rule.firstFactorOk && rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: rule.refusal ?? FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });\n", '', [DEFAULT2FA], undefined, 'Google sign-in'],
   ['review 2: a password alone adds the first factor publicly (everyone must have one)', 'src/api/publicAccess.ts', "          if (rule.enrols && !(pass.en > now)) return reply.code(403).send({ error: rule.refusal ?? FIRST_FACTOR_NEEDS_LINK, secondFactor: 'enrol-link' });\n", '', [TRUST]],
@@ -175,7 +183,7 @@ const MUTANTS = [
   ['guests: a member may flip the guest switch', 'src/api/reachRoutes.ts', "    if (no) return reply.code(403).send({ error: no });\n    const on = req.body?.on === true;\n    if (on && isPublic(req))", "    const on = req.body?.on === true;\n    if (on && isPublic(req))", [DEFAULT2FA], undefined, 'guest switch'],
   ['guests: the switch is not written down', 'src/api/reachRoutes.ts', "    store.recordSecurity('public.guests_without_second_factor', req.principal?.ownerId, { on });\n", "", [DEFAULT2FA], undefined, 'guest switch'],
   ['guests: accepting an invitation without a factor needs no switch', 'src/api/publicAccess.ts', "!!o.acceptingWebChat && publicConfig().guestsWithoutSecondFactor && ", "!!o.acceptingWebChat && ", [DEFAULT2FA], undefined, 'accepting a web-chat invitation'],
-  ['guests: someone with an agent may accept an invitation without a factor', 'src/api/publicAccess.ts', " && !!store?.ownsNothing(ownerId);", ";", [DEFAULT2FA], undefined, 'accepting a web-chat invitation'],
+  ['guests: someone with an agent may accept an invitation without a factor', 'src/api/publicAccess.ts', " && !hasOwnerRights(ownerId) && !!store?.ownsNothing(ownerId);", " && !hasOwnerRights(ownerId);", [DEFAULT2FA], undefined, 'accepting a web-chat invitation'],
   ['guests: any session read may skip the factor, not only accepting web chat', 'src/api/publicAccess.ts', "const becomesGuest = !!o.acceptingWebChat && ", "const becomesGuest = ", [DEFAULT2FA], undefined, 'with the switch on'],
   // B1. Owner-rights recovery is refused at the public address.
   ['owner recovery: a reset link for the owner works publicly (form)', 'src/api/accountsAuth.ts', "    if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });\n    const { hash, salt } = await hashPassword(password);", "    const { hash, salt } = await hashPassword(password);", [RECOVERY], undefined, 'reset link for the owner'],
@@ -183,18 +191,18 @@ const MUTANTS = [
   ['owner recovery: the recovery code works publicly', 'src/api/accountsAuth.ts', "    // Said only to someone who gave the right code (so it tells a stranger nothing), and the code is not spent.\n    if (ownerRecoveryFromPublic(req, account)) return reply.code(403).send({ error: OWNER_RECOVERY_PRIVATE_ONLY, privateOnly: true });\n", "", [RECOVERY], undefined, 'recovery code'],
   ['owner recovery: only the account flag counts as owner rights', 'src/api/accountsAuth.ts', "account.pwHash !== '' && (account.hostOwner || (req.server.publicAccess?.hasOwnerRights(account.id) ?? false));", "account.pwHash !== '' && account.hostOwner;", [RECOVERY], undefined, 'reset link for the owner'],
   ['owner recovery: members are refused too', 'src/api/accountsAuth.ts', "account.pwHash !== '' && (account.hostOwner || (req.server.publicAccess?.hasOwnerRights(account.id) ?? false));", "account.pwHash !== '';", [RECOVERY, SF]],
-  ['owner recovery: a Telegram link is made for the owner from the internet', 'src/api/routes.ts', "const code = ownerFromPublic ? undefined : randomBytes(16).toString('base64url');", "const code = randomBytes(16).toString('base64url');", [RECOVERY], undefined, 'Forgot password'],
-  ['owner recovery: the owner\'s link is made for the public address', 'src/api/routes.ts', "const base = ownerRights ? appUrlFor() : linkUrlFor();", "const base = linkUrlFor();", [RECOVERY], undefined, 'Forgot password'],
+  ['owner recovery: a Telegram link is made for the owner from the internet', 'src/orchestrator/accounts/telegramRecovery.ts', "const code = ownerFromPublic ? undefined : randomBytes(16).toString('base64url');", "const code = randomBytes(16).toString('base64url');", [RECOVERY], undefined, 'Forgot password'],
+  ['owner recovery: the owner\'s link is made for the public address', 'src/orchestrator/accounts/telegramRecovery.ts', "const base = ownerRights ? appUrlFor() : linkUrlFor();", "const base = linkUrlFor();", [RECOVERY], undefined, 'Forgot password'],
   // B2. "Forgot password?" asked from the internet.
-  ['public recovery: held only to the private interval', 'src/api/routes.ts', "    if (fromPublic) {\n      if (!publicRecoveryAllowed(req, key)) return settle();\n    } else {", "    {", [RECOVERY], undefined, 'held tight'],
-  ['public recovery: no hour between asks', 'src/api/routes.ts', "    if (byName.length && now - byName[byName.length - 1]! < PUBLIC_RECOVERY_EVERY_MS) return false;\n", "", [RECOVERY], undefined, 'a username'],
-  ['public recovery: no limit a day', 'src/api/routes.ts', "    if (byName.length >= PUBLIC_RECOVERY_PER_DAY) return false;\n", "", [RECOVERY], undefined, 'a username'],
-  ['public recovery: a pending link is replaced', 'src/api/routes.ts', "    if (fromPublic && account.claimCode && account.claimExpires && Date.parse(account.claimExpires) > Date.now()) return settle();\n", "", [RECOVERY], undefined, 'pending link'],
-  ['public recovery: an expired link counts as pending', 'src/api/routes.ts', "account.claimExpires && Date.parse(account.claimExpires) > Date.now()) return settle();", "account.claimExpires) return settle();", [RECOVERY], undefined, 'held tight'],
-  ['public recovery: no ceiling per address', 'src/api/routes.ts', "    if (!underCeiling(byAddr, 3_600_000, PUBLIC_RECOVERY_PER_ADDRESS, now)) return false;\n", "", [RECOVERY], undefined, 'an address'],
-  ['public recovery: no ceiling for everyone together', 'src/api/routes.ts', "    if (!underCeiling(pr.all, 3_600_000, PUBLIC_RECOVERY_ALL, now)) return false;\n", "", [RECOVERY], undefined, 'an address'],
-  ['public recovery: IPv6 addresses are counted singly', 'src/api/routes.ts', "    const addr = addressBucket(publicClientAddress(req));\n    const byAddr", "    const addr = publicClientAddress(req);\n    const byAddr", [RECOVERY], undefined, 'an address'],
-  ['public recovery: the public counts lock the private address', 'src/api/routes.ts', "    const fromPublic = isPublic(req);\n    if (fromPublic) {", "    const fromPublic = isPublic(req);\n    if (!publicRecoveryAllowed(req, key)) return settle();\n    if (fromPublic) {", [RECOVERY], undefined, 'a username'],
+  ['public recovery: held only to the private interval', 'src/orchestrator/accounts/telegramRecovery.ts', "    if (fromPublic) {\n      if (!publicRecoveryAllowed(asker, key)) return;\n    } else {", "    {", [RECOVERY], undefined, 'held tight'],
+  ['public recovery: no hour between asks', 'src/orchestrator/accounts/telegramRecovery.ts', "    if (byName.length && now - byName[byName.length - 1]! < PUBLIC_RECOVERY_EVERY_MS) return false;\n", "", [RECOVERY], undefined, 'a username'],
+  ['public recovery: no limit a day', 'src/orchestrator/accounts/telegramRecovery.ts', "    if (byName.length >= PUBLIC_RECOVERY_PER_DAY) return false;\n", "", [RECOVERY], undefined, 'a username'],
+  ['public recovery: a pending link is replaced', 'src/orchestrator/accounts/telegramRecovery.ts', "    if (fromPublic && account.claimCode && account.claimExpires && Date.parse(account.claimExpires) > Date.now()) return;\n", "", [RECOVERY], undefined, 'pending link'],
+  ['public recovery: an expired link counts as pending', 'src/orchestrator/accounts/telegramRecovery.ts', "account.claimExpires && Date.parse(account.claimExpires) > Date.now()) return;", "account.claimExpires) return;", [RECOVERY], undefined, 'held tight'],
+  ['public recovery: no ceiling per address', 'src/orchestrator/accounts/telegramRecovery.ts', "    if (!underCeiling(byAddr, 3_600_000, PUBLIC_RECOVERY_PER_ADDRESS, now)) return false;\n", "", [RECOVERY], undefined, 'an address'],
+  ['public recovery: no ceiling for everyone together', 'src/orchestrator/accounts/telegramRecovery.ts', "    if (!underCeiling(pr.all, 3_600_000, PUBLIC_RECOVERY_ALL, now)) return false;\n", "", [RECOVERY], undefined, 'an address'],
+  ['public recovery: IPv6 addresses are counted singly', 'src/api/accountsRoutes.ts', "address: () => addressBucket(publicClientAddress(req))", "address: () => publicClientAddress(req)", [RECOVERY], undefined, 'an address'],
+  ['public recovery: the public counts lock the private address', 'src/orchestrator/accounts/telegramRecovery.ts', "    const fromPublic = asker.fromPublic;\n    if (fromPublic) {", "    const fromPublic = asker.fromPublic;\n    if (!publicRecoveryAllowed(asker, key)) return;\n    if (fromPublic) {", [RECOVERY], undefined, 'a username'],
   // B3. New-device notices are limited.
   ['notice limits: a notice for every sign-in', 'src/api/publicAccess.ts', "    const soon = pair.last > 0 && now - pair.last < NOTICE_EVERY_MS && now >= pair.last;", "    const soon = false;", [NOTICE_LIMITS]],
   ['notice limits: one account\'s notices silence another\'s', 'src/api/publicAccess.ts', "    const key = `${to}\\n${about}`;", "    const key = to;", [NOTICE_LIMITS], undefined, 'ten minutes'],
@@ -227,17 +235,17 @@ const MUTANTS = [
   // C. The smaller ones.
   ['smaller: clearing your own second factor needs no password', 'src/api/secondFactor.ts', "    if (target === ownerId && !(await proveManage(req, reply, ownerId, req.body?.current))) return reply;\n", "", [SF]],
   ['smaller: only "me" asks for the password, not your own name', 'src/api/secondFactor.ts', "    if (target === ownerId && !(await proveManage(", "    if (req.params.id === 'me' && !(await proveManage(", [SF]],
-  ['smaller: guesses at an invitation code are not counted', 'src/api/routes.ts', "      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');\n", "", [SMALLER], undefined, 'invitation code'],
-  ['smaller: counted guesses are never refused', 'src/api/routes.ts', "    if (guard?.throttled(req, undefined, 'link')) return reply.code(429).send({ valid: false, reason: 'Too many attempts — try again later.' });\n", "", [SMALLER], undefined, 'invitation code'],
-  ['smaller: a used link counts as a guess', 'src/api/routes.ts', "      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');", "      guard?.noteFailure(req, undefined, 'link');", [SMALLER], undefined, 'invitation code'],
-  ['smaller: invitation guesses lock the password form', 'src/api/routes.ts', "      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');", "      if (check.reason === 'unknown') guard?.noteFailure(req);", [SMALLER], undefined, 'invitation code'],
+  ['smaller: guesses at an invitation code are not counted', 'src/api/memberRoutes.ts', "      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');\n", "", [SMALLER], undefined, 'invitation code'],
+  ['smaller: counted guesses are never refused', 'src/api/memberRoutes.ts', "    if (guard?.throttled(req, undefined, 'link')) return reply.code(429).send({ valid: false, reason: 'Too many attempts — try again later.' });\n", "", [SMALLER], undefined, 'invitation code'],
+  ['smaller: a used link counts as a guess', 'src/api/memberRoutes.ts', "      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');", "      guard?.noteFailure(req, undefined, 'link');", [SMALLER], undefined, 'invitation code'],
+  ['smaller: invitation guesses lock the password form', 'src/api/memberRoutes.ts', "      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');", "      if (check.reason === 'unknown') guard?.noteFailure(req);", [SMALLER], undefined, 'invitation code'],
   ['smaller: factors are listed before the second factor is given', 'src/api/secondFactor.ts', "    const shown = api.secondFactorGiven(req);", "    const shown = true;", [SMALLER], undefined, 'before the second factor'],
-  ['smaller: "given" is true for any public pass', 'src/api/publicAccess.ts', "    return !!pass && !!ownerId && factorAt(pass, ownerId) > 0;", "    return !!pass;", [SMALLER], undefined, 'before the second factor'],
+  ['smaller: "given" is true for any public pass', 'src/api/publicAccess.ts', "    return !!pass && !!ownerId && factorAt(req, pass, ownerId) > 0;", "    return !!pass;", [SMALLER], undefined, 'before the second factor'],
   ['smaller: an owner\'s passkey answer need not verify its user', 'src/api/secondFactor.ts', "            { challenge, origins: api.origins(), rpId, requireUserVerification: uvFor(ownerId) === 'required' },", "            { challenge, origins: api.origins(), rpId },", [SMALLER], undefined, 'passkey'],
-  ['smaller: an owner\'s new passkey need not verify its user', 'src/api/secondFactor.ts', "        { challenge, origins: api.origins(), rpId, requireUserVerification: uvFor(ownerId) === 'required' },", "        { challenge, origins: api.origins(), rpId },", [SMALLER], undefined, 'passkey'],
+  ['smaller: an owner\'s new passkey need not verify its user', 'src/api/secondFactor.ts', "        { challenge, origins: api.origins(), rpId, requireUserVerification: uvFor(ownerId) === 'required' },\n      );\n      if (store.secondFactorByCredential", "        { challenge, origins: api.origins(), rpId },\n      );\n      if (store.secondFactorByCredential", [SMALLER], undefined, 'passkey'],
   ['smaller: user verification is only preferred for owners', 'src/api/secondFactor.ts', "(api.hasOwnerRights(ownerId) ? 'required' : 'preferred');", "'preferred';", [SMALLER], undefined, 'passkey'],
   ['smaller: user verification is required of members too', 'src/api/secondFactor.ts', "(api.hasOwnerRights(ownerId) ? 'required' : 'preferred');", "'required';", [SMALLER], undefined, 'passkey'],
-  ['smaller: the page puts the address in a script string', 'web/index.html', "data-copy=\"${esc(r.url)}\" onclick=\"copyText(this.dataset.copy)", "onclick=\"copyText('${esc(r.url)}')", [SMALLER], undefined, 'data attribute'],
+  ['smaller: the page puts the address in the button\'s own code', 'web/app/signin.js', "data-copy=\"${esc(r.url)}\" ${onAction('click', 'copyAndSay', [{ $: 'data', k: 'copy' }", "data-copy=\"${esc(r.url)}\" ${onAction('click', 'copyAndSay', [r.url", [SMALLER], undefined, 'data attribute'],
   ['switch: off leaves Funnel on', 'src/api/reachRoutes.ts', "      const r = await funnelOff(cfg.port, cfg.funnelPort);\n      if (!r.ok) { funnelError = r.error; command = r.command; }", "", [REACH]],
   ['switch: off leaves the listener open', 'src/api/reachRoutes.ts', "    else await api.stopListener();", "", [REACH]],
   ['switch: invited-only can be turned off while on', 'src/api/reachRoutes.ts', "if (!on && api.config().on) return reply.code(409)", "if (false) return reply.code(409)", [REACH]],
@@ -249,6 +257,46 @@ const MUTANTS = [
   ['safeguard i: a pinned machine counts as upgrading', 'src/ops/autoUpgrade.ts', "if (pin && /^v[0-9]/.test(pin)) return", "if (false) return", [GUARDS]],
   ['doctor: a safeguard off is only a warning', 'src/doctor.ts', "out.push({ level: c.ok ? 'ok' : 'fail', text: `  ${c.letter}.", "out.push({ level: c.ok ? 'ok' : 'warn', text: `  ${c.letter}.", [GUARDS]],
 ];
+
+/**
+ * What is wrong with each malformed entry, checked before anything runs. An
+ * entry whose tests were not a list of test files ran `vitest run` with none
+ * named, the whole suite: "killed" by any failure anywhere, or by the time
+ * limit (HB-0867 review). test/publicAccessMutants.test.ts runs `--check`.
+ */
+const malformed = MUTANTS.flatMap((m) => {
+  const [name, file, find, replace, tests, note, named] = m;
+  const why = [];
+  if (m.length < 5 || m.length > 7) why.push(`${m.length} fields, not 5 to 7`);
+  if (typeof name !== 'string' || !name) why.push('no name');
+  const there = typeof file === 'string' && existsSync(join(root, file));
+  if (!there) why.push(`no file ${JSON.stringify(file)}`);
+  if (typeof find !== 'string' || !find) why.push('no text to find');
+  // Exactly once: the run changes the first place it is, which was another
+  // line than the one meant when the text was also part of a longer line, or
+  // was there twice (HB-0867 review).
+  else if (there) {
+    const times = readFileSync(join(root, file), 'utf8').split(find).length - 1;
+    if (times !== 1) why.push(times ? `its text is there ${times} times, not once` : 'its text is not there');
+  }
+  if (typeof replace !== 'string') why.push(`what replaces the text is ${JSON.stringify(replace)}, not text`);
+  if (!Array.isArray(tests) || !tests.length) why.push(`its tests are ${JSON.stringify(tests)}, not a list of test files`);
+  else for (const t of tests) if (typeof t !== 'string' || !/^test\/.+\.test\.(?:ts|tsx|mjs)$/.test(t) || !existsSync(join(root, t))) why.push(`no test file ${JSON.stringify(t)}`);
+  if (note !== undefined && note !== 'equivalent') why.push(`its note is ${JSON.stringify(note)}, not 'equivalent'`);
+  if (named !== undefined && (typeof named !== 'string' || !named)) why.push(`its test names are ${JSON.stringify(named)}, not a pattern`);
+  return why.length ? [`${typeof name === 'string' && name ? name : JSON.stringify(name)}: ${why.join('; ')}`] : [];
+});
+const names = MUTANTS.map((m) => m[0]);
+for (const n of new Set(names.filter((n, i) => names.indexOf(n) !== i))) malformed.push(`${n}: the name is used twice`);
+if (malformed.length) {
+  for (const line of malformed) console.log(`✗ malformed: ${line}`);
+  console.log(`${malformed.length} of ${MUTANTS.length} entries malformed: nothing was run (update this script)`);
+  process.exit(2);
+}
+if (process.argv[2] === '--check') {
+  console.log(`${MUTANTS.length} mutants, each well formed`);
+  process.exit(0);
+}
 
 const only = process.argv.slice(2);
 const work = mkdtempSync(join(tmpdir(), 'hb-mutants-'));
@@ -277,7 +325,7 @@ try {
     } else { console.log(`✓ ${name}`); killed++; }
   }
   // The copy must pass untouched, or "killed" means nothing.
-  const base = spawnSync('npx', ['vitest', 'run', GATE, TRUST, SF, NOTICES, REACH, GUARDS, ROUTES, REVIEW, REVIEW2, DEFAULT2FA, RECOVERY, NOTICE_LIMITS, CRASH, SMALLER], { cwd: work, env, encoding: 'utf8', timeout: 900_000 });
+  const base = spawnSync('npx', ['vitest', 'run', GATE, TRUST, SF, NOTICES, REACH, GUARDS, ROUTES, REVIEW, REVIEW2, DEFAULT2FA, RECOVERY, NOTICE_LIMITS, CRASH, SMALLER, NIGHT], { cwd: work, env, encoding: 'utf8', timeout: 900_000 });
   if (base.status !== 0) {
     console.log('✗ the unmutated copy does not pass its own tests: every result above is void');
     // Which ones, so it can be told from a slow machine (status null: the time limit).

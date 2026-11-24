@@ -113,6 +113,9 @@ describe('new-device notices and the security record', () => {
       expect(publicCsp(mode)).toContain("frame-ancestors 'self'");
       expect(publicCsp(mode)).toContain("base-uri 'self'");
       expect(publicCsp(mode)).not.toContain('unsafe-eval');
+      // No inline script, injected or not (HB-0812); styles keep theirs.
+      expect(/script-src [^;]*/.exec(publicCsp(mode))?.[0]).toBe(`script-src 'self'${mode === 'identity' ? ' https://accounts.google.com' : ''}`);
+      expect(publicCsp(mode)).toMatch(/style-src 'self' 'unsafe-inline'/);
       expect(publicCsp(mode)).not.toMatch(/(script|default)-src[^;]*\*/);
     }
   });

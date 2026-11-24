@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { runInNewContext } from 'node:vm';
-import { PANEL_RELAY_SOURCE } from '../src/orchestrator/browserPanel.js';
+import { PANEL_RELAY_SOURCE } from '../src/providers/browserPanelRelay.js';
 
 /** Execute the shipped relay itself, with synthetic CDP responses and no
  * process, network, Docker or real browser access. */

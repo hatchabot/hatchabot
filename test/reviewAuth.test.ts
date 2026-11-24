@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { _resetLoginThrottle, registerAuth, sessionTtlMs } from '../src/api/auth.js';
 import { principalOf } from '../src/api/principal.js';
 import { Store } from '../src/store/store.js';
-import { computePosture } from '../src/orchestrator/posture.js';
+import { computePosture } from '../src/orchestrator/health/posture.js';
 import { redactUrlForLog } from '../src/api/requestLog.js';
 import { registerOriginCheck } from '../src/api/requestOrigin.js';
 import { opsDoorTools, opsToolsFingerprint } from '../src/ops/opsTools.js';

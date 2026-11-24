@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { runInNewContext } from 'node:vm';
-import { allowlistScrubScript } from '../src/orchestrator/members.js';
-import { PAIRING_DB } from '../src/orchestrator/claim.js';
+import { allowlistScrubScript } from '../src/orchestrator/members/members.js';
+import { PAIRING_DB } from '../src/orchestrator/members/claim.js';
 import { DISCORD_ID } from './support/fixtures.js';
 
 describe('member revocation across persisted approval forms', () => {

@@ -4,7 +4,8 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { computeUsagePeriod, localDay, snapshotDailyUsage } from '../src/orchestrator/fleetUsage.js';
+import { computeUsagePeriod, localDay, snapshotDailyUsage } from '../src/orchestrator/usage/fleetUsage.js';
+import { HOUR_FIELDS } from '../src/orchestrator/usage/usage.js';
 
 /**
  * Status → Usage by period: from the sampler's records (token counter
@@ -146,6 +147,23 @@ describe('computeUsagePeriod', () => {
     expect(v.byBilling).toEqual({ included: 550, api: 400, local: 0 });
   });
 
+  it('a plan deleted once no agent uses it keeps its past tokens included, not billed API (HB-0931)', () => {
+    const store = world();
+    // Kitchen moved off the plan onto the key; the plan is then deleted, its readings still in the window.
+    store.setAgentAIProfile('kitchen', 'api');
+    store.setAgentModel('kitchen', 'claude-opus-4-8');
+    store.setAgentAIProfile('attic', 'api');
+    const before = computeUsagePeriod(store, OWNER, 'hour', NOW);
+    store.deleteAIProfile('sub');
+    expect(store.getAIProfile('sub')).toBeUndefined();
+    const after = computeUsagePeriod(store, OWNER, 'hour', NOW);
+    const kitchen = after.agents.find((a) => a.name === 'Kitchen')!;
+    expect(kitchen).toMatchObject({ tokens: 50, billing: 'included', profileName: 'Max', cost: null });
+    expect(after.byBilling).toEqual(before.byBilling);
+    expect(after.byBilling.included).toBe(50);
+    expect(after.cost).toEqual(before.cost);
+  });
+
   it('a few hours back: 6 hours in 15-minute bars counts the last hours, not the morning (2026-09-28)', () => {
     const v = computeUsagePeriod(world(), OWNER, '6h', NOW);
     expect(v.bucketMinutes).toBe(15);
@@ -256,6 +274,31 @@ describe('the daily trend point (review, 2026-09-29)', () => {
     expect(day().costHigh).toBeCloseTo(3, 9);
   }));
 
+  it("yesterday's cost is its own tokens at its own models: a dearer model today does not reprice it (HB-1094)", () => withTz('UTC', () => {
+    const store = trendWorld();
+    const bucket = (input: number) => HOUR_FIELDS.map((f) => (f === 'input' ? input : f === 'calls' ? 10 : 0));
+    const profileWith = (models: Record<string, Record<string, number[]>>) => ({
+      since: Date.parse('2026-09-01T00:00:00Z'), hourly: true, promptErrors: 0, crons: 0, firstCall: 0,
+      models: Object.fromEntries(Object.entries(models).map(([m, h]) => [m, { calls: 10, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, h }])),
+    });
+    // Yesterday: 1M in on haiku ($1/M), and the lifetime rate says the same.
+    store.addTokenSample('den', 'api', '2026-09-27T10:00:00.000Z', 1000);
+    store.addTokenSample('den', 'api', '2026-09-27T11:00:00.000Z', 1_001_000);
+    store.setModelProfile('den', profileWith({ 'claude-haiku-4-5': { '2026-09-27T10': bucket(1e6) } }), '2026-09-27T11:00:00.000Z');
+    store.setAgentTokenRate('den', 1 / 1e6, false, '2026-09-27T11:00:00.000Z');
+    snapshotDailyUsage(store, Date.parse('2026-09-28T00:05:00.000Z'));
+    const day = () => store.listUsageSnapshots(OWNER, 30).find((s) => s.day === '2026-09-27')!;
+    expect(day().costLow).toBeCloseTo(1, 9);
+    // Today: 1M in on opus ($5/M); the lifetime rate moves to $3/M.
+    store.addTokenSample('den', 'api', '2026-09-28T09:00:00.000Z', 2_001_000);
+    store.setModelProfile('den', profileWith({ 'claude-haiku-4-5': { '2026-09-27T10': bucket(1e6) }, 'claude-opus-4-8': { '2026-09-28T08': bucket(1e6) } }), '2026-09-28T09:00:00.000Z');
+    store.setAgentTokenRate('den', 3 / 1e6, false, '2026-09-28T09:00:00.000Z');
+    snapshotDailyUsage(store, Date.parse('2026-09-28T09:05:00.000Z'));
+    expect(day().usedTokens).toBe(1_000_000);
+    expect(day().costLow).toBeCloseTo(1, 9);
+    expect(store.listUsageSnapshots(OWNER, 30).find((s) => s.day === '2026-09-28')!.costLow).toBeCloseTo(5, 9);
+  }));
+
   it('yesterday is finished on the first pass after midnight', () => withTz('UTC', () => {
     const store = trendWorld();
     store.addTokenSample('kitchen', 'sub', '2026-09-27T23:40:00.000Z', 1000);
@@ -294,6 +337,28 @@ describe('the daily trend point (review, 2026-09-29)', () => {
     for (const id of ['den', 'kitchen']) { store.setAgentState(id, 'DELETING'); store.setAgentState(id, 'DELETED'); }
     snapshotDailyUsage(store, Date.parse('2026-09-29T12:00:00.000Z'));
     expect(day().usedTokens).toBe(1500);
+  }));
+
+  it("an owner's last agent deleted before the day's first pass: today still has its use and cost (HB-1097)", () => withTz('UTC', () => {
+    const store = trendWorld();
+    store.setAgentTokenRate('den', 2 / 1e6, false, '2026-09-28T00:00:00.000Z'); // $2 per million
+    store.addTokenSample('den', 'api', '2026-09-28T01:00:00.000Z', 1000);
+    store.addTokenSample('den', 'api', '2026-09-28T11:00:00.000Z', 1_001_000);   // +1M today
+    for (const id of ['den', 'kitchen']) { store.setAgentState(id, 'DELETING'); store.setAgentState(id, 'DELETED'); }
+    snapshotDailyUsage(store, Date.parse('2026-09-28T12:00:00.000Z'));
+    const day = store.listUsageSnapshots(OWNER, 30).find((s) => s.day === '2026-09-28');
+    expect(day?.usedTokens).toBe(1_000_000);
+    expect(day?.costLow).toBeCloseTo(2, 9);
+  }));
+
+  it("a source switch still waiting for its rebuild: today's point bills the agent to the source its container runs (HB-1009)", () => withTz('UTC', () => {
+    const store = trendWorld();
+    store.setAgentApplied('den', 'api', 'claude-opus-4-8');
+    expect(store.setAgentAIProfile('den', 'sub')).toBe('ok');   // saved; the rebuild has not run
+    store.addTokenSample('den', 'api', '2026-09-28T10:00:00.000Z', 4000);
+    store.addTokenSample('kitchen', 'sub', '2026-09-28T10:00:00.000Z', 300);
+    snapshotDailyUsage(store, Date.parse('2026-09-28T12:00:00.000Z'));
+    expect(store.listUsageSnapshots(OWNER, 30).find((s) => s.day === '2026-09-28')!.byBilling).toEqual({ included: 300, api: 4000, local: 0 });
   }));
 
   it("yesterday with no snapshot (down at midnight) gets one on the next pass (report B48, 2026-10-22)", () => withTz('UTC', () => {

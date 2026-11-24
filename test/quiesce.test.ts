@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { stopAndConfirm } from '../src/orchestrator/quiesce.js';
+import { stopAndConfirm } from '../src/orchestrator/lifecycle/quiesce.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 
 it.each(['running', 'unknown'] as const)('refuses an unconfirmed stop (%s), even after a successful command', async phase => {

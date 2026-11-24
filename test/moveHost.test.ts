@@ -7,9 +7,9 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { moveAgentToHost, resumeMoveHost } from '../src/orchestrator/moveHost.js';
-import { operationRefusal, SimulatedCrash } from '../src/orchestrator/operations.js';
-import { TransferError } from '../src/orchestrator/transfer.js';
+import { moveAgentToHost, resumeMoveHost } from '../src/orchestrator/transfer/moveHost.js';
+import { operationRefusal, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
+import { TransferError } from '../src/orchestrator/transfer/transfer.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 const channelStub = { kind: 'telegram', pool: { availableCount: () => 0, owns: () => false } } as any;

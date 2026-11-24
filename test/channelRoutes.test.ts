@@ -293,6 +293,35 @@ describe('changing and removing', () => {
   });
 });
 
+describe('a delete that forgets its bots (?recycleBot=0, the CLI\'s --no-recycle) forgets only one the owner gave (HB-1419 review)', () => {
+  const APP = '1234567890123456789';
+  it("a bot leased from the owner's spares goes back to them, a shared one to the house; a pasted one is forgotten", async () => {
+    const { store, secrets, add, inject } = await setup();
+    await inject('POST', '/v1/discord-bots', { token: 'ok-good' });
+    const mine = add();
+    expect((await inject('POST', `/v1/agents/${mine}/channels/discord`, { pooled: APP })).statusCode).toBe(202);
+    expect((await inject('DELETE', `/v1/agents/${mine}?recycleBot=0`)).statusCode).toBeLessThan(300);
+    expect(store.getDiscordBot(APP)).toMatchObject({ ownerId: OWNER, secretRef: `discord-pool/${APP}` });
+    expect(secrets.map.get(`discord-pool/${APP}`)).toBe('ok-good');
+    expect(secrets.map.has(`channel/${mine}/discord`)).toBe(false);
+    // The house's: back to the house, not the private bot of whoever used it last.
+    expect((await inject('DELETE', `/v1/discord-bots/${APP}`)).statusCode).toBe(200);
+    await inject('POST', '/v1/discord-bots', { token: 'ok-good', shared: true });
+    const house = add();
+    expect((await inject('POST', `/v1/agents/${house}/channels/discord`, { pooled: APP })).statusCode).toBe(202);
+    expect((await inject('DELETE', `/v1/agents/${house}?recycleBot=0`)).statusCode).toBeLessThan(300);
+    expect(store.getDiscordBot(APP)).toMatchObject({ ownerId: null });
+    expect(secrets.map.get(`discord-pool/${APP}`)).toBe('ok-good');
+    // Pasted: the owner's own, forgotten as asked.
+    expect((await inject('DELETE', `/v1/discord-bots/${APP}`)).statusCode).toBe(200);
+    const pasted = add();
+    expect((await inject('POST', `/v1/agents/${pasted}/channels/discord`, { token: 'ok-good' })).statusCode).toBe(202);
+    expect((await inject('DELETE', `/v1/agents/${pasted}?recycleBot=0`)).statusCode).toBeLessThan(300);
+    expect(store.getDiscordBot(APP)).toBeUndefined();
+    expect([...secrets.map.keys()].filter((k) => k.includes(APP) || k.includes(pasted))).toEqual([]);
+  });
+});
+
 describe('the Discord bot pool', () => {
   it('parks a bot by token (checked, never returned), lists it, and an agent attaches it without pasting', async () => {
     const { store, secrets, add, inject } = await setup();
@@ -599,5 +628,36 @@ describe('connecting a chat app to an agent that is not running', () => {
     expect(woke.statusCode).toBe(202);
     expect(woke.json().atNextStart).toBeUndefined();
     expect(store.listOperations([asleep], 1).filter((o) => o.kind === 'rebuild').length).toBe(1);
+  });
+});
+
+describe('a body of the wrong shape (HB-0814)', () => {
+  it('parking a bot: a body that is not an object, or a `shared` that is not true or false, is a 400 that names it; nothing is checked or stored', async () => {
+    const { store, secrets, inject } = await setup();
+    verifyCalls.length = 0;
+    for (const body of [['ok-good'], { token: 'ok-good', shared: 'yes' }]) {
+      const r = await inject('POST', '/v1/discord-bots', body);
+      expect(r.statusCode, JSON.stringify(body)).toBe(400);
+      expect(r.json().error).toMatch(/expected/i);
+    }
+    expect((await inject('POST', '/v1/slack-apps', { token: 'ok-good', shared: 1 })).statusCode).toBe(400);
+    expect(verifyCalls).toEqual([]);
+    expect(store.listAllDiscordBots('discord')).toEqual([]);
+    expect(secrets.map.size).toBe(0);
+    // A field that is not text is read as text, as before: the platform is asked, and refuses it.
+    expect((await inject('POST', '/v1/discord-bots', { token: 12345 })).json().error).toBe('The platform refused it.');
+  });
+
+  it('connecting an app: a body that is not an object is a 400; a field that is not text is missing, as before', async () => {
+    const { store, add, inject } = await setup();
+    const id = add();
+    const r = await inject('POST', `/v1/agents/${id}/channels/slack`, ['ok-good']);
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toMatch(/expected/i);
+    expect(store.getChannelForAgent(id, 'slack')).toBeUndefined();
+    // The fake connector reads its field as given; a pooled that is not text is not a parked bot's id.
+    const n = await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 5, pooled: 7 });
+    expect(n.statusCode).toBe(400);
+    expect(n.json().error).toBe('The platform refused it.');
   });
 });

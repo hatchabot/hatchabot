@@ -3,7 +3,7 @@ import { lookup as dnsLookupCb, type LookupAddress } from 'node:dns';
 import { isIP } from 'node:net';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { braveAdvice, braveFailure, DDG_TURNED_AWAY, duckDuckGoTurnedAway } from '../orchestrator/webSearch.js';
+import { braveAdvice, braveFailure, DDG_TURNED_AWAY, duckDuckGoTurnedAway } from '../domain/searchAdvice.js';
 
 /**
  * Web search for the management agent, done BY Hatchabot so the agent's jail
@@ -106,12 +106,125 @@ export function isPrivateAddress(ip: string): boolean {
     || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
 }
 
-const strip = (html: string): string => html
-  .replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ')
-  .replace(/<[^>]+>/g, ' ')
-  // &amp; last: unescaped first, "&amp;lt;" read as "<" (CodeQL js/double-escaping, 2026-10-24).
-  .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
-  .replace(/\s+/g, ' ').trim();
+/**
+ * A page's text: its script, style, noscript and svg blocks and its tags each
+ * a space, its entities unescaped once. Read left to right, each position
+ * once. It was two regular expressions, and a page of `<` with no `>` (or of
+ * `<script` with no `</script>`) set each of them scanning to the end from
+ * every one, in time that grew with the square of the page, on the server's
+ * one thread (HB-1056). What it takes out is what they took out.
+ */
+export function strip(html: string): string {
+  return withoutTags(withoutBlocks(html))
+    // &amp; last: unescaped first, "&amp;lt;" read as "<" (CodeQL js/double-escaping, 2026-10-24).
+    .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ').trim();
+}
+
+const BLOCKS = ['script', 'style', 'noscript', 'svg'];
+/** `<script…</script>` and the like, from each opener to its first closer, a space each (an opener never closed stays). */
+function withoutBlocks(html: string): string {
+  // ASCII letters only, as the old `/…/i` matched them, and every index the same as in `html`
+  // (`toLowerCase` makes two characters of some one, such as "İ").
+  const lower = html.replace(/[A-Z]+/g, (s) => s.toLowerCase());
+  // Where each block's next closer is: found once and kept while it is ahead,
+  // so openers with no closer after them do not each search to the end.
+  const closer = new Map<string, number>();
+  const closerFrom = (name: string, from: number): number => {
+    const known = closer.get(name);
+    if (known !== undefined && (known === -1 || known >= from)) return known;
+    const at = lower.indexOf(`</${name}>`, from);
+    closer.set(name, at);
+    return at;
+  };
+  let out = '';
+  let kept = 0;
+  for (let i = lower.indexOf('<'); i !== -1; i = lower.indexOf('<', i + 1)) {
+    const name = BLOCKS.find((b) => lower.startsWith(b, i + 1));
+    if (!name) continue;
+    const end = closerFrom(name, i + 1 + name.length);
+    if (end === -1) continue;
+    out += `${html.slice(kept, i)} `;
+    kept = end + name.length + 3;
+    i = kept - 1;
+  }
+  return out + html.slice(kept);
+}
+
+/** Every `<…>` with something inside, a space each. */
+function withoutTags(html: string): string {
+  let out = '';
+  let kept = 0;
+  for (let i = html.indexOf('<'); i !== -1; i = html.indexOf('<', i + 1)) {
+    const end = html.indexOf('>', i + 1);
+    if (end === -1) break; // no `>` after this one, so none after any later `<` either
+    if (end === i + 1) continue; // `<>` is not a tag
+    out += `${html.slice(kept, i)} `;
+    kept = end + 1;
+    i = end;
+  }
+  return out + html.slice(kept);
+}
+
+/** A tag's last `href="…"` with something in its quotes: where it starts in the tag, and its value. */
+function lastHref(tag: string): { at: number; value: string } | undefined {
+  for (let h = tag.lastIndexOf('href="'); h !== -1; h = h > 0 ? tag.lastIndexOf('href="', h - 1) : -1) {
+    const q = tag.indexOf('"', h + 6);
+    if (q > h + 6) return { at: h, value: tag.slice(h + 6, q) };
+  }
+  return undefined;
+}
+
+/**
+ * The `<a …class="<cls>"…>text</a>` links of a page, left to right, each
+ * position read once: a tag (up to its first `>`) naming the class after its
+ * first character, with an `href="…"` after that for a title link, and its
+ * text up to the first `</a>`. They were regular expressions whose `[^>]+`
+ * and `[\s\S]*?` searched to the end from every `<a` of a page with no `>` or
+ * no `</a>` after it, in time that grew with the square of the page, or its
+ * cube (21 KB of `<a class="result__a" ` held the server's one thread 7 s),
+ * HB-1238. What they found is what this finds, but for an href whose quotes
+ * hold a `>`, which ends the tag here.
+ */
+function classLinks(html: string, cls: string, withHref: boolean): Array<{ at: number; end: number; href?: string; text: string }> {
+  const mark = `class="${cls}"`;
+  const out: Array<{ at: number; end: number; href?: string; text: string }> = [];
+  for (let i = html.indexOf('<a'); i !== -1;) {
+    const gt = html.indexOf('>', i + 2);
+    if (gt === -1) break; // no `>` after this `<a`, so none after any later one either
+    // Every later `<a` before this `>` has the same tag end, and less of the
+    // tag before it: if this one is no link, nor are they.
+    const tag = html.slice(i + 2, gt);
+    const c = tag.indexOf(mark, 1);
+    const href = withHref ? lastHref(tag) : undefined;
+    if (c === -1 || (withHref && (!href || c + mark.length + 1 > href.at))) { i = html.indexOf('<a', gt + 1); continue; }
+    const close = html.indexOf('</a>', gt + 1);
+    if (close === -1) break; // nor a `</a>` after any later one
+    out.push({ at: i, end: close + 4, ...(withHref ? { href: href!.value } : {}), text: html.slice(gt + 1, close) });
+    i = html.indexOf('<a', close + 4);
+  }
+  return out;
+}
+
+/** DuckDuckGo's HTML results page: up to 8 results, each a title link and the snippet after it. */
+export function duckDuckGoResults(html: string): Result[] {
+  const out: Result[] = [];
+  // One result per title link; its snippet is looked for only up to the next
+  // result. (A lazy match with an optional snippet group ended right after
+  // the link, so every snippet came back empty — audit, 2026-10-22.)
+  const links = classLinks(html, 'result__a', true);
+  for (let i = 0; i < links.length && out.length < 8; i++) {
+    const m = links[i]!;
+    const rest = html.slice(m.end, links[i + 1]?.at ?? html.length);
+    const snippet = classLinks(rest, 'result__snippet', false)[0]?.text ?? '';
+    let url = m.href!.replace(/&amp;/g, '&');
+    const uddg = /[?&]uddg=([^&]+)/.exec(url);
+    if (uddg) url = decodeURIComponent(uddg[1]!);
+    if (url.startsWith('//')) url = `https:${url}`;
+    if (/^https?:\/\//.test(url)) out.push({ title: strip(m.text), url, snippet: strip(snippet).slice(0, 300) });
+  }
+  return out;
+}
 
 export function makeOpsWeb(deps: OpsWebDeps) {
   const f = deps.fetchImpl ?? fetch;
@@ -226,22 +339,7 @@ export function makeOpsWeb(deps: OpsWebDeps) {
     if (duckDuckGoTurnedAway(r.status, html)) throw new Error(`${DDG_TURNED_AWAY} ${braveAdvice({ keySet: !!key, ...(key ? { brave: braveFailure(braveAnswered) } : {}) })}`);
     if (!r.ok) throw new Error(`The search provider answered ${r.status}.`);
     deps.onSearched?.('duckduckgo');
-    const out: Result[] = [];
-    // One result per title link; its snippet is looked for only up to the next
-    // result. (A lazy match with an optional snippet group ended right after
-    // the link, so every snippet came back empty — audit, 2026-10-22.)
-    const links = [...html.matchAll(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)];
-    for (let i = 0; i < links.length && out.length < 8; i++) {
-      const m = links[i]!;
-      const rest = html.slice(m.index! + m[0].length, links[i + 1]?.index ?? html.length);
-      const snippet = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/.exec(rest)?.[1] ?? '';
-      let url = m[1]!.replace(/&amp;/g, '&');
-      const uddg = /[?&]uddg=([^&]+)/.exec(url);
-      if (uddg) url = decodeURIComponent(uddg[1]!);
-      if (url.startsWith('//')) url = `https:${url}`;
-      if (/^https?:\/\//.test(url)) out.push({ title: strip(m[2] ?? ''), url, snippet: strip(snippet).slice(0, 300) });
-    }
-    return out;
+    return duckDuckGoResults(html);
   }
 
   return async function opsWeb(ownerId: string, tool: string, args: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {

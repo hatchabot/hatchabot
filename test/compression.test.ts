@@ -4,10 +4,14 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { cpSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { etagMatches, registerRoutes } from '../src/api/routes.js';
+import { registerRoutes } from '../src/api/routes.js';
+import { etagMatches, versionMarkup } from '../src/api/pageRoutes.js';
+import { metaVersion, versionMarker } from '../src/doctor.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
@@ -37,7 +41,7 @@ afterEach(() => {
   toClose = [];
 });
 
-async function world(opts: { appVersion?: string; agents?: number; gatewayPort?: number } = {}) {
+async function world(opts: { appVersion?: string; agents?: number; gatewayPort?: number; web?: string } = {}) {
   const db = new Database(':memory:');
   const store = new Store(db);
   const provider = new MockProvider();
@@ -54,7 +58,7 @@ async function world(opts: { appVersion?: string; agents?: number; gatewayPort?:
   await registerRoutes(f, {
     store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]),
     channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
-    webIndexPath, appVersion: opts.appVersion,
+    webIndexPath: opts.web ? join(opts.web, 'index.html') : webIndexPath, webJoinPath: join(opts.web ?? dirname(webIndexPath), 'join.html'), appVersion: opts.appVersion,
   });
   toClose.push(f);
   return { f, provider, store };
@@ -80,7 +84,7 @@ describe('the page', () => {
     const plain = await f.inject({ method: 'GET', url: '/' });
     expect(plain.statusCode).toBe(200);
     expect(plain.headers['content-encoding']).toBeUndefined();
-    expect(plain.body).toContain('window.HATCHABOT_VERSION="9.9.9"');
+    expect(plain.body).toContain('<meta name="hatchabot-version" content="9.9.9">');
     expect(plain.headers['x-hatchabot-version']).toBe('9.9.9');
 
     const gz = await f.inject({ method: 'GET', url: '/', headers: { 'accept-encoding': 'gzip' } });
@@ -122,7 +126,7 @@ describe('the page', () => {
     expect(a2).toBe(a); // stable across restarts of one version
     expect(b.headers.etag).not.toBe(a);
     expect(b.statusCode).toBe(200);
-    expect(b.body).toContain('window.HATCHABOT_VERSION="2.104.0"');
+    expect(versionMarker(b.body)).toBe('2.104.0');
   });
 
   it('matches If-None-Match by weak comparison', () => {
@@ -139,6 +143,101 @@ describe('the page', () => {
     const sw = await f.inject({ method: 'GET', url: '/sw.js' });
     expect(sw.statusCode).toBe(200);
     expect(sw.headers['cache-control']).toBe('no-cache');
+  });
+});
+
+describe("the page's scripts (web/app/, HB-0811)", () => {
+  const srcs = (html: string) => [...html.matchAll(/<script src="([^"]+)"><\/script>/g)].map((m) => m[1]!);
+
+  it('the page names each script by its digest, and each comes back as that file, cached for good', async () => {
+    const { f } = await world({ appVersion: '9.9.9' });
+    const page = await f.inject({ method: 'GET', url: '/' });
+    const names = srcs(page.body);
+    expect(names.length).toBeGreaterThan(10);
+    expect(page.body).not.toContain('src="app/');
+    for (const src of names) {
+      const m = /^\/app\/([a-z0-9-]+\.js)\?v=([\w-]{22})$/.exec(src);
+      expect(m, src).not.toBeNull();
+      const res = await f.inject({ method: 'GET', url: src });
+      expect(res.statusCode, src).toBe(200);
+      expect(res.headers['content-type']).toBe('text/javascript; charset=utf-8');
+      expect(res.headers['cache-control']).toBe('public, max-age=31536000, immutable');
+      expect(res.body).toBe(readFileSync(join(dirname(webIndexPath), 'app', m![1]!), 'utf8'));
+      expect((await f.inject({ method: 'GET', url: src, headers: { 'if-none-match': String(res.headers.etag) } })).statusCode).toBe(304);
+    }
+  });
+
+  it('by any other address a script is the current file, revalidated each time; nothing else is read', async () => {
+    const { f } = await world();
+    for (const url of ['/app/core.js', '/app/core.js?v=an-old-digest']) {
+      const res = await f.inject({ method: 'GET', url });
+      expect(res.statusCode, url).toBe(200);
+      expect(res.headers['cache-control'], url).toBe('no-cache');
+    }
+    for (const url of ['/app/missing.js', '/app/Core.js', '/app/core.txt', '/app/..%2fsw.js', '/app/%2e%2e%2findex.html', '/app/', '/app/a/b.js']) {
+      expect((await f.inject({ method: 'GET', url })).statusCode, url).toBe(404);
+    }
+  });
+
+  it('is compressed when the browser asks', async () => {
+    const { f } = await world();
+    const res = await f.inject({ method: 'GET', url: '/app/home.js', headers: { 'accept-encoding': 'gzip' } });
+    expect(res.headers['content-encoding']).toBe('gzip');
+    expect(gunzipSync(res.rawPayload).toString('utf8')).toBe(readFileSync(join(dirname(webIndexPath), 'app', 'home.js'), 'utf8'));
+  });
+
+  it('an edited script shows at once: a new digest in the page, so a new ETag for it', async () => {
+    const web = mkdtempSync(join(tmpdir(), 'hb-page-'));
+    try {
+      cpSync(dirname(webIndexPath), web, { recursive: true });
+      const { f } = await world({ web });
+      const before = await f.inject({ method: 'GET', url: '/' });
+      const file = join(web, 'app', 'start.js');
+      writeFileSync(file, readFileSync(file, 'utf8') + '\n// edited\n');
+      utimesSync(file, new Date(), new Date(Date.now() + 5000));
+      const after = await f.inject({ method: 'GET', url: '/', headers: { 'if-none-match': String(before.headers.etag) } });
+      expect(after.statusCode).toBe(200);
+      expect(after.headers.etag).not.toBe(before.headers.etag);
+      const changed = srcs(after.body).filter((s) => !srcs(before.body).includes(s));
+      expect(changed).toHaveLength(1);
+      expect(changed[0]).toMatch(/^\/app\/start\.js\?v=/);
+      expect((await f.inject({ method: 'GET', url: changed[0]! })).body).toContain('// edited');
+    } finally {
+      rmSync(web, { recursive: true, force: true });
+    }
+  });
+
+  it('the pages run no inline script, so the public address\'s policy can refuse every one (HB-0812)', async () => {
+    const { f } = await world({ appVersion: '9.9.9' });
+    for (const url of ['/', '/join/ABC123']) {
+      const body = (await f.inject({ method: 'GET', url })).body;
+      const tags = body.match(/<script\b[^>]*>/gi) ?? [];
+      expect(tags.length, url).toBeGreaterThan(1);
+      for (const tag of tags) expect(tag, url).toMatch(/^<script src="\/app\/[a-z0-9-]+\.js\?v=[\w-]{22}">$/);
+      expect(body.match(/<\/script>/gi)?.length, url).toBe(tags.length);
+    }
+  });
+
+  it('the version is still the text doctor and the deploy scripts of every release look for', async () => {
+    const { f } = await world({ appVersion: '2.191.0' });
+    const body = (await f.inject({ method: 'GET', url: '/' })).body;
+    expect(versionMarker(body)).toBe('2.191.0');
+    // And the meta tag, in the head doctor reads of the page (metaVersion's first 256 KB): a page whose head outgrew it would lose it.
+    expect(metaVersion(body)).toBe('2.191.0');
+    // scripts/deploy-release.sh and scripts/migrate-rename-host.sh: grep -oE 'HATCHABOT_VERSION="[^"]+"', the first hit.
+    for (const script of ['scripts/deploy-release.sh', 'scripts/migrate-rename-host.sh']) expect(readFileSync(script, 'utf8')).toContain(`grep -oE 'HATCHABOT_VERSION="[^"]+"' | sed -n 1p`);
+    expect(/HATCHABOT_VERSION="[^"]+"/.exec(body)?.[0]).toBe('HATCHABOT_VERSION="2.191.0"');
+    // Something that is not a version cannot end the comment or the attribute it is written in.
+    const word = '1.0.0___script_x__script___--';
+    expect(versionMarkup('1.0.0"><script>x</script><!--')).toBe(`<meta name="hatchabot-version" content="${word}"><!-- HATCHABOT_VERSION="${word}" -->`);
+  });
+
+  it('the join page names its scripts the same way', async () => {
+    const { f } = await world();
+    const res = await f.inject({ method: 'GET', url: '/join/ABC123' });
+    expect(res.statusCode).toBe(200);
+    expect(srcs(res.body).map((s) => s.replace(/\?v=.*/, ''))).toEqual(['/app/theme.js', '/app/join.js']);
+    for (const src of srcs(res.body)) expect((await f.inject({ method: 'GET', url: src })).headers['cache-control']).toBe('public, max-age=31536000, immutable');
   });
 });
 

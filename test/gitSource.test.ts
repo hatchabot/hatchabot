@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { firstThen, heldPort, onFreePort, TAKEN } from './helpers/ports.js';
-import { buildGitRemovalScript, buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncScript, isPublicGitUrl } from '../src/orchestrator/gitSource.js';
+import { buildGitRemovalScript, buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncScript, isPublicGitUrl } from '../src/orchestrator/apps/gitSource.js';
 
 describe('runtime directories cannot become repo clones or removals (HB-0707)', () => {
   it('refuses reserved names at both clone script builders', () => {
@@ -215,6 +216,25 @@ describe('removing a git source takes it off the volume (HB-0002)', () => {
       expect(() => v.git('config', '--get', 'core.sshCommand')).toThrow();
       rmSync(v.base, { recursive: true, force: true });
     }
+  });
+
+  it('added again with a key of its own: the new key is left, the old one goes (HB-0963)', () => {
+    const newKey = 'made-up new key\n';
+    const sha = createHash('sha256').update(newKey, 'utf8').digest('hex');
+    const script = buildGitRemovalScript('defs', 'git@github.com:example-owner/defs.git', { keepClone: true, unlessKeySha256: sha });
+    // Its sync put the new key there: left as it is, and done.
+    const synced = volume();
+    writeFileSync(join(synced.base, '.ssh', 'defs_deploy'), newKey);
+    expect(run(script, synced.base).status).toBe(0);
+    expect(readFileSync(join(synced.base, '.ssh', 'defs_deploy'), 'utf8')).toBe(newKey);
+    rmSync(synced.base, { recursive: true, force: true });
+    // Not synced yet: the file there is the old key, and it goes.
+    const old = volume('git@github.com:example-owner/defs.git');
+    expect(run(script, old.base).status).toBe(0);
+    expect(readdirSync(join(old.base, '.ssh'))).toEqual(['other_deploy']);
+    expect(readFileSync(join(old.clone, 'notes.md'), 'utf8')).toBe('work');
+    rmSync(old.base, { recursive: true, force: true });
+    expect(() => buildGitRemovalScript('defs', null, { unlessKeySha256: 'x; rm -rf /' })).toThrow();
   });
 
   it('a public repo that never cloned: done, with nothing to remove', () => {

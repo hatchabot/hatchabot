@@ -10,8 +10,8 @@
  * running runtime, never a released bot with a running container.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { clearBusy } from '../src/orchestrator/busy.js';
-import { resetHibernateState, wakeAgent } from '../src/orchestrator/hibernate.js';
+import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { resetHibernateState, wakeAgent } from '../src/orchestrator/lifecycle/hibernate.js';
 import type { MockProvider } from '../src/providers/mockProvider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 

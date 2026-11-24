@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, resetHibernateState, wakeAgent, wakeSweep, WAKE_GIVE_UP, type HibernateDeps } from '../src/orchestrator/hibernate.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, resetHibernateState, wakeAgent, wakeSweep, WAKE_GIVE_UP, type HibernateDeps } from '../src/orchestrator/lifecycle/hibernate.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 /**
@@ -21,6 +21,9 @@ function depsFor(w: World, over: Partial<HibernateDeps> = {}): HibernateDeps & {
     ownCrons: async () => [],
     isBusy: () => false,
     log: (id) => (event) => { events.push([id, event]); },
+    // Telegram with nothing waiting for any bot, unless a test says otherwise: never the real one,
+    // which four tests here asked with a made-up token (test/support/noTelegram.ts).
+    fetchImpl: (async () => new Response(JSON.stringify({ ok: true, result: [] }))) as typeof fetch,
     events,
     ...over,
   };
@@ -127,6 +130,48 @@ describe('waking', () => {
     w.store.setAgentState(id, 'STOPPED');
     expect(await wakeSweep(deps)).toEqual([]);
     expect(await wakeAgent(deps, w.store.getAgent(id)!, 'x')).toMatchObject({ state: 'STOPPED' });
+  });
+
+  it('a sleeper whose Telegram is slow to answer does not hold up the mail check of the ones after it, and only so many are asked at once (HB-1124)', async () => {
+    const w = await makeWorld();
+    const slow = await seedRunningAgent(w, { id: 's1', slug: 'slow', accountId: 'slowbot', botToken: 'fake-token-slow' });
+    const mail = await seedRunningAgent(w, { id: 'm1', slug: 'mail', accountId: 'mailbot', botToken: 'fake-token-mail' });
+    const more = [];
+    for (let i = 0; i < 9; i++) more.push(await seedRunningAgent(w, { id: `q${i}`, slug: `quiet${i}`, accountId: `quiet${i}bot`, botToken: `fake-token-q${i}` }));
+    let answering = true;
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let inFlight = 0;
+    let most = 0;
+    const asked: string[] = [];
+    const deps = depsFor(w, {
+      fetchImpl: (async (u: string | URL | Request) => {
+        const url = String(u);
+        if (answering) return new Response(JSON.stringify({ ok: true, result: [] }));
+        asked.push(url);
+        inFlight++; most = Math.max(most, inFlight);
+        try {
+          // The slow one and the quiet ones wait; the one with mail answers at once.
+          if (!url.includes('fake-token-mail')) await held;
+          return new Response(JSON.stringify({ ok: true, result: url.includes('fake-token-mail') ? [{ update_id: 7 }] : [] }));
+        } finally { inFlight--; }
+      }) as typeof fetch,
+    });
+    for (const id of [slow, mail, ...more]) await hibernateAgent(deps, w.store.getAgent(id)!, 'test');
+    answering = false;
+    const sweep = wakeSweep(deps);
+    try {
+      // While the slow one (asked first) still waits, the one with mail is asked and woken.
+      await vi.waitFor(() => { if (w.store.getAgent(mail)!.state !== 'RUNNING') throw new Error('not woken yet'); });
+      expect(asked[0]).toContain('fake-token-slow');
+      expect(w.store.getAgent(slow)!.state).toBe('STOPPED');
+    } finally {
+      // Never leave a sweep hanging: it holds the one-sweep-at-a-time flag.
+      release();
+    }
+    expect(await sweep).toEqual([mail]);
+    expect(asked).toHaveLength(11);
+    expect(most).toBe(8);
   });
 
   // After a week with no updates Telegram starts update_id again at random:
@@ -401,5 +446,23 @@ describe('the 30th audit: by hand', () => {
     const res = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/hibernate`, headers: as() });
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toMatch(/management agent/);
+  });
+
+  it('while an ask is answering, a sleep by hand is refused with its reason, not a 500 (HB-0887)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { id: 'ask1', slug: 'asked', accountId: 'askedbot' });
+    let answer!: () => void;
+    const exec = w.provider.exec.bind(w.provider);
+    w.provider.exec = async (ref, argv, opts) => argv[0] === 'agent'
+      ? new Promise((r) => { answer = () => r({ code: 0, stdout: 'done', stderr: '' }); })
+      : exec(ref, argv, opts);
+    const ask = w.f.inject({ method: 'POST', url: `/v1/agents/${id}/ask`, headers: as(), payload: { text: 'hello?' } });
+    await vi.waitFor(() => expect(answer).toBeDefined());
+    const res = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/hibernate`, headers: as() });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatch(/^It is busy just now/);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING');
+    answer();
+    expect((await ask).statusCode).not.toBe(500);
   });
 });

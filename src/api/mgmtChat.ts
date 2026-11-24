@@ -1,4 +1,4 @@
-import { isCostCard } from '../orchestrator/recommendations.js';
+import { buildRecommendations, inRecommended } from '../orchestrator/usage/recommendations.js';
 import { publicReplayHeaders } from './trust.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
@@ -13,8 +13,8 @@ import { internalHeaders, ownerIdOf } from './principal.js';
 import { OpsAuthError, setOpsHandlers } from '../ops/opsServer.js';
 import { makeOpsWeb, type OpsWebDeps } from '../ops/opsWeb.js';
 import { opsDoorTools } from '../ops/opsTools.js';
-import { SEARCH_KEY_REF } from '../orchestrator/provision.js';
-import { voiceNetworkHosts } from '../orchestrator/voiceNetwork.js';
+import { SEARCH_KEY_REF } from '../orchestrator/lifecycle/provision.js';
+import { voiceNetworkHosts } from '../orchestrator/voice/voiceNetwork.js';
 
 /**
  * Where a management agent reaches Hatchabot, and where the cards it files are
@@ -55,6 +55,22 @@ export interface MgmtChatDeps {
   /** Push "something is waiting" to the owner's Telegram, through the
    *  management agent's own bot (routes.ts owns it; see src/ops/push.ts). */
   pushOps?: (ownerId: string, headline: string, detail?: string) => void;
+  /** Does this request's person own the machine (its Recommended has the machine's budget too; routes.ts ownsLocalHost)? */
+  machineOwner?: (req: FastifyRequest) => boolean;
+}
+
+/**
+ * Cards a confirm was carrying out when the process ended (HB-1053). A confirm
+ * marks its card confirmed before the change runs, so that a second tap cannot
+ * run it twice; a restart between the two left the card confirmed with no
+ * outcome, the change not made, and nothing said: the card was gone from the
+ * list and confirming it again was "Already handled". Run at start-up, before
+ * anything can confirm, so each one found is a previous process's. Each is
+ * told, as a failure is, and never run again: it may have happened in part.
+ */
+export function markInterruptedConfirms(store: Store): number {
+  return store.markInterruptedMgmtProposals((rec) =>
+    `⚠ Interrupted — ${rec.summary ?? rec.tool ?? 'a change'}: Hatchabot restarted while it was carrying this out, so it may not have happened, or only in part. Check, and ask again if it is not done.`);
 }
 
 export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void {
@@ -132,7 +148,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   /** A proposal, enriched with the FULL spec so the web card can show every
    *  byte that would execute — the clipped-preview lesson (audit 2026-09-03)
    *  applied from day one here. */
-  const enrich = (confirmId: string, summary: string) => {
+  const enrich = (confirmId: string, summary: string, inRecommendedList?: Set<string | undefined>) => {
     const rec = pendingStore.peek(confirmId);
     return {
       confirmId,
@@ -144,8 +160,9 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       note: rec?.note,
       risk: rec?.risk ?? 'routine',
       expiresAtMs: rec?.expiresAtMs,
-      // A cost or model card: shown as a Usage → Recommended item (recommendations.ts), not in the cards list.
-      recommended: rec ? isCostCard(rec) : false,
+      // A cost or model card: shown as a Usage → Recommended item (recommendations.ts), not in the cards list —
+      // only while Recommended shows it; on an agent archived since (HB-1095), or merged into an item put off with Not now (HB-1269), it stays here.
+      recommended: !!inRecommendedList?.has(confirmId),
       // set_model: the scorecard's evidence and a downgrade's risks, shown on the card.
       check: rec?.resolved.check ? { evidence: rec.resolved.check.evidence, warnings: rec.resolved.check.warnings, downgrade: rec.resolved.check.downgrade } : undefined,
       spec: rec?.resolved.spec
@@ -169,29 +186,39 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   const resolveProposal = async (req: FastifyRequest, reply: import('fastify').FastifyReply, id: string, verb: 'confirm' | 'cancel') => {
     const ownerId = ownerIdOf(req);
     const c = confirmerFor(ownerId); // created on demand: cards outlive a restart
-    // One confirm at a time per owner: the confirmer holds ONE set of
-    // credentials, and a second confirm arriving mid-way would swap them under
-    // the first (a confirm pressed at the public address could then run with a
-    // private one's standing; review, 2026-10-01).
-    const before = confirming.get(ownerId) ?? Promise.resolve();
-    let release!: () => void;
-    const mine = new Promise<void>((res) => { release = res; });
-    const chained = before.then(() => mine);
-    confirming.set(ownerId, chained);
-    await before;
     let rec: PendingConfirm | undefined;
     let out: Awaited<ReturnType<Confirmer['broker']['confirm']>>;
-    try {
-      c.setAuth(req);
-      // Read the card before it resolves: afterwards its author is what tells us
-      // whether the management agent is waiting to hear how it went.
+    if (verb === 'cancel') {
+      // A cancel runs nothing as anyone: it only claims the card (owner-bound
+      // and single-use, PendingStore.claim). Queued with the confirms, it
+      // waited for a rebuild being followed for minutes before an unrelated
+      // card could be put away (HB-0940). It never touches the confirmer's
+      // credentials or card id, which a confirm in progress is using.
       rec = store.getMgmtProposal<PendingConfirm>(id) as PendingConfirm | undefined;
-      c.setProposal(id);
       out = await c.broker.confirm(id, verb, { ...WEB_WHO, ownerId });
-    } finally {
-      c.setProposal(undefined);
-      release();
-      if (confirming.get(ownerId) === chained) confirming.delete(ownerId);
+    } else {
+      // One confirm at a time per owner: the confirmer holds ONE set of
+      // credentials, and a second confirm arriving mid-way would swap them under
+      // the first (a confirm pressed at the public address could then run with a
+      // private one's standing; review, 2026-10-01).
+      const before = confirming.get(ownerId) ?? Promise.resolve();
+      let release!: () => void;
+      const mine = new Promise<void>((res) => { release = res; });
+      const chained = before.then(() => mine);
+      confirming.set(ownerId, chained);
+      await before;
+      try {
+        c.setAuth(req);
+        // Read the card before it resolves: afterwards its author is what tells us
+        // whether the management agent is waiting to hear how it went.
+        rec = store.getMgmtProposal<PendingConfirm>(id) as PendingConfirm | undefined;
+        c.setProposal(id);
+        out = await c.broker.confirm(id, verb, { ...WEB_WHO, ownerId });
+      } finally {
+        c.setProposal(undefined);
+        release();
+        if (confirming.get(ownerId) === chained) confirming.delete(ownerId);
+      }
     }
     if (!out.ok) {
       return reply.code(out.reason === 'missing' ? 404 : 409).send({
@@ -220,6 +247,9 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   // owner's "Alerts" list; they execute later, with the auth of
   // whoever presses Confirm — never with anything the agent holds.
   const OPEN_PROPOSALS_CAP = 20;
+  const TOO_MANY_OPEN = `There are already ${OPEN_PROPOSALS_CAP} proposals waiting for the owner. Ask them to confirm or cancel some first.`;
+  const openProposals = (ownerId: string): number =>
+    store.listMgmtProposals<PendingConfirm>(ownerId, Date.now()).filter((p) => p.status === 'pending').length;
   const opsWeb = makeOpsWeb({ braveKey: () => secrets.get(SEARCH_KEY_REF).catch(() => undefined), ...deps.opsWeb });
   const opsBrokers = new Map<string, Broker>();
   const opsBrokerFor = (ownerId: string): Broker => {
@@ -239,7 +269,12 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
         }
         return parsed;
       };
-      b = new Broker(new HttpApiClient(requester), pendingStore, { audit: (event, detail) => app.log.info({ ...detail, via: 'ops-agent' }, event) });
+      b = new Broker(new HttpApiClient(requester), pendingStore, {
+        audit: (event, detail) => app.log.info({ ...detail, via: 'ops-agent' }, event),
+        // Counted again as the card is filed: two calls that each saw 19
+        // waiting both filed theirs once their agents were resolved (HB-0942).
+        admit: (who) => (openProposals(who.ownerId) >= OPEN_PROPOSALS_CAP ? TOO_MANY_OPEN : undefined),
+      });
       b.setMode(true);
       opsBrokers.set(ownerId, b);
     }
@@ -263,10 +298,8 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       case 'tools/call': {
         const name = String(m.params?.name ?? '');
         const text = (t: string, isError = false) => ok({ content: [{ type: 'text', text: t }], isError });
-        if (toolDef(name)?.tier === 'mutate'
-          && store.listMgmtProposals<PendingConfirm>(agent.ownerId, Date.now()).filter((p) => p.status === 'pending').length >= OPEN_PROPOSALS_CAP) {
-          return text(`There are already ${OPEN_PROPOSALS_CAP} proposals waiting for the owner. Ask them to confirm or cancel some first.`, true);
-        }
+        // Before anything is resolved, so a full list costs nothing; the broker counts again as it files (admit).
+        if (toolDef(name)?.tier === 'mutate' && openProposals(agent.ownerId) >= OPEN_PROPOSALS_CAP) return text(TOO_MANY_OPEN, true);
         const { why, ...args } = (m.params?.arguments ?? {}) as Record<string, unknown>;
         if (name === 'web_search' || name === 'read_result') {
           const out = await opsWeb(agent.ownerId, name, args).catch((e) => ({ text: `Error: ${String((e as Error).message ?? e)}`, isError: true }));
@@ -286,6 +319,8 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
           return text(`Filed for the owner's approval: "${r.pending.summary.split('\n')[0]}". It is NOT done. It appears under "Alerts" on their Hatchabot home screen and only happens if they press Confirm there. Tell them so; never say it succeeded.${warned}`);
         }
         if (r.ok) return text(JSON.stringify(r.data).slice(0, 12_000));
+        // The list filled while this one was being resolved: the same answer as the early check's (HB-0942).
+        if (r.error.code === 'TOO_MANY_OPEN') return text(r.error.message, true);
         return text(`Error ${r.error.code}: ${r.error.message}`, true);
       }
       default:
@@ -313,13 +348,36 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   };
   setOpsHandlers({ mcp: opsMcp, allowedHosts: opsAllowedHosts, peerOk: deps.opsPeerOk, doormanKeyOk, log: (event, detail) => app.log.info(detail, event) });
 
+  /** The last Recommended build the list could not make, and when it was logged (a plain variable: one reason at a time). */
+  let recommendedFailed: { why: string; at: number } = { why: '', at: -Infinity };
   /** The home screen's list: what is waiting for you, and what happened to
    *  the last day's. */
   app.get('/v1/proposals', async (req) => {
     const ownerId = ownerIdOf(req);
     const rows = store.listMgmtProposals<PendingConfirm>(ownerId, Date.now());
+    const pending = rows.filter((r) => r.status === 'pending');
+    // A card is left out of this list only when Recommended, as built, shows
+    // it: one filed for an item the owner had put off with Not now was merged
+    // into that hidden item and was in neither list (HB-1269). Built only
+    // when some card could be there, and only read: the home screen polls
+    // this every few seconds, so it never tidies the stored Not nows. A build
+    // that fails hides no card: every card is shown here, and the list stays.
+    let shown: Set<string | undefined> | undefined;
+    if (pending.some((r) => inRecommended(store, r))) {
+      try {
+        shown = new Set(buildRecommendations(store, ownerId, { machineOwner: deps.machineOwner?.(req) ?? false, prune: false }).items.map((it) => it.proposalId));
+      } catch (err) {
+        // Once a minute for the same reason: the home screen asks every 4 s.
+        const why = (err as Error)?.message ?? String(err);
+        const at = Date.now();
+        if (why !== recommendedFailed.why || at - recommendedFailed.at >= 60_000) {
+          recommendedFailed = { why, at };
+          app.log.warn({ err: why }, 'proposals.recommended_failed');
+        }
+      }
+    }
     return {
-      pending: rows.filter((r) => r.status === 'pending').map((r) => enrich(r.id, r.summary)),
+      pending: pending.map((r) => enrich(r.id, r.summary, shown)),
       recent: rows.filter((r) => r.status !== 'pending').slice(0, 10).map((r) => ({
         confirmId: r.id, summary: r.summary.split('\n')[0], status: r.status, outcome: r.outcome, resolvedAtMs: r.resolvedAtMs,
       })),

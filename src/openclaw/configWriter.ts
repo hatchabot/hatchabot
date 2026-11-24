@@ -1,5 +1,5 @@
-import { BROWSER_CDP_URL, BROWSER_PROFILE } from '../orchestrator/browser.js';
-import { filesMb, FILES_MB_DEFAULT } from '../orchestrator/machineDefaults.js';
+import { BROWSER_CDP_URL, BROWSER_PROFILE } from '../providers/browserContainer.js';
+import { filesMb, FILES_MB_DEFAULT } from '../domain/filesLimit.js';
 import type { OpenClawConfigPatch } from '../providers/provider.js';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -670,7 +670,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       cmds.push({ argv: ['config', 'set', `skills.entries.${skill.id}.enabled`, selected.has(skill.id) ? 'true' : 'false'] });
     }
   }
-  // Its own browser (src/orchestrator/browser.ts): an attach-only profile at
+  // Its own browser (src/orchestrator/console/browser.ts): an attach-only profile at
   // the Chromium in its network namespace. Without one the tool is OFF — the
   // image carries no browser, and a tool that cannot work only costs the model
   // tokens and failed attempts (2026-10-08). Convergent: re-asserted every build.

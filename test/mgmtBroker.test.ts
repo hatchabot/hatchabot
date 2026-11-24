@@ -519,6 +519,25 @@ describe('broker limits (audit 2026-09-03 coverage)', () => {
     expect(third).toMatchObject({ ok: false, error: { code: 'RATE_LIMITED' } });
   });
 
+  it('a filing turned away by the open-card limit says so, and leaves the change slots as they were (HB-0942 review)', async () => {
+    const api = new FakeApi(AGENTS, { p1: [] });
+    let seq = 0;
+    const pending = new PendingStore({ genId: () => `c_${++seq}` });
+    let full = true;
+    const FULL = 'There are already 20 proposals waiting for the owner. Ask them to confirm or cancel some first.';
+    const broker = new Broker(api, pending, { mutateLimit: 2, mutateWindowMs: 60_000, admit: () => (full ? FULL : undefined) });
+    broker.setMode(true);
+    for (let i = 0; i < 3; i++) {
+      expect(await broker.handleTool('stop_agent', { agent: 'a1' }, WHO)).toEqual({ ok: false, tool: 'stop_agent', error: { code: 'TOO_MANY_OPEN', message: FULL } });
+    }
+    expect([seq, pending.peek('c_1')]).toEqual([0, undefined]); // no card was filed
+    // Room again: both of the window's slots are still there.
+    full = false;
+    expect((await broker.handleTool('stop_agent', { agent: 'a1' }, WHO)).ok).toBe(true);
+    expect((await broker.handleTool('stop_agent', { agent: 'a1' }, WHO)).ok).toBe(true);
+    expect(await broker.handleTool('stop_agent', { agent: 'a1' }, WHO)).toMatchObject({ ok: false, error: { code: 'RATE_LIMITED' } });
+  });
+
   it('a create that never reaches RUNNING times out with a next step, and writes nothing', async () => {
     const api = new FakeApi(AGENTS, { p1: [] });
     let seq = 0;
@@ -722,6 +741,31 @@ describe('one-call tools (restTools.ts) — resolved at propose time, replayed o
     expect((r as any).pending.summary).toMatch(/ask these to act: Advisor/);
     await confirm(broker, r);
     expect(api.calls).toEqual(['PUT /v1/agents/a1/peers {"peerIds":["a2","a3"],"allowActions":["a3"]}', 'rebuild:a1']);
+  });
+
+  it('set_peers at its bounds reads the owner’s fleet once for the whole card, not once per name (HB-0939)', async () => {
+    // A target and 32 peers, every one of them allowed to act: the tool's limits.
+    const fleet: AgentSummary[] = Array.from({ length: 33 }, (_, i) => ({ id: `f${i}`, name: `Helper ${i}`, slug: `helper-${i}`, state: 'RUNNING', aiProfileId: 'p1' }));
+    const peers = fleet.slice(1);
+    class FleetApi extends FakeApi {
+      lists = 0;
+      override async listAgents() { this.lists++; return fleet; }
+      override async raw(method: string, path: string, body?: unknown) {
+        if (method === 'GET' && path === '/v1/agents/f0/peers') return { candidates: peers.map((a) => ({ id: a.id })) };
+        return super.raw(method, path, body);
+      }
+    }
+    const api = new FleetApi(fleet);
+    const broker = new Broker(api, new PendingStore(), {});
+    broker.setMode(true);
+    const r = await broker.handleTool('set_peers', { agent: 'Helper 0', peers: peers.map((a) => a.id), allow_actions: peers.map((a) => a.name) }, WHO);
+    expect((r as any).pending.summary).toMatch(/may ask: Helper 1, Helper 2,/);
+    expect(api.lists).toBe(1);
+    await confirm(broker, r);
+    expect(api.calls[0]).toBe(`PUT /v1/agents/f0/peers ${JSON.stringify({ peerIds: peers.map((a) => a.id), allowActions: peers.map((a) => a.id) })}`);
+    // Each proposal reads it afresh: a second card sees the fleet as it is then.
+    await broker.handleTool('set_peers', { agent: 'f0', peers: ['f1'] }, WHO);
+    expect(api.lists).toBe(2);
   });
 
   it('create_invite puts the link in the done message', async () => {

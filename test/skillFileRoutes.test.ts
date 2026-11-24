@@ -1,19 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 import type { AgentState } from '../src/domain/types.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/busy.js';
-import { beginOperation } from '../src/orchestrator/operations.js';
-import { readSkillFile, mutateSkillFile, SkillFileError, type SkillFileView } from '../src/orchestrator/skillFiles.js';
-import { runSkillTrial, SKILL_TRIAL_LIMITS, type SkillTrialResult } from '../src/orchestrator/skillTrials.js';
+import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
+import { readSkillFile, mutateSkillFile, SkillFileError, type SkillFileView } from '../src/orchestrator/skills/skillFiles.js';
+import { runSkillTrial, SKILL_TRIAL_LIMITS, type SkillTrialResult } from '../src/orchestrator/skills/skillTrials.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
-vi.mock('../src/orchestrator/skillFiles.js', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/orchestrator/skillFiles.js')>(),
+vi.mock('../src/orchestrator/skills/skillFiles.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/orchestrator/skills/skillFiles.js')>(),
   readSkillFile: vi.fn(), mutateSkillFile: vi.fn(),
 }));
-vi.mock('../src/orchestrator/skillTrials.js', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/orchestrator/skillTrials.js')>(), runSkillTrial: vi.fn(),
+vi.mock('../src/orchestrator/skills/skillTrials.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/orchestrator/skills/skillTrials.js')>(), runSkillTrial: vi.fn(),
 }));
 
 const SKILL = 'hatchabot-writing', REVISION = 'a'.repeat(64);

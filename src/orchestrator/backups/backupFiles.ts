@@ -1,0 +1,1304 @@
+/**
+ * Reads and manages the on-disk backup sets that scripts/backup-volumes.sh
+ * writes — one dated directory per run, each holding the control-plane DB, the
+ * secret key, and one .tgz per agent volume. Nothing here ever serves those
+ * files (they hold plaintext bot tokens and the decryption key); it exposes
+ * only metadata — dates, sizes, what's present — and lets the machine's owner
+ * trigger a run or prune an old one.
+ */
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { parseEnv } from 'node:util';
+import { defaultBackupsDir, defaultDbPath } from '../../envCompat.js';
+import { fileURLToPath } from 'node:url';
+import { isDiskFull, OneShotNotGoneError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, type RuntimeProvider } from '../../providers/provider.js';
+import { DEFAULT_PREFIX, dockerNames } from '../../providers/dockerNames.js';
+import type { Store } from '../../store/store.js';
+import { forgetDmPolicy } from '../channels/dmPolicyMemo.js';
+import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from '../members/members.js';
+import { beginOperation, handleFor, rethrowIfCrash, type OpHandle } from '../lifecycle/operations.js';
+import { queueRemovalsSince } from '../google/googleConnections.js';
+import { processAlive } from '../../domain/processAlive.js';
+
+// A dated backup directory is exactly `YYYY-MM-DD`, matching what the script
+// creates (`date +%F`) and prunes. Anything else in the base dir is ignored,
+// and this same shape gates prune against path traversal.
+const DATE_DIR = /^20\d\d-\d\d-\d\d$/;
+
+const SCRIPT = resolve(fileURLToPath(import.meta.url), '../../../../scripts/backup-volumes.sh');
+
+/** Where the script writes, mirroring its own `BASE=` default exactly. */
+export function backupsDir(): string {
+  return process.env.HATCHABOT_BACKUP_DIR || defaultBackupsDir();
+}
+
+/** Retention the script enforces, surfaced so the panel can say how long a
+ *  backup will live. The same reading as scripts/backup-volumes.sh: a whole
+ *  number of days above 0, anything else 14 (HB-0432). */
+export function keepDays(): number {
+  const v = (process.env.HATCHABOT_BACKUP_KEEP_DAYS ?? '').replace(/\s/g, '');
+  const days = /^\d+$/.test(v) ? Number(v.replace(/^0+/, '')) : 0;
+  return days > 0 && days <= 999_999 ? days : 14;
+}
+
+export interface BackupVolume {
+  /** the agent volume, prefix stripped for readability (e.g. "kitchen-helper") */
+  name: string;
+  /** raw tarball basename, so a caller can match it back to a live agent */
+  file: string;
+  sizeBytes: number;
+}
+
+export interface BackupSet {
+  date: string;
+  sizeBytes: number;
+  hasDb: boolean;
+  /** whether the secret key rode along — without it the backup can't be decrypted */
+  hasKey: boolean;
+  volumes: BackupVolume[];
+  /**
+   * Whether the run that wrote this set finished with every volume in, from
+   * its backup-status.json. False: a volume failed, the run refused, or it
+   * never finished. Undefined: no record (a set from before the record, or a
+   * run still going). The dated directory alone said nothing — it exists
+   * before the first volume is in (review, 2026-09-29).
+   */
+  complete?: boolean;
+  /** The run is still writing this set. */
+  running?: boolean;
+  /** Volumes that failed to archive. */
+  failedVolumes?: string[];
+  /** Volumes no agent uses, left out of the set (a leftover to remove by hand). */
+  orphans?: string[];
+  /** When the run started (ISO), from the record. */
+  startedAt?: string;
+  /** When the run ended (ISO), from the record. */
+  finishedAt?: string;
+  /** Volumes an agent on this machine uses that docker did not have. */
+  missing?: string[];
+  /** Volumes on a runner that did not answer (asleep or offline): left out, not failed. */
+  skipped?: string[];
+  /**
+   * Volumes whose archive was written whole (absent in a record from before
+   * v2.157.0). What makes an agent recoverable from an incomplete set
+   * (recoveryReadiness.ts).
+   */
+  captured?: string[];
+  /**
+   * Made by another install that shares this folder, or by this one under an
+   * earlier HATCHABOT_SECRET_KEY (a reinstall, a key changed by hand): its
+   * `.backup-owner`, or the key it saved, is not this install's (foreignSet).
+   * Listed only when asked (listBackups' `others`), labelled; the nightly
+   * clean-up and Delete leave it alone, and a restore from it asks first
+   * (review of HB-0540: hidden, an install's own sets vanished after a key
+   * change, exactly when they were needed).
+   */
+  foreign?: boolean;
+}
+
+type SetRecord = Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'orphans' | 'startedAt' | 'finishedAt' | 'missing' | 'skipped' | 'captured'>;
+
+/** A run that has said "running" this long without a verdict was killed. */
+const RUN_STALE_MS = 6 * 3600_000;
+
+/** What a set's backup-status.json says, read defensively (the file is the script's, not ours). */
+export function readSetStatus(dir: string, now = Date.now()): SetRecord {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(join(dir, STATUS_FILE), 'utf8'));
+  } catch {
+    return {};
+  }
+  if (!raw || typeof raw !== 'object') return {};
+  const r = raw as Record<string, unknown>;
+  // Whole: which volumes were captured, failed, missing or skipped decides
+  // what a restore may use (recoveryReadiness.ts usableFor). Cut at 500, a
+  // set of 501 volumes hid the 501st's whole archive (HB-0945). Only the
+  // orphans, which the page counts and nothing decides on, are cut.
+  const names = (v: unknown, max = Infinity) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, max) : []);
+  const startedAt = typeof r.startedAt === 'string' ? r.startedAt : undefined;
+  const finishedAt = typeof r.finishedAt === 'string' && r.state !== 'running' ? r.finishedAt : undefined;
+  const out: SetRecord = {
+    ...(startedAt ? { startedAt } : {}),
+    ...(finishedAt ? { finishedAt } : {}),
+    failedVolumes: names(r.failedVolumes),
+    orphans: names(r.orphans, 500),
+    ...(Array.isArray(r.missing) ? { missing: names(r.missing) } : {}),
+    ...(Array.isArray(r.skipped) ? { skipped: names(r.skipped) } : {}),
+    ...(Array.isArray(r.captured) ? { captured: names(r.captured) } : {}),
+  };
+  if (r.state === 'complete') out.complete = true;
+  else if (r.state === 'running') {
+    // Killed outright (no trap ran) reads as unfinished once it is hours old.
+    if (now - (Date.parse(startedAt ?? '') || 0) > RUN_STALE_MS) out.complete = false;
+    else out.running = true;
+  } else out.complete = false;
+  return out;
+}
+
+export const STATUS_FILE = 'backup-status.json';
+
+function safeStatSize(p: string): number {
+  try {
+    return statSync(p).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Every backup set on disk, newest first. Missing base dir → []. `others`:
+ * also the sets made by another install or under an earlier key, marked
+ * `foreign` (the list and the readiness, which offer them for a restore);
+ * without it, this install's own only (what "the newest set" means).
+ * `limit`: stop at that many sets kept. Newest first, and a set's owner read
+ * only when it is reached: the home screen's ?latest=1 read every set's mark
+ * (and a legacy set's saved key) for the one it shows (second review of HB-0540).
+ */
+export function listBackups(base = backupsDir(), opts: { others?: boolean; limit?: number } = {}): BackupSet[] {
+  if (!existsSync(base)) return [];
+  const prefixes = [`${process.env.HATCHABOT_PREFIX || 'hatchabot'}-`, 'agentclaw-'];
+  const mark = ownerMark();
+  const sets: BackupSet[] = [];
+  // The names are dates (YYYY-MM-DD): sorted as text, newest first.
+  for (const entry of readdirSync(base).filter((e) => DATE_DIR.test(e)).sort().reverse()) {
+    if (opts.limit !== undefined && sets.length >= opts.limit) break;
+    const dir = join(base, entry);
+    let files: string[];
+    let foreign = false;
+    try {
+      if (!statSync(dir).isDirectory()) continue;
+      foreign = foreignSet(dir, mark);
+      // Another install's, or this one's under an earlier key: only when asked (HB-0540).
+      if (foreign && !opts.others) continue;
+      files = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    let sizeBytes = 0;
+    const volumes: BackupVolume[] = [];
+    for (const f of files) {
+      const size = safeStatSize(join(dir, f));
+      sizeBytes += size;
+      if (f.endsWith('.tgz')) {
+        const stem = f.slice(0, -'.tgz'.length);
+        volumes.push({
+          name: (() => { const p = prefixes.find((x) => stem.startsWith(x)); return p ? stem.slice(p.length) : stem; })(),
+          file: f,
+          sizeBytes: size,
+        });
+      }
+    }
+    volumes.sort((a, b) => a.name.localeCompare(b.name));
+    sets.push({
+      date: entry,
+      sizeBytes,
+      hasDb: files.includes('hatchabot.sqlite') || files.includes('agentclaw.sqlite'),
+      hasKey: files.includes('secret-key.env'),
+      volumes,
+      ...readSetStatus(dir),
+      ...(foreign ? { foreign: true } : {}),
+    });
+  }
+  return sets;
+}
+
+/**
+ * Active agents whose volume is not in this set — an agent on another
+ * machine (a runner) is never in it, since the nightly script archives only
+ * this machine's volumes, and the panel listed only what a set holds, so
+ * nothing said so (review, 2026-09-29). Agents made after the run started
+ * are not "missing" from it.
+ */
+export function agentsMissingFromSet(
+  set: Pick<BackupSet, 'date' | 'volumes' | 'startedAt'>,
+  agents: Array<{ id: string; name: string; runtimeRef?: string; createdAt: string; hostId: string }>,
+  hostName: (hostId: string) => string | undefined,
+): Array<{ agentId: string; name: string; host?: string }> {
+  const have = new Set(set.volumes.map((v) => v.file));
+  const cutoff = Date.parse(set.startedAt ?? '') || Date.parse(`${set.date}T00:00:00`);
+  const out: Array<{ agentId: string; name: string; host?: string }> = [];
+  for (const a of agents) {
+    if (!a.runtimeRef || have.has(agentArchiveName(a.runtimeRef))) continue;
+    const made = Date.parse(a.createdAt);
+    if (Number.isFinite(made) && made >= cutoff) continue;
+    const host = hostName(a.hostId);
+    out.push({ agentId: a.id, name: a.name, ...(host ? { host } : {}) });
+  }
+  return out;
+}
+
+/** Delete one dated backup set. Refuses anything that isn't a `YYYY-MM-DD`
+ *  directory living directly under the base — so a crafted date can never
+ *  escape the backups dir. Returns whether something was removed. */
+export function pruneBackup(date: string, base = backupsDir()): boolean {
+  if (!DATE_DIR.test(date)) throw new Error('Not a backup date.');
+  const target = resolve(base, date);
+  // Belt to the regex's suspenders: the resolved path must sit exactly one
+  // level under the (resolved) base — no `..`, no symlink hop out.
+  if (dirname(target) !== resolve(base)) throw new Error('Refusing to delete outside the backups directory.');
+  if (!existsSync(target)) return false;
+  // A dated link to a folder elsewhere is not followed: the lock below was
+  // written into the folder it points at, outside the backups directory, and
+  // left there live while only the link went (HB-0328).
+  if (lstatSync(target).isSymbolicLink()) {
+    throw new Error(`The ${date} backup is a link to a folder elsewhere, not a set kept here. Remove the link (or what it points at) by hand once you have looked.`);
+  }
+  // Another install's set, or this one's under an earlier key: never deleted from here (HB-0540).
+  if (foreignSet(target)) throw new Error(NOT_DELETED_HERE(date));
+  // A set a run is still writing is not deleted: removing it took the run's
+  // lock with it, so the run wrote into nothing and a second run could start
+  // on the same day (#139). The lock is taken here, as the script takes it,
+  // so a run that starts while this deletes stops instead.
+  const lock = join(target, BACKUP_LOCK);
+  const busy = () => new BackupBusyError(`The ${date} backup is still being written. Wait for the run to finish, then delete it.`);
+  try { mkdirSync(lock); } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    if (lockHeld(lock)) throw busy();
+    // Share the script's takeover mutex and judge the PID again under it:
+    // a new run may have replaced the stale lock while it was being read.
+    const takeover = `${lock}.takeover`;
+    try { mkdirSync(takeover); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        // As the script does: only an old, empty takeover is cleared, and
+        // this attempt stops. A fresh retry must acquire it for itself.
+        try { if (Date.now() - statSync(takeover).mtimeMs > 60_000) rmdirSync(takeover); } catch { /* active or not empty */ }
+        throw busy();
+      }
+      throw err;
+    }
+    try {
+      if (lockHeld(lock)) throw busy();
+      rmSync(lock, { recursive: true, force: true });
+      // A run may have won the front door after the old lock went away.
+      try { mkdirSync(lock); } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw busy();
+        throw err;
+      }
+    } finally {
+      try { rmdirSync(takeover); } catch { /* the script can clear an old empty takeover */ }
+    }
+  }
+  writeFileSync(join(lock, 'pid'), String(process.pid));
+  // Out of the way in one step, then removed: no moment where the set's
+  // name holds half a set.
+  const doomed = join(resolve(base), `.deleting-${date}-${process.pid}`);
+  try {
+    renameSync(target, doomed);
+  } catch (err) {
+    // Still there, so its lock (this process's pid) goes: left, it read as a
+    // backup under way for as long as this process ran.
+    rmSync(lock, { recursive: true, force: true });
+    throw err;
+  }
+  rmSync(doomed, { recursive: true, force: true });
+  return true;
+}
+
+/** The script's per-set lock (scripts/backup-volumes.sh: `$DEST/.backup-lock`, holding the run's pid). */
+export const BACKUP_LOCK = '.backup-lock';
+
+/** Refused because a backup run holds the set. */
+export class BackupBusyError extends Error {}
+
+/** Whether a set's lock belongs to a run that is still going: its pid lives, or it has no pid yet and is under a minute old (the script's own rule). */
+function lockHeld(lock: string): boolean {
+  let pid = NaN;
+  try { pid = Number(readFileSync(join(lock, 'pid'), 'utf8').trim()); } catch { /* no pid yet */ }
+  if (!Number.isInteger(pid) || pid <= 0) {
+    try { return Date.now() - statSync(lock).mtimeMs < 60_000; } catch { return false; }
+  }
+  return processAlive(pid);
+}
+
+// ---- "Back up now" -------------------------------------------------------
+// The script can take minutes on large volumes, far longer than an HTTP
+// request should hang. So a run is fire-and-poll: start it, watch a small
+// in-memory state, and let the panel ask how it went.
+
+export type BackupRunStatus = 'idle' | 'running' | 'ok' | 'error';
+
+export interface BackupRunState {
+  status: BackupRunStatus;
+  startedAt?: number;
+  /** tail of the script's own output — progress lines, never file contents */
+  summary?: string;
+}
+
+let runState: BackupRunState = { status: 'idle' };
+
+export function backupRunState(): BackupRunState {
+  return runState;
+}
+
+/** A lock older than this is not a run's: no backup takes half a day. */
+const LOCK_STALE_MS = 12 * 3600_000;
+
+/** The mark this install's sets carry in `.backup-owner` (key_owner in backup-volumes.sh); undefined without a key. */
+export function ownerMark(key = process.env.HATCHABOT_SECRET_KEY): string | undefined {
+  return key ? createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16) : undefined;
+}
+
+/**
+ * Whether a set was made by another install, or by this one under an earlier
+ * key: two installs that share a backup folder each write their own sets
+ * there, and the script leaves the other's alone. Listing, deleting and
+ * restoring here did not ask, so one install offered, deleted and restored
+ * from the other's sets (HB-0540). The mark cannot tell another install from
+ * this one before a reinstall or a key change, so such a set is listed,
+ * labelled, never deleted from here, and restored only when confirmed. Read as
+ * the script's retention reads it: the set's `.backup-owner`, or for a set
+ * from before that file, the mark of the key it saved. Only when this
+ * install's own mark is known (as backupRunning); a set that says neither is
+ * taken as this one's.
+ */
+export function foreignSet(dir: string, mark = ownerMark()): boolean {
+  if (!mark) return false;
+  const owner = setOwner(dir);
+  return owner !== '' && owner !== mark;
+}
+
+/**
+ * Each set's owner as last read, by its folder, until the files it was read
+ * from change: every listing read every set's mark, and hashed the saved key
+ * of every set from before the mark, on each call (sixth review of HB-0540).
+ * Small and bounded: a folder holds a few weeks of sets.
+ */
+const setOwners = new Map<string, { stamp: string; owner: string }>();
+const SET_OWNERS_MAX = 1000;
+function setOwner(dir: string): string {
+  const stampOf = (f: string) => { try { const st = statSync(join(dir, f)); return `${st.ino}:${st.size}:${st.mtimeMs}`; } catch { return '-'; } };
+  const stamp = `${stampOf('.backup-owner')}|${stampOf('secret-key.env')}`;
+  const known = setOwners.get(dir);
+  if (known && known.stamp === stamp) return known.owner;
+  let owner = '';
+  try { owner = readFileSync(join(dir, '.backup-owner'), 'utf8').trim(); } catch { /* not marked */ }
+  if (!owner) {
+    try {
+      const saved = parseEnv(readFileSync(join(dir, 'secret-key.env'), 'utf8'));
+      // '' for a file that holds neither name: undefined would take ownerMark's
+      // default, this install's own key, and call the set this install's,
+      // where backup-owner.sh's set_owner says it names none (fifteenth review).
+      owner = ownerMark(saved.HATCHABOT_SECRET_KEY ?? saved.AGENTCLAW_SECRET_KEY ?? '') ?? '';
+    } catch { /* no key saved */ }
+  }
+  if (setOwners.size >= SET_OWNERS_MAX) setOwners.clear();
+  setOwners.set(dir, { stamp, owner });
+  return owner;
+}
+
+/** Why a set is marked: the mark cannot tell which. */
+const OTHER_KEY_WHY = (date: string) =>
+  `The ${date} backup was made by another install, or under an earlier key: another Hatchabot install that shares this backup folder, or this one before its HATCHABOT_SECRET_KEY changed (a reinstall, or a key changed by hand).`;
+/** Said when Delete is asked for such a set. */
+const NOT_DELETED_HERE = (date: string) =>
+  `${OTHER_KEY_WHY(date)} So it is not deleted from here, and the nightly clean-up leaves it too. If it is this install's own and no longer wanted, delete its folder (${date}) in the backup folder by hand.`;
+/**
+ * Said when a restore from such a set is asked without the owner's yes. Its
+ * key does not stop the restore: only the agent's archive goes back into its
+ * volume (the set's database and saved key are not used), the archive holds
+ * nothing sealed with the install key, and this install's bot, members and
+ * model are put back over it (reapply).
+ */
+const RESTORE_ASKS = (date: string) =>
+  `${OTHER_KEY_WHY(date)} Restore from it only if it is this agent's own copy. The key it was made under does not stop it: the agent's memory and files come back, and its current bot, members and model are put back over them. Confirm to go ahead (from the command line: --other-key).`;
+
+/**
+ * Whether a backup is being made now: "Back up now" from this process, or a
+ * run that holds today's or yesterday's set lock (the script writes only into
+ * `$(date +%F)`; yesterday's for a run that began before midnight). Read
+ * from the locks, not the sets' records: a run killed outright leaves its
+ * record "running" for hours, and its lock is taken for dead at once. Not a
+ * lock over 12 hours old (a crash left it, and its pid may be another
+ * process's now), not one holding this process's own pid (a Delete that
+ * failed; this process's own run is runState), and not another install's set
+ * in a shared folder.
+ */
+export function backupRunning(base = backupsDir(), now = Date.now()): boolean {
+  if (runState.status === 'running') return true;
+  const mark = ownerMark();
+  const d = new Date(now);
+  for (const back of [0, 1]) {
+    const day = new Date(d.getFullYear(), d.getMonth(), d.getDate() - back);
+    const date = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+    const lock = join(base, date, BACKUP_LOCK);
+    let age: number;
+    try { age = now - statSync(lock).mtimeMs; } catch { continue; }
+    if (age > LOCK_STALE_MS) continue;
+    if (mark) {
+      let owner = '';
+      try { owner = readFileSync(join(base, date, '.backup-owner'), 'utf8').trim(); } catch { /* not marked */ }
+      if (owner && owner !== mark) continue;
+    }
+    let pid = '';
+    try { pid = readFileSync(join(lock, 'pid'), 'utf8').trim(); } catch { /* none yet */ }
+    if (pid === String(process.pid)) continue;
+    if (lockHeld(lock)) return true;
+  }
+  return false;
+}
+
+/**
+ * How long a run's EXIT trap has, once the run is past its time limit and
+ * asked to stop, before what is left of it is killed: the backup's removes
+ * its one-shot (two minutes at most), the drill's its throwaway container
+ * and volume (HB-0923, HB-0924).
+ */
+export const SCRIPT_KILL_GRACE_MS = 3 * 60_000;
+
+/**
+ * A script run's time limit (HB-0923, HB-0924). The script runs detached, a
+ * process group of its own. At `afterMs` the whole group is asked to stop
+ * (SIGTERM: bash runs its trap only once the step it waits for ends, so the
+ * step is told too), and the trap writes its record and removes what it
+ * started. `graceMs` later, whatever is still in the group is killed
+ * (SIGKILL) and `stopped` settles the run, whether or not its output ever
+ * closes: a docker call the trap began after the signal, stuck on a daemon
+ * that does not answer, kept the run "running" for good. Returns what calls
+ * it off (the run ended by itself: its output closed).
+ */
+export function scriptDeadline(child: ChildProcess, afterMs: number, graceMs: number, on: { term: () => void; stopped: () => void }): () => void {
+  const signal = (sig: NodeJS.Signals) => {
+    try { if (child.pid) process.kill(-child.pid, sig); else child.kill(sig); }
+    catch { try { child.kill(sig); } catch { /* gone */ } }
+  };
+  let hard: NodeJS.Timeout | undefined;
+  const soft = setTimeout(() => {
+    on.term();
+    signal('SIGTERM');
+    hard = setTimeout(() => { signal('SIGKILL'); on.stopped(); }, graceMs);
+    hard.unref?.();
+  }, afterMs);
+  soft.unref?.();
+  return () => { clearTimeout(soft); if (hard) clearTimeout(hard); };
+}
+
+/** "Back up now" is stopped after this long: the app reads a run that says "running" this long as killed (RUN_STALE_MS). */
+export const BACKUP_KILL_MS = RUN_STALE_MS;
+
+/** Said when a restore would write a volume while a backup reads it. */
+const BACKUP_UNDER_WAY = 'A backup is being made right now, and it would copy this agent half-restored, so nothing was changed. Try again once it finishes (usually a few minutes).';
+
+/**
+ * Start a backup unless one is already running (in which case the current
+ * state is returned unchanged — the button is idempotent). `now` is injected
+ * so callers can stamp times without this module reaching for the clock.
+ * Stopped at its time limit (`limits`, scriptDeadline): with no limit, a
+ * Docker that took the call and never answered held "Back up now", and
+ * every restore it refuses, running for good (HB-0923).
+ */
+export function startBackup(
+  now: number,
+  onFinish?: (state: BackupRunState) => void,
+  limits: { killAfterMs: number; graceMs: number } = { killAfterMs: BACKUP_KILL_MS, graceMs: SCRIPT_KILL_GRACE_MS },
+): BackupRunState {
+  if (runState.status === 'running') return runState;
+  // This run's own: settled once, by whichever of its ends comes first. A
+  // step that outlived the time limit held the output open, and its late
+  // close settled the NEXT run with this one's result and left that run's
+  // operation running for good (review of HB-0923).
+  const mine: BackupRunState = { status: 'running', startedAt: now };
+  runState = mine;
+  let over = false;
+  const settle = (next: BackupRunState) => {
+    if (over) return;
+    over = true;
+    if (runState === mine) runState = next;
+    try { onFinish?.(next); } catch { /* the record of a run never breaks the run */ }
+  };
+
+  const lines: string[] = [];
+  const capture = (buf: Buffer) => {
+    for (const l of buf.toString('utf8').split('\n')) if (l.trim()) lines.push(l);
+    // Keep only the tail — a big run shouldn't grow this without bound.
+    if (lines.length > 40) lines.splice(0, lines.length - 40);
+  };
+
+  // Under a test runner the real script would back up THIS machine into the
+  // real ~/hatchabot-backups: run from a checkout it found no database,
+  // refused, and its "incomplete, 0 volumes" record replaced the night's real
+  // one (2026-10-01 to 10-03, every test run). Tests name a script of their own.
+  const script = process.env.HATCHABOT_BACKUP_SCRIPT ?? ((process.env.VITEST || process.env.NODE_ENV === 'test') ? '' : SCRIPT);
+  if (!script) {
+    runState = { status: 'error', startedAt: runState.startedAt, summary: 'Backups are not run under a test runner (set HATCHABOT_BACKUP_SCRIPT to a test script).' };
+    return runState;
+  }
+  let child;
+  try {
+    // Its own process group, so its time limit stops the step it is in too.
+    // HATCHABOT_BACKUP_BY_APP: this run has the key the service started with,
+    // which the script saves even when .env's was changed since, with a
+    // warning; a run by hand with a key that is not .env's is refused there
+    // (HB-1065 review).
+    child = spawn('bash', [script], { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: { ...process.env, HATCHABOT_BACKUP_BY_APP: '1' } });
+  } catch (err) {
+    runState = { status: 'error', startedAt: runState.startedAt, summary: String((err as Error)?.message ?? err) };
+    return runState;
+  }
+  const hours = Math.round(limits.killAfterMs / 3600_000);
+  const callOff = scriptDeadline(child, limits.killAfterMs, limits.graceMs, {
+    term: () => { lines.push(`The backup took longer than ${hours >= 1 ? `${hours} hour${hours === 1 ? '' : 's'}` : 'its time limit'} and was stopped: Docker may not be answering. Check it (docker info), then back up again.`); },
+    stopped: () => { settle({ status: 'error', startedAt: now, summary: lines.slice(-15).join('\n') }); },
+  });
+  child.stdout?.on('data', capture);
+  child.stderr?.on('data', capture);
+  child.on('error', (err) => {
+    callOff();
+    settle({
+      status: 'error',
+      startedAt: now,
+      summary: `Couldn't run the backup script: ${err.message}`,
+    });
+  });
+  child.on('close', (code) => {
+    callOff();
+    // A run that already ended (a spawn error, its time limit) stays as it ended.
+    settle({
+      status: code === 0 ? 'ok' : 'error',
+      startedAt: now,
+      summary: lines.slice(-15).join('\n') || (code === 0 ? 'Backup complete.' : `Backup failed (exit ${code}).`),
+    });
+  });
+  return runState;
+}
+
+// ---- restore ONE agent from a backup set ---------------------------------
+
+export class RestoreError extends Error {
+  /** `code`: a refusal the owner can answer (other_key: confirm with `otherKey`). */
+  constructor(public userMessage: string, public code?: 'other_key') {
+    super(userMessage);
+    this.name = 'RestoreError';
+  }
+}
+
+/**
+ * The tarball basename the nightly script wrote for a runtime's volume. The
+ * backup archives each `${PREFIX}-*` docker volume as `<volume>.tgz`, and the
+ * volume is the docker provider's for the ref (dockerNames: `<name>-vol`, or
+ * `agentclaw-vol-<short>` for a legacy pre-slug ref, which this used to name
+ * `<short>-vol` — no restore found its archive, audit #021). Docker-specific
+ * by design, like the rest of the backup subsystem (the script, exportState,
+ * importState); another kind of ref (a test's mock) is `<name>-vol`.
+ */
+export function agentArchiveName(runtimeRef: string, prefix = process.env.HATCHABOT_PREFIX ?? DEFAULT_PREFIX): string {
+  const volume = runtimeRef.startsWith('docker://') ? dockerNames(runtimeRef, prefix).volume : `${runtimeRef.replace(/^\w+:\/\//, '')}-vol`;
+  return `${volume}.tgz`;
+}
+
+/**
+ * Where a restore keeps the copy it took of an agent's volume first, when
+ * neither the restore nor putting that copy back worked: the agent's only
+ * good state then lives in that file (issue #12). Beside the dated sets, but
+ * not one of them, so listBackups and the nightly prune never touch it.
+ */
+export function restoreSafetyDir(): string {
+  return installFolder('restore-safety');
+}
+
+/**
+ * A folder of this install's own beside the sets, named by the mark its backup
+ * sets carry (key_owner in backup-volumes.sh, which uninstall.sh reads too):
+ * two installs may share this base, and one's boot sweep took the copy the
+ * other was using, and one user's private folder refused another's.
+ */
+function installFolder(name: string): string {
+  const key = process.env.HATCHABOT_SECRET_KEY;
+  return join(backupsDir(), key ? `${name}-${createHash('sha256').update(`hatchabot-backup-owner\0${key}`).digest('hex').slice(0, 16)}` : name);
+}
+
+/** Where this restore's copy of the volume goes (decided before it is written, so a restart knows). */
+function safetyCopyPath(runtimeRef: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return join(restoreSafetyDir(), `${agentArchiveName(runtimeRef).replace(/\.tgz$/, '')}-before-restore-${stamp}.tgz`);
+}
+
+/** A folder only its owner can enter: what goes in holds an agent's secrets, whatever the umask. */
+function privateDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+}
+
+/**
+ * Copies this process has a folder for and has not finished writing. An empty
+ * folder may be one another operation just made and is about to write into:
+ * removed under it, that operation failed with ENOENT, cancelled for no reason
+ * of its own.
+ */
+const copiesUnderWay = new Set<string>();
+/** The folder a copy lived in, when it is empty and nothing is about to write there. */
+function dropCopyFolder(dir: string): void {
+  for (const f of copiesUnderWay) if (dirname(f) === dir) return;
+  try { rmdirSync(dir); } catch { /* not empty, or gone */ }
+}
+
+/** A restore that ended either way no longer needs its copy (it holds secrets), or a copy a restart cut off half-way; the folder goes when empty. */
+function dropSafetyCopy(file: string | undefined): void {
+  // Under the name before folders were per install too: a restore held across the upgrade.
+  if (!file || !dirname(file).startsWith(join(backupsDir(), 'restore-safety'))) return;
+  copiesUnderWay.delete(file);
+  for (const f of [file, `${file}.part`]) {
+    try { rmSync(f, { force: true }); } catch { /* best effort */ }
+  }
+  dropCopyFolder(dirname(file));
+}
+
+/**
+ * Where a move keeps its copy of the volume between the two machines: this
+ * install's data folder, not the backup folder. A move has no other need of
+ * that folder, and on a NAS an unmounted or full share cancelled every move and
+ * the copy crossed the network twice (HB-0388).
+ */
+function moveCopyDir(): string {
+  const db = resolve(process.env.HATCHABOT_DB ?? defaultDbPath());
+  // Separate databases may share their parent folder. The basename is
+  // stable when a release's data/ symlink changes its absolute spelling.
+  const identity = createHash('sha256').update(basename(db)).digest('hex').slice(0, 16);
+  return join(dirname(db), `move-copies-${identity}`);
+}
+
+/** A new path for one move's copy (made by exportStateToFile), in a private folder. */
+export function newMoveCopy(): string {
+  const file = join(moveCopyDir(), `${randomUUID()}.tgz`);
+  copiesUnderWay.add(file);
+  try { privateDir(moveCopyDir()); }
+  catch (err) { copiesUnderWay.delete(file); throw err; }
+  return file;
+}
+
+/** A move that ended either way no longer needs its copy; the folder goes when empty. */
+export function dropMoveCopy(file: string | undefined): void {
+  if (!file) return;
+  copiesUnderWay.delete(file);
+  for (const f of [file, `${file}.part`]) {
+    try { rmSync(f, { force: true }); } catch { /* best effort */ }
+  }
+  dropCopyFolder(dirname(file));
+}
+
+/**
+ * Boot: copies a move held when the process ended (it holds an agent's
+ * secrets, and a resumed move never reads it: the source's volume is still
+ * there). No move of this install runs yet, and the folder is this install's
+ * alone. Legacy unmarked move-copies folders are left alone: their database
+ * cannot be identified safely. Returns how many.
+ */
+export function sweepMoveCopies(): number {
+  const dir = moveCopyDir();
+  if (!existsSync(dir)) return 0;
+  const names = readdirSync(dir);
+  for (const n of names) rmSync(join(dir, n), { force: true, recursive: true });
+  try { rmdirSync(dir); } catch { /* best effort */ }
+  return names.length;
+}
+
+function short(err: unknown): string {
+  return String(err instanceof Error ? err.message : err).replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+export interface RestoreResult {
+  date: string;
+  /** whether the agent was running before, and was started again after */
+  running: boolean;
+  /** What that night's copy had that Hatchabot's current settings undid: people since removed, an old bot. */
+  undone?: string[];
+}
+
+/**
+ * Replace ONE agent's entire volume with the copy from a backup set — the
+ * "more complete than a snapshot" restore. Destructive: it overwrites live
+ * memory, so the agent is stopped for the swap and only restarted if it was
+ * running before. A safety copy of the current volume is taken first and rolled
+ * back if the extract fails, so a broken archive can't leave a half-written
+ * volume. That copy is written under restoreSafetyDir() BEFORE the volume is
+ * replaced (and removed once the restore ends either way), so a restart in the
+ * middle can still put it back (resumeBackupRestore). If the rollback fails
+ * too, the agent is left stopped and FAILED and the copy stays there for
+ * recovery. The caller is responsible for the busy guard and for gating this
+ * to the machine's owner.
+ */
+export interface RestoreDeps {
+  store: Store; provider: RuntimeProvider; log?: (e: string, d: Record<string, unknown>) => void;
+  /** Put this installation's current settings (bot, members, model) back over the restored config, as Import and Move do. */
+  reapply?: (runtimeRef: string) => Promise<void>;
+  /**
+   * What a Start runs once it is up (the routes' clearPinsWhenUp): Google
+   * accounts detached or queued for removal come off, web chat and pins
+   * follow. A restored volume needs it as much as a started one (B022).
+   */
+  afterStart?: (agentId: string) => void;
+  /** Who asked, for the operation's record. */
+  requestedBy?: string;
+  /** Told the operation's id once it begins (the route answers 202 with it). */
+  onOperation?: (id: string) => void;
+  /** The owner confirmed a set made by another install or under an earlier key (RESTORE_ASKS). */
+  otherKey?: boolean;
+}
+
+export async function restoreAgentFromBackup(
+  deps: RestoreDeps,
+  agentId: string,
+  date: string,
+): Promise<RestoreResult> {
+  const { store } = deps;
+  if (!DATE_DIR.test(date)) throw new RestoreError('Not a backup date.');
+
+  const agent = store.getAgent(agentId);
+  if (!agent?.runtimeRef) throw new RestoreError('This agent has no runtime to restore into yet.');
+  // FAILED too: a restore that could not be undone leaves the agent FAILED
+  // (below), and restoring a backup again is how it gets its memory back.
+  if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED' && agent.state !== 'FAILED') {
+    throw new RestoreError(`Can't restore while the agent is ${agent.state}.`);
+  }
+
+  // Another install's set, or this one's under an earlier key: only on the owner's yes (HB-0540).
+  if (!deps.otherKey && foreignSet(join(backupsDir(), date))) throw new RestoreError(RESTORE_ASKS(date), 'other_key');
+  const file = join(backupsDir(), date, agentArchiveName(agent.runtimeRef));
+  if (!existsSync(file)) {
+    throw new RestoreError(`The ${date} backup doesn't contain this agent.`);
+  }
+  // Read as it goes into the volume, not into memory (HB-0066): asked here, so
+  // one it cannot read is refused before the agent is stopped.
+  try { accessSync(file, constants.R_OK); }
+  catch (err) { throw new RestoreError(`The ${date} backup of this agent could not be read (${short(err)}).`); }
+
+  // Its volume must not change under tonight's copy of it (HB-0385 review).
+  if (backupRunning()) throw new RestoreError(BACKUP_UNDER_WAY);
+
+  const wasRunning = agent.state === 'RUNNING';
+  const runtimeRef = agent.runtimeRef;
+  // Another install's set (or this one's under an earlier key): its tasks
+  // may be copies an adopt carried that this database has no record of, so
+  // adopting that folder again matches them by look (HB-0985). This
+  // install's own sets need no mark: their copies are recorded here.
+  if (foreignSet(join(backupsDir(), date))) store.markUnrecordedCarriedTasks(agentId);
+  // Recorded as it goes (operations.ts): a restart after the copy of how it
+  // was is on disk holds the agent stopped for its owner's choice, and the
+  // copy is there to put back (resumeBackupRestore).
+  const safetyFile = safetyCopyPath(runtimeRef);
+  const op = beginOperation(store, 'restore-backup', agentId, {
+    date, wasRunning, safetyFile, appliedCuratedSkillsBefore: agent.appliedCuratedSkills,
+  }, { requestedBy: deps.requestedBy });
+  deps.onOperation?.(op.id);
+  try {
+    return await restoreSteps(deps, op, agentId, runtimeRef, date, file, wasRunning, safetyFile);
+  } catch (err) {
+    rethrowIfCrash(err);
+    // Whatever was not recorded below (an unexpected error) ends the record too.
+    const row = op.get();
+    if (row.status === 'running') op.fail(err);
+    throw err;
+  }
+}
+
+async function restoreSteps(
+  deps: RestoreDeps, op: OpHandle, agentId: string, runtimeRef: string, date: string, archive: string, wasRunning: boolean, safetyFile: string,
+): Promise<RestoreResult> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const appliedCuratedSkillsBefore = op.get().params.appliedCuratedSkillsBefore as string[] | undefined;
+  const restartIfWasRunning = () => restartAfterRestore(deps, agentId, runtimeRef, wasRunning);
+  const nothingChanged = async (why: string): Promise<never> => {
+    // Its memory is as it was, but a start that failed (its machine stopped
+    // answering) leaves it stopped: said, not "left as it was" alone.
+    const startErr = await restartIfWasRunning();
+    const said = startErr
+      ? `${why} It could not be started again (${short(startErr)}), so it is stopped: start it once its machine answers.`
+      : why;
+    dropSafetyCopy(safetyFile);
+    op.rolledBack(said);
+    throw new RestoreError(said);
+  };
+
+  // Down whatever its record says, and checked (issue #21, 2026-10-09): only
+  // RUNNING used to be stopped, but a FAILED agent's container may still be up
+  // (a failed rebuild or health check leaves it so), and the copy and the
+  // import below then ran against a live agent writing to the same volume.
+  // Its record (wasRunning) still decides whether it starts again after.
+  const notDown = await confirmStopped(deps, agentId, runtimeRef);
+  if (notDown) {
+    return nothingChanged(
+      `Its runtime could not be confirmed stopped (${notDown}), so the restore did not begin — nothing was changed. ` +
+        'Try again in a moment; if its machine is asleep or off, wake it first.',
+    );
+  }
+  if (wasRunning) store.setAgentState(agentId, 'STOPPED');
+  op.step('stopped');
+
+  // Safety net: capture the current volume so a failed extract can be undone.
+  // No copy, no restore: the extract empties the volume first, so a failure
+  // part-way left nothing to go back to (night review, 2026-09-27).
+  // On disk BEFORE the volume is replaced: in memory only, a restart in the
+  // middle lost the one copy of how it was (design, "After a restart"). Streamed
+  // there, not held here, so its size no longer refuses a restore (HB-0066).
+  copiesUnderWay.add(safetyFile);
+  try {
+    privateDir(restoreSafetyDir());
+  } catch (err) {
+    copiesUnderWay.delete(safetyFile);
+    rethrowIfCrash(err);
+    log('restore.safety_keep_failed', { agentId, error: String(err) });
+    return nothingChanged(
+      `Its current state could not be saved to disk first (${short(err)}), so the restore would not be undoable — nothing was changed. ` +
+        "Check this machine's free disk space, then try again.",
+    );
+  }
+  try {
+    await provider.exportStateToFile(runtimeRef, safetyFile);
+    copiesUnderWay.delete(safetyFile); // the file itself holds the folder now
+  } catch (err) {
+    copiesUnderWay.delete(safetyFile);
+    rethrowIfCrash(err);
+    log('restore.safety_capture_failed', { agentId, error: String(err) });
+    if (err instanceof VolumeGoneError) {
+      // Both make a new, empty volume; Rebuild refuses a FAILED agent, which has Retry.
+      const wayIn = store.getAgent(agentId)?.state === 'FAILED' ? 'Tap Retry on the agent' : 'Rebuild the agent';
+      return nothingChanged(`${VOLUME_GONE} There is nothing to copy first, so the restore did not begin — nothing was changed. ${wayIn}, which makes a new, empty volume, then restore this backup.`);
+    }
+    if (isDiskFull(err)) {
+      return nothingChanged(
+        "This machine's disk is too full to hold a copy of its current state, so the restore would not be undoable — nothing was changed. " +
+          'Free some space, then try again.',
+      );
+    }
+    // No pointer at Download copy: it tars the same volume the same way, so it
+    // fails for the same reason (review, 2026-09-29).
+    return nothingChanged(
+      "Its current state could not be copied first, so the restore would not be undoable — nothing was changed. " +
+        "Try again in a moment; if it keeps failing, check this machine's free disk space.",
+    );
+  }
+  op.step('safety-taken');
+
+  /**
+   * Put the pre-restore copy back after `what` failed. Only a rollback that
+   * worked restarts the agent and may say it was left as it was. When the
+   * rollback fails too, the volume holds neither the old state nor the
+   * backup: booting it would run a half-written (and possibly too-open)
+   * config, and "left as it was" was false (issue #12). So the agent stays
+   * stopped and FAILED, the copy is kept on disk for recovery, and both
+   * failures are named.
+   */
+  const rollBack = async (what: string, cause: unknown, leftAsItWas: string): Promise<never> => {
+    let rollbackErr: unknown;
+    store.setAgentCuratedSkillsApplied(agentId, undefined);
+    // The one-shot that failed may still be extracting into the volume: putting
+    // the copy back alongside it could leave a mix of the two, restarted as
+    // "left as it was" with the copy deleted (HB-0385). So it does not begin.
+    const stillThere = cause instanceof OneShotNotGoneError ? cause.oneShot : undefined;
+    try {
+      if (stillThere) throw new Error(`the container that was unpacking it (${stillThere}) could not be confirmed gone, so putting it back did not begin`);
+      // The import replaces the volume: never under a running agent (issue #21).
+      const notDown = await confirmStopped(deps, agentId, runtimeRef);
+      if (notDown) throw new Error(`its runtime could not be confirmed stopped (${notDown})`);
+      await provider.importStateFromFile(runtimeRef, safetyFile, { ownCopy: true });
+      store.setAgentCuratedSkillsApplied(agentId, appliedCuratedSkillsBefore);
+    } catch (e) {
+      rethrowIfCrash(e);
+      rollbackErr = e;
+      log('restore.rollback_failed', { agentId, error: String(e) });
+    }
+    if (rollbackErr === undefined) {
+      const startErr = await restartIfWasRunning();
+      const said = startErr
+        ? `${leftAsItWas} It could not be started again (${short(startErr)}), so it is stopped: start it once its machine answers.`
+        : leftAsItWas;
+      dropSafetyCopy(safetyFile);
+      op.rolledBack(said);
+      throw new RestoreError(said);
+    }
+    // A re-apply may have started it again; whatever is in its volume now
+    // must not run. Keep recovery held when a final stop cannot be proved,
+    // rather than ending the operation and opening Retry on uncertain state.
+    const notDown = await confirmStopped(deps, agentId, runtimeRef, { runtimeOnly: true });
+    const where = `The copy of how it was before the restore is kept at ${safetyFile}.`;
+    if (notDown) {
+      const msg = `${what} (${short(cause)}), and putting it back as it was failed too (${short(rollbackErr)}). ` +
+        `Its runtime could not be confirmed stopped (${notDown}), so recovery stays held. ${where} ` +
+        'Bring its machine back, then finish the restore or put back the copy from before.';
+      op.hold(msg, RESTORE_CHOICES);
+      throw new RestoreError(msg);
+    }
+    // A one-shot that may still be unpacking: a restore or Put back stops it
+    // first, or does not begin; by hand, nothing does (HB-0385).
+    const byHand = stillThere
+      ? `The container that was unpacking it (${stillThere}) may still be running on its machine: a new restore stops it before it begins, or does not begin. Before putting that copy back by hand, remove it (docker rm -f ${stillThere}).`
+      : '';
+    store.setAgentState(
+      agentId,
+      'FAILED',
+      `A restore from the ${date} backup failed and could not be undone, so its memory may be half-restored. ${where} ` +
+        `Restore a backup again, or put that copy back by hand, before tapping Retry.${byHand ? ` ${byHand}` : ''}`,
+    );
+    log('restore.left_failed', { agentId, date, kept: safetyFile });
+    const msg =
+      `${what} (${short(cause)}), ${stillThere ? `and it could not be put back as it was: ${short(rollbackErr)}` : `and putting it back as it was failed too (${short(rollbackErr)})`}. ` +
+      `The agent could not be put back: it is stopped and marked failed so it does not run on a half-restored memory. ${where} ` +
+      `Restore a backup again, or put that copy back by hand, before starting it.${byHand ? ` ${byHand}` : ''}`;
+    op.fail(msg);
+    throw new RestoreError(msg);
+  };
+
+  forgetDmPolicy(agentId); // the restored config is whatever the archive held
+  try {
+    await provider.importStateFromFile(runtimeRef, archive);
+    // The replacement has that night's config. Only a successful current
+    // configuration can establish which library selection now applies.
+    store.setAgentCuratedSkillsApplied(agentId, undefined);
+  } catch (err) {
+    rethrowIfCrash(err);
+    log('restore.import_failed', { agentId, error: String(err) });
+    // It stopped before the volume was emptied: nothing to put back. Putting it
+    // back anyway staged the safety copy the same way, and on a disk too full
+    // for the backup (the copy is usually the larger) that failed too and marked
+    // an untouched agent FAILED and half-restored.
+    // Also one Docker never started (HB-0384): refused at create, `no space
+    // left on device`, or a runner that dropped between the copy and here.
+    if (err instanceof VolumeUntouchedError) {
+      return nothingChanged(
+        isDiskFull(err)
+          ? 'Restore failed because the disk is full — the agent was left as it was. Free some space, then try again.'
+          : `Restore failed (${short(err)}) — the agent was left as it was.`,
+      );
+    }
+    store.setAgentCuratedSkillsApplied(agentId, undefined);
+    // The volume may be half-overwritten. Put the pre-restore state back, so a
+    // broken archive never corrupts a working agent.
+    await rollBack(
+      'Restore failed',
+      err,
+      isDiskFull(err)
+        ? "Restore failed because the disk is full — the agent was left as it was. Free some space, then try again."
+        : 'Restore failed — the agent was left as it was.',
+    );
+  }
+  op.step('replaced');
+
+  let undone: string[];
+  try {
+    undone = await applyCurrentSettingsOver(deps, agentId, runtimeRef, archiveMadeAt(date, archive));
+  } catch (err) {
+    rethrowIfCrash(err);
+    // Never leave that night's access in force: back to how it was before.
+    log('restore.reapply_failed', { agentId, error: String(err) });
+    return rollBack(
+      "The backup was read, but this agent's current settings could not be put back over it",
+      err,
+      "The backup was read, but this agent's current settings could not be put back over it, so it was left as it was.",
+    );
+  }
+  op.step('reapplied');
+  return completeRestore(deps, op, agentId, runtimeRef, date, wasRunning, safetyFile, undone);
+}
+
+/**
+ * Stop the runtime and check that it is down before its volume is copied or
+ * replaced (issue #21, 2026-10-09). Undefined when it is confirmed stopped
+ * or gone; otherwise why not. A stop that fails on a container already gone
+ * is fine; one whose machine cannot be reached is not knowably down.
+ */
+async function confirmStopped(deps: RestoreDeps, agentId: string, runtimeRef: string, opts: { runtimeOnly?: boolean } = {}): Promise<string | undefined> {
+  const log = deps.log ?? (() => {});
+  let stopErr: unknown;
+  try {
+    await deps.provider.stop(runtimeRef);
+  } catch (err) {
+    rethrowIfCrash(err);
+    stopErr = err;
+  }
+  const st = await deps.provider.status(runtimeRef).catch((err: unknown) => {
+    rethrowIfCrash(err);
+    return { phase: 'unknown' as const };
+  });
+  if (st.phase !== 'stopped' && st.phase !== 'absent') {
+    log('restore.not_stopped', { agentId, phase: st.phase, ...(stopErr ? { error: String(stopErr) } : {}) });
+    const why = stopErr ? `: ${short(stopErr)}` : '';
+    return st.phase === 'unknown' ? `its machine did not answer${why}` : `it is still ${st.phase}${why}`;
+  }
+  if (opts.runtimeOnly) return undefined;
+  // Nor anything else writing its volume: a copy a failed restore could not
+  // remove, going on once a runner woke (HB-0385).
+  const busy = await deps.provider.stopVolumeWriters?.(runtimeRef).catch((err: unknown) => {
+    rethrowIfCrash(err);
+    return `they could not be listed (${short(err)})`;
+  });
+  if (busy) {
+    log('restore.volume_busy', { agentId, detail: busy });
+    return `an earlier copy into its memory may still be running: ${busy}`;
+  }
+  return undefined;
+}
+
+/** What an outcome adds when restartAfterRestore could not start it again: nothing when it could. */
+const notStartedAgain = (startErr: unknown): string =>
+  startErr ? ` It could not be started again (${short(startErr)}), so it is stopped: start it once its machine answers.` : '';
+
+/** Start it again if the restore stopped it; a failed start is logged and returned, not thrown (the result says what it is). */
+async function restartAfterRestore(deps: RestoreDeps, agentId: string, runtimeRef: string, wasRunning: boolean): Promise<unknown> {
+  if (!wasRunning) return undefined;
+  try {
+    await deps.provider.start(runtimeRef);
+    if (deps.store.getAgent(agentId)?.state !== 'RUNNING') deps.store.setAgentState(agentId, 'RUNNING');
+  } catch (startErr) {
+    (deps.log ?? (() => {}))('restore.restart_failed', { agentId, error: String(startErr) });
+    return startErr ?? new Error('start failed');
+  }
+  deps.afterStart?.(agentId);
+  return undefined;
+}
+
+/**
+ * The backup is that night's whole volume, config and approvals included.
+ * Memory and files are what a restore is for; who may talk to the agent and
+ * which bot it uses follow Hatchabot's records now, or a removed member was
+ * let back in where the app could not show it, and a swapped-away bot was
+ * polled by two agents (review #5, 2026-09-29; Chris chose this over a
+ * whole-volume rollback). What was undone is reported, not silently dropped.
+ * Throws when the part that matters for safety could not be done. Its
+ * Google accounts follow today's attachments when it starts (afterStart);
+ * one taken off it since the copy was made (`copiedAt`) is queued to come
+ * off again first, as nothing else would name it (HB-1085).
+ */
+async function applyCurrentSettingsOver(deps: RestoreDeps, agentId: string, runtimeRef: string, copiedAt: number): Promise<string[]> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const undone: string[] = [];
+  queueRemovalsSince(store, agentId, Number.isFinite(copiedAt) ? copiedAt : 0);
+  // The tasks Hatchabot made on it (the weekly review) are the copy's now:
+  // its next build makes one again that the copy cannot hold (HB-1123).
+  store.matchManagedCronsToCopy(agentId, Number.isFinite(copiedAt) ? copiedAt : 0);
+  try {
+    const seen = await provider.execShellOnVolume(runtimeRef, RESTORED_ACCESS_SCRIPT, { readOnly: true });
+    const had = JSON.parse(seen.stdout || '{}') as { ids?: string[]; telegramAccounts?: string[] };
+    const ids = new Set(had.ids ?? []);
+    const back = revokedScrubTargets(store, agentId).people.filter((p) => p.ids.some((id) => ids.has(id))).map((p) => p.name);
+    if (back.length) undone.push(`That night's copy still let ${back.join(', ')} in; ${back.length === 1 ? 'they stay' : 'they all stay'} removed.`);
+    const current = store.getChannelForAgent(agentId, 'telegram')?.accountId;
+    if ((had.telegramAccounts ?? []).some((k) => k !== current)) {
+      undone.push(current ? 'It used a different Telegram bot that night; it keeps the one it has now.' : 'It had a Telegram bot that night; it stays without one.');
+    }
+  } catch (err) {
+    rethrowIfCrash(err);
+    log('restore.access_read_failed', { agentId, error: String(err) });
+  }
+  if (deps.reapply) {
+    try { await deps.reapply(runtimeRef); }
+    catch (err) {
+      rethrowIfCrash(err);
+      // A full re-apply can fail for reasons a rebuild would too (its AI
+      // source gone). The part that matters for safety still runs: only its
+      // current bot stays; the rest follows at its next rebuild.
+      log('restore.reapply_partial', { agentId, error: String(err).slice(0, 200) });
+      store.setAgentCuratedSkillsApplied(agentId, undefined);
+      const res = await provider.execShellOnVolume(runtimeRef, keepOnlyTelegramAccountScript(store.getChannelForAgent(agentId, 'telegram')?.accountId));
+      if (res.code !== 0) throw new Error(`dropping the old bot failed: ${res.stderr.slice(-200)}`);
+      // Slack and Discord too: that night's tokens must not run either, and
+      // without the build they can't be told from today's (B023). Google
+      // accounts are matched to today's attachments when it starts (afterStart).
+      const chat = await provider.execShellOnVolume(runtimeRef, DROP_CHAT_ACCOUNTS_SCRIPT);
+      if (chat.code !== 0) throw new Error(`turning off Slack and Discord failed: ${chat.stderr.slice(-200)}`);
+      const hasChat = !!(store.getChannelForAgent(agentId, 'slack') || store.getChannelForAgent(agentId, 'discord'));
+      undone.push(
+        `Its current settings couldn't all be put back now (${short(err)}). To be safe it keeps only its current Telegram bot, ` +
+          `has Slack and Discord off, and its Google accounts are matched to the ones attached now when it next starts. ` +
+          `The rest (model, AI source${hasChat ? ', its Slack or Discord' : ''}) follows at its next rebuild.`,
+      );
+    }
+  }
+  const { targets } = revokedScrubTargets(store, agentId);
+  if (targets.length) {
+    const res = await provider.execShellOnVolume(runtimeRef, allowlistScrubScript(targets));
+    if (res.code !== 0) throw new Error(`removing people again failed: ${res.stderr.slice(-200)}`);
+  }
+  return undone;
+}
+
+/**
+ * The earliest a set's archives can have been made: the start of its day
+ * here, the day the script names it by (`date +%F`).
+ */
+function setMadeFrom(date: string): number {
+  const [y, m, d] = date.split('-').map(Number);
+  return new Date(y!, m! - 1, d!).getTime();
+}
+
+/**
+ * When an archive of the `date` set was read, as early as it can say: the
+ * first of the file's own times (made, last written) and its set's run's
+ * start. Not the record's start alone: a later run of the same day keeps
+ * the archives an earlier one made (HB-0433), so the file's own times can
+ * come first. A time outside that set's day (and the six hours a run may
+ * go on past midnight), a copied set's, falls back to the start of its day.
+ * The start of the day alone counted an account taken off at ten and
+ * connected by the agent itself at eleven as in the noon copy against the
+ * owner's wish, and took it off again (review of HB-1085).
+ */
+function archiveMadeAt(date: string, file: string): number {
+  const from = setMadeFrom(date);
+  const times: number[] = [];
+  try {
+    const st = statSync(file);
+    times.push(st.mtimeMs);
+    if (st.birthtimeMs > 0) times.push(st.birthtimeMs);
+  } catch { /* gone: the day's start */ }
+  const started = Date.parse(readSetStatus(dirname(file)).startedAt ?? '');
+  if (Number.isFinite(started)) times.push(started);
+  const at = Math.min(...times);
+  return times.length && at >= from && at < from + 86_400_000 + RUN_STALE_MS ? at : from;
+}
+
+/** The last of a restore: say so, start it again if it ran, and drop the copy of how it was. */
+async function completeRestore(
+  deps: RestoreDeps, op: OpHandle, agentId: string, runtimeRef: string, date: string, wasRunning: boolean, safetyFile: string | undefined, undone: string[],
+): Promise<RestoreResult> {
+  const { store } = deps;
+  (deps.log ?? (() => {}))('agent.restored', { agentId, date, undone: undone.length });
+  // A FAILED agent (an earlier restore that could not be undone) has its
+  // memory back now; Retry is what starts it.
+  if (store.getAgent(agentId)?.state === 'FAILED') {
+    store.setAgentState(agentId, 'FAILED', `Restored from the ${date} backup — tap Retry to start it.`);
+  }
+  await restartAfterRestore(deps, agentId, runtimeRef, wasRunning);
+  dropSafetyCopy(safetyFile);
+  // What it IS now, not what it was: a failed restart used to report "restarting".
+  const running = store.getAgent(agentId)?.state === 'RUNNING';
+  // What it undid rides the outcome: the request no longer waits for the
+  // answer that used to carry it (phase 3), so the outcome is what the page
+  // and the CLI show.
+  op.done(`Restored from the ${date} backup${running ? '' : wasRunning ? '; it could not be started again' : ''}.${undone.map((u) => ` ${u}`).join('')}`);
+  return { date, running, ...(undone.length ? { undone } : {}) };
+}
+
+/** The choices a restore interrupted with its volume possibly half-written offers. */
+const RESTORE_CHOICES = {
+  actions: [
+    { action: 'finish', label: 'Finish the restore' },
+    { action: 'put-back', label: 'Put back the copy from before' },
+  ],
+  recommended: 'finish',
+};
+
+/**
+ * A restore a restart cut off (the design's restore-backup row). Before the
+ * copy of how it was reached the disk nothing was changed: it is started again
+ * if it ran. From then until its settings were put back over that night's
+ * copy, its volume may be half-written and only the owner knows which way they
+ * want it: held, stopped, with [Finish the restore] [Put back the copy from
+ * before]. After that, only the restart was left: finished.
+ */
+export async function resumeBackupRestore(deps: RestoreDeps, opId: string): Promise<void> {
+  const op = handleFor(deps.store, opId);
+  const row = op.get();
+  const p = row.params as { date?: string; wasRunning?: boolean; safetyFile?: string; appliedCuratedSkillsBefore?: string[] };
+  const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
+  if (!agent?.runtimeRef || agent.state === 'DELETED') { op.fail('Interrupted by a restart; the agent is gone.'); return; }
+  const date = String(p.date ?? '');
+  const step = row.step ?? null;
+  if (step === null || step === 'stopped') {
+    const startErr = await restartAfterRestore(deps, agent.id, agent.runtimeRef, p.wasRunning === true);
+    dropSafetyCopy(p.safetyFile);
+    op.rolledBack(`The restore from the ${date} backup was interrupted by a restart before anything was changed — ${startErr ? 'its memory is as it was.' : 'it is as it was.'}${notStartedAgain(startErr)}`);
+    return;
+  }
+  if (step === 'reapplied') {
+    await completeRestore(deps, op, agent.id, agent.runtimeRef, date, p.wasRunning === true, p.safetyFile, []);
+    return;
+  }
+  // A crash may have interrupted the replacement or current configuration.
+  deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
+  // Whatever its volume holds now must not run until the owner chooses. Checked
+  // down, not assumed: a stop whose machine did not answer used to be
+  // recorded STOPPED and told the owner it "stays stopped" (B021). Held either
+  // way; the choices check again before they touch the volume.
+  const notDown = await confirmStopped(deps, agent.id, agent.runtimeRef);
+  if (notDown) {
+    op.hold(
+      `The restore from the ${date} backup was interrupted by a restart, so its memory may be half-restored, and its runtime ` +
+        `could not be confirmed stopped (${notDown}). Wake its machine or bring Docker back, then choose.`,
+      RESTORE_CHOICES,
+    );
+    return;
+  }
+  if (agent.state === 'RUNNING') deps.store.setAgentState(agent.id, 'STOPPED');
+  op.hold(
+    `The restore from the ${date} backup was interrupted by a restart, so its memory may be half-restored. It stays stopped until you choose.`,
+    RESTORE_CHOICES,
+  );
+}
+
+/** The owner's choice on a held restore: finish it from that night's copy, or put back the copy from before. */
+export async function recoverBackupRestore(deps: RestoreDeps, opId: string, action: string): Promise<void> {
+  const op = handleFor(deps.store, opId);
+  const row = op.get();
+  const p = row.params as { date?: string; wasRunning?: boolean; safetyFile?: string; appliedCuratedSkillsBefore?: string[] };
+  const agent = row.agentId ? deps.store.getAgent(row.agentId) : undefined;
+  if (!agent?.runtimeRef) throw new RestoreError('The agent is gone.');
+  const date = String(p.date ?? '');
+  const ref = agent.runtimeRef;
+  if (backupRunning()) throw new RestoreError(BACKUP_UNDER_WAY.replace('nothing was changed', 'nothing was changed and it stays held'));
+  // Either choice replaces the volume. The boot pass's stop was best effort,
+  // so it is checked down here, or the choice is refused and stays held (issue #21).
+  const notDown = await confirmStopped(deps, agent.id, ref);
+  if (notDown) {
+    throw new RestoreError(
+      `Its runtime could not be confirmed stopped (${notDown}), so nothing was changed and it stays held. ` +
+        'Try again in a moment; if its machine is asleep or off, wake it first.',
+    );
+  }
+  if (action === 'put-back') {
+    if (!p.safetyFile || !existsSync(p.safetyFile)) {
+      throw new RestoreError('The copy from before the restore is no longer on disk, so it cannot be put back. Finish the restore, or restore another backup.');
+    }
+    await deps.provider.importStateFromFile(ref, p.safetyFile, { ownCopy: true }).catch((err: unknown) => {
+      deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
+      throw new RestoreError(`The copy from before could not be put back: ${short(err)}. It stays stopped; try again.`);
+    });
+    deps.store.setAgentCuratedSkillsApplied(agent.id, p.appliedCuratedSkillsBefore);
+    forgetDmPolicy(agent.id);
+    // The copy is how it was when the restore began, maybe days ago: who may
+    // use it and its bot follow today's records, as a finished restore's do
+    // (B022). A failure keeps it held and stopped; trying again is safe.
+    await applyCurrentSettingsOver(deps, agent.id, ref, Date.parse(row.requestedAt)).catch(async (err: unknown) => {
+      rethrowIfCrash(err);
+      // Configuration can start the runtime before failing. Keep this recovery
+      // busy until its stop settles, and do not claim it stopped on a lost host.
+      const notDown = await confirmStopped(deps, agent.id, ref);
+      const state = notDown
+        ? `Its runtime could not be confirmed stopped (${notDown}); it stays held. Bring its machine back, then try again.`
+        : 'It stays stopped; try again.';
+      throw new RestoreError(`The copy from before was put back, but its current settings could not be put over it: ${short(err)}. ${state}`);
+    });
+    // Its files are as they were; a start that failed is said, not "as it
+    // was": it was running, and now it is stopped (HB-0944).
+    const startErr = await restartAfterRestore(deps, agent.id, ref, p.wasRunning === true);
+    dropSafetyCopy(p.safetyFile);
+    op.rolledBack(`Put back as it was before the restore from the ${date} backup.${notStartedAgain(startErr)}`);
+    return;
+  }
+  // finish
+  if (!DATE_DIR.test(date)) throw new RestoreError('Not a backup date.');
+  const file = join(backupsDir(), date, agentArchiveName(ref));
+  if (!existsSync(file)) {
+    throw new RestoreError(`The ${date} backup is no longer on disk, so the restore cannot be finished. Put back the copy from before instead.`);
+  }
+  forgetDmPolicy(agent.id);
+  await deps.provider.importStateFromFile(ref, file).catch((err: unknown) => {
+    deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
+    throw new RestoreError(`The restore could not be finished: ${short(err)}. It stays stopped; put back the copy from before, or try again.`);
+  });
+  deps.store.setAgentCuratedSkillsApplied(agent.id, undefined);
+  op.step('replaced');
+  // A failure here leaves it held and stopped: the owner may still put the copy back.
+  const undone = await applyCurrentSettingsOver(deps, agent.id, ref, archiveMadeAt(date, file)).catch(async (err: unknown) => {
+    rethrowIfCrash(err);
+    const notDown = await confirmStopped(deps, agent.id, ref);
+    const state = notDown
+      ? `Its runtime could not be confirmed stopped (${notDown}); it stays held. Bring its machine back, then try again.`
+      : 'It stays stopped; put back the copy from before, or try again.';
+    throw new RestoreError(`The restore could not be finished: ${short(err)}. ${state}`);
+  });
+  op.step('reapplied');
+  await completeRestore(deps, op, agent.id, ref, date, p.wasRunning === true, p.safetyFile, undone);
+}

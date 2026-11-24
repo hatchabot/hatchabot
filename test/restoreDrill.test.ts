@@ -10,11 +10,13 @@
 import { createHash } from 'node:crypto';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
-import { listDrills } from '../src/orchestrator/drills.js';
+import { listDrills } from '../src/orchestrator/backups/drills.js';
+import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
+import { systemPathWithout } from './helpers/scriptEnv.js';
 
 // These run the restore drill on real sets: 1-2 s alone, past vitest's 5 s
 // when the self-hosted runner shares the machine (PR #76, 2026-11-05).
@@ -40,7 +42,9 @@ function drillWorld() {
   // a temp dir and counts the files under agents/, as the real command does.
   // A volume named *broken* fails to extract. DRILL_CTS and DRILL_VOLS are
 // drills' containers and volumes already there, "<name>|<label value>" each;
-// a label filter lists those it matches, by key alone or key=value.
+// a label filter lists those it matches, by key alone or key=value. Once the
+// file DRILL_RM_HANG names is there, removing a container or a volume never
+// answers (30 s).
   writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash
 echo "$*" >> "${log}"
 labelled() {
@@ -56,10 +60,20 @@ case "$1" in
   volume)
     case "$2" in
       ls) case "$*" in *label=*) LIST="\${DRILL_VOLS:-}" labelled "$@" ;; *) echo "hatchabot-kitchen-1-vol"; echo "acl-restore-drill-123" ;; esac ;;
+      rm) [ ! -e "\${DRILL_RM_HANG:-/nonexistent}" ] || sleep 30 ;;
     esac
     exit 0 ;;
-  rm) exit 0 ;;
+  rm) [ ! -e "\${DRILL_RM_HANG:-/nonexistent}" ] || sleep 30; exit 0 ;;
   run)
+    # Once the file DRILL_RUN_HANG names is made, the restore never answers. Its
+    # client passes a TERM on to the container (where the restore's shell, PID 1,
+    # ignores it) and waits, as docker run does unless --sig-proxy=false.
+    if [ -n "\${DRILL_RUN_HANG:-}" ]; then
+      case "$*" in *--sig-proxy=false*) ;; *) trap '' TERM ;; esac
+      touch "\$DRILL_RUN_HANG"; n=0
+      while [ $n -lt 600 ] && [ -d "${root}" ]; do sleep 0.1; n=$((n + 1)); done
+      exit 0
+    fi
     [ -z "\${DRILL_SLOW:-}" ] || { touch "\$DRILL_SLOW"; sleep 2; }
     tgz=""
     for a in "$@"; do case "$a" in *:/in/vol.tgz:ro) tgz="\${a%%:/in/vol.tgz:ro}";; esac; done
@@ -192,6 +206,95 @@ describe('the drill writes a record of every run', () => {
     expect(w.lastRecord().result).toBe('failed');
   }, 30_000);
 
+  const realTimeout = spawnSync('bash', ['-c', 'command -v timeout'], { encoding: 'utf8' }).stdout.trim();
+  it.skipIf(!realTimeout)('a drill stopped while Docker does not answer: its clean-up is bounded, and it still ends with its record (HB-0924)', async () => {
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    // timeout as a shim: the clean-up's 45 seconds made one, the rest as asked.
+    writeFileSync(join(w.root, 'bin', 'timeout'), `#!/usr/bin/env bash
+o=(); k=(); while :; do case "$1" in --foreground) o=(--foreground); shift ;; -k) k=(-k "$2"); shift 2 ;; *) break ;; esac; done
+d="$1"; shift
+if [ "$d" = 45 ]; then echo "$*" >> "${w.root}/bounded.log"; k=(-k 1); d=1; fi
+exec "${realTimeout}" "\${o[@]}" "\${k[@]}" "$d" "$@"
+`, { mode: 0o755 });
+    const started = join(w.root, 'restoring');
+    const c = spawn('bash', [join(w.install, 'scripts', 'restore-drill.sh')], {
+      env: { HOME: join(w.root, 'home'), PATH: `${join(w.root, 'bin')}:${dirname(process.execPath)}:/usr/bin:/bin`, HATCHABOT_BACKUP_DIR: w.backups, DRILL_SLOW: started, DRILL_RM_HANG: started },
+      stdio: 'ignore',
+    });
+    const t0 = Date.now();
+    while (!existsSync(started) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
+    expect(existsSync(started)).toBe(true);
+    c.kill('SIGTERM');
+    const code = await new Promise<number | null>((r) => c.on('exit', (n) => r(n)));
+    expect(code).toBe(143);
+    expect(Date.now() - t0).toBeLessThan(20_000);
+    expect(w.lastRecord().result).toBe('failed');
+    expect(readFileSync(join(w.root, 'bounded.log'), 'utf8')).toMatch(/^docker rm -f hatchabot-restore-drill-\d+-1\ndocker volume rm -f hatchabot-restore-drill-\d+-1\n$/);
+  }, 60_000);
+
+  it.skipIf(!realTimeout)('stopped at its time limit in a restore under the real timeout: the TERM reaches the docker client, and the trap writes its record and removes its container and volume (review of HB-0924)', async () => {
+    const { scriptDeadline } = await import('../src/orchestrator/backups/backupFiles.js');
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    const started = join(w.root, 'restoring');
+    // In a process group of its own, as the app starts it (startDrill).
+    const c = spawn('bash', [join(w.install, 'scripts', 'restore-drill.sh')], {
+      env: { HOME: join(w.root, 'home'), PATH: `${join(w.root, 'bin')}:${dirname(process.execPath)}:/usr/bin:/bin`, HATCHABOT_BACKUP_DIR: w.backups, DRILL_RUN_HANG: started },
+      stdio: 'ignore', detached: true,
+    });
+    const t0 = Date.now();
+    while (!existsSync(started) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
+    expect(existsSync(started)).toBe(true);
+    let stopped = false;
+    const closed = new Promise<number | null>((r) => c.on('close', (code) => r(code)));
+    const callOff = scriptDeadline(c, 0, 25_000, { term: () => {}, stopped: () => { stopped = true; } });
+    const code = await closed;
+    callOff();
+    expect(stopped).toBe(false); // it ended by itself, its trap run, before anything was killed
+    expect(code).toBe(143);
+    expect(w.lastRecord().result).toBe('failed');
+    const log = w.dockerLog();
+    expect(log).toMatch(/^rm -f hatchabot-restore-drill-\d+-1$/m);
+    expect(log).toMatch(/^volume rm -f hatchabot-restore-drill-\d+-1$/m);
+  }, 40_000);
+
+  it.skipIf(!realTimeout)('a restore that takes longer than its 15 minutes says so, and its container is removed (review of HB-0924)', async () => {
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    // timeout as a shim: the restore's 15 minutes made one second, the rest as asked.
+    writeFileSync(join(w.root, 'bin', 'timeout'), `#!/usr/bin/env bash
+o=(); k=(); while :; do case "$1" in --foreground) o=(--foreground); shift ;; -k) k=(-k 1); shift 2 ;; *) break ;; esac; done
+d="$1"; shift; [ "$d" != 900 ] || d=1
+exec "${realTimeout}" "\${o[@]}" "\${k[@]}" "$d" "$@"
+`, { mode: 0o755 });
+    const r = w.run({ DRILL_RUN_HANG: join(w.root, 'restoring') });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('restoring it took longer than 15 minutes — stopped');
+    expect(r.stderr).not.toMatch(/failed to extract/);
+    expect(w.lastRecord().result).toBe('failed');
+    expect(w.dockerLog()).toMatch(/^rm -f hatchabot-restore-drill-\d+-1$/m);
+  }, 30_000);
+
+  it.skipIf(!realTimeout)('a Mac with Homebrew\'s coreutils but not its gnubin (gtimeout, no timeout): a restore that hangs is still stopped (HB-1208)', async () => {
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    const bin = join(w.root, 'bin');
+    // gtimeout as a shim: the restore's 15 minutes made one second, the rest as asked.
+    writeFileSync(join(bin, 'gtimeout'), `#!/usr/bin/env bash
+echo "$*" >> "${w.root}/gtimeout.log"
+o=(); k=(); while :; do case "$1" in --foreground) o=(--foreground); shift ;; -k) k=(-k 1); shift 2 ;; *) break ;; esac; done
+d="$1"; shift; [ "$d" != 900 ] || d=1
+exec "${realTimeout}" "\${o[@]}" "\${k[@]}" "$d" "$@"
+`, { mode: 0o755 });
+    symlinkSync(process.execPath, join(bin, 'node'));
+    const r = w.run({ DRILL_RUN_HANG: join(w.root, 'restoring'), PATH: `${bin}:${systemPathWithout(join(w.root, 'system'), ['timeout', 'gtimeout'])}` });
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stderr).toContain('restoring it took longer than 15 minutes — stopped');
+    expect(w.lastRecord().result).toBe('failed');
+    expect(readFileSync(join(w.root, 'gtimeout.log'), 'utf8')).toMatch(/^--foreground -k 10 900 docker run --rm --name hatchabot-restore-drill-/m);
+  }, 30_000);
+
   it('what a killed drill left behind is removed first; another install\'s running drill and a live volume are never touched (HB-0327)', () => {
     const w = drillWorld();
     w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
@@ -259,6 +362,32 @@ describe('the drill writes a record of every run', () => {
     // Every archive the record names there: it passes as before.
     w.set('2026-10-09', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete', captured: ['hatchabot-kitchen-1-vol'] });
     expect(w.run().status).toBe(0);
+  });
+
+  it("the saved key passes when it reads any of the set's secrets, beside one from an older key, as the backup's own check does; none read, it fails (HB-1228 review)", async () => {
+    /** A set whose database holds secrets stored with these keys, in this order, as the service stores them. */
+    const withSecrets = async (w: ReturnType<typeof drillWorld>, keys: string[]) => {
+      const d = w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete', db: false });
+      const db = new Database(join(d, 'hatchabot.sqlite'));
+      db.exec('CREATE TABLE agents (state TEXT); CREATE TABLE ai_profiles (id TEXT); CREATE TABLE channels (id TEXT)');
+      for (const [i, k] of keys.entries()) {
+        await new LocalSecretStore(db, LocalSecretStore.keyFromEnv({ HATCHABOT_SECRET_KEY: k })).put(`channel/made-up-${i}/bot-token`, 'made-up-secret-value');
+      }
+      db.close();
+    };
+    const mixed = drillWorld();
+    await withSecrets(mixed, ['another-made-up-key', 'not-a-real-key-for-tests']);
+    const r = mixed.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('✓ backed-up key decrypts channel/made-up-1/bot-token (20 chars — not shown)');
+    expect(mixed.lastRecord()).toMatchObject({ result: 'passed', key: 'ok' });
+    const wrong = drillWorld();
+    await withSecrets(wrong, ['another-made-up-key', 'another-made-up-key']);
+    const f = wrong.run();
+    expect(f.status).toBe(1);
+    expect(f.stderr).toContain('the backed-up key decrypts none of the 2 secrets');
+    expect(f.stderr).toContain('✗ The backed-up key could NOT decrypt the backed-up secrets');
+    expect(wrong.lastRecord()).toMatchObject({ result: 'failed', key: 'failed' });
   });
 
   it('no database copy: the archives are still checked and recorded, the drill fails', () => {
@@ -439,6 +568,24 @@ describe('the drill writes a record of every run', () => {
     expect(env.stderr).toContain(`No complete backup set under ${elsewhere}`);
   });
 
+  it('run by hand, it reads .env as the service and the backup do: a # in a value on Linux, a $VAR on a Mac (HB-1231)', () => {
+    for (const mac of [false, true]) {
+      const w = drillWorld();
+      w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+      const nightly = join(w.root, mac ? 'nightly' : 'nightly#1');
+      renameSync(w.backups, nightly);
+      if (mac) {
+        writeFileSync(join(w.root, 'bin', 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+        writeFileSync(join(w.install, '.env'), `FIXTURE_ROOT=${w.root}\nHATCHABOT_BACKUP_DIR="$FIXTURE_ROOT/nightly"\n`);
+      } else {
+        writeFileSync(join(w.install, '.env'), `HATCHABOT_BACKUP_DIR=${nightly}\n`);
+      }
+      const r = w.run({ HATCHABOT_BACKUP_DIR: undefined as unknown as string });
+      expect(r.status, `${mac ? 'Mac' : 'Linux'}: ${r.stdout}${r.stderr}`).toBe(0);
+      expect(r.stdout).toContain(`Drilling restore from: ${join(nightly, '2026-10-08')}`);
+    }
+  });
+
   it('docker not answering: the archives are read and recorded, nothing restored, the drill fails', () => {
     const w = drillWorld();
     w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
@@ -482,6 +629,51 @@ printf '%s\\n' "$text"
     expect(existsSync(join(dir, '.lock.takeover'))).toBe(false);
   });
 
+  it('a killed drill\'s pid that a process of this same user has since: taken over once older than a drill runs, its start differing or none recorded; one whose start matches is held however old (HB-1033, and its review: a clock step)', () => {
+    const root = tmp('hb-drilllock-');
+    const dir = join(root, 'drills');
+    const lock = join(dir, '.lock');
+    const source = readFileSync(join(repo, 'scripts', 'restore-drill.sh'), 'utf8');
+    const funcs = source.slice(source.indexOf('take_lock() {'), source.indexOf('\ntrap finish EXIT'));
+    const take = () => spawnSync('bash', ['-c', `set -euo pipefail\nLOCK=""\n${funcs}\ntake_lock\necho entered`], {
+      env: { PATH: '/usr/bin:/bin', RECORD_DIR: dir, HOME: root }, encoding: 'utf8',
+    });
+    const startOf = (pid: number) => spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    const busy = new RegExp(`Another restore drill \\(pid ${process.pid}\\) is running`);
+    // This test's own process stands for the long-lived one the pid went to.
+    const fresh = (started?: string) => {
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(lock, { recursive: true });
+      writeFileSync(join(lock, 'pid'), String(process.pid));
+      if (started !== undefined) writeFileSync(join(lock, 'started'), `${started}\n`);
+    };
+    const age = () => { const then = new Date(Date.now() - 4 * 3600_000); utimesSync(lock, then, then); };
+    // A start that differs: the pid another's now, or the drill's own after a
+    // step of the clock moved what ps says. Held while a drill could run...
+    fresh('Thu Jan  1 00:00:00 1970');
+    const stepped = take();
+    expect(stepped.status).toBe(1);
+    expect(stepped.stderr).toMatch(busy);
+    // ...and taken once older than one runs.
+    age();
+    const reused = take();
+    expect(reused.status, reused.stderr).toBe(0);
+    expect(reused.stdout).toContain('entered');
+    expect(readFileSync(join(lock, 'pid'), 'utf8').trim()).not.toBe(String(process.pid));
+    expect(readFileSync(join(lock, 'started'), 'utf8').trim()).toMatch(/\d\d:\d\d:\d\d/); // the new holder's own
+    // The holder it names, started when it says: held, however old.
+    fresh(startOf(process.pid));
+    age();
+    expect(take().stderr).toMatch(busy);
+    // No start recorded (a lock an older drill made): held while a drill could run, taken once older.
+    fresh();
+    expect(take().status).toBe(1);
+    age();
+    const old = take();
+    expect(old.status, old.stderr).toBe(0);
+    expect(old.stdout).toContain('entered');
+  });
+
   // pid 1 is another user's process here (kill -0 says "not permitted"),
   // unless the tests run as root or in a namespace of their own.
   const foreign = /not permitted/.test(spawnSync('bash', ['-c', 'LC_ALL=C kill -0 1'], { encoding: 'utf8' }).stderr);
@@ -506,4 +698,100 @@ printf '%s\\n' "$text"
     expect(stale.stdout).toContain('entered');
     expect(readFileSync(join(lock, 'pid'), 'utf8').trim()).not.toBe('1');
   });
+});
+
+describe('every docker call the drill makes has a time limit (HB-1374)', () => {
+  const realTimeout = spawnSync('bash', ['-c', 'command -v timeout'], { encoding: 'utf8' }).stdout.trim();
+  /**
+   * timeout as a shim, logging each call ("<seconds> <command>"): the short
+   * calls' minute, and a volume list's two, made one second. docker as a
+   * shim in front of the world's, that never answers (30 s) to the call
+   * DRILL_HANG names; with DRILL_STUBBORN, deaf to the TERM too, so the
+   * time limit has to kill it (137).
+   */
+  function bounded() {
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    const front = join(w.root, 'front'); mkdirSync(front);
+    writeFileSync(join(front, 'timeout'), `#!/usr/bin/env bash
+o=(); k=(); while :; do case "$1" in --foreground) o=(--foreground); shift ;; -k) k=(-k 1); shift 2 ;; *) break ;; esac; done
+d="$1"; shift; echo "$d $*" >> "${w.root}/timeout.log"; case "$d" in 60|120) d=1 ;; esac
+exec "${realTimeout}" "\${o[@]}" "\${k[@]}" "$d" "$@"
+`, { mode: 0o755 });
+    writeFileSync(join(front, 'docker'), `#!/usr/bin/env bash
+case " $* " in *" \${DRILL_HANG:-no call} "*) [ -z "\${DRILL_STUBBORN:-}" ] || trap '' TERM; exec sleep 30 ;; esac
+exec "${join(w.root, 'bin', 'docker')}" "$@"
+`, { mode: 0o755 });
+    const run = (hang?: string, stubborn = false) => {
+      const t0 = Date.now();
+      const r = spawnSync('bash', [join(w.install, 'scripts', 'restore-drill.sh')], {
+        encoding: 'utf8', timeout: 25_000,
+        env: {
+          HOME: join(w.root, 'home'), PATH: `${front}:${join(w.root, 'bin')}:${dirname(process.execPath)}:/usr/bin:/bin`, HATCHABOT_BACKUP_DIR: w.backups,
+          GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
+          ...(hang ? { DRILL_HANG: hang } : {}), ...(stubborn ? { DRILL_STUBBORN: '1' } : {}),
+        },
+      });
+      return { ...r, took: Date.now() - t0 };
+    };
+    // Its docker calls (the first, "5 true", asks whether it takes --foreground).
+    const limited = () => (existsSync(join(w.root, 'timeout.log')) ? readFileSync(join(w.root, 'timeout.log'), 'utf8').split('\n').filter((l) => / docker /.test(l)) : []);
+    return { w, run, limited };
+  }
+
+  it.skipIf(!realTimeout)('each call goes through the time limit: the short ones a minute, a volume list two, the restore its 15', () => {
+    const { w, run, limited } = bounded();
+    const r = run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const calls = w.dockerLog().split('\n').filter(Boolean);
+    expect(calls.length).toBeGreaterThanOrEqual(8);
+    const viaLimit = limited().map((l) => l.replace(/^\d+ docker /, ''));
+    expect(viaLimit).toEqual(calls);
+    for (const l of limited()) expect(l, l).toMatch(/^(60 docker (?!run |volume ls)|120 docker volume ls|900 docker run )/);
+    for (const call of ['version', 'image inspect', 'ps -a', 'volume create', 'rm -f', 'volume rm -f']) expect(limited().some((l) => l.startsWith(`60 docker ${call} `) || l === `60 docker ${call}`), call).toBe(true);
+    expect(limited().filter((l) => l.startsWith('120 docker volume ls'))).toHaveLength(3);
+  });
+
+  it.skipIf(!realTimeout)('a daemon that never answers one of them no longer holds the drill: it ends, with its record', () => {
+    for (const hang of ['version', 'inspect', 'ps', 'ls', 'create', 'rm']) {
+      const { w, run } = bounded();
+      const r = run(hang);
+      expect(r.status, `${hang}: ${r.stdout}${r.stderr}`).not.toBeNull();
+      expect(r.took, hang).toBeLessThan(20_000);
+      const rec = w.lastRecord();
+      if (hang === 'version') {
+        expect(r.stderr).toContain('docker is not answering');
+        expect(rec).toMatchObject({ result: 'failed', volumes: [{ restored: null, note: 'nodocker' }] });
+      } else if (hang === 'create') {
+        expect(r.stderr).toContain('hatchabot-kitchen-1-vol: docker did not answer within 60 seconds when asked for a throwaway volume — not restored');
+        expect(r.stderr).not.toContain('took longer than 15 minutes');
+        expect(rec.volumes[0]).toMatchObject({ restored: false, note: 'nodocker', result: 'failed' });
+      } else if (hang === 'inspect') {
+        // Not answered about, the image is not swapped for one that may need a pull from that daemon (review of HB-1374).
+        expect(r.stderr).toContain('docker did not answer within 60 seconds when asked about the image');
+        expect(w.dockerLog()).not.toMatch(/debian:stable-slim/);
+        expect(rec).toMatchObject({ result: 'failed', volumes: [{ restored: null, note: 'nodocker' }] });
+      } else {
+        // The rest only find or remove what a drill left: it still restores.
+        expect(rec.result, `${hang}: ${r.stdout}${r.stderr}`).toBe('passed');
+      }
+    }
+  }, 120_000);
+
+  it.skipIf(!realTimeout)('a client deaf to the TERM, killed by the time limit (137), is docker not answering too, never an archive that failed to extract (review of HB-1374)', () => {
+    for (const hang of ['create', 'inspect']) {
+      const { w, run } = bounded();
+      const r = run(hang, true);
+      expect(r.took, hang).toBeLessThan(20_000);
+      expect(r.stderr, `${hang}: ${r.stdout}${r.stderr}`).not.toContain('failed to extract');
+      const rec = w.lastRecord();
+      if (hang === 'create') {
+        expect(r.stderr).toContain('hatchabot-kitchen-1-vol: docker did not answer within 60 seconds when asked for a throwaway volume — not restored');
+        expect(rec.volumes[0]).toMatchObject({ restored: false, note: 'nodocker', result: 'failed' });
+      } else {
+        expect(r.stderr).toContain('docker did not answer within 60 seconds when asked about the image');
+        expect(rec).toMatchObject({ result: 'failed', volumes: [{ restored: null, note: 'nodocker' }] });
+      }
+    }
+  }, 120_000);
 });

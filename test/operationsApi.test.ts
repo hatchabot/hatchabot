@@ -6,8 +6,8 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { beginOperation } from '../src/orchestrator/operations.js';
-import { moveAgentToHost } from '../src/orchestrator/moveHost.js';
+import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
+import { moveAgentToHost } from '../src/orchestrator/transfer/moveHost.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 const MEMBER = 'user-member';

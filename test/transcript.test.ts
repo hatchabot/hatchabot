@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { RENDER_SCRIPT } from '../src/orchestrator/transcript.js';
+import { RENDER_SCRIPT, recoveryCheckScript } from '../src/orchestrator/memory/transcript.js';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
@@ -208,6 +208,129 @@ describe('every current conversation is current, wherever it is kept', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  /** The renderer with a small heap: only what it keeps of a history fits in it. */
+  const renderSmall = (root: string, extra: Record<string, string>) => spawnSync(process.execPath, ['--max-old-space-size=40', '-e', RENDER_SCRIPT], {
+    env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', NAME_B64: Buffer.from('Kitchen').toString('base64'), TZ: 'UTC', ...extra }, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+  });
+  const toolHeavy = (n: number, id = (i: number) => `e${i}`) => {
+    const pad = 'z'.repeat(250_000);
+    const rows = [line({ type: 'message', id: id(0), timestamp: '2026-11-01T00:00:00Z', message: { role: 'user', content: 'Hello' } })];
+    for (let i = 1; i <= n; i++) rows.push(line({ type: 'message', id: id(i), timestamp: '2026-11-01T00:00:01Z', message: { role: 'toolResult', content: [{ type: 'text', text: pad }] } }));
+    rows.push(line({ type: 'message', id: id(n + 1), timestamp: '2026-11-01T00:00:02Z', message: { role: 'assistant', content: 'Hello back' } }));
+    return rows;
+  };
+
+  it('reads a long, tool-heavy legacy transcript in bounded memory (HB-0969)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-big-'));
+    try {
+      mkdirSync(join(root, 'kitchen', 'sessions'), { recursive: true });
+      writeFileSync(join(root, 'kitchen', 'sessions', 'big.jsonl'), toolHeavy(200).join('\n')); // about 50 MB
+      for (const MODE of ['export', 'stats']) {
+        const r = renderSmall(root, { MODE, MAXB: '1000' });
+        expect(r.status).toBe(0);
+        const j = JSON.parse(r.stdout);
+        if (MODE === 'export') { expect(j.messages).toBe(2); expect(j.text).toContain('Hello back'); }
+        else expect(j).toMatchObject({ liveMessages: 2, conversations: 1 });
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('reads a long, tool-heavy 2026.9 database in bounded memory (HB-0969)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-bigdb-'));
+    try {
+      mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+      const db = new Database(join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite'));
+      db.exec(`CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, current_session_id TEXT NOT NULL, entry_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT, created_at INTEGER NOT NULL, event_zstd BLOB, PRIMARY KEY (session_id, seq));`);
+      db.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?)').run('agent:kitchen:main', 'live', '{}', 1);
+      const put = db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL)');
+      db.transaction(() => { toolHeavy(200).forEach((row, i) => put.run('live', i + 1, row, i)); })();
+      db.close();
+      const r = renderSmall(root, { MODE: 'export', MAXB: '1000' });
+      expect(r.status).toBe(0);
+      expect(JSON.parse(r.stdout)).toMatchObject({ conversations: 1, messages: 2 });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // Fifty megabytes of chat, not tool output: what is said, in turn.
+  const longChat = (tag: string, n: number, from = 0) => {
+    const pad = 'w'.repeat(250_000);
+    const rows: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const ts = new Date(Date.UTC(2026, 10, 1) + (from + i) * 60_000).toISOString();
+      rows.push(line({ type: 'message', id: `${tag}-${i}`, timestamp: ts, message: { role: i % 2 ? 'assistant' : 'user', content: `${tag} said ${i} ${pad}` } }));
+    }
+    return rows;
+  };
+
+  it('an export of a long chat history holds only what its limit can show (HB-1172)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-longchat-'));
+    try {
+      const dir = join(root, 'kitchen', 'sessions'); mkdirSync(dir, { recursive: true });
+      for (let c = 0; c < 4; c++) writeFileSync(join(dir, `c${c}.jsonl.reset.2026-11-0${c + 2}T00-00-00`), longChat(`c${c}`, 50, c * 100).join('\n'));
+      // The newest 600 KB: the last two messages, and the end of the one before.
+      const r = renderSmall(root, { MODE: 'export', MAXB: '600000' });
+      expect(r.status, r.stderr).toBe(0);
+      const j = JSON.parse(r.stdout);
+      expect(j).toMatchObject({ conversations: 4, messages: 200 });
+      expect(j.text).toMatch(/^> ⚠ Truncated to the most recent part.*\n\n\n\*\*\[2026-11-01 05:48\] User:\*\* c3 said 48 w/);
+      expect(j.text).toContain('Kitchen:** c3 said 49 w');
+      expect(j.text).not.toContain('said 47');
+      const out = join(root, 'recovered.md');
+      const rec = renderSmall(root, { MODE: 'recover', MAXB: '600000', OUT: out });
+      expect(rec.status, rec.stderr).toBe(0);
+      expect(JSON.parse(rec.stdout)).toMatchObject({ conversations: 4, messages: 200 });
+      expect(readFileSync(out, 'utf8')).toBe(j.text);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('a 2026.9 database of long chats is read a conversation at a time (HB-1172)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-longchatdb-'));
+    try {
+      mkdirSync(join(root, 'kitchen', 'agent'), { recursive: true });
+      const db = new Database(join(root, 'kitchen', 'agent', 'openclaw-agent.sqlite'));
+      db.exec(`CREATE TABLE session_nodes (session_key TEXT PRIMARY KEY, current_session_id TEXT NOT NULL, entry_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT, created_at INTEGER NOT NULL, event_zstd BLOB, PRIMARY KEY (session_id, seq));`);
+      db.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?)').run('agent:kitchen:main', 's39', '{}', 1);
+      const put = db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL)');
+      db.transaction(() => { for (let c = 0; c < 40; c++) longChat(`s${c}`, 5, c * 10).forEach((row, i) => put.run(`s${String(c).padStart(2, '0')}`, i + 1, row, i)); })();
+      db.close();
+      const r = renderSmall(root, { MODE: 'export', MAXB: '1000' });
+      expect(r.status, r.stderr).toBe(0);
+      expect(JSON.parse(r.stdout)).toMatchObject({ conversations: 40, messages: 200 });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('cut at any limit, an export is the end of the whole one (HB-1172)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-cut-'));
+    try {
+      const dir = join(root, 'kitchen', 'sessions'); mkdirSync(dir, { recursive: true });
+      const day = (d: number, h: number) => new Date(Date.UTC(2026, 10, d, h)).toISOString();
+      // Conversations of every size, read in an order that is not their own:
+      // one long reply, headings, text of more than one byte a letter.
+      const talk = (d: number, n: number, text: (i: number) => string) => {
+        const rows = [sess(day(d, 8))];
+        for (let i = 0; i < n; i++) rows.push(msg(i % 2 ? 'assistant' : 'user', text(i), day(d, 8 + i)));
+        return rows.join('\n');
+      };
+      writeFileSync(join(dir, 'k.jsonl.reset.2026-11-09T00-00-00'), talk(8, 6, (i) => `## Plan ${i}\nGrüße 🌱 ${'ü'.repeat(30 * i)}`));
+      writeFileSync(join(dir, 'a.jsonl.reset.2026-11-03T00-00-00'), talk(2, 3, (i) => `short ${i}`));
+      writeFileSync(join(dir, 'm.jsonl.reset.2026-11-05T00-00-00'), talk(4, 2, (i) => (i ? 'x'.repeat(5000) : 'tell me everything')));
+      writeFileSync(join(dir, 'b.jsonl.reset.2026-11-04T00-00-00'), talk(3, 9, (i) => `###### step ${i}\n\n\nnext ${i}`));
+      writeFileSync(join(dir, 'z.jsonl'), talk(10, 4, (i) => `now ${i}`));
+      const full = render(root, { MAXB: '100000000' }).text as string;
+      const bytes = Buffer.from(full, 'utf8');
+      const warn = '> ⚠ Truncated to the most recent part — the full history exceeded the export limit.\n\n';
+      const limits = [40, 120, 333, 1000, 2500, 4999, 5100, 6000, 7777, bytes.length - 400].filter((m) => m <= bytes.length - 400);
+      expect(limits.length).toBeGreaterThan(8);
+      for (const m of limits) {
+        const cut = render(root, { MAXB: String(m) });
+        expect(cut.text).toBe(warn + bytes.subarray(bytes.length - m).toString('utf8').replace(/^[^\n]*\n/, ''));
+        expect(cut).toMatchObject({ conversations: 5, messages: 24 });
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('a sessions folder that cannot be read fails the read instead of looking empty', () => {
     const root = mkdtempSync(join(tmpdir(), 'tx-bad-'));
     mkdirSync(join(root, 'kitchen'), { recursive: true });
@@ -232,6 +355,37 @@ class MemSecrets implements SecretStore {
   async get(r: string) { const v = this.map.get(r); if (v === undefined) throw new Error('missing'); return v; }
   async delete(r: string) { this.map.delete(r); }
 }
+describe('the look at a recovery turn\'s process (in-container shell, HB-0887)', () => {
+  // Only /proc is read: nothing on the machine is changed.
+  const env = { PATH: '/usr/bin:/bin' };
+  const look = (proc: { pid: string; start: string }) => execFileSync('/bin/sh', ['-c', recoveryCheckScript(proc)], { env }).toString().trim();
+  const startOf = (pid: string) => execFileSync('/bin/sh', ['-c', `s=$(cat /proc/${pid}/stat); set -- \${s##*") "}; shift 19; echo $1`], { env }).toString().trim();
+
+  it.runIf(process.platform === 'linux')('says running while it runs; gone once it is a zombie, another process has its PID, or it is not there', async () => {
+    // A parent that never reaps its child, as a container's first process
+    // may not: the ended child is a zombie, which kill -0 still answers for.
+    const parent = spawn('/bin/sh', ['-c', 'sleep 0.3 & echo $!; exec sleep 5'], { env });
+    const exited = new Promise((r) => parent.once('exit', r));
+    try {
+      const pid = await new Promise<string>((r) => parent.stdout.once('data', (d) => r(String(d).trim())));
+      const proc = { pid, start: startOf(pid) };
+      expect(look(proc)).toBe('running');
+      expect(look({ pid, start: String(Number(proc.start) + 1) })).toBe('gone'); // its PID, another process's start
+      await vi.waitFor(() => expect(readFileSync(`/proc/${pid}/stat`, 'utf8')).toMatch(/\) Z /), { timeout: 3000 });
+      expect(look(proc)).toBe('gone');
+      parent.kill();
+      await exited;
+      await vi.waitFor(() => expect(existsSync(`/proc/${pid}`)).toBe(false), { timeout: 3000 });
+      expect(look(proc)).toBe('gone');
+    } finally { parent.kill(); }
+  });
+
+  it('is only ever given numbers', () => {
+    expect(() => recoveryCheckScript({ pid: '1; rm -rf /', start: '2' })).toThrow();
+    expect(() => recoveryCheckScript({ pid: '12', start: '' })).toThrow();
+  });
+});
+
 async function world(state = 'RUNNING') {
   const store = new Store(new Database(':memory:'));
   const provider = new MockProvider();
@@ -291,6 +445,39 @@ describe('POST /v1/agents/:id/recover-context', () => {
     expect(turn?.[1]).toMatch(/nohup/);          // no exec timeout applies
     expect(turn?.[1]).toMatch(/--deliver/);      // agent confirms in its own chat
     expect(turn?.[1]).toMatch(/--timeout 900/);
+  });
+
+  it('keeps the idle sweep from putting the agent to sleep while its recovery turn runs (HB-0887)', async () => {
+    const { provider, f } = await world();
+    const sweep = (f as unknown as { hibernateDeps: { isBusy: (id: string) => boolean } }).hibernateDeps;
+    expect(sweep.isBusy('a1')).toBe(false);
+    provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ conversations: 1, messages: 57 }) });
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/recover-context', headers: H })).statusCode).toBe(202);
+    expect(sweep.isBusy('a1')).toBe(true);
+  });
+
+  it('a sleep by hand while its recovery turn runs is refused with its reason, and goes ahead once the turn has ended (HB-0887)', async () => {
+    const { provider, f } = await world();
+    // The launch prints the turn's process; the look at it answers as the test says.
+    let turn = 'running';
+    const exec = provider.execShell.bind(provider);
+    provider.execShell = async (ref, script, opts) => {
+      if (script.startsWith('nohup ')) return { code: 0, stdout: 'hatchabot-recovery 4242 98765\n', stderr: '' };
+      if (script.includes('/proc/4242/stat')) return { code: 0, stdout: `${turn}\n`, stderr: '' };
+      return exec(ref, script, opts);
+    };
+    provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ conversations: 1, messages: 57 }) });
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/recover-context', headers: H })).statusCode).toBe(202);
+    provider.execResponses.delete('sh');
+    const busy = await f.inject({ method: 'POST', url: '/v1/agents/a1/hibernate', headers: H });
+    expect(busy.statusCode, busy.body).toBe(409); // was a 500
+    expect(busy.json().error).toMatch(/^It is busy just now/);
+    // One turn in its conversation at a time: an ask waits for it too.
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/ask', headers: H, payload: { text: 'hello?' } })).statusCode).toBe(429);
+    turn = 'gone'; // it confirmed in its chat and ended, long before its fifteen minutes
+    const asleep = await f.inject({ method: 'POST', url: '/v1/agents/a1/hibernate', headers: H });
+    expect(asleep.statusCode, asleep.body).toBe(200);
+    expect(asleep.json()).toMatchObject({ state: 'STOPPED' });
   });
 
   it('includeLive is passed through to the renderer and named in the prompt', async () => {

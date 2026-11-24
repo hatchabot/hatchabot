@@ -1,17 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
+import { request as httpRequest } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Store, type TokenIncidentRow } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { HOUR_FIELDS, type HourField, type TokenHealthRaw, type WindowModelStats } from '../src/orchestrator/usage.js';
-import type { StoredProfile } from '../src/orchestrator/modelScorecard.js';
+import { HOUR_FIELDS, type HourField, type TokenHealthRaw, type WindowModelStats } from '../src/orchestrator/usage/usage.js';
+import type { StoredProfile } from '../src/orchestrator/usage/modelScorecard.js';
 import type { PendingConfirm } from '../src/mgmt/pendingStore.js';
-import { buildRecommendations, CHEAPER_MIN_USD, GROUP, isCostCard, NO_BUDGET_FROM_USD } from '../src/orchestrator/recommendations.js';
-import { runBudgets, type BudgetDeps } from '../src/orchestrator/budgets.js';
-import { runUsageAlerts } from '../src/orchestrator/usageAlerts.js';
-import { loopCovering } from '../src/orchestrator/tokenWatch.js';
-import { recordChange } from '../src/orchestrator/modelLedger.js';
+import { buildRecommendations, CHEAPER_MIN_USD, GROUP, isCostCard, NO_BUDGET_FROM_USD } from '../src/orchestrator/usage/recommendations.js';
+import { runBudgets, type BudgetDeps } from '../src/orchestrator/usage/budgets.js';
+import { runUsageAlerts } from '../src/orchestrator/usage/usageAlerts.js';
+import { loopCovering } from '../src/orchestrator/usage/tokenWatch.js';
+import { buildTokenHealth } from '../src/orchestrator/usage/tokenHealth.js';
+import { recordChange } from '../src/orchestrator/usage/modelLedger.js';
 import { REST_BY_NAME } from '../src/mgmt/restTools.js';
 import { COVERAGE } from '../src/mgmt/coverage.js';
 import { publicClassFor } from '../src/api/publicRoutes.js';
@@ -130,8 +133,30 @@ describe('the list: each check becomes an item, ranked', () => {
     expect(now.secondary.map((a) => a.kind)).toEqual(['context-cap']);
   });
 
+  it('a big conversation during a switch of source is judged by the source it still runs, as the cap route is (HB-1170)', () => {
+    const w = world();
+    w.store.insertAIProfile({ id: 'box', ownerId: OWNER, name: 'Ollama', vendor: 'local', kind: 'api_key', model: 'qwen3', secretRef: 'ai/box', createdAt: 'now' } as never);
+    const big = () => health({ conv: { calls: 300, p50: 200_000, p90: 260_000, max: 300_000, over100k: 300 } });
+    // Running the local model, saved onto the key: no cap to offer until the rebuild (the route refuses one).
+    w.agent('toCloud', 'Garden Planner');
+    w.store.setAgentApplied('toCloud', 'box', 'qwen3');
+    w.store.setTokenHealth('toCloud', big(), iso(NOW));
+    // Running the key's model, saved onto the local source: its cap still saves money until the rebuild.
+    w.agent('toLocal', 'Budget Tracker', { aiProfileId: 'box' });
+    w.store.setAgentApplied('toLocal', 'key', 'claude-opus-4-8');
+    w.store.setTokenHealth('toLocal', big(), iso(NOW));
+    const items = w.list().items.filter((x) => x.kind === 'big-conversation');
+    expect(items.map((x) => x.agents[0]!.id)).toEqual(['toLocal']);
+    expect(items[0]!.action).toMatchObject({ kind: 'context-cap', path: '/v1/agents/toLocal/context-cap' });
+    expect(items[0]!.effect).toMatchObject({ usdPerMonth: 10.5, billing: 'api' });
+    // Context now's Cap cell reads the row's billing: a menu for the one running the key, none for the one running local.
+    const rows = new Map(buildTokenHealth(w.store, OWNER, { now: NOW }).rows.map((r) => [r.id, r]));
+    expect(rows.get('toLocal')).toMatchObject({ billing: 'api', model: 'claude-opus-4-8' });
+    expect(rows.get('toCloud')).toMatchObject({ billing: 'local', model: 'qwen3' });
+  });
+
   it('a compaction running or done since the size was measured: the advice catches up (2026-10-10)', async () => {
-    const { compactingNow } = await import('../src/orchestrator/compactionState.js');
+    const { compactingNow } = await import('../src/orchestrator/memory/compactionState.js');
     const w = world();
     w.agent('budget', 'Budget Tracker');
     w.store.setTokenHealth('budget', health({ conv: { calls: 300, p50: 200_000, p90: 260_000, max: 320_000, over100k: 300 }, main: { budget: { ctx: 310_000, at: NOW - HOUR } } }), iso(NOW));
@@ -253,6 +278,43 @@ describe('one cause, one item', () => {
     expect(items.map((x) => x.kind)).toEqual(['loop']);
     expect(items[0]!.action).toMatchObject({ kind: 'compact', body: { mode: 'lines', lines: 200 } });
     expect(items[0]!.absorbs).toEqual(['conversation:stock']);
+  });
+
+  it('a compaction card is merged only when it runs the same compaction: a summary is not the loop\'s line trim (HB-1055)', () => {
+    const w = world();
+    w.agent('stock', 'Stock Watcher');
+    w.store.setTokenHealth('stock', health({ conv: { calls: 300, p50: 200_000, p90: 260_000, max: 460_000, over100k: 300 }, main: { stock: { ctx: 446_000, at: NOW - HOUR } } }), iso(NOW));
+    w.store.openTokenIncident(incident('stock', { id: 'ti_stock_retry', kind: 'channel-retry', key: 'telegram:123', text: 'Stuck: Telegram message retried 12 times since 08:19 — compacting a 446K conversation takes longer than the 5-minute limit' }));
+    w.agent('budget', 'Budget Tracker');
+    w.store.setTokenHealth('budget', health({ conv: { calls: 300, p50: 200_000, p90: 260_000, max: 320_000, over100k: 300 }, main: { budget: { ctx: 310_000, at: NOW - HOUR } } }), iso(NOW));
+    const card = (id: string, agentId: string, agentName: string, body: Record<string, unknown>, at = NOW - HOUR) => w.store.putMgmtProposal({
+      id, ownerId: OWNER, chatId: 0, fromUserId: 0, messageId: 0, tool: 'compact_agent',
+      resolved: { agentId, agentName, rest: { call: { method: 'POST', path: `/v1/agents/${agentId}/compact`, body }, card: '🗜 …' } },
+      summary: `🗜 Compact "${agentName}"'s conversation`, createdAtMs: at, expiresAtMs: NOW + DAY, status: 'pending', source: 'agent',
+    } as PendingConfirm);
+    card('c_sum', 'stock', 'Stock Watcher', { mode: 'summarise' });
+    card('c_wide', 'stock', 'Stock Watcher', { mode: 'lines', lines: 1000 });
+    card('c_trim_b', 'budget', 'Budget Tracker', { mode: 'lines', lines: 200 });
+    let items = w.list().items;
+    // The loop keeps its own trim; the summary and the wider trim are cards of their own.
+    const loop = items.find((x) => x.kind === 'loop')!;
+    expect(loop.proposalId).toBeUndefined();
+    expect(loop.action).toMatchObject({ kind: 'compact', path: '/v1/agents/stock/compact', body: { mode: 'lines', lines: 200 } });
+    expect(items.find((x) => x.id === 'card:c_sum')).toMatchObject({ kind: 'proposal', action: { kind: 'confirm-card', label: 'Compact it now' } });
+    expect(items.find((x) => x.id === 'card:c_wide')).toMatchObject({ kind: 'proposal', action: { label: 'Compact it (keep the last 1000 lines)' } });
+    // A conversation item's summary is not a trim either.
+    const conv = items.find((x) => x.id === 'conversation:budget')!;
+    expect(conv.proposalId).toBeUndefined();
+    expect(conv.action).toMatchObject({ kind: 'compact', body: { mode: 'summarise' } });
+    expect(items.find((x) => x.id === 'card:c_trim_b')).toMatchObject({ kind: 'proposal' });
+    // The same compaction, proposed: one item, its click. No line count is the default 200; no mode is a summary.
+    card('c_trim', 'stock', 'Stock Watcher', { mode: 'lines' }, NOW - 2 * HOUR);
+    card('c_sum_b', 'budget', 'Budget Tracker', {}, NOW - 2 * HOUR);
+    items = w.list().items;
+    expect(items.find((x) => x.kind === 'loop')).toMatchObject({ proposalId: 'c_trim', action: { kind: 'confirm-card', path: '/v1/proposals/c_trim/confirm' } });
+    expect(items.find((x) => x.id === 'conversation:budget')).toMatchObject({ proposalId: 'c_sum_b', action: { kind: 'confirm-card' } });
+    expect(items.some((x) => x.id === 'card:c_trim' || x.id === 'card:c_sum_b')).toBe(false);
+    expect(items.some((x) => x.id === 'card:c_sum')).toBe(true);
   });
 
   it('the Hatchabot agent\'s card for the same change merges into the item, marked as its proposal; others stand alone; non-cost cards are not items', () => {
@@ -434,6 +496,99 @@ describe('the routes', () => {
     expect((await f.inject({ method: 'GET', url: '/v1/agents/theirs/recommendations', headers: as() })).statusCode).toBe(404);
   });
 
+  it('a cost card on an agent archived since stays in the home screen\'s cards list, as Recommended no longer has it (HB-1095)', async () => {
+    const { f, store } = await app();
+    const now = Date.now();
+    store.putMgmtProposal({
+      id: 'c_model', ownerId: OWNER, chatId: 0, fromUserId: 0, messageId: 0, tool: 'set_model', resolved: { agentId: 'stock', agentName: 'Stock Watcher', model: 'claude-haiku-4-5' },
+      summary: 'Switch Stock Watcher to claude-haiku-4-5', createdAtMs: now - HOUR, expiresAtMs: now + DAY, status: 'pending', source: 'agent',
+    } as PendingConfirm);
+    const card = async () => (await f.inject({ method: 'GET', url: '/v1/proposals', headers: as() })).json().pending.find((p: { confirmId: string }) => p.confirmId === 'c_model');
+    expect(await card()).toMatchObject({ recommended: true });
+    expect((await f.inject({ method: 'GET', url: '/v1/recommendations', headers: as() })).json().items.some((x: { proposalId?: string }) => x.proposalId === 'c_model')).toBe(true);
+    store.setAgentState('stock', 'ARCHIVED');
+    expect((await f.inject({ method: 'GET', url: '/v1/recommendations', headers: as() })).json().items.some((x: { proposalId?: string }) => x.proposalId === 'c_model')).toBe(false);
+    expect(await card()).toMatchObject({ recommended: false });
+  });
+
+  it('a card filed for an item the owner put off with Not now stays in the cards list, as Recommended does not show it (HB-1269)', async () => {
+    const { f, store } = await app();
+    const now = Date.now();
+    store.setModelProfile('stock', steady(now), iso(now));
+    const list = async () => (await f.inject({ method: 'GET', url: '/v1/recommendations', headers: as() })).json();
+    const card = async (id: string) => (await f.inject({ method: 'GET', url: '/v1/proposals', headers: as() })).json().pending.find((p: { confirmId: string }) => p.confirmId === id);
+    // Not now on the cheaper model, before any card for it.
+    const item = (await list()).items.find((x: { id: string }) => x.id === 'cheaper:stock');
+    expect(item.action.body.model).toBe('claude-haiku-4-5');
+    expect((await f.inject({ method: 'POST', url: '/v1/recommendations/cheaper:stock/dismiss', headers: as(), payload: {} })).statusCode).toBe(200);
+    // Later the Hatchabot agent files the same switch: it would merge into the item put off.
+    const put = (id: string, model: string) => store.putMgmtProposal({
+      id, ownerId: OWNER, chatId: 0, fromUserId: 0, messageId: 0, tool: 'set_model', resolved: { agentId: 'stock', agentName: 'Stock Watcher', model },
+      summary: `Switch Stock Watcher to ${model}`, createdAtMs: now, expiresAtMs: now + DAY, status: 'pending', source: 'agent',
+    } as PendingConfirm);
+    put('c_put_off', 'claude-haiku-4-5');
+    expect((await list()).items.some((x: { proposalId?: string }) => x.proposalId === 'c_put_off')).toBe(false);
+    expect(await card('c_put_off')).toMatchObject({ recommended: false });
+    // A card Recommended does show (its own item) is still left out of the cards list.
+    put('c_other', 'claude-sonnet-5');
+    expect((await list()).items.some((x: { proposalId?: string }) => x.proposalId === 'c_other')).toBe(true);
+    expect(await card('c_other')).toMatchObject({ recommended: true });
+  });
+
+  it('the cards list never fails or writes for Recommended: a build that throws shows every card, and the poll prunes nothing (HB-1269 review)', async () => {
+    const { f, store } = await app();
+    const now = Date.now();
+    const put = (id: string, tool: string, resolved: Record<string, unknown>) => store.putMgmtProposal({
+      id, ownerId: OWNER, chatId: 0, fromUserId: 0, messageId: 0, tool, resolved,
+      summary: `card ${id}`, createdAtMs: now, expiresAtMs: now + DAY, status: 'pending', source: 'agent',
+    } as unknown as PendingConfirm);
+    const cards = async () => {
+      const r = await f.inject({ method: 'GET', url: '/v1/proposals', headers: as() });
+      return { status: r.statusCode, body: r.body, pending: r.statusCode === 200 ? r.json().pending.map((p: { confirmId: string; recommended: boolean }) => [p.confirmId, p.recommended]) : [] };
+    };
+    put('c_backup', 'run_backup', { rest: { call: { method: 'POST', path: '/v1/backups/run', body: {} }, card: 'Back up' } });
+    put('c_model', 'set_model', { agentId: 'stock', agentName: 'Stock Watcher', model: 'claude-haiku-4-5' });
+    expect((await cards()).pending).toEqual([['c_backup', false], ['c_model', true]]);
+    // The home screen polls this every few seconds: it reads Recommended, never tidies it.
+    const prune = vi.spyOn(store, 'pruneRecommendationDismissals');
+    try {
+      await cards();
+      expect(prune).not.toHaveBeenCalled();
+    } finally { prune.mockRestore(); }
+    // A read inside the build that fails: every card is shown (none hidden), and the reason is not sent.
+    const broken = vi.spyOn(store, 'listTokenIncidents').mockImplementation(() => { throw new Error('a read that fails inside'); });
+    try {
+      const out = await cards();
+      expect(out.status).toBe(200);
+      expect(out.pending).toEqual([['c_backup', false], ['c_model', false]]);
+      expect(out.body).not.toContain('a read that fails inside');
+    } finally { broken.mockRestore(); }
+  });
+
+  it('a Recommended build that keeps failing is logged once a minute, and again at once for another reason, not at every poll (HB-1269 review)', async () => {
+    const { f, store } = await app();
+    const now = Date.now();
+    store.putMgmtProposal({
+      id: 'c_model', ownerId: OWNER, chatId: 0, fromUserId: 0, messageId: 0, tool: 'set_model', resolved: { agentId: 'stock', agentName: 'Stock Watcher', model: 'claude-haiku-4-5' },
+      summary: 'Switch Stock Watcher to claude-haiku-4-5', createdAtMs: now, expiresAtMs: now + DAY, status: 'pending', source: 'agent',
+    } as PendingConfirm);
+    let ahead = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now + ahead);
+    let why = 'a read that fails inside';
+    const broken = vi.spyOn(store, 'listTokenIncidents').mockImplementation(() => { throw new Error(why); });
+    const warn = vi.spyOn(f.log, 'warn');
+    const logged = () => warn.mock.calls.filter((c) => c[1] === 'proposals.recommended_failed').map((c) => (c[0] as { err: string }).err);
+    const poll = async () => expect((await f.inject({ method: 'GET', url: '/v1/proposals', headers: as() })).statusCode).toBe(200);
+    try {
+      for (let i = 0; i < 5; i++) { ahead = i * 4_000; await poll(); } // the home screen's polls, 4 s apart
+      expect(logged()).toEqual(['a read that fails inside']);
+      why = 'another fault'; ahead = 20_000; await poll(); await poll();
+      expect(logged()).toEqual(['a read that fails inside', 'another fault']);
+      ahead = 20_000 + 61_000; await poll();
+      expect(logged()).toEqual(['a read that fails inside', 'another fault', 'another fault']);
+    } finally { warn.mockRestore(); broken.mockRestore(); clock.mockRestore(); }
+  });
+
   it('each action goes through the card\'s own route, the ledger says via "recommendation", and the timeline has a line', async () => {
     const { f, store } = await app();
     const now = Date.now();
@@ -459,6 +614,36 @@ describe('the routes', () => {
     // A plain request (no item) is not a recommendation's.
     await f.inject({ method: 'PUT', url: '/v1/agents/stock/budget', headers: as(), payload: { usd: 120 } });
     expect(events(store, 'stock')).toHaveLength(2);
+  });
+
+  it('an action whose page hung up before the answer is still on the timeline (HB-1405 review)', async () => {
+    const { f, store } = await app();
+    // The budget route is slow to answer (a loaded machine); the server sees its caller go meanwhile.
+    let reached!: () => void, release!: () => void, serverSaw!: Promise<void>;
+    const entered = new Promise<void>((r) => { reached = r; });
+    const held = new Promise<void>((r) => { release = r; });
+    f.addHook('preHandler', async (req) => {
+      if (req.routeOptions.url !== '/v1/agents/:id/budget') return;
+      serverSaw = new Promise<void>((r) => { req.raw.socket.once('close', () => r()); });
+      reached(); await held;
+    });
+    try {
+      await f.listen({ port: 0, host: '127.0.0.1' });
+      const { port } = f.server.address() as AddressInfo;
+      const body = JSON.stringify({ usd: 100, atLimit: 'warn' });
+      const call = httpRequest({ host: '127.0.0.1', port, method: 'PUT', path: '/v1/agents/stock/budget',
+        headers: { ...as(), 'x-hatchabot-recommendation': 'no-budget:stock', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } });
+      const hungUp = new Promise<void>((r) => { call.on('error', () => r()); call.on('close', () => r()); });
+      call.end(body);
+      await entered;
+      call.destroy();
+      await hungUp;
+      await serverSaw;
+      release();
+      // Its answer goes to nobody, but the budget was set: the line is there.
+      await vi.waitFor(() => expect(store.getBudget('stock')).toMatchObject({ usd: 100 }), { timeout: 2000, interval: 20 });
+      await vi.waitFor(() => expect(events(store, 'stock').map((e) => (e.detail as { route: string }).route)).toEqual(['PUT /v1/agents/:id/budget']), { timeout: 2000, interval: 20 });
+    } finally { await f.close(); }
   });
 
   it('a context cap and a paused task, through their routes', async () => {

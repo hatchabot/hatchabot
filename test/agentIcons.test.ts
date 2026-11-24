@@ -8,9 +8,10 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { completeViaCli } from '../src/api/cliChatModel.js';
-import { ICON_PALETTE, IDEA_COUNT, WANT_MAX, colorFor, keywordIcon, parseChoices, parseIdeas, pickIcons, suggestIcons, validIcon, validIconColor } from '../src/orchestrator/agentIcons.js';
+import { ICON_PALETTE, IDEA_COUNT, WANT_MAX, colorFor, keywordIcon, parseChoices, parseIdeas, pickIcons, suggestIcons, validIcon, validIconColor } from '../src/orchestrator/homeScreen/agentIcons.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { Agent, AIProfile } from '../src/domain/types.js';
+import { readPage } from '../scripts/page-source.mjs';
 
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -393,7 +394,7 @@ describe('a Clear from Alerts lasts as long as what it cleared (HB-0409)', () =>
   });
 
   it("the keys the store drops are the ones the page's Alerts use", () => {
-    const page = readFileSync('web/index.html', 'utf8');
+    const page = readPage('web/index.html');
     for (const k of ["'state:FAILED'", "key: 'failed'", "key: 'pending'", "key: 'opsDrift'", "key: 'restart:'", "key: 'memory'"]) expect(page, k).toContain(k);
   });
 });

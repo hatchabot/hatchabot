@@ -1,10 +1,10 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isDiskFull, VolumeGoneError, VolumeUntouchedError } from '../src/providers/provider.js';
-import { LocalDockerProvider, remoteTarget, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel, tcpReachable } from '../src/providers/localDockerProvider.js';
+import { dockerMemoryBytes, LocalDockerProvider, remoteTarget, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel, sshReachProbe, tcpReachable, THIS_PROCESS } from '../src/providers/localDockerProvider.js';
 import { createServer } from 'node:net';
 import { firstThen, heldPort, listenOnFreePort } from './helpers/ports.js';
 import { GATEWAY_TOKEN } from './support/fixtures.js';
@@ -266,6 +266,207 @@ exit 0
     const creates = lines.filter((l) => l.startsWith('network create'));
     expect(creates).toHaveLength(1); // once per provider, not per agent
     expect(creates[0]).toContain('com.docker.network.bridge.enable_icc=false');
+  });
+
+  it('a network pruned since it was made is made again when a create finds it gone, and is not looked for on every create (HB-1029)', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-net-gone-'));
+    const log = join(d, 'argv.log');
+    const made = join(d, 'made');
+    const st = join(d, 'docker');
+    // A create or an inspect of the network fails, as Docker words it, while it is not there.
+    writeFileSync(st, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+if [ "$1 $2" = "network inspect" ] && [ "$3" = hatchabot-agents ] && [ ! -f ${JSON.stringify(made)} ]; then echo 'Error response from daemon: network hatchabot-agents not found' >&2; exit 1; fi
+if [ "$1 $2" = "network inspect" ] && [ "$3" = hatchabot-agents ]; then echo '172.30.0.1 '; exit 0; fi
+if [ "$1 $2" = "network create" ]; then touch ${JSON.stringify(made)}; fi
+if [ "$1" = create ] && [ ! -f ${JSON.stringify(made)} ] && echo "$*" | grep -q -- '--network hatchabot-agents'; then echo 'Error response from daemon: network hatchabot-agents not found' >&2; exit 1; fi
+exit 0
+`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: st, image: 'test-image:latest' });
+    const lines = () => readFileSync(log, 'utf8').split('\n');
+    const count = (prefix: string) => lines().filter((l) => l.startsWith(prefix)).length;
+    await p.provision(spec() as any);
+    expect(count('network create')).toBe(1);
+    // Every agent on it deleted, and `docker network prune` took it.
+    rmSync(made);
+    const inspects = count('network inspect hatchabot-agents');
+    await p.provision(spec() as any);
+    expect(count('network create')).toBe(2);
+    expect(lines().filter((l) => l.startsWith('create ')).length).toBe(3); // the one refused, then again
+    // Made again, known made: the next create asks nothing first.
+    const after = count('network inspect hatchabot-agents');
+    expect(after - inspects).toBe(1);
+    await p.provision(spec() as any);
+    expect(count('network inspect hatchabot-agents')).toBe(after);
+    // Its gateway address (the console's trusted proxy, read before a create) after a prune: made again too.
+    rmSync(made);
+    expect(await p.agentProxySource()).toBe('172.30.0.1');
+    expect(count('network create')).toBe(3);
+  });
+
+  it('two creates that meet the pruned network at once share its one re-make, and both go through (HB-1029 review)', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-net-two-'));
+    const log = join(d, 'argv.log');
+    const made = join(d, 'made');
+    const remaking = join(d, 'remaking');
+    const second = join(d, 'second');
+    const st = join(d, 'docker');
+    // Both creates reach Docker with the network known made; the first is
+    // refused, and the second is refused while the first's re-make is under way.
+    writeFileSync(st, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+wait_for() { for i in $(seq 1 100); do [ -f "$1" ] && return; sleep 0.05; done; }
+if [ "$1 $2" = "network inspect" ] && [ "$3" = hatchabot-agents ] && [ ! -f ${JSON.stringify(made)} ]; then echo 'Error response from daemon: network hatchabot-agents not found' >&2; exit 1; fi
+if [ "$1 $2" = "network create" ]; then touch ${JSON.stringify(remaking)}; sleep 0.5; touch ${JSON.stringify(made)}; exit 0; fi
+if [ "$1" = create ] && echo "$*" | grep -q -- '--name hatchabot-porch-helper-'; then touch ${JSON.stringify(second)}; wait_for ${JSON.stringify(remaking)}; fi
+if [ "$1" = create ] && echo "$*" | grep -q -- '--name hatchabot-kitchen-helper-'; then wait_for ${JSON.stringify(second)}; fi
+if [ "$1" = create ] && [ ! -f ${JSON.stringify(made)} ] && echo "$*" | grep -q -- '--network hatchabot-agents'; then echo 'Error response from daemon: network hatchabot-agents not found' >&2; exit 1; fi
+exit 0
+`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: st, image: 'test-image:latest' });
+    const lines = () => readFileSync(log, 'utf8').split('\n');
+    writeFileSync(made, '');
+    await p.provision(spec() as any);
+    rmSync(made);
+    const other = spec({ agentId: 'aa11bb22-0000-4000-8000-000000000001', slug: 'porch-helper' });
+    const both = await Promise.allSettled([p.provision(spec() as any), p.provision(other as any)]);
+    expect(both.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect(lines().filter((l) => l.startsWith('network create')).length).toBe(1);
+    expect(lines().filter((l) => l.startsWith('create ') && l.includes('--name hatchabot-porch-helper-')).length).toBe(2); // refused, then again
+  });
+
+  describe('a sleeping agent whose network a prune took (HB-1400)', () => {
+    const OLD = 'a'.repeat(64), NEW = 'b'.repeat(64), OPS = 'hatchabot-ops-df918a55c3e1';
+    /**
+     * Docker as moby behaves after `docker network prune` took the agents
+     * network while the agent was stopped: the container still holds the old
+     * network's id, and its start fails naming it, until it is put on the
+     * network made again. `$net` is the network's id while it exists.
+     */
+    /** `manager`: a management agent made on its own --internal network (`mode`), or one only its label says is one. */
+    const world = (o: { connectFails?: boolean; otherNetwork?: boolean; none?: boolean; netGone?: boolean; manager?: 'ops' | 'label'; opsGone?: boolean; opsOpen?: boolean } = {}) => {
+      const d = mkdtempSync(join(tmpdir(), 'acl-net-start-'));
+      const log = join(d, 'argv.log');
+      const net = join(d, 'net'), held = join(d, 'held'), facts = join(d, 'facts'), ops = join(d, 'ops');
+      writeFileSync(held, o.none ? '' : o.otherNetwork ? `other=${OLD}` : `hatchabot-agents=${OLD}`);
+      if (o.none && !o.netGone) writeFileSync(net, NEW);
+      writeFileSync(facts, o.manager === 'ops' ? `|${OPS}|18789` : o.manager === 'label' ? '|bridge|18789' : '|hatchabot-agents|<no value>');
+      if (!o.opsGone) writeFileSync(ops, o.opsOpen ? 'false' : 'true');
+      const st = join(d, 'docker');
+      writeFileSync(st, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+if [ "$1 $2" = "network inspect" ]; then case "$*" in *-ops-*) [ -f ${JSON.stringify(ops)} ] && { cat ${JSON.stringify(ops)}; echo; exit 0; }; echo "Error response from daemon: network ${OPS} not found" >&2; exit 1;; esac; [ -f ${JSON.stringify(net)} ] && exit 0; echo 'Error response from daemon: network hatchabot-agents not found' >&2; exit 1; fi
+if [ "$1 $2" = "network create" ]; then echo ${NEW} > ${JSON.stringify(net)}; exit 0; fi
+if [ "$1 $2" = "container inspect" ]; then case "$*" in *'{{len .NetworkSettings.Networks}}'*) printf '%s%s\n' "$(grep -c = ${JSON.stringify(held)})" "$(cat ${JSON.stringify(facts)})"; exit 0;; esac; cat ${JSON.stringify(held)}; echo; exit 0; fi
+if [ "$1 $2" = "network disconnect" ]; then : > ${JSON.stringify(held)}; exit 0; fi
+if [ "$1 $2" = "network connect" ]; then case "$*" in *-ops-*) [ -f ${JSON.stringify(ops)} ] || exit 1; echo "${OPS}=${NEW}" > ${JSON.stringify(held)}; exit 0;; esac; [ -f ${JSON.stringify(net)} ] || { echo 'Error response from daemon: network hatchabot-agents not found' >&2; exit 1; }; ${o.connectFails ? `echo 'Error response from daemon: connect refused' >&2; exit 1` : `echo "hatchabot-agents=$(cat ${JSON.stringify(net)})" > ${JSON.stringify(held)}; exit 0`}; fi
+if [ "$1" = start ]; then id=$(sed -n 's/.*=//p' ${JSON.stringify(held)}); if [ -n "$id" ] && ! grep -qx "$id" ${JSON.stringify(net)} 2>/dev/null; then echo "Error response from daemon: network $id not found" >&2; exit 1; fi; fi
+exit 0
+`, { mode: 0o755 });
+      const lines = () => readFileSync(log, 'utf8').split('\n').filter(Boolean);
+      return { p: new LocalDockerProvider({ docker: st, image: 'test-image:latest' }), lines };
+    };
+    const ref = 'kitchen-helper-df918a55';
+
+    it('is put on the network made again, once, and starts', async () => {
+      const { p, lines } = world();
+      const ctr = p.containerName(ref);
+      await p.start(ref);
+      expect(lines()).toEqual([
+        `container inspect --format {{len .NetworkSettings.Networks}}|{{.HostConfig.NetworkMode}}|{{index .Config.Labels "hatchabot.console-port"}} ${ctr}`,
+        `start ${ctr}`,
+        expect.stringMatching(new RegExp(`^container inspect --format .* ${ctr}$`)),
+        'network inspect hatchabot-agents',
+        'network create --driver bridge -o com.docker.network.bridge.enable_icc=false --label hatchabot.role=agents hatchabot-agents',
+        `network disconnect --force hatchabot-agents ${ctr}`,
+        `network connect hatchabot-agents ${ctr}`,
+        `start ${ctr}`,
+      ]);
+    });
+
+    it('a network that will not take it says to Rebuild, and no start is tried that would run it on none', async () => {
+      const { p, lines } = world({ connectFails: true });
+      await expect(p.start(ref)).rejects.toMatchObject({ userMessage: "The agent's network was removed (a docker network prune?), and it could not be put on the new one. Rebuild it." });
+      expect(lines().filter((l) => l.startsWith('start '))).toHaveLength(1);
+    });
+
+    it('one left on no network at all is put back on the agents network before it starts, made again if it is gone (HB-1400 review)', async () => {
+      for (const netGone of [false, true]) {
+        const { p, lines } = world({ none: true, netGone });
+        const ctr = p.containerName(ref);
+        await p.start(ref);
+        const calls = lines();
+        expect(calls.filter((l) => l.startsWith('network connect ') || l.startsWith('start '))).toEqual([`network connect hatchabot-agents ${ctr}`, `start ${ctr}`]);
+        expect(calls.some((l) => l.startsWith('network create '))).toBe(netGone);
+        expect(calls.indexOf(`network connect hatchabot-agents ${ctr}`)).toBeLessThan(calls.indexOf(`start ${ctr}`));
+      }
+    });
+
+    it('one on no network that cannot be put on one is never started: it says to Rebuild (HB-1400 review)', async () => {
+      const { p, lines } = world({ none: true, connectFails: true });
+      await expect(p.start(ref)).rejects.toMatchObject({ userMessage: 'The agent is on no network (its network was removed, a docker network prune?), and it could not be put back on one. Rebuild it.' });
+      expect(lines().some((l) => l.startsWith('start '))).toBe(false);
+      // After the rejoin whose connect failed, the next start is refused too, never run on none.
+      const { p: q, lines: seen } = world({ connectFails: true });
+      await expect(q.start(ref)).rejects.toThrow();
+      await expect(q.start(ref)).rejects.toMatchObject({ userMessage: 'The agent is on no network (its network was removed, a docker network prune?), and it could not be put back on one. Rebuild it.' });
+      expect(seen().filter((l) => l.startsWith('start '))).toHaveLength(1);
+    });
+
+    it("a management agent on no network goes back on its own --internal network, never on the agents network, or is refused with Rebuild (round-2 review)", async () => {
+      const { p, lines } = world({ none: true, manager: 'ops' });
+      const ctr = p.containerName(ref);
+      await p.start(ref);
+      expect(lines().filter((l) => l.startsWith('network ') || l.startsWith('start '))).toEqual([
+        `network inspect --format {{.Internal}} ${OPS}`, `network connect ${OPS} ${ctr}`, `start ${ctr}`,
+      ]);
+      const refused = "The management agent is on no network (its network was removed, a docker network prune?), and it could not be put back on its own. Rebuild it.";
+      // Its network gone, one that is not --internal under its name, or one only its label says is a manager's: refused.
+      for (const o of [{ opsGone: true }, { opsOpen: true }, { manager: 'label' as const }]) {
+        const w = world({ none: true, manager: 'ops', ...o });
+        await expect(w.p.start(ref), JSON.stringify(o)).rejects.toMatchObject({ userMessage: refused });
+        expect(w.lines().filter((l) => l.startsWith('start ') || l.includes('hatchabot-agents')), JSON.stringify(o)).toEqual([]);
+      }
+      // HATCHABOT_AGENT_NETWORK=bridge changes nothing for it.
+      const prev = process.env.HATCHABOT_AGENT_NETWORK;
+      process.env.HATCHABOT_AGENT_NETWORK = 'bridge';
+      try {
+        const w = world({ none: true, manager: 'ops', opsGone: true });
+        await expect(w.p.start(ref)).rejects.toMatchObject({ userMessage: refused });
+      } finally {
+        if (prev === undefined) delete process.env.HATCHABOT_AGENT_NETWORK; else process.env.HATCHABOT_AGENT_NETWORK = prev;
+      }
+    });
+
+    it('another network gone, not the agents network, is not touched: the start fails as before', async () => {
+      const { p, lines } = world({ otherNetwork: true });
+      await expect(p.start(ref)).rejects.toMatchObject({ userMessage: 'The agent could not start. Try again?' });
+      expect(lines().some((l) => l.startsWith('network '))).toBe(false);
+    });
+  });
+
+  it('a default image, or a pin, in a registry with a port runs the agent on it (HB-1357)', async () => {
+    const p = new LocalDockerProvider({ docker: stub, image: 'registry.example:5000/family/runtime:latest' });
+    await p.provision(spec() as any);
+    expect(argv().split('\n').find((l) => l.startsWith('create '))).toMatch(/ registry\.example:5000\/family\/runtime:latest openclaw gateway$/);
+    writeFileSync(LOG, '');
+    await p.provision(spec({ image: 'registry.example:5000/family/runtime:2026.9.8' }) as any);
+    expect(argv().split('\n').find((l) => l.startsWith('create '))).toMatch(/ registry\.example:5000\/family\/runtime:2026\.9\.8 openclaw gateway$/);
+    // Still never a flag, nor a port with no repository after it.
+    await expect(p.provision(spec({ image: '-registry.example:5000/x:1' }) as any)).rejects.toThrow(/bad image ref/);
+    await expect(p.provision(spec({ image: 'registry.example:5000:1' }) as any)).rejects.toThrow(/bad image ref/);
+  });
+
+  it('an agent given no limit, with HATCHABOT_AGENT_MEMORY set but empty, gets the default 3g, not an empty --memory (HB-1401)', async () => {
+    const prev = process.env.HATCHABOT_AGENT_MEMORY;
+    process.env.HATCHABOT_AGENT_MEMORY = '';
+    try {
+      await provider.provision(spec() as any);
+      const create = argv().split('\n').find((l) => l.startsWith('create '));
+      expect(create).toContain('--memory 3g --memory-swap 3g ');
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_AGENT_MEMORY; else process.env.HATCHABOT_AGENT_MEMORY = prev;
+    }
   });
 
   it('HATCHABOT_AGENT_NETWORK=bridge keeps the old default network', async () => {
@@ -711,7 +912,7 @@ describe('exporting a volume that is not there (2026-10-09)', () => {
     expect(res).toMatchObject({ code: 1, volumeMissing: true });
     expect(argv()).toMatch(/^volume inspect --format \{\{\.Name\}\} hatchabot-kitchen-helper-df918a55-vol$/m);
     expect(argv()).not.toMatch(/^run /m);
-    const { listInspectableFiles } = await import('../src/orchestrator/inspect.js');
+    const { listInspectableFiles } = await import('../src/orchestrator/diagnostics/inspect.js');
     await expect(listInspectableFiles(p, 'docker://hatchabot-kitchen-helper-df918a55', 'kitchen-helper')).rejects.toThrow(/volume is gone/);
   });
 
@@ -901,5 +1102,290 @@ exit 0
       vi.stubEnv('HATCHABOT_DOCKER_ROOTLESS', '1');
       expect(await runner('[name=seccomp]').rootless()).toBe(false);
     } finally { vi.unstubAllEnvs(); }
+  });
+});
+
+describe('HB-0977: which daemon a runner reaches is asked each time, never remembered', () => {
+  /** A docker whose `info` answers what the file `daemon` holds, or fails when there is none. */
+  function world() {
+    const d = mkdtempSync(join(tmpdir(), 'acl-daemon-id-'));
+    const answer = join(d, 'daemon');
+    const log = join(d, 'argv.log');
+    const bin = join(d, 'docker');
+    writeFileSync(bin, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+case "$*" in
+  *"info --format"*) [ -f ${JSON.stringify(answer)} ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }; cat ${JSON.stringify(answer)} ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: bin, image: 'test-image:latest', host: 'ssh://runner@10.0.0.9', reachProbe: async () => true });
+    const asked = () => (existsSync(log) ? readFileSync(log, 'utf8') : '').split('\n').filter((l) => l.includes('info --format {{.ID}}')).length;
+    return { p, asked, says: (id: string | undefined) => (id === undefined ? rmSync(answer, { force: true }) : writeFileSync(answer, `${id}\n`)) };
+  }
+
+  it('the address repointed at another machine: its own ID, not the one it had', async () => {
+    const w = world();
+    w.says('made-up-daemon-one');
+    expect(await w.p.daemonId()).toBe('made-up-daemon-one');
+    w.says('made-up-daemon-two');
+    expect(await w.p.daemonId()).toBe('made-up-daemon-two');
+    expect(w.asked()).toBe(2);
+  });
+
+  it('a daemon that no longer answers is not vouched for by an earlier answer', async () => {
+    const { machineAnswers } = await import('../src/orchestrator/transfer/moveHost.js');
+    const w = world();
+    w.says('made-up-daemon-one');
+    expect(await machineAnswers(w.p)).toBe(true);
+    w.says(undefined);
+    await expect(w.p.daemonId()).rejects.toMatchObject({ userMessage: "Couldn't reach that host's Docker daemon." });
+    expect(await machineAnswers(w.p)).toBe(false);
+  });
+});
+
+describe('HB-1057: a runner is probed where its ssh connects, not where its name says', () => {
+  /** An ssh that logs its argv and, for -G, says `config` (or fails when that is undefined). */
+  function sshSays(config: string | undefined) {
+    const d = mkdtempSync(join(tmpdir(), 'acl-ssh-g-'));
+    const log = join(d, 'argv.log');
+    const ssh = join(d, 'ssh');
+    writeFileSync(ssh, `#!${process.execPath}
+require('fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n');
+${config === undefined ? 'process.exit(255);' : `process.stdout.write(${JSON.stringify(config)});`}
+`, { mode: 0o755 });
+    return { ssh, argv: () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as string[]) : []) };
+  }
+  async function listening() {
+    const srv = createServer((c) => c.destroy());
+    const held = await heldPort();
+    const port = await listenOnFreePort(srv, { choose: firstThen(held.port) }).finally(() => held.release());
+    return { port, close: () => new Promise<void>((r) => srv.close(() => r())) };
+  }
+
+  it('a Host alias with its own HostName and Port: reached there, and docker is asked', async () => {
+    const srv = await listening();
+    try {
+      const s = sshSays(`user runner\nhostname 127.0.0.1\nport ${srv.port}\naddressfamily any\n`);
+      writeFileSync(LOG, '');
+      const p = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', host: 'ssh://fixture-alias.invalid', ssh: s.ssh });
+      expect(await p.reachable()).toBe(true);
+      expect((await p.execShell('docker://hatchabot-kitchen-helper-df918a55', 'true')).code).toBe(0);
+      expect(readFileSync(LOG, 'utf8')).toContain('-H ssh://fixture-alias.invalid exec');
+      // Asked with what docker passes ssh: the name, and a port only when the address has one.
+      expect(s.argv()).toEqual([['-G', 'fixture-alias.invalid']]);
+    } finally { await srv.close(); }
+  });
+
+  it('through another machine (ProxyJump, ProxyCommand): not probed from here', async () => {
+    for (const via of ['proxyjump jump.fixture.invalid', 'proxycommand nc -X connect %h %p']) {
+      const s = sshSays(`hostname fixture-alias.invalid\nport 22\n${via}\n`);
+      const p = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', host: 'ssh://fixture-alias.invalid', ssh: s.ssh });
+      expect(await p.reachable()).toBe(true);
+    }
+  });
+
+  it('ssh cannot say: the address as written, its port passed on', async () => {
+    const srv = await listening();
+    try {
+      const s = sshSays(undefined);
+      const p = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', host: `ssh://127.0.0.1:${srv.port}`, ssh: s.ssh });
+      expect(await p.reachable()).toBe(true);
+      expect(s.argv()).toEqual([['-G', '-p', String(srv.port), '127.0.0.1']]);
+      // And one ssh routes nowhere that answers is down, as before.
+      const gone = sshSays(`hostname 127.0.0.1\nport ${srv.port}\n`);
+      await srv.close();
+      const q = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', host: 'ssh://fixture-alias.invalid', ssh: gone.ssh });
+      expect(await q.reachable()).toBe(false);
+    } finally { await srv.close().catch(() => {}); }
+  });
+
+  it('the alias edited to another machine: the next probe knocks where ssh goes now', async () => {
+    const before = await listening(), after = await listening();
+    try {
+      // An ssh whose -G answer is a file the test rewrites, as the owner edits ~/.ssh/config.
+      const d = mkdtempSync(join(tmpdir(), 'acl-ssh-moved-'));
+      const said = join(d, 'said'), ssh = join(d, 'ssh');
+      writeFileSync(ssh, `#!${process.execPath}\nprocess.stdout.write(require('fs').readFileSync(${JSON.stringify(said)}, 'utf8'));\n`, { mode: 0o755 });
+      writeFileSync(said, `hostname 127.0.0.1\nport ${before.port}\n`);
+      const probe = sshReachProbe('ssh://fixture-alias.invalid', ssh);
+      expect(await probe('fixture-alias.invalid', 22, 1_000)).toBe(true);
+      // The VM is made again at a new address and the alias follows it; the old one is gone.
+      writeFileSync(said, `hostname 127.0.0.1\nport ${after.port}\n`);
+      await before.close();
+      expect(await probe('fixture-alias.invalid', 22, 1_000)).toBe(true);
+    } finally { await before.close().catch(() => {}); await after.close(); }
+  });
+});
+
+describe('HB-1027: the container a model copy makes is a one-shot the sweep can find', () => {
+  it('named and labelled; one whose removal failed is taken by the next sweep', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-copyimg-'));
+    const log = join(d, 'argv.log');
+    const st = join(d, 'docker');
+    // Remembers what it made (its name, or a made-up id for an unnamed one) and the labels it wore;
+    // the first removal fails, as a daemon that did not answer in time; ps lists what wears the label.
+    writeFileSync(st, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+d=${JSON.stringify(d)}
+case "$1" in
+  create)
+    name=$(echo "$*" | grep -oE -- '--name [^ ]+' | cut -d' ' -f2); [ -n "$name" ] || name=c0ffee000001
+    echo "$*" | grep -q -- '--label hatchabot.oneshot=hatchabot ' && touch "$d/$name.labelled"
+    touch "$d/$name.made"; echo "$name" ;;
+  cp) printf 'made-up model' > "$3" ;;
+  rm)
+    if [ ! -f "$d/rm-failed" ]; then touch "$d/rm-failed"; echo 'Error response from daemon: timed out' >&2; exit 1; fi
+    shift 2; for n in "$@"; do rm -f "$d/$n.made" "$d/$n.labelled"; done ;;
+  ps) for f in "$d"/*.labelled; do [ -e "$f" ] && basename "$f" .labelled; done ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: st, image: 'test-image:latest' });
+    const dest = join(d, 'model.gguf.part');
+    expect(await p.copyFromImage('test-image:latest', '/opt/model.gguf', dest)).toBe(true);
+    expect(readFileSync(dest, 'utf8')).toBe('made-up model');
+    const lines = readFileSync(log, 'utf8').split('\n');
+    const create = lines.find((l) => l.startsWith('create '))!;
+    const name = /--name (\S+)/.exec(create)?.[1];
+    expect(name).toMatch(/^hatchabot-cp-[0-9a-f]{12}$/);
+    expect(create).toContain('--label hatchabot.oneshot=hatchabot ');
+    expect(lines).toContain(`cp ${name}:/opt/model.gguf ${dest}`);
+    // Its removal failed: it is still there, and the sweep (at boot, and every 10 minutes) removes it.
+    expect(existsSync(join(d, `${name}.made`))).toBe(true);
+    expect(await p.sweepOneShots({ created: true })).toBe(1);
+    expect(existsSync(join(d, `${name}.made`))).toBe(false);
+  });
+
+  it('one still copying is left to its copy by the timed sweep, however long the copy takes (HB-1027 review)', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-copyslow-'));
+    const log = join(d, 'argv.log');
+    const st = join(d, 'docker');
+    // Every one-shot made ten minutes ago by the daemon's clock, never run: past ONESHOT_STALE_MS.
+    // The copy waits for "go"; one left by an earlier copy of this process lies there too.
+    writeFileSync(st, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+d=${JSON.stringify(d)}
+case "$1" in
+  create) name=$(echo "$*" | grep -oE -- '--name [^ ]+' | cut -d' ' -f2); touch "$d/$name.made"; echo "$name" ;;
+  cp) touch "$d/copying"; for i in $(seq 1 100); do [ -f "$d/go" ] && break; sleep 0.05; done; printf 'made-up model' > "$3" ;;
+  ps) for f in "$d"/*.made; do [ -e "$f" ] && n=$(basename "$f" .made) && echo "id-$n|${THIS_PROCESS}|$n|created"; done ;;
+  info) echo 2026-01-01T00:10:00Z ;;
+  container) shift 3; for id in "$@"; do echo "$id|2026-01-01T00:00:00Z|created|0001-01-01T00:00:00Z"; done ;;
+  rm) shift 2; for id in "$@"; do rm -f "$d/\${id#id-}.made"; done ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    writeFileSync(join(d, 'hatchabot-cp-0000000000aa.made'), '');
+    const p = new LocalDockerProvider({ docker: st, image: 'test-image:latest' });
+    const copy = p.copyFromImage('test-image:latest', '/opt/model.gguf', join(d, 'model.gguf.part'));
+    for (let i = 0; i < 100 && !existsSync(join(d, 'copying')); i++) await new Promise((r) => setTimeout(r, 50));
+    const name = /--name (\S+)/.exec(readFileSync(log, 'utf8').split('\n').find((l) => l.startsWith('create '))!)?.[1];
+    expect(name).toMatch(/^hatchabot-cp-[0-9a-f]{12}$/);
+    // The 10-minute sweep, mid-copy: the one left behind goes, the one being copied from stays.
+    expect(await p.sweepOneShots({ created: true, notThisProcess: true })).toBe(1);
+    expect(existsSync(join(d, 'hatchabot-cp-0000000000aa.made'))).toBe(false);
+    expect(existsSync(join(d, `${name}.made`))).toBe(true);
+    writeFileSync(join(d, 'go'), '');
+    expect(await copy).toBe(true);
+    expect(existsSync(join(d, `${name}.made`))).toBe(false);
+    // Done: a next one of the same name would be swept again.
+    writeFileSync(join(d, `${name}.made`), '');
+    expect(await p.sweepOneShots({ created: true, notThisProcess: true })).toBe(1);
+  });
+});
+
+describe('HB-1107: an agent\'s logs keep the order the container wrote them in', () => {
+  // A docker whose `logs` writes the container's lines to its stdout and stderr in turn, as docker demultiplexes them.
+  const logsStub = (body: string) => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-logs-'));
+    const st = join(d, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(join(d, 'argv.log'))}\n[ "$1" = logs ] || exit 0\n${body}\n`, { mode: 0o755 });
+    return { p: new LocalDockerProvider({ docker: st, image: 'test-image:latest' }), argv: () => readFileSync(join(d, 'argv.log'), 'utf8') };
+  };
+
+  it('stdout and stderr interleaved as written, not every stderr line after all of stdout', async () => {
+    const { p, argv } = logsStub(`echo 'gateway: starting'\necho 'error: the AI source refused the key' >&2\necho 'gateway: retrying with the setup token'\necho 'warn: slow reply' >&2\necho 'gateway: ready'`);
+    expect(await p.logs('docker://hatchabot-kitchen-helper-df918a55', 40)).toBe([
+      'gateway: starting', 'error: the AI source refused the key', 'gateway: retrying with the setup token', 'warn: slow reply', 'gateway: ready',
+    ].join('\n'));
+    expect(argv()).toContain('logs --tail 40 hatchabot-kitchen-helper-df918a55');
+  });
+
+  it('what docker says when it fails is still the answer, and a missing docker is still "not available"', async () => {
+    const { p } = logsStub(`echo 'Error response from daemon: No such container: hatchabot-kitchen-helper-df918a55' >&2\nexit 1`);
+    expect(await p.logs('docker://hatchabot-kitchen-helper-df918a55', 40)).toBe('Error response from daemon: No such container: hatchabot-kitchen-helper-df918a55');
+    const gone = new LocalDockerProvider({ docker: join(tmpdir(), 'acl-no-docker-here', 'docker'), image: 'test-image:latest' });
+    await expect(gone.logs('docker://hatchabot-kitchen-helper-df918a55', 40)).rejects.toThrow(/docker unavailable/);
+  });
+
+  it('a runner\'s logs go through the same one pipe, with its connection flags', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-logs-remote-'));
+    const st = join(d, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(join(d, 'argv.log'))}\necho one\necho two >&2\necho three\n`, { mode: 0o755 });
+    // Known up, so no probe runs: the fixture address answers nothing.
+    const p = new LocalDockerProvider({ docker: st, image: 'test-image:latest', host: 'tcp://runner.invalid:2376', reachProbe: async () => true });
+    expect(await p.logs('docker://hatchabot-kitchen-helper-df918a55', 10)).toBe('one\ntwo\nthree');
+    expect(readFileSync(join(d, 'argv.log'), 'utf8')).toMatch(/^-H tcp:\/\/runner\.invalid:2376 .*logs --tail 10 hatchabot-kitchen-helper-df918a55$/m);
+  });
+});
+
+describe('HB-1114: a reader whose docker link dropped is removed, not left reading', () => {
+  /**
+   * A runner's docker: the volume is there, the reader's `run` prints a little
+   * and then the link drops (exit 255, as the ssh under docker does), and the
+   * one-shot is still running there until removed by name.
+   */
+  function dropping() {
+    const d = mkdtempSync(join(tmpdir(), 'acl-dropped-'));
+    const log = join(d, 'argv.log');
+    const bin = join(d, 'docker');
+    writeFileSync(bin, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+case "$*" in
+  *" volume inspect "*) exit 0 ;;
+  *" run --rm "*) printf 'part of it'; echo 'Connection to runner.invalid closed by remote host.' >&2; exit 255 ;;
+  *" container inspect "*) echo 'running|2026-11-24T08:00:00Z' ;;
+  *" rm -f "*) exit 0 ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: bin, image: 'test-image:latest', host: 'tcp://runner.invalid:2376', reachProbe: async () => true, reapRetryMs: 10 });
+    const lines = () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n') : []);
+    const named = (kind: string) => lines().map((l) => new RegExp(`--name (hatchabot-${kind}-[0-9a-f]{12})`).exec(l)?.[1]).find(Boolean);
+    const removed = async (name: string) => {
+      for (let i = 0; i < 100 && !lines().some((l) => l.endsWith(` rm -f ${name}`)); i++) await new Promise((r) => setTimeout(r, 20));
+      return lines().some((l) => l.endsWith(` rm -f ${name}`));
+    };
+    return { p, named, removed };
+  }
+  const drain = async (s: NodeJS.ReadableStream) => { let got = ''; for await (const c of s) got += String(c); return got; };
+
+  it('a download: the stream fails, and its reader is removed by name', async () => {
+    const { p, named, removed } = dropping();
+    await expect(drain(p.streamFromVolume('docker://hatchabot-kitchen-helper-df918a55', ['cat', 'x']))).rejects.toThrow(/exit 255/);
+    const name = named('fs');
+    expect(name).toBeTruthy();
+    expect(await removed(name!)).toBe(true);
+  });
+
+  it('a buffered export: it fails, and its reader is removed by name', async () => {
+    const { p, named, removed } = dropping();
+    await expect(p.exportState('docker://hatchabot-kitchen-helper-df918a55')).rejects.toThrow(/volume export failed/);
+    const name = named('ex');
+    expect(name).toBeTruthy();
+    expect(await removed(name!)).toBe(true);
+  });
+});
+
+describe('dockerMemoryBytes reads a memory limit as Docker does', () => {
+  it('every form Docker takes, and none it refuses', () => {
+    const G = 1024 ** 3, M = 1024 ** 2;
+    const takes: Array<[string, number]> = [
+      ['2g', 2 * G], ['2048m', 2 * G], ['1.5GiB', 1.5 * G], ['2GB', 2 * G], ['2 g', 2 * G], ['512M', 512 * M],
+      ['.5g', 0.5 * G], ['5.', 5], ['1e9', 1e9], ['1e3m', 1000 * M], ['+2g', 2 * G], ['100b', 100], ['100', 100], ['1.5', 1],
+    ];
+    for (const [v, b] of takes) expect([v, dockerMemoryBytes(v)]).toEqual([v, b]);
+    for (const v of ['', 'g', '.', '1gi', '1ib', '1bb', '-1g', '2  g', '2gb2', 'inf', '0x10', '2x', ' 2g', '2g ', '\t2g', '2 g ', '2g\n']) expect([v, dockerMemoryBytes(v)]).toEqual([v, undefined]);
   });
 });

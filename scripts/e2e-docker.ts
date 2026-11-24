@@ -18,8 +18,8 @@ import { Store } from '../src/store/store.js';
 import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { TelegramManualProvisioner, verifyBotToken } from '../src/channels/telegramManual.js';
-import { provisionAgent, claudeAuthDir } from '../src/orchestrator/provision.js';
-import { claimFirstContact } from '../src/orchestrator/claim.js';
+import { provisionAgent, claudeAuthDir } from '../src/orchestrator/lifecycle/provision.js';
+import { claimFirstContact } from '../src/orchestrator/members/claim.js';
 import { existsSync } from 'node:fs';
 
 const provider = new LocalDockerProvider({ image: process.env.HATCHABOT_IMAGE });

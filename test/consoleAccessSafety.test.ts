@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConsoleAccess } from '../src/orchestrator/consoleAccess.js';
+import { ConsoleAccess } from '../src/orchestrator/console/consoleAccess.js';
 import type { Agent } from '../src/domain/types.js';
 
 const homes: string[] = [];

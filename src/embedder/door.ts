@@ -12,7 +12,8 @@
  * - rate-limits per key (a token bucket, EMBED_PER_MIN a minute; a guest
  *   tenant's key stands for its whole fleet, so it gets EMBED_GUEST_FACTOR
  *   times that, 8 by default, and as many in flight), caps the body at 2 MB
- *   and the inputs at 256, times out at 60 s;
+ *   and the inputs at 256, times out at 60 s from the call's admission, its
+ *   body included (HB-0974);
  * - holds each key to EMBED_MB_PER_MIN of request bodies a minute (8 MB, the
  *   guest factor times that for a guest): a call count alone let each call
  *   carry 2 MB, so a prompt-injected agent kept the engine busy for every
@@ -41,7 +42,7 @@ export function doorScript(): string {
     'const isGuest=(a)=>String(a).startsWith("guest:");const perMin=(a)=>isGuest(a)?PER_MIN*GUEST_X:PER_MIN;const maxInflight=(a)=>isGuest(a)?MAX_INFLIGHT_AGENT*GUEST_X:MAX_INFLIGHT_AGENT;',
     'const BYTES_PER_MIN=(Number(process.env.EMBED_MB_PER_MIN)||8)*1024*1024;const bytesPerMin=(a)=>isGuest(a)?BYTES_PER_MIN*GUEST_X:BYTES_PER_MIN;',
     'const KEYS_TTL=Number(process.env.EMBED_KEYS_TTL_MS||2000);',
-    'const MAX_BODY=2*1024*1024,MAX_INPUTS=256,TIMEOUT=60000;',
+    'const MAX_BODY=2*1024*1024,MAX_INPUTS=256,TIMEOUT=Number(process.env.EMBED_TIMEOUT_MS)||60000;',
     'let keys={},keysMtime=-1,keysAt=0;',
     // The file's stamp is kept only once it was read and parsed: kept before,
     // one failed read (a half-written file) emptied the keys until the file
@@ -56,6 +57,15 @@ export function doorScript(): string {
     'const byteBuckets=new Map();',
     'function byteBucket(agent){const now=Date.now(),cap=bytesPerMin(agent);let b=byteBuckets.get(agent);if(!b){b={t:cap,at:now};byteBuckets.set(agent,b);}',
     ' b.t=Math.min(cap,b.t+(now-b.at)*cap/60000);b.at=now;return b;}',
+    // A bucket that has filled up again holds nothing a new one would not, so
+    // once a minute those are dropped: the door outlives the control plane, and
+    // every agent and guest it had ever served kept its two buckets (and a count
+    // of calls in flight at zero) for as long as it ran, deleted or not
+    // (HB-1022). One still short of full, an agent in debt, is kept.
+    'let prunedAt=Date.now();',
+    'function prune(){const now=Date.now();if(now-prunedAt<60000)return;prunedAt=now;',
+    ' for(const [k,b] of buckets)if(b.t+(now-b.at)*perMin(k)/60000>=perMin(k))buckets.delete(k);',
+    ' for(const [k,b] of byteBuckets)if(b.t+(now-b.at)*bytesPerMin(k)/60000>=bytesPerMin(k))byteBuckets.delete(k);}',
     'function send(res,code,obj){res.writeHead(code,{"content-type":"application/json"});res.end(JSON.stringify(obj));}',
     'const server=http.createServer((req,res)=>{',
     ' const a=req.headers.authorization||"";const tok=a.startsWith("Bearer ")?a.slice(7):"";',
@@ -64,26 +74,34 @@ export function doorScript(): string {
     '  if(!tok||!((sk&&crypto.timingSafeEqual(h(tok),h(sk)))||keys[h(tok).toString("hex")])){send(res,401,{error:"unauthorized"});return;}',
     '  fetch(UP+"/health",{signal:AbortSignal.timeout(5000)}).then(r=>send(res,r.ok?200:503,{ok:r.ok})).catch(()=>send(res,503,{ok:false}));return;}',
     ' if(req.method!=="POST"||req.url!=="/v1/embeddings"){send(res,404,{error:"not found"});return;}',
-    ' loadKeys();',
+    ' loadKeys();prune();',
     ' const agent=tok?keys[crypto.createHash("sha256").update(tok).digest("hex")]:undefined;',
     ' if(!agent){send(res,401,{error:"unauthorized"});req.resume();return;}',
     ' if(byteBucket(agent).t<=0||!allow(agent)){send(res,429,{error:"rate limited"});req.resume();return;}',
     ' if(inflight>=MAX_INFLIGHT||(inflightBy.get(agent)||0)>=maxInflight(agent)){send(res,429,{error:"busy"});req.resume();return;}',
     ' inflight++;inflightBy.set(agent,(inflightBy.get(agent)||0)+1);let released=false;',
-    ' const release=()=>{if(released)return;released=true;inflight--;inflightBy.set(agent,Math.max(0,(inflightBy.get(agent)||1)-1));};',
+    // Gone at zero, not kept as a zero (HB-1022).
+    ' const release=()=>{if(released)return;released=true;clearTimeout(deadline);inflight--;const left=(inflightBy.get(agent)||1)-1;if(left>0)inflightBy.set(agent,left);else inflightBy.delete(agent);};',
     // The slot is held until the upstream call settles, and a caller that
     // hangs up aborts that call: releasing on close alone let abandoned
     // embedding calls pile past the caps (night review, 2026-09-28).
-    ' const ac=new AbortController();let upstream=false;',
+    ' const ac=new AbortController();let upstream=false,late=false;',
+    // One deadline from admission, the body included: it started only once
+    // the body had come, so a caller that sent part of one held its slot for
+    // Node's five minutes, and four (or a guest's 32) held the agent's (or the
+    // whole fleet's) for that long (HB-0974). Late with the body, the call is
+    // ended and its slot freed; late with the answer, the upstream call is
+    // aborted, as before.
+    ' const deadline=setTimeout(()=>{late=true;ac.abort();if(!upstream){if(!res.headersSent)send(res,408,{error:"request timeout"});req.destroy();release();}},TIMEOUT);',
     ' res.on("close",()=>{if(upstream){if(!res.writableEnded)ac.abort();}else release();});',
     ' const chunks=[];let size=0,over=false;',
     ' req.on("data",c=>{if(over)return;size+=c.length;if(size>MAX_BODY){over=true;byteBucket(agent).t-=size;send(res,413,{error:"body too large"});req.destroy();}else chunks.push(c);});',
     ' req.on("error",()=>{});',
-    ' req.on("end",async()=>{if(over)return;const started=Date.now();const raw=Buffer.concat(chunks);let n=1;byteBucket(agent).t-=raw.length;',
+    ' req.on("end",async()=>{if(over||late)return;const started=Date.now();const raw=Buffer.concat(chunks);let n=1;byteBucket(agent).t-=raw.length;',
     '  try{const j=JSON.parse(raw.toString("utf8"));if(Array.isArray(j.input))n=j.input.length;}catch(e){send(res,400,{error:"bad json"});return;}',
     '  if(n>MAX_INPUTS){send(res,413,{error:"too many inputs"});return;}',
     '  try{const h={"content-type":"application/json"};const k=upkey();if(k)h.authorization="Bearer "+k;',
-    '   upstream=true;const r=await fetch(UP+"/v1/embeddings",{method:"POST",headers:h,body:raw,signal:AbortSignal.any([ac.signal,AbortSignal.timeout(TIMEOUT)])});',
+    '   upstream=true;const r=await fetch(UP+"/v1/embeddings",{method:"POST",headers:h,body:raw,signal:ac.signal});',
     '   const body=Buffer.from(await r.arrayBuffer());',
     '   res.writeHead(r.status,{"content-type":r.headers.get("content-type")||"application/json"});res.end(body);',
     '   console.log(JSON.stringify({agent,n,bytes:raw.length,ms:Date.now()-started,status:r.status}));}',

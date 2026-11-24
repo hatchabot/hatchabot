@@ -80,6 +80,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(READ, /^\/$/, 'open', 'The app page and its static files'),
   r(READ, /^\/(healthz|manifest\.webmanifest|sw\.js|privacy|terms)$/, 'open', 'The app page and its static files'),
   r(READ, /^\/icons\/:name$/, 'open', 'The app page and its static files'),
+  r(READ, /^\/app\/:name$/, 'open', 'The app page and its static files'),
   r(READ, /^\/v1\/config$/, 'open', 'What the sign-in screen needs'),
   r(['POST'], /^\/v1\/(login|session|logout)$/, 'open', 'Sign-in and sign-out'),
   r(READ, /^\/signin\/link$/, 'open', 'One-time sign-in links (hosted installs)'),
@@ -183,7 +184,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(READ, /^\/v1\/web-search(\/usage)?$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/(web-search\/check|agents\/:id\/search-test|agents\/:id\/connections\/:email\/test)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(READ, /^\/v1\/(model-scorecard|model-options|model-changes|model-prices|token-health|token-incidents|budgets)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
-  r(READ, /^\/v1\/(hosts|images|images\/:name\/log|runtime|runtime\/build|runtime\/capabilities|runtime\/images|runtime\/images\/:tag\/history|backups|backups\/readiness|bots|bot-inventory|pool|discord-bots|slack-apps|connections|channels\/connectors|channels\/slack\/manifest|machine-defaults|rebuild-policy|rebuild-concurrency|embed-default|embedder|embedder\/guests|media-key|search-key|google-oauth\/client|ops-agent|access)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
+  r(READ, /^\/v1\/(hosts|images|images\/:name\/log|runtime|runtime\/build|runtime\/build\/check|runtime\/capabilities|runtime\/images|runtime\/images\/:tag\/history|backups|backups\/readiness|bots|bot-inventory|pool|discord-bots|slack-apps|connections|channels\/connectors|channels\/slack\/manifest|machine-defaults|rebuild-policy|rebuild-concurrency|embed-default|embedder|embedder\/guests|media-key|search-key|google-oauth\/client|ops-agent|access)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/ops-agent\/suggest$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['DELETE'], /^\/v1\/connections\/:id$/, 'signed-in', 'Removing a Google connection'),
 ];

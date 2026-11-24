@@ -6,7 +6,7 @@ import net from 'node:net';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { buildRuntimeSpec } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec } from '../src/orchestrator/lifecycle/provision.js';
 import { createOpsServer, getOpsHandlers, OpsAuthError } from '../src/ops/opsServer.js';
 import { OPS_TOOLS_DENY, buildConfigCommands } from '../src/openclaw/configWriter.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
@@ -145,6 +145,52 @@ describe('its door: reads run, changes only become proposals', () => {
     const done = await f.inject({ method: 'POST', url: `/v1/proposals/${list.pending[0].confirmId}/confirm`, headers: H });
     expect(done.statusCode).toBe(200);
     expect(store.getAgent('t1')!.state).toBe('STOPPED');
+  });
+
+  it('two changes filed together never take the open cards past twenty (HB-0942)', async () => {
+    const w = await world();
+    // Each call's agent lookup (GET /v1/agents, in process) is held until both have passed the first count.
+    let holding = false;
+    let arrived = 0;
+    let bothIn!: () => void;
+    const both = new Promise<void>((r) => { bothIn = r; });
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    w.f.addHook('onRequest', async (req) => {
+      if (!holding || req.method !== 'GET' || req.url !== '/v1/agents') return;
+      if (++arrived === 2) bothIn();
+      await gate;
+    });
+    w.store.insertAgent({ id: 't1', ownerId: OWNER, name: 'Recipe Box', slug: 'recipe', state: 'RUNNING', aiProfileId: `p-${OWNER}`, hostId: `h-${OWNER}`, persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as any);
+    await w.f.inject({ method: 'POST', url: '/v1/ops-agent', headers: H, payload: {} });
+    const a = w.store.getOpsAgent(OWNER)!;
+    w.store.setAgentState(a.id, 'RUNNING');
+    w.store.setOpsToken(a.id, OWNER, 'key-123');
+    const door = getOpsHandlers()!;
+    const now = Date.now();
+    for (let i = 0; i < 19; i++) {
+      w.store.putMgmtProposal({ id: `c_open${i}`, ownerId: OWNER, chatId: 0, fromUserId: 0, messageId: 0, tool: 'run_backup',
+        resolved: { rest: { call: { method: 'POST', path: '/v1/backups/run', body: {} }, card: 'Back up' } },
+        summary: 'Back up', createdAtMs: now, expiresAtMs: now + 3600_000, status: 'pending', source: 'agent' } as any);
+    }
+    const pending = async () => (await w.f.inject({ method: 'GET', url: '/v1/proposals', headers: H })).json().pending.length;
+    expect(await pending()).toBe(19);
+    holding = true;
+    const call = () => door.mcp('key-123', rpc('tools/call', { name: 'stop_agent', arguments: { agent: 'Recipe Box' } })) as Promise<any>;
+    const [one, two] = [call(), call()];
+    await both; // both saw 19 waiting and are resolving their agent
+    open();
+    const texts = (await Promise.all([one, two])).map((r) => r.result.content[0].text as string);
+    holding = false;
+    expect(await pending()).toBe(20);
+    expect(texts.filter((t) => /^Filed for the owner's approval/.test(t))).toHaveLength(1);
+    expect(texts.filter((t) => /There are already 20 proposals waiting for the owner\. Ask them to confirm or cancel some first\./.test(t))).toHaveLength(1);
+    // Turned away as it was filed, in the same words as before anything was resolved (HB-0942 review).
+    expect(texts.filter((t) => !/^Filed/.test(t))).toEqual(['There are already 20 proposals waiting for the owner. Ask them to confirm or cancel some first.']);
+    // …and a call made once the list is full is refused before anything is resolved, as before.
+    const third = (await call()).result;
+    expect(third).toMatchObject({ isError: true, content: [{ text: 'There are already 20 proposals waiting for the owner. Ask them to confirm or cancel some first.' }] });
+    expect(await pending()).toBe(20);
   });
 
   it('cannot reach another owner’s agent even by id', async () => {

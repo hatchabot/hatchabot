@@ -1,12 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
-import { parseModelCalls, sampleAgentUsage } from '../src/orchestrator/sourceUsage.js';
+import { parseModelCalls, sampleAgentUsage } from '../src/orchestrator/usage/sourceUsage.js';
 
 const OWNER = 'dev-owner';
 // A line as OpenClaw writes it, behind docker's --timestamps stamp.
@@ -83,5 +83,60 @@ printf 'king\\n' >&2
     const p = new LocalDockerProvider({ docker: stub, image: 'test-image:latest' });
     const text = await p.modelCallLog('docker://hatchabot-pantry', '2026-09-15T15:00:00Z');
     expect(parseModelCalls(text).map((c) => [c.key, c.status])).toEqual([['2026-09-15T15:52:00.000000000Z', 429]]);
+  });
+});
+
+describe('a log read Docker broke off (HB-1064)', () => {
+  /** A docker on a PATH of its own whose `logs` prints these lines, then exits `code`. */
+  function logs(lines: string[], code: number) {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-logs-cut-'));
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    symlinkSync(process.execPath, join(bin, 'node'));
+    vi.stubEnv('HOME', dir); vi.stubEnv('PATH', bin);
+    const docker = join(bin, 'docker');
+    writeFileSync(docker, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(lines.map((l) => `${l}\n`).join(''))});\nprocess.exit(${code});\n`, { mode: 0o755 });
+    return new LocalDockerProvider({ docker, image: 'test-image:latest' });
+  }
+  const COMPACT = '2026-09-15T15:01:00.000000000Z 2026-09-15T15:01:00.000+00:00 [agent] Auto-compaction failed: context overflow';
+  /** The usage pass at 16:00, its cursor at 15:00, reading through `real`. */
+  async function pass(real: LocalDockerProvider) {
+    const { store, provider } = await world();
+    provider.modelCallLog = ((ref: string, since: string) => real.modelCallLog(ref, since)) as never;
+    store.setUsageCursor('a', '2026-09-15T15:00:00.000000000Z');
+    await sampleAgentUsage({ store, providerFor: () => provider }, store.getAgent('a')!, Date.parse('2026-09-15T16:00:00Z'));
+    return store;
+  }
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('cut off after a loop line and before any call: a failure, and the cursor stays for the next pass', async () => {
+    const real = logs([COMPACT], 255);
+    await expect(real.modelCallLog('docker://hatchabot-pantry', '2026-09-15T15:00:00.000000000Z')).rejects.toThrow(/docker logs exited 255/);
+    const store = await pass(real);
+    // Moved on as an idle agent's would be, it skipped 15:00–15:55 for good.
+    expect(store.usageCursor('a')?.lastTs).toBe('2026-09-15T15:00:00.000000000Z');
+  });
+
+  it('cut off after only the call the cursor sits on, or a quoted marker: a failure too, the cursor stays', async () => {
+    // docker's --since gives back the cursor's own line: counted last pass, not new.
+    const again = logs([line('2026-09-15T15:00:00.000000000Z', 200)], 255);
+    await expect(again.modelCallLog('docker://hatchabot-pantry', '2026-09-15T15:00:00.000000000Z')).rejects.toThrow(/docker logs exited 255/);
+    expect((await pass(again)).usageCursor('a')?.lastTs).toBe('2026-09-15T15:00:00.000000000Z');
+    // A cursor kept in milliseconds stands for its whole millisecond, as the sampler reads it.
+    await expect(logs([line('2026-09-15T15:00:00.000400000Z', 429)], 255).modelCallLog('docker://hatchabot-pantry', '2026-09-15T15:00:00.000Z')).rejects.toThrow(/exited 255/);
+    // A marker inside another line is no call (HB-0005), so not one read either.
+    const quoted = logs(['2026-09-15T15:10:00.000000000Z [telegram] message from guest: [model-fetch] response provider=anthropic status=429'], 255);
+    expect((await pass(quoted)).usageCursor('a')?.lastTs).toBe('2026-09-15T15:00:00.000000000Z');
+    // The same read whole is an idle agent's, and moves on.
+    expect((await pass(logs([line('2026-09-15T15:00:00.000000000Z', 200)], 0))).usageCursor('a')?.lastTs).toBe('2026-09-15T15:55:00.000000000Z');
+  });
+
+  it('cut off after a call still counts it, as far as it read; a whole read of loop lines alone still moves on', async () => {
+    const cut = await pass(logs([COMPACT, line('2026-09-15T15:20:00.000000000Z', 429)], 255));
+    expect(cut.usageCursor('a')?.lastTs).toBe('2026-09-15T15:20:00.000000000Z');
+    expect(cut.limitHitsFor('max', '2026-09-15T15')).toHaveLength(1);
+    const whole = await pass(logs([COMPACT], 0));
+    expect(whole.usageCursor('a')?.lastTs).toBe('2026-09-15T15:55:00.000000000Z');
+    expect(whole.loopMarks(['a'], '2026-09-15T00:00:00Z').map((m) => m.kind)).toEqual(['compactFail']);
   });
 });

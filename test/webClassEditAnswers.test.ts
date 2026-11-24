@@ -5,17 +5,19 @@
  * how many it applied to.
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
+import { readPage } from '../scripts/page-source.mjs';
 
-const html = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+const html = readPage(new URL('../web/index.html', import.meta.url).pathname); // with its scripts (web/app/, HB-0811)
 const js = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join('\n');
 function source(name: string): string {
   const m = new RegExp(`^(?:async )?function ${name}\\([^\\n]*\\) \\{\\n[\\s\\S]*?^\\}`, 'm').exec(js);
   if (!m) throw new Error(`no function ${name} in web/index.html`);
   return m[0];
 }
+/** The page's own onAction (its event-action attributes), with esc as the sandboxes stub it. */
+const onAction = vm.runInNewContext(`(${source('onAction')})`, { esc: (v: unknown) => String(v ?? '') });
 
 const LIGHT = { id: 'c1', name: 'Light', model: 'claude-haiku-4-5' };
 const HEAVY = { id: 'c2', name: 'Heavy', model: 'claude-opus-5-5' };
@@ -74,7 +76,7 @@ describe("the class row's count of members still on an old model", () => {
       const list = { innerHTML: '' };
       const c = vm.createContext({
         agentClasses: [{ id: 'c1', name: 'Light', model: 'claude-haiku-4-5' }], agents, myAccount: {},
-        $: () => list, esc: (x: string) => x, jsq: (x: string) => x,
+        $: () => list, esc: (x: string) => x, jsq: (x: string) => x, onAction,
         classModelOptions: () => '', classSourceOptions: () => '', classImageOptions: () => '', classMemoryOptions: () => '', classSwapOptions: () => '',
       });
       vm.runInContext(source('renderClassList'), c);

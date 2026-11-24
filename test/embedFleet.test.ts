@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { createAgentRecord } from '../src/orchestrator/provision.js';
-import { pickAutoRebuilds } from '../src/orchestrator/rebuildPolicy.js';
+import { createAgentRecord } from '../src/orchestrator/lifecycle/provision.js';
+import { pickAutoRebuilds } from '../src/domain/rebuildPolicy.js';
 import { EmbedderService } from '../src/embedder/embedder.js';
 
 /** Step 3 of the embedder: the fleet default for new agents, and moving the rest. */

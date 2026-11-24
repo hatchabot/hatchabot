@@ -33,7 +33,7 @@ const agentRef = {
 } as const;
 
 /** A template setup field — mirrors the control plane's TemplateParamSchema
- *  (orchestrator/template.ts); the broker re-validates with the real zod
+ *  (orchestrator/transfer/template.ts); the broker re-validates with the real zod
  *  schema before any confirmation card is shown. */
 const SETUP_FIELD = {
   type: 'object',

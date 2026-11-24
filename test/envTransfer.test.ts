@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
-import { MAX_AGENT_ENV_VARS } from '../src/orchestrator/envPolicy.js';
+import { MAX_AGENT_ENV_VARS } from '../src/domain/envPolicy.js';
 
 const octet = (owner?: string) => ({ ...as(owner), 'content-type': 'application/octet-stream' });
 const addEnv = (w: Awaited<ReturnType<typeof makeWorld>>, name: string, value: string) =>

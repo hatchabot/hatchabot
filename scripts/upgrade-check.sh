@@ -60,13 +60,16 @@ import { Store } from './src/store/store.js';
 new Store(new Database(process.argv[2]!));   // constructing it writes the schema
 console.log('made', process.argv[2]);
 TS
+  # A database that could not be made is an upgrade not checked, and a failed
+  # check: skipped, every one of them could fail and the gate still passed,
+  # having checked nothing (HB-1076).
   ( cd "$TMP/old" && npx tsx make-db.ts "$db" >/dev/null ) \
-    || { echo "   could not build a database at $tag — skipping"; continue; }
-  # --migrate: open it the way the server does, so the ALTERs get their chance.
+    || { echo "   ^ could not build a database with $tag's code (above), so no upgrade from it was checked"; fail=1; continue; }
+  # --migrate: open it the way the server does, so the schema steps get their chance.
   if npx tsx scripts/schema-drift.ts "$db" --migrate; then
     echo "   ok"
   else
-    echo "   ^ an upgrade from $tag would break: add an ALTER TABLE in store.ts"
+    echo "   ^ an upgrade from $tag would break: append a step to SCHEMA_STEPS in src/store/schemaVersion.ts"
     fail=1
   fi
 done

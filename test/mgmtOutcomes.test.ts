@@ -82,7 +82,7 @@ describe('run_backup (HB-0563)', () => {
 
 describe('clone_agent (HB-0572)', () => {
   it('names what the copy does not have, beside how its setup ended', async () => {
-    const reply = { id: 'clone-1', name: 'Garden Notes copy', slug: 'garden-notes-copy', state: 'PROVISIONING', operation: { id: 'clone-op', status: 'running' }, notCopied: ['seed-catalog'], envNotCopied: ['SEED_SHOP_KEY'], memoryNotCopied: [], memoryCopyFailed: true };
+    const reply = { id: 'clone-1', name: 'Garden Notes copy', slug: 'garden-notes-copy', state: 'PROVISIONING', operation: { id: 'clone-op', status: 'running' }, notCopied: ['seed-catalog'], envNotCopied: ['SEED_SHOP_KEY'], modelNotCopied: 'made-up-model', memoryNotCopied: [], memoryCopyFailed: true };
     const { run } = broker((_m, path) => {
       if (path === '/v1/agents/a1/clone') return reply;
       if (path === '/v1/operations/clone-op') return { id: 'clone-op', status: 'succeeded', outcome: 'Set up and running.' };
@@ -92,6 +92,7 @@ describe('clone_agent (HB-0572)', () => {
     expect(text).toContain('Set up and running.');
     expect(text).toContain('seed-catalog');
     expect(text).toContain('SEED_SHOP_KEY');
+    expect(text).toContain('Its model made-up-model is not one its AI source offers');
     expect(text).toMatch(/daily notes/);
   });
 

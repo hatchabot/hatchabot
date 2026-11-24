@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
@@ -72,5 +72,70 @@ describe('scripts/ensure-deps.sh checks the database driver once per Node (audit
     expect(r.status).not.toBe(0);
     expect(r.stdout).not.toContain('Dependencies are up to date.');
     expect(existsSync(i.abiStamp)).toBe(false);
+  });
+});
+
+describe('scripts/ensure-deps.sh runs one install per folder at a time (HB-1067)', () => {
+  const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  async function until(what: () => boolean, ms = 15_000) {
+    const end = Date.now() + ms;
+    while (!what()) { if (Date.now() > end) throw new Error('timed out waiting'); await sleepMs(50); }
+  }
+  // npm ci as a shim that empties node_modules, as npm ci does, and holds
+  // there until the test lets it go (or 20 s pass, so none outlives a failed test).
+  function heldInstall() {
+    const i = install();
+    writeFileSync(i.lockStamp, 'an-older-sum\n');
+    const release = join(i.app, '..', 'release');
+    writeFileSync(join(i.app, '..', 'bin', 'npm'), `#!/usr/bin/env bash
+echo "npm $* begun" >> '${join(i.app, '..', 'calls.log')}'
+rm -rf node_modules; mkdir node_modules
+n=0; while [ ! -e '${release}' ] && [ "$n" -lt 400 ]; do sleep 0.05; n=$((n + 1)); done
+echo "npm $* done" >> '${join(i.app, '..', 'calls.log')}'
+`, { mode: 0o755 });
+    const start = (extra: Record<string, string> = {}) => {
+      const p = spawn('bash', [join(i.app, 'scripts', 'ensure-deps.sh')], { env: scriptEnv(join(i.app, '..', 'home'), `${join(i.app, '..', 'bin')}:/usr/bin:/bin`, extra) });
+      let out = '';
+      p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { out += d; });
+      const done = new Promise<number | null>((r) => p.on('close', (code) => r(code)));
+      return { done, out: () => out };
+    };
+    return { ...i, release, start };
+  }
+
+  for (const [label, tzA, tzB] of [['in one time zone', '', ''], ['the first in one time zone and the second in another (review of HB-1067)', 'JST-9', 'EST5']] as const) it(`a second run while the first is installing waits, then finds the install done: one npm ci, not two at once (${label})`, async () => {
+    const i = heldInstall();
+    const a = i.start(tzA ? { TZ: tzA } : {});
+    let b: ReturnType<typeof i.start> | undefined;
+    try {
+      await until(() => i.calls().includes('npm ci --no-audit --no-fund begun'));
+      b = i.start(tzB ? { TZ: tzB } : {});
+      // Waiting, or (as before the lock) emptying node_modules beside the first.
+      await until(() => b!.out().includes('Waiting for another install of the dependencies') || i.calls().filter((c) => c.endsWith('begun')).length > 1);
+      await sleepMs(500);
+      expect(i.calls()).toEqual(['npm ci --no-audit --no-fund begun']); // the second has not begun one
+    } finally {
+      writeFileSync(i.release, ''); // let the shims go, however the test went
+    }
+    if (!b) throw new Error('the second run never started');
+    expect(await a.done, a.out()).toBe(0);
+    expect(await b.done, b.out()).toBe(0);
+    expect(b.out()).toContain('Dependencies are up to date.');
+    expect(i.calls()).toEqual(['npm ci --no-audit --no-fund begun', 'npm ci --no-audit --no-fund done', 'driver-check']);
+    expect(readFileSync(i.lockStamp, 'utf8').trim()).toBe(i.sum);
+    expect(readdirSync(join(i.app, '..', 'home', '.local', 'state', 'hatchabot'))).toEqual([]); // the lock let go
+  });
+
+  it('a lock left by a run that is gone is taken over', () => {
+    const i = install();
+    const sum = spawnSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', i.app], { encoding: 'utf8' }).stdout.trim();
+    const lock = join(i.app, '..', 'home', '.local', 'state', 'hatchabot', `deps-${sum}.lock.d`);
+    mkdirSync(lock, { recursive: true });
+    const gone = spawnSync('bash', ['-c', 'echo $$']).stdout.toString().trim();
+    writeFileSync(join(lock, 'owner'), `${gone} Thu Jan  1 00:00:00 1970\n`);
+    const r = i.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).not.toContain('Waiting for another install');
+    expect(existsSync(lock)).toBe(false);
   });
 });

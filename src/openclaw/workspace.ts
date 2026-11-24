@@ -78,23 +78,51 @@ function fenceMask(lines: string[], exact = false, indented = false): boolean[] 
   // never closed, is text, as at the top level (ninth review).
   scansForTests++;
   const re = indented ? ANY_FENCE_LINE : FENCE_LINE;
+  // Without a CRLF file's \r, which `.` does not match.
+  const found = lines.map((raw) => { const l = raw.replace(/\r$/, ''); return { l, m: re.exec(l) }; });
+  // A deep opener never closed is text: whether one has a closer anywhere
+  // after it is worked out once, from the end. Finding that out at the end of
+  // the file and reading on from the opener again read the rest once per such
+  // opener, in time that grew with the square of the file (HB-0921).
+  const closesAfter = closersAfter(found, exact);
   const inFence: boolean[] = [];
-  const text = new Set<number>();
-  let open: { ch: string; len: number; at: number; deep: boolean } | null = null;
+  let open: { ch: string; len: number } | null = null;
   for (let i = 0; i < lines.length; i++) {
-    // Without a CRLF file's \r, which `.` does not match.
-    const l = lines[i]!.replace(/\r$/, '');
-    const m = re.exec(l);
+    const { l, m } = found[i]!;
     if (open === null) {
       inFence[i] = false;
-      if (m && !text.has(i)) open = { ch: m[1]![0]!, len: m[1]!.length, at: i, deep: !FENCE_LINE.test(l) };
+      if (m && (FENCE_LINE.test(l) || closesAfter(i, m[1]![0]!, m[1]!.length))) open = { ch: m[1]![0]!, len: m[1]!.length };
     } else {
       inFence[i] = true;
       if (m && m[1]![0] === open.ch && (exact ? m[1]!.length === open.len : m[1]!.length >= open.len) && m[2]!.trim() === '') open = null;
     }
-    if (i === lines.length - 1 && open?.deep) { text.add(open.at); i = open.at; open = null; }
   }
   return inFence;
+}
+
+/**
+ * Whether a line after `at` would close a fence of `ch` and `len` (fenceMask's
+ * rule: the same character, as long or longer, or exactly as long when
+ * `exact`, with nothing else on the line). Each line is looked at once, here.
+ */
+function closersAfter(found: Array<{ m: RegExpExecArray | null }>, exact: boolean): (at: number, ch: string, len: number) => boolean {
+  // For each character: the longest bare fence at or after each line, and the
+  // last line each exact run is on.
+  const longest: Record<string, number[]> = { '`': [], '~': [] };
+  const lastOf = new Map<string, number>();
+  let ticks = 0;
+  let tildes = 0;
+  for (let i = found.length - 1; i >= 0; i--) {
+    const m = found[i]!.m;
+    if (m && m[2]!.trim() === '') {
+      const run = m[1]!;
+      if (run[0] === '`') ticks = Math.max(ticks, run.length); else tildes = Math.max(tildes, run.length);
+      if (!lastOf.has(`${run[0]}${run.length}`)) lastOf.set(`${run[0]}${run.length}`, i);
+    }
+    longest['`']![i] = ticks;
+    longest['~']![i] = tildes;
+  }
+  return (at, ch, len) => exact ? (lastOf.get(`${ch}${len}`) ?? -1) > at : (longest[ch]?.[at + 1] ?? 0) >= len;
 }
 
 /**

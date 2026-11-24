@@ -220,6 +220,7 @@ describe('the public listener: who gets what', () => {
     expect(csp).toContain("frame-ancestors 'self'");
     expect(csp).toContain("object-src 'none'");
     expect(csp).not.toMatch(/script-src[^;]*https?:/); // accounts mode: no script from anywhere else
+    expect(csp).not.toMatch(/script-src[^;]*'unsafe-inline'/); // nor an inline one (HB-0812)
     expect(r.res.headers.get('x-content-type-options')).toBe('nosniff');
     expect(r.res.headers.get('referrer-policy')).toBe('no-referrer');
     // …and none of that is added at the private address.

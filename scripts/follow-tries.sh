@@ -12,15 +12,25 @@
 # timers of releases before read it (`read -r T_TARGET T_COUNT T_LAST`: a
 # fourth field made T_LAST no number, and they started the count again; tenth
 # review). Of those failures, the disk's are counted beside it, in FILE.disk:
-# "<release> <the disk's>", none when there are none.
+# "<release> <the disk's> <epoch of the disk's last>", none when there are
+# none (a file with no third field, from before, takes FILE's epoch). Each
+# wait runs on its own clock: the release's from its own last try (FILE's
+# epoch), the disk's from the disk's last failure. A repair the disk stopped
+# (note_try 2) is no try of the release: on one shared clock, a repair that
+# failed every hour put back the release's wait each time, and once that
+# wait was longer than the disk's it never ran out (review of HB-0637).
 #
 # tries_open FILE NAME RELEASE: read FILE's record for RELEASE into T_COUNT,
-#   T_LAST and T_DISK (all 0 for another release, or none; T_DISK 0 when
-#   FILE.disk is not there or names another release). NAME is where both are
-#   kept meanwhile when FILE cannot be written (HELD, below).
-# tries_waiting: 0 while the wait after the last failure lasts (by the release's
+#   T_LAST, T_DISK and T_DLAST (all 0 for another release, or none; T_DISK 0
+#   when FILE.disk is not there or names another release). NAME is where both
+#   are kept meanwhile when FILE cannot be written (HELD, below).
+# tries_waiting: 0 while the wait after the release's last try lasts (by its
 #   own failures; by the disk's, an hour at most, when it has none).
-# note_try 0|1: one more failure in a row, 1 when it was the disk's.
+# note_try 0|1|2: one more failure in a row: 0 the release's, 1 the disk's in
+#   a try of the release, 2 the disk's in a repair, not a try of the release,
+#   whose clock it leaves. T_COUNT, T_DISK, T_LAST and T_DLAST say so after
+#   it, so a second in the same tick adds on (it wrote over the first, from
+#   the counts read at the start: HB-0637).
 # forget_tries: the release was upgraded to, or set aside.
 MAX_TRIES=8
 tries_open() {
@@ -34,16 +44,18 @@ tries_open() {
   fi
   local from="$TRIES" t="" dt="" more=""
   [ -z "$HELD" ] || [ -L "$HELD" ] || [ ! -f "$HELD" ] || from="$HELD"
-  T_COUNT=0; T_LAST=0; T_DISK=0
+  T_COUNT=0; T_LAST=0; T_DISK=0; T_DLAST=0
   { read -r t T_COUNT T_LAST more < "$from"; } 2>/dev/null || true
   case "${T_COUNT:-}${T_LAST:-}" in ''|*[!0-9]*) T_COUNT=0; T_LAST=0 ;; esac
-  [ -L "$from.disk" ] || { read -r dt T_DISK more < "$from.disk"; } 2>/dev/null || true
+  [ -L "$from.disk" ] || { read -r dt T_DISK T_DLAST more < "$from.disk"; } 2>/dev/null || true
   case "${T_DISK:-}" in ''|*[!0-9]*) T_DISK=0 ;; esac
+  case "${T_DLAST:-}" in ''|*[!0-9]*) T_DLAST=0 ;; esac
+  [ "$T_DLAST" -gt 0 ] || T_DLAST="$T_LAST"
   # Another release's, or left by a timer from before that counted on
   # without it: never more than the failures counted.
   [ "$dt" = "$TRIES_FOR" ] || T_DISK=0
   [ "$T_DISK" -le "$T_COUNT" ] || T_DISK="$T_COUNT"
-  if [ "$t" != "$TRIES_FOR" ] || [ "$T_COUNT" -le 0 ]; then T_COUNT=0; T_LAST=0; T_DISK=0; fi
+  if [ "$t" != "$TRIES_FOR" ] || [ "$T_COUNT" -le 0 ]; then T_COUNT=0; T_LAST=0; T_DISK=0; T_DLAST=0; fi
 }
 tries_waiting() {
   [ "$T_COUNT" -gt 0 ] || return 1
@@ -79,8 +91,12 @@ tries_put() {
   { printf '%s\n' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"; } 2>/dev/null || { rm -f "$1.tmp" 2>/dev/null || true; return 1; }
 }
 note_try() {
-  local line dline="" disk=$((T_DISK + $1))
-  line="$TRIES_FOR $((T_COUNT + 1)) $(date +%s)"; [ "$disk" = 0 ] || dline="$TRIES_FOR $disk"
+  local line dline="" disk="$T_DISK" now last dlast="$T_DLAST"
+  now="$(date +%s)"; last="$now"
+  [ "$1" = 0 ] || { disk=$((T_DISK + 1)); dlast="$now"; }
+  [ "$1" != 2 ] || last="$T_LAST"
+  line="$TRIES_FOR $((T_COUNT + 1)) $last"; [ "$disk" = 0 ] || dline="$TRIES_FOR $disk $dlast"
+  T_COUNT=$((T_COUNT + 1)); T_DISK="$disk"; T_LAST="$last"; T_DLAST="$dlast"
   if tries_put "$TRIES" "$line" "$dline"; then
     [ -z "$HELD" ] || rm -f "$HELD" "$HELD.disk" 2>/dev/null || true
     return 0

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { buildRuntimeSpec, hostPathTargetProblem } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec, hostPathTargetProblem } from '../src/orchestrator/lifecycle/provision.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 
@@ -123,7 +123,7 @@ describe('HB-0066: a copy of a volume leaves out what the agent rebuilds by itse
   it('exportState and the export estimate use it', async () => {
     const { readFileSync, writeFileSync } = await import('node:fs');
     const { LocalDockerProvider } = await import('../src/providers/localDockerProvider.js');
-    const { estimateStateBytes } = await import('../src/orchestrator/transfer.js');
+    const { estimateStateBytes } = await import('../src/orchestrator/transfer/transfer.js');
     const d = tmp();
     const log = join(d, 'argv.log');
     const stub = join(d, 'docker');

@@ -1,0 +1,1461 @@
+import { stopAndConfirm } from '../lifecycle/quiesce.js';
+import { moveCrossesDown } from '../../openclaw/configWriter.js';
+import { validIcon, validIconColor } from '../homeScreen/agentIcons.js';
+import { randomUUID } from 'node:crypto';
+import { constants as zlibConstants, createGzip, gzip, gunzip, gunzipSync } from 'node:zlib';
+import { promisify } from 'node:util';
+import { pipeline } from 'node:stream/promises';
+import { semaphore } from '../../util/queues.js';
+import { z } from 'zod';
+import { CuratedSkillSelectionSchema } from '../../openclaw/skills.js';
+import type { Agent, AIProfile, GroupAccess, MemberRole, TemplateParam } from '../../domain/types.js';
+import {
+  buildRuntimeSpec,
+  forgetEmbedDecision,
+  recordApplied,
+  reindexMemoryIfSwitched,
+  runRebuildHook,
+  slugify,
+  waitForHealthy,
+  waitForSkillsSettled,
+  type ProvisionDeps,
+  sharePathProblem,
+  hostPathTargetProblem,
+} from '../lifecycle/provision.js';
+import { clearBusy, markBusy } from '../lifecycle/busy.js';
+import { clearStaleRuntimePins } from '../sources/runtimePins.js';
+import { beginOperation, forgetFilesReplacing, handleFor, rethrowIfCrash } from '../lifecycle/operations.js';
+import { ENV_NAME_RE, envValueProblem, MAX_IMPORTED_ENV_VARS, reservedEnvProblem } from '../../domain/envPolicy.js';
+import { buildRecipeOn, derivedByTag, namedHere, recipeFor, recipeProblem, recordBuilds, sameImageHere, standInAmong, type ImageRecipe } from '../machines/imageRecipe.js';
+import { isDerived, parseBuildInputs, VERSION_TAG } from '../machines/buildInputs.js';
+import { DERIVED_TAG_PREFIX } from '../machines/derivedImage.js';
+import { defaultMemoryCap, formatMemoryCap, memberMemoryMax, parseMemoryCap } from '../../domain/memoryCap.js';
+import { formatSwapAllowance, parseSwapAllowance } from '../../domain/swap.js';
+import { imageRepository } from '../../domain/imageRepository.js';
+import { statSync } from 'node:fs';
+import { MAX_FILE_BYTES } from '../files/snapshots.js';
+import { MAX_TEMPLATE_PARAMS } from './template.js';
+import { PARAM_KEY_RE, TemplateParamSchema } from '../../domain/templateParams.js';
+import { folderMountNameProblem, MAX_DATA_SOURCES, MAX_MOUNT_NAME } from '../apps/dataSourceLimits.js';
+import { validGitMountName, normalizeGitUrl } from '../apps/gitSource.js';
+import { STATE_CACHE_EXCLUDES } from '../../providers/volumeCopy.js';
+import { manifestSchema as appManifestSchema } from '../apps/apps.js';
+import { TelegramUnavailableError } from '../../channels/telegramManual.js';
+
+/**
+ * Export/import: an agent as a single portable file, so "move it to another
+ * machine" is download-here, upload-there (§ the distributed-hosts direction).
+ *
+ * The archive is gzipped JSON: a manifest (identity, members, channel + bot
+ * token, AI hints) plus the runtime volume snapshot base64-inlined. The bot
+ * token IS the agent's Telegram identity — it must travel, which makes the
+ * file itself a credential. Handle like one.
+ *
+ * The cardinal rule of a move: the source copy must never poll again once the
+ * import runs — Telegram delivers each message to exactly one poller, and two
+ * copies flip-flop. Export therefore leaves the source agent STOPPED.
+ */
+
+export const EXPORT_FORMAT = 'hatchabot-export';
+/** Files exported before the rename. */
+export const LEGACY_EXPORT_FORMAT = 'agentclaw-export';
+export const EXPORT_VERSION = 1;
+
+/** How much of the gzip the peek decompresses first, and the most that may
+ *  come out of it (a bomb's prefix throws, and the full read below decides). */
+const PEEK_IN_BYTES = 4096;
+const PEEK_OUT_BYTES = 8 * 1024 * 1024;
+/** Both exporters write `format` first. */
+const FORMAT_HEAD = /^\s*\{\s*"format"\s*:\s*"([^"\\]{1,64})"/;
+
+/** Best-effort read of an archive's `format` tag (no full validation), so one
+ *  Import path can route a Download (full agent) vs a Share (template) file.
+ *  Bounded like the real import — a bomb (or anything unreadable) yields
+ *  `undefined`, which the caller treats as a full restore that re-validates.
+ *  Only the first few KB are decompressed: the whole archive (up to 256 MB of
+ *  inlined volume) was decompressed here and then again by the import
+ *  (HB-0075). A file that does not begin with `format` is read whole, off
+ *  the event loop: on it, up to 256 MB held every other request (HB-1162). */
+export async function peekFormat(data: Buffer): Promise<string | undefined> {
+  try {
+    const head = gunzipSync(data.subarray(0, PEEK_IN_BYTES), {
+      finishFlush: zlibConstants.Z_SYNC_FLUSH, maxOutputLength: PEEK_OUT_BYTES,
+    }).toString('utf8');
+    const m = FORMAT_HEAD.exec(head);
+    if (m) return m[1];
+  } catch {
+    /* not gzip, or a prefix that inflates past the bound: the full read decides */
+  }
+  try {
+    const o = await inflateWhole(data, MAX_STATE_BYTES, (json) => JSON.parse(json) as { format?: unknown });
+    return typeof o?.format === 'string' ? o.format : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
+/**
+ * Whole files inflated at once, across the process. Off the event loop
+ * nothing ordered them any more: as many imports as were sent at once (one
+ * gzip bomb, sent over and over) each inflated up to 256 MB together
+ * (HB-1162). Its waiters are a lock's: they end with their requests.
+ */
+const WHOLE_INFLATES_AT_ONCE = 2;
+const inflating = semaphore(WHOLE_INFLATES_AT_ONCE);
+/**
+ * A gzip file inflated whole on zlib's threads, at most `maxOutputLength`
+ * bytes, and `read` from its text while the slot is held, so what it
+ * inflated to is let go before the next takes the slot. Throws as gunzip
+ * and `read` throw.
+ */
+export async function inflateWhole<T>(data: Buffer, maxOutputLength: number, read: (text: string) => T): Promise<T> {
+  await inflating.acquire();
+  try {
+    return read((await gunzipAsync(data, { maxOutputLength })).toString('utf8'));
+  } finally {
+    inflating.release();
+  }
+}
+/** The state's bytes taken at a time: a multiple of 3, so its pieces' base64 is the whole's. */
+const STATE_PIECE_BYTES = 3 * 256 * 1024;
+
+/**
+ * The file: the manifest's JSON with `state` as the state's base64,
+ * gzipped. The same bytes as gzipSync(JSON.stringify(manifest with its
+ * state)), made without holding the server's event loop (HB-0925): the
+ * state goes in as base64 a piece at a time, and zlib compresses on its own
+ * threads. Done whole, a large agent (up to 192 MiB of state) stopped every
+ * other request and timer for seconds, and held the state three times over
+ * (its base64, the JSON, that JSON's bytes) on the way. `state` is the
+ * manifest's last key, so its JSON ends with it; were it not, the file is
+ * made whole, as before, compressed off the loop all the same.
+ */
+export async function packExport(manifest: ExportManifest, state: Buffer): Promise<Buffer> {
+  const json = JSON.stringify({ ...manifest, state: '' });
+  const end = '"state":""}';
+  if (!json.endsWith(end)) return gzipAsync(Buffer.from(JSON.stringify({ ...manifest, state: state.toString('base64') }), 'utf8'));
+  const out: Buffer[] = [];
+  // A pipeline: each piece waits for the gzip to take it (what is held at
+  // once stays bounded), and an error anywhere rejects this one promise.
+  // A listener added per wait was never removed (a warning past ten), and a
+  // zlib error during one left a rejection nothing awaited (review of HB-0925).
+  await pipeline(
+    async function* pieces() {
+      yield Buffer.from(json.slice(0, -2), 'utf8'); // up to and with `"state":"`
+      for (let at = 0; at < state.length; at += STATE_PIECE_BYTES) {
+        yield Buffer.from(state.subarray(at, at + STATE_PIECE_BYTES).toString('base64'), 'latin1');
+      }
+      yield Buffer.from('"}', 'utf8');
+    },
+    createGzip(),
+    async (gzipped: AsyncIterable<Buffer>) => { for await (const c of gzipped) out.push(c); },
+  );
+  return Buffer.concat(out);
+}
+
+export interface ExportedDataSource {
+  kind: 'folder' | 'git';
+  access: 'ro' | 'rw';
+  mountName: string;
+  hostPath?: string;
+  mountAtHostPath?: boolean;
+  repoUrl?: string;
+  pubKey?: string;
+  /** The deploy key's private half (git with a key). */
+  deployKey?: string;
+}
+
+export interface ExportManifest {
+  openclawVersion?: string;
+  format: typeof EXPORT_FORMAT;
+  version: number;
+  exportedAt: string;
+  agent: {
+    name: string;
+    slug: string;
+    persona: string;
+    curatedSkills?: string[];
+    /** Always true, and read by nothing here: written only because Hatchabot
+     *  before v2.170.0 refuses a copy without it (HB-0094). */
+    sharedMemory?: true;
+    /** Host folders it could read. Paths are machine-specific — carried as a
+     *  declaration so the destination can check them, never auto-applied. */
+    sharedPaths?: string[];
+    /** Its data sources (Settings → Data). A repo travels whole, deploy key included
+     *  (the file is a credential already); a folder is a declaration the destination
+     *  re-adds only when the same path is there and safe (audit, 2026-10-23: they
+     *  were dropped, and the clone's key stayed on the volume untracked). */
+    dataSources?: ExportedDataSource[];
+    /** Home-screen icon (one emoji) and its tint. */
+    icon?: string;
+    iconColor?: string;
+    /** Per-agent model override. Applied on import only if the destination
+     *  profile's menu still offers it; otherwise dropped to the default. */
+    model?: string;
+    /** Its own memory cap and swap allowance ("12g", "off"). Applied on import
+     *  within the destination's rules (importedLimits); absent = its default. */
+    memoryCap?: string;
+    swapAllowance?: string;
+    /** Its setup fields, the values in force and the raw {{placeholder}} layer
+     *  they render into (Agent.parameters/paramValues/paramFiles): without them a
+     *  restored copy could not be re-configured or re-shared (audit #005). */
+    setup?: { parameters: TemplateParam[]; values?: Record<string, string>; files?: { soul?: string; agents?: string; persona?: string } };
+    /** The switches provisioning writes into its runtime config. Left behind,
+     *  the second provision of an import wrote them off over the restored
+     *  config: its browser and trigger scripts stopped (audit #007). */
+    switches?: { browser?: boolean; cronTriggers?: boolean; richMessages?: boolean; groupAccess?: GroupAccess; filesMaxMb?: number };
+    /** Its installed app's record (agent_apps): the code, config and tasks ride
+     *  the volume, and this is what Update, Roll back and Stop app manage them
+     *  by (audit #006). Who may use those is judged where they are asked. */
+    app?: { app: string; source: string; ref: string; sha: string; manifest: unknown; previousSha?: string; previousManifest?: unknown; installedAt: string; testOk?: boolean };
+  };
+  ai: { vendor: string; model: string; models?: string[] };
+  /** Absent when the agent is web-only (no Telegram bot). */
+  channel?: { kind: 'telegram'; accountId: string; deepLink: string; botToken: string };
+  memberships: Array<{
+    userId: string;
+    role: MemberRole;
+    displayName?: string;
+    channelUserId?: string;
+    status: 'active' | 'revoked';
+  }>;
+  /**
+   * Per-agent env vars WITH their secret values. A full export is a private
+   * identity backup (it already carries the bot token — treat like a
+   * password); an agent that arrives without its env secrets is silently
+   * broken, which is worse. Templates (template.ts) still carry NAMES only.
+   */
+  envVars?: Array<{ name: string; value: string }>;
+  /**
+   * The image it is pinned to, as a RECIPE (base + extra packages + a derived
+   * image's Dockerfile lines), never the image itself. The destination uses
+   * its own copy if it has one, and otherwise builds it only when its owner
+   * says so, after seeing what would run. `problem`: why no recipe could be
+   * written (the export still works; the agent lands on the default image).
+   */
+  image?: { tag: string; recipe?: Omit<ImageRecipe, 'tag'>; problem?: string };
+  /** base64 gzipped tarball of the OpenClaw state dir. */
+  state: string;
+}
+
+
+/** Cleanup is unconfirmed: a peer must keep its source stopped. */
+export class ImportCleanupPending extends Error {}
+
+export class TransferError extends Error {
+  constructor(readonly userMessage: string) {
+    super(userMessage);
+    this.name = 'TransferError';
+  }
+}
+
+/**
+ * A template refused for one of its scheduled tasks (template.ts,
+ * scheduleProblem), in a template file's words. A copy made through a
+ * template (a clone, a derived child) says it in its own: `copyOf`. Here,
+ * beside TransferError, not in template.ts, which this module imports from:
+ * a subclass there would be made before TransferError is (HB-1018).
+ */
+export class TemplateTaskRefused extends TransferError {
+  constructor(readonly task: string, readonly why: string) {
+    super(`That template can't be used: its scheduled task "${task}" ${why}.`);
+  }
+  /** The same refusal for a copy of `agentName`. */
+  copyOf(agentName: string): TransferError {
+    return new TransferError(`Can't copy ${agentName}: its scheduled task "${this.task}" ${this.why}.`);
+  }
+}
+
+/**
+ * The file carries an image this machine lacks: someone has to decide whether
+ * to build it here (only the machine's owner may) or use the default image.
+ */
+export class ImageDecisionNeeded extends TransferError {
+  constructor(
+    readonly image: string,
+    readonly recipe: ImageRecipe | undefined,
+    readonly problem: string | undefined,
+    readonly mayBuild: boolean,
+    where = 'this machine',
+  ) {
+    super(
+      `This agent is pinned to the image ${image}, which ${where} does not have. ` +
+        (problem
+          ? `It can't be built here (${problem}), so it can only run on the default image.`
+          : mayBuild
+            ? 'Build it here from the recipe in the file, or run it on the default image.'
+            : `Only the owner of ${where} can build images, so it can run on the default image, or ask them to import it.`),
+    );
+    this.name = 'ImageDecisionNeeded';
+  }
+}
+
+/**
+ * An archive is untrusted input — it crosses machines and may arrive from
+ * someone else. Everything below is validated before a single value reaches
+ * the store, a shell string, or a docker name. The slug matters most: it is
+ * interpolated into container/volume names and workspace paths.
+ */
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+const ManifestSchema = z.object({
+  format: z.enum([EXPORT_FORMAT, LEGACY_EXPORT_FORMAT]),
+  version: z.literal(EXPORT_VERSION),
+  exportedAt: z.string().max(64),
+  /** The OpenClaw version its data was last written by (night review, 2026-09-28): an import onto an older line refuses. */
+  openclawVersion: z.string().max(40).optional(),
+  agent: z.object({
+    name: z.string().min(1).max(64),
+    slug: z.string().regex(SLUG_RE),
+    persona: z.string().max(8000),
+    curatedSkills: CuratedSkillSelectionSchema.optional(),
+    // `sharedMemory` is accepted and ignored: memory is always shared since
+    // v2.107.0, so an old file's `false` means nothing (HB-0094).
+    sharedMemory: z.boolean().optional(),
+    sharedPaths: z.array(z.string().max(512)).max(8).optional(),
+    dataSources: z.array(z.object({
+      kind: z.enum(['folder', 'git']),
+      access: z.enum(['ro', 'rw']),
+      mountName: z.string().min(1).max(MAX_MOUNT_NAME),
+      hostPath: z.string().max(512).optional(),
+      mountAtHostPath: z.boolean().optional(),
+      repoUrl: z.string().max(512).optional(),
+      pubKey: z.string().max(4000).optional(),
+      deployKey: z.string().max(16000).optional(),
+    })).max(MAX_DATA_SOURCES).optional(),
+    // Held to the limit ai.model has: holding an agent on a source's long
+    // default pinned that model as its override, and the agent's own backup
+    // was refused (HB-0321). Applied only when the destination's source
+    // offers it, so one that is not usable is dropped, not fatal.
+    model: z.string().max(256).optional().catch(undefined),
+    // Its home-screen icon travels with it; a bad value is dropped, not fatal.
+    icon: z.string().max(16).optional().catch(undefined),
+    iconColor: z.string().max(7).optional().catch(undefined),
+    memoryCap: z.string().max(16).optional().catch(undefined),
+    swapAllowance: z.string().max(16).optional().catch(undefined),
+    // The setup layer, the switches and the app record: each held to the rules
+    // its own route holds them to, and dropped whole (not fatal) when it fails
+    // them — the agent itself still comes back, as it always did. Lazy: the
+    // template's schema lives in a module that imports this one.
+    setup: z.lazy(() => z.object({
+      parameters: z.array(TemplateParamSchema).min(1).max(MAX_TEMPLATE_PARAMS)
+        .refine((a) => new Set(a.map((p) => p.key)).size === a.length),
+      values: z.record(z.string().regex(PARAM_KEY_RE), z.string().max(2000)).refine((r) => Object.keys(r).length <= MAX_TEMPLATE_PARAMS).optional(),
+      files: z.object({
+        soul: z.string().max(MAX_FILE_BYTES).optional(),
+        agents: z.string().max(MAX_FILE_BYTES).optional(),
+        persona: z.string().max(8000).optional(),
+      }).optional(),
+    })).optional().catch(undefined),
+    switches: z.object({
+      browser: z.boolean().optional().catch(undefined),
+      cronTriggers: z.boolean().optional().catch(undefined),
+      richMessages: z.boolean().optional().catch(undefined),
+      groupAccess: z.object({ mode: z.enum(['off', 'members', 'room']), roomId: z.string().regex(/^-?\d{1,20}$/).optional() })
+        .refine((g) => g.mode !== 'room' || !!g.roomId).optional().catch(undefined),
+      filesMaxMb: z.number().int().min(1).max(1000).optional().catch(undefined),
+    }).optional().catch(undefined),
+    app: z.lazy(() => z.object({
+      app: z.string().max(40),
+      source: z.string().min(1).max(1000),
+      ref: z.string().min(1).max(256),
+      sha: z.string().regex(/^[0-9a-f]{12,64}$/),
+      manifest: appManifestSchema,
+      previousSha: z.string().regex(/^[0-9a-f]{12,64}$/).optional(),
+      previousManifest: appManifestSchema.optional(),
+      installedAt: z.string().max(64),
+      testOk: z.boolean().optional(),
+    }).refine((r) => r.manifest.app === r.app && (!r.previousManifest || r.previousManifest.app === r.app) && !r.previousSha === !r.previousManifest))
+      .optional().catch(undefined),
+  }),
+  // A hint only (the destination picks its own source by vendor): an AI
+  // source may name models longer than 64 characters, and refusing those
+  // made such an agent's own export unimportable (#162).
+  ai: z.object({
+    vendor: z.string().max(32),
+    model: z.string().max(256).catch(''),
+    models: z.array(z.string().max(256)).max(16).optional().catch(undefined),
+  }),
+  channel: z.object({
+    kind: z.literal('telegram'),
+    accountId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_]+$/),
+    // Must be a real Telegram link. Unvalidated, this string reached an
+    // href="" in the app, so an imported archive could carry a `javascript:`
+    // URI and run script in the app's origin when the owner clicked it.
+    deepLink: z.string().max(256).startsWith('https://t.me/'),
+    botToken: z.string().min(1).max(256),
+  }).optional(), // absent for a web-only agent (no Telegram bot)
+  memberships: z
+    .array(
+      z.object({
+        userId: z.string().min(1).max(128),
+        role: z.enum(['owner', 'admin', 'user']),
+        displayName: z.string().max(64).optional(),
+        channelUserId: z.string().regex(/^\d{1,32}$/).optional(),
+        status: z.enum(['active', 'revoked']),
+      }),
+    )
+    .max(256),
+  envVars: z
+    .array(
+      z.object({
+        // Same shape rule as the env route; the reserved-name POLICY is
+        // enforced at import time via envPolicy.ts (the archive is untrusted).
+        name: z.string().regex(ENV_NAME_RE).max(128),
+        value: z.string().min(1).max(8192),
+      }),
+    )
+    .max(MAX_IMPORTED_ENV_VARS)
+    .optional(),
+  // Shape only; the CONTENT is judged by recipeProblem before anything builds.
+  image: z
+    .object({
+      tag: z.string().min(1).max(200),
+      recipe: z
+        .object({
+          base: z.string().min(1).max(200),
+          packages: z.array(z.string().max(64)).max(32),
+          lines: z.string().max(8000).optional(),
+          channels: z.array(z.string().max(16)).max(8),
+          // What its base was built from, and its layers (HB-0986): an older
+          // Hatchabot drops both and builds on the base by name, as before.
+          inputs: z.string().max(2000).optional(),
+          layers: z.string().max(80).optional(),
+        })
+        .optional(),
+      problem: z.string().max(300).optional(),
+    })
+    .optional(),
+  state: z.string(),
+});
+
+/** Uncompressed ceiling — a gzip bomb must not OOM the control plane. */
+export const MAX_STATE_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Largest raw (gzipped-tar) state that still fits under MAX_STATE_BYTES once
+ * base64-inflated (×4/3) and wrapped in a small manifest. Beyond this the
+ * export would either produce a file no import could ever accept, or trip
+ * Node's max-string-length inside JSON.stringify with an opaque RangeError —
+ * so we refuse it up front with a message the owner can act on. The manifest
+ * itself can be bigger than the 8 KB this sets aside (64 environment values of
+ * 8 KB each): stateAllowance has the exact limit for a given manifest.
+ */
+export const MAX_RAW_STATE_BYTES = Math.floor((MAX_STATE_BYTES - 8192) * 0.75);
+
+/**
+ * The largest raw state a manifest of `metaBytes` (its JSON with an empty
+ * state) can carry and still be read back under MAX_STATE_BYTES: the state
+ * goes in as base64, 4 bytes for every 3 or part of 3, none of them escaped.
+ * Never more than MAX_RAW_STATE_BYTES, which the import holds the state to.
+ * Without it, an export with large environment values came out over the
+ * importer's ceiling: a copy this same version could not import (HB-0582).
+ */
+export function stateAllowance(metaBytes: number): number {
+  return Math.max(0, Math.min(MAX_RAW_STATE_BYTES, Math.floor((MAX_STATE_BYTES - metaBytes) / 4) * 3));
+}
+
+/** Under this much room for the state, the settings and environment values are what fill the file. */
+export const NO_ROOM_BYTES = 1e6;
+
+/**
+ * The refusal of a state over `limit`. An allowance next to nothing means the
+ * agent's settings and environment values (`metaBytes`, the manifest without
+ * its state) alone fill the file: said as such, with their size, not as a
+ * limit of "about 0 MB" for the state (eleventh review). Refused before the
+ * state is measured, so its size is not named (twelfth review).
+ */
+export function tooLarge(bytes: number, limit = MAX_RAW_STATE_BYTES, metaBytes = 0): TransferError {
+  if (limit < NO_ROOM_BYTES) {
+    return new TransferError(
+      `This agent's settings and environment values alone come to about ${(metaBytes / 1e6).toFixed(0)} MB, ` +
+        `next to the ${(MAX_STATE_BYTES / 1e6).toFixed(0)} MB a single file can hold, so there is no room for its ` +
+        `saved state. Remove its largest environment values, then try again.`,
+    );
+  }
+  return new TransferError(
+    `This agent's saved state is ${(bytes / 1e6).toFixed(0)} MB — too large to move as ` +
+      `a single file (the limit is about ${(limit / 1e6).toFixed(0)} MB` +
+      `${limit < MAX_RAW_STATE_BYTES ? ' with its settings and environment values' : ''}). Trim old ` +
+      `sessions, or keep the bulk data in a shared folder instead of the agent's own volume.`,
+  );
+}
+
+/**
+ * What the export's archive would weigh, measured on a read-only mount while
+ * the agent keeps running. The raw size answers when it is already under the
+ * limit (compression only shrinks it); only a bigger volume pays for a trial
+ * compress, and that runs beside the live agent, not after stopping it.
+ * `limit`: what this agent's state may weigh (stateAllowance), so the raw size
+ * answers only when it fits that. Undefined when it can't be measured: the
+ * check after the real tar still holds.
+ */
+export async function estimateStateBytes(provider: ProvisionDeps['provider'], runtimeRef: string, limit = MAX_RAW_STATE_BYTES): Promise<number | undefined> {
+  const script =
+    `s=$(du -sb /home/node 2>/dev/null | cut -f1); ` +
+    `if [ -n "$s" ] && [ "$s" -le ${Math.max(0, Math.floor(limit))} ]; then echo "$s"; ` +
+    `else tar cz ${STATE_CACHE_EXCLUDES.join(' ')} -C /home/node . 2>/dev/null | wc -c; fi`;
+  try {
+    const res = await provider.execShellOnVolume(runtimeRef, script, { readOnly: true });
+    const n = Number(res.stdout.trim());
+    return /^\d+$/.test(res.stdout.trim()) && n > 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The model its owner chose: while a budget's switch to a cheaper model is
+ * open and it is still on that model, the one the switch puts back when it
+ * ends (none: its source's default); else its own pin. A copy carries this,
+ * never the budget's pin: no budget switch is open on the copy, so it stayed
+ * on the cheaper model after the budget let its source go (HB-1165).
+ */
+export function ownersModel(store: ProvisionDeps['store'], agent: Agent): string | undefined {
+  const cheap = agent.model ? store.openCheaperPause(agent.id) : undefined;
+  if (cheap && cheap.toModel === agent.model) return cheap.fromModel ?? undefined;
+  return agent.model;
+}
+
+export async function exportAgent(
+  deps: ProvisionDeps,
+  agentId: string,
+): Promise<{ filename: string; data: Buffer; dropped: string[] }> {
+  const { store, secrets, provider } = deps;
+  const log = deps.log ?? (() => {});
+
+  const agent = store.getAgent(agentId);
+  if (!agent?.runtimeRef) throw new TransferError('This agent has no runtime to export yet.');
+  if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
+    throw new TransferError(`Can't export while the agent is ${agent.state}.`);
+  }
+  const channel = store.getChannelForAgent(agentId);
+  if (!channel && !agent.webOnly) throw new TransferError('This agent has no messaging channel to export.');
+  // What the archive does NOT carry, said rather than lost in silence (30th
+  // audit): a Discord or Slack bot and the people linked there stay behind
+  // (their tokens are this machine's pool; a bot cannot be in two places).
+  const dropped = store.listChannelsForAgent(agentId).filter((c) => c.kind !== 'telegram').map((c) => c.kind);
+  const profile = store.getAIProfile(agent.aiProfileId);
+
+  // Every secret the file carries is read BEFORE the agent is stopped: a
+  // missing one used to fail the export after the stop, leaving a running
+  // agent stopped (and each failing env var started it again; night review).
+  let botToken: string | undefined;
+  if (channel) {
+    try { botToken = await secrets.get(channel.secretRef); } catch {
+      throw new TransferError("Its Telegram bot's token is missing here, so the copy could not include it. Detach Telegram (it keeps everything it knows), then export again.");
+    }
+  }
+  const envVars: Array<{ name: string; value: string }> = [];
+  for (const e of store.listAgentEnv(agentId)) {
+    try {
+      envVars.push({ name: e.name, value: await secrets.get(e.secretRef) });
+    } catch {
+      // A missing secret means the var is already broken here — say so
+      // rather than exporting an archive that silently lacks it.
+      throw new TransferError(
+        `Env var "${e.name}" has no stored value (its secret is missing). Remove it in ` +
+          'Settings → Environment, then export again.',
+      );
+    }
+  }
+
+  // The file, all but its state, assembled once BEFORE the stop: what it
+  // weighs is what the state may add to it. Each of these is a read (the
+  // image's labels, the store, a data source's key) that does not need the
+  // agent stopped; a lookup failure only costs the recipe (noted in the file),
+  // never the export.
+  const dataVersion = await provider.info(agent.runtimeRef).then((i) => i.openclawVersion, () => undefined);
+  let image: ExportManifest['image'];
+  if (agent.image) {
+    const r = await recipeFor(provider, agent.image, derivedByTag((n) => store.getDerivedImage(n))).catch(
+      (e: unknown) => ({ problem: `its recipe could not be read (${String(e).slice(0, 120)})` }),
+    );
+    image = 'problem' in r
+      ? { tag: agent.image, problem: r.problem }
+      : { tag: agent.image, recipe: { base: r.base, packages: r.packages, lines: r.lines, channels: r.channels, inputs: r.inputs, layers: r.layers } };
+  }
+  const appRow = store.getAgentApp(agentId);
+  const installedApp: ExportManifest['agent']['app'] = appRow && {
+    app: appRow.app, source: appRow.source, ref: appRow.ref, sha: appRow.sha, manifest: appRow.manifest,
+    ...(appRow.previousSha ? { previousSha: appRow.previousSha, previousManifest: appRow.previousManifest } : {}),
+    installedAt: appRow.installedAt, ...(appRow.testOk !== undefined ? { testOk: appRow.testOk } : {}),
+  };
+  // Its data sources: a repo with its key (the clone on the volume needs it to
+  // pull and push), a folder as a declaration (audit, 2026-10-23).
+  const dataSources: ExportedDataSource[] = [];
+  for (const d of store.listDataSources(agentId)) {
+    const row: ExportedDataSource = { kind: d.kind, access: d.access, mountName: d.mountName,
+      ...(d.hostPath ? { hostPath: d.hostPath } : {}), ...(d.mountAtHostPath ? { mountAtHostPath: true } : {}),
+      ...(d.repoUrl ? { repoUrl: d.repoUrl } : {}), ...(d.pubKey ? { pubKey: d.pubKey } : {}) };
+    if (d.kind === 'git' && d.secretRef) {
+      const key = await secrets.get(d.secretRef).catch(() => undefined);
+      if (!key) {
+        throw new TransferError(
+          `Repo "${d.mountName}" has no stored deploy key, so this copy could not reconnect it. ` +
+            'Fix its connection in Data, then export again.',
+        );
+      }
+      row.deployKey = key;
+    }
+    dataSources.push(row);
+  }
+  const cls = agent.classId ? store.getAgentClass(agent.classId) : undefined;
+  const memoryCap = agent.memoryCap ?? cls?.memoryCap;
+  const swapAllowance = agent.swapAllowance ?? cls?.swapAllowance;
+  const manifest: ExportManifest = {
+    format: EXPORT_FORMAT,
+    version: EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    ...(dataVersion ? { openclawVersion: dataVersion } : {}),
+    agent: {
+      name: agent.name,
+      slug: agent.slug,
+      persona: agent.persona,
+      ...(!agent.ops && agent.curatedSkills !== undefined ? { curatedSkills: agent.curatedSkills } : {}),
+      sharedMemory: true,
+      sharedPaths: agent.sharedPaths,
+      ...(dataSources.length ? { dataSources } : {}),
+      // Its owner's choice, not a budget's cheaper one (HB-1165).
+      model: ownersModel(store, agent),
+      icon: agent.icon,
+      iconColor: agent.iconColor,
+      // Its own budgets, else its class's: the class does not travel, and an
+      // agent on an 8 GB class came back on the default 3 GB (HB-0313). The
+      // destination holds them to its own rules (importedLimits).
+      ...(memoryCap ? { memoryCap } : {}),
+      ...(swapAllowance ? { swapAllowance } : {}),
+      ...(agent.parameters?.length ? { setup: {
+        parameters: agent.parameters,
+        ...(agent.paramValues ? { values: agent.paramValues } : {}),
+        ...(agent.paramFiles ? { files: agent.paramFiles } : {}),
+      } } : {}),
+      switches: {
+        ...(agent.browser ? { browser: true } : {}),
+        ...(agent.cronTriggers ? { cronTriggers: true } : {}),
+        ...(agent.richMessages !== undefined ? { richMessages: agent.richMessages } : {}),
+        ...(agent.groupAccess ? { groupAccess: agent.groupAccess } : {}),
+        ...(agent.filesMaxMb ? { filesMaxMb: agent.filesMaxMb } : {}),
+      },
+      ...(installedApp ? { app: installedApp } : {}),
+    },
+    ai: {
+      vendor: profile?.vendor ?? 'anthropic',
+      model: profile?.model ?? '',
+      models: profile?.models,
+    },
+    channel: channel ? {
+      kind: 'telegram',
+      accountId: channel.accountId,
+      deepLink: channel.deepLink,
+      botToken: botToken!,
+    } : undefined,
+    memberships: store.listMemberships(agentId).map((m) => ({
+      ...m,
+      role: m.role as MemberRole,
+      status: m.status as 'active' | 'revoked',
+    })),
+    envVars,
+    image,
+    state: '',
+  };
+  // Too big to travel: say so BEFORE the stop. The size check after the tar
+  // used to be the first (up to a minute of downtime on the biggest agents,
+  // only to refuse; review, 2026-09-29), and the first one here bounded the
+  // rest of the file from the whole agent and profile rows, reading its
+  // memberships, app and data sources twice, plus room for what came after
+  // (reviews of HB-0582). Now it is this file's own measure: the agent is
+  // stopped only for what this file can carry, and the check after the tar
+  // holds the state to the same.
+  const metaBytes = Buffer.byteLength(JSON.stringify(manifest), 'utf8');
+  const allowance = stateAllowance(metaBytes);
+  // No room at all beside them: refused at once, not after measuring the
+  // volume (a trial compress of it) only to refuse it (twelfth review).
+  if (allowance < NO_ROOM_BYTES) throw tooLarge(0, allowance, metaBytes);
+  const estimate = await estimateStateBytes(provider, agent.runtimeRef, allowance);
+  if (estimate !== undefined && estimate > allowance) throw tooLarge(estimate, allowance, metaBytes);
+
+  // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
+  // of an export is usually that the agent is about to live somewhere else.
+  const wasRunning = agent.state === 'RUNNING';
+  await stopAndConfirm(provider, agent.runtimeRef);
+  if (wasRunning) store.setAgentState(agentId, 'STOPPED');
+  // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
+  // which owns its own undo) would strand a running agent silently STOPPED —
+  // it stops answering Telegram with no error the owner ever sees. Put it back.
+  const restoreIfRunning = async () => {
+    if (!wasRunning) return;
+    // Only claim RUNNING if the container actually came back — matching
+    // migrate's undo. Setting RUNNING after a swallowed start() failure would
+    // leave the DB lying (RUNNING over a stopped container) until reconcile.
+    try {
+      await provider.start(agent.runtimeRef!);
+      store.setAgentState(agentId, 'RUNNING');
+    } catch (startErr) {
+      log('export.restart_failed', { agentId, error: String(startErr) });
+    }
+  };
+
+  let state: Buffer;
+  try {
+    state = await provider.exportState(agent.runtimeRef);
+  } catch (err) {
+    // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
+    // which owns its own undo) would strand a running agent silently STOPPED.
+    await restoreIfRunning();
+    throw err;
+  }
+  // The whole file, not the state alone, must fit what an import reads back
+  // (HB-0582): the allowance measured above, of this same manifest, and never
+  // over MAX_RAW_STATE_BYTES (stateAllowance). Late, so the agent goes back to
+  // how it was.
+  if (state.length > allowance) {
+    await restoreIfRunning();
+    throw tooLarge(state.length, allowance, metaBytes);
+  }
+  manifest.exportedAt = new Date().toISOString(); // when the state was taken; the same length as the one measured
+  // Off the event loop, the state a piece at a time (HB-0925).
+  const data = await packExport(manifest, state);
+  // A sleeping agent stays down as an ordinary stopped one: asleep, the wake
+  // poll here kept reading its bot and started it the moment a message came,
+  // next to the copy that now answers it elsewhere (night review, 2026-09-27).
+  // Only once the file exists: cleared up front, a refused or failed export
+  // left a sleeping agent plain STOPPED, never to wake on a message again
+  // (review, 2026-09-29). The busy flag keeps the wake poll off it meanwhile.
+  if (agent.hibernatedAt) store.setHibernated(agentId, null);
+  // A copy of it now exists, bot token included: until it runs again, deleting
+  // it here must not park that bot for the next agent (audit, 2026-10-23).
+  store.setAgentExportedAt(agentId, new Date().toISOString());
+  log('agent.exported', { agentId, bytes: state.length, ...(dropped.length ? { dropped } : {}) });
+  return { filename: `${agent.slug}.hatchabot`, data, dropped };
+}
+
+export interface ImportOptions {
+  ownerId: string;
+  /** Explicit AI profile; defaults to a vendor match, then the first one. */
+  aiProfileId?: string;
+  hostId?: string;
+  /** For a file whose pinned image this machine lacks: build it from the
+   *  file's recipe, or run the default image. Unset: ask (ImageDecisionNeeded). */
+  image?: 'build' | 'drop';
+  /** The caller owns this machine — the only one who may build an image here,
+   *  or carry in a memory cap above the per-agent maximum (importedLimits). */
+  mayBuild?: boolean;
+  /**
+   * Checks a bot token with Telegram and returns its username. Set by the
+   * app; a file could otherwise name someone else's bot with a junk token,
+   * and the agent would poll a dead token behind a link to their bot.
+   */
+  verifyToken?: (token: string) => Promise<string>;
+  /** Who asked, for the operation's record (default: ownerId). */
+  requestedBy?: string;
+  /** Told the operation's id once the agent's row exists (the route returns it). */
+  onOperation?: (id: string) => void;
+  /**
+   * Called once it runs with a Telegram bot and nobody in the owner's seat on
+   * it: the route watches for the importer's first message (claimFirstContact),
+   * never one from `excludeIds`, the previous owner's (HB-0076).
+   */
+  watchOwner?: (agent: Agent, opts: { accountId: string; excludeIds: string[] }) => void;
+}
+
+/**
+ * The memory cap and swap allowance a file carries, as this machine allows
+ * them: an agent that needed 12g arrived on the 3g default and failed under
+ * its usual work (report A31, 2026-10-22). A member's import is held to the
+ * per-agent maximum here (HATCHABOT_AGENT_MEMORY_MAX), as Settings holds
+ * them; the machine's owner is not. Swap never exceeds the cap under it. A
+ * value this machine would refuse falls back to its default.
+ */
+export function importedLimits(a: { memoryCap?: string; swapAllowance?: string }, machineOwner: boolean, env: NodeJS.ProcessEnv = process.env): { memoryCap?: string; swapAllowance?: string } {
+  const max = machineOwner ? Infinity : parseMemoryCap(memberMemoryMax(env))!;
+  const capBytes = parseMemoryCap(a.memoryCap);
+  const memoryCap = capBytes && capBytes <= max ? formatMemoryCap(capBytes) : undefined;
+  const swapBytes = parseSwapAllowance(a.swapAllowance);
+  const under = parseMemoryCap(memoryCap ?? defaultMemoryCap(env))!;
+  const swapAllowance = swapBytes !== undefined && swapBytes <= under && swapBytes <= max ? formatSwapAllowance(swapBytes) : undefined;
+  return { ...(memoryCap ? { memoryCap } : {}), ...(swapAllowance ? { swapAllowance } : {}) };
+}
+
+/**
+ * Which image the imported agent runs on. The same-named image already here:
+ * that. Otherwise the caller's decision — and nothing is built without one.
+ * Decides only; the build itself runs once the agent's row exists (buildPinned),
+ * so a mover whose connection drops mid-build sees it PROVISIONING there and
+ * waits, instead of reading "not there" and restarting its own copy.
+ */
+async function settleImage(
+  deps: ProvisionDeps,
+  filed: NonNullable<ExportManifest['image']>,
+  opts: ImportOptions,
+  where: string,
+): Promise<{ pin?: string; build?: ImageRecipe }> {
+  const { store, provider } = deps;
+  // Named in this fleet's repository, the agent's pin with it: a file from a
+  // fleet on another one (HATCHABOT_IMAGE) names its own (HB-1183). Always:
+  // the images listed here are this fleet's repository's alone, so a file's
+  // name outside it was never found here, and pinning it would leave the
+  // fleet (HB-1183 review). A default pinned by digest is its repository too,
+  // as this machine's image list reads it (review of HB-1182).
+  const repo = imageRepository(provider.image ?? 'hatchabot-runtime:latest');
+  const listed = await provider.listImageTags().catch(() => undefined);
+  const named = namedHere(filed.tag, filed.recipe?.base, repo);
+  const image: typeof filed = { ...filed, tag: named.tag, ...(filed.recipe ? { recipe: { ...filed.recipe, base: named.base! } } : {}) };
+  // An image here of that name is the file's only when it builds what the
+  // file's recipe builds: a renamed name was pinned whatever image had it here,
+  // and its own name too (HB-1183 review). In this fleet's own names, a file
+  // with no recipe, or an image here nothing describes, is pinned by name as
+  // before. A renamed name never is, but for a plain pin from before the
+  // label (a version, or latest, with nothing laid on it), which is that
+  // image here by its name when that is no derived image (design §2).
+  // This machine's own record of the file's lines whose last build is not
+  // READY is neither: the image of its name is the build before, and a build
+  // is offered, which rebuilds the record (buildPinned; HB-1183 review).
+  const info = listed?.find((t) => t.tag === image.tag);
+  let other: string | undefined;
+  let unbuilt = false;
+  if (info) {
+    const recipe = image.recipe ? { tag: image.tag, ...image.recipe } : undefined;
+    const rec = recipe ? derivedByTag((n) => store.getDerivedImage(n))(image.tag) : undefined;
+    unbuilt = !!rec && rec.status !== 'READY' && recordBuilds(rec, recipe!, listed!) === true;
+    const same = recipe && !unbuilt ? sameImageHere(info, recipe, rec, listed!) : undefined;
+    const name = image.tag.slice(repo.length + 1);
+    const plainByName = !!recipe && !isDerived(info) && (name === 'latest' || VERSION_TAG.test(name)) && !recipe.packages.length && !recipe.lines?.trim();
+    if (same === false) other = `a different image here already has the name ${image.tag}`;
+    else if (!unbuilt && same === undefined && image.tag !== filed.tag && !plainByName) other = `an image here already has the name ${image.tag}, and nothing here says it is this one`;
+  }
+  const here = !!info && !other && !unbuilt;
+  // Which image runs here is the machine owner's call (PATCH image says so);
+  // an import by anyone else pinned whatever tag the file named, a candidate
+  // or another owner's derived image included (night review, 2026-09-27).
+  if (here && opts.mayBuild) return { pin: image.tag };
+  // The machine's own default image under another name is no choice at all:
+  // pinned for anyone (regression review, 2026-09-28).
+  if (here) {
+    const [def, tagged] = await Promise.all([provider.currentImageInfo(undefined), provider.currentImageInfo(image.tag)]).catch(() => [{}, {}] as Array<{ imageId?: string }>);
+    if (def.imageId && def.imageId === tagged.imageId) return { pin: image.tag };
+  }
+  if (opts.image === 'drop') return {};
+  if (here) {
+    throw new ImageDecisionNeeded(image.tag, undefined, "only this machine's owner can pin an agent to a particular image", false, where);
+  }
+  const recipe: ImageRecipe | undefined = image.recipe ? { tag: image.tag, ...image.recipe } : undefined;
+  let problem = other ?? (recipe ? recipeProblem(recipe, repo) : (image.problem ?? 'the file has no recipe for it'));
+  // A derived image here under the same name but other lines is someone
+  // else's image: building would silently replace it for every agent on it.
+  // The same one is judged by what it builds, not by its base's name: that
+  // base here may be another tag standing for the same image (HB-0986).
+  const existing = !problem ? derivedByTag((n) => store.getDerivedImage(n))(image.tag) : undefined;
+  if (existing) {
+    const same = recordBuilds(existing, recipe!, await provider.listImageTags().catch(() => undefined));
+    if (same === undefined) problem = "this machine's images could not be read just now — try again";
+    else if (!same) problem = `a different image here already has the name ${image.tag}`;
+  }
+  if (opts.image !== 'build' || problem || !opts.mayBuild) {
+    throw new ImageDecisionNeeded(image.tag, recipe, problem ?? undefined, !!opts.mayBuild, where);
+  }
+  return { pin: image.tag, build: recipe! };
+}
+
+async function buildPinned(deps: ProvisionDeps, recipe: ImageRecipe, ownerId: string, checkedOn?: string): Promise<void> {
+  const { store, provider } = deps;
+  // The tag after the repository, which may name a registry with a port (HB-1357 review).
+  const name = recipe.tag.slice(imageRepository(recipe.tag).length + 1);
+  const derivedName = name.startsWith(DERIVED_TAG_PREFIX) ? name.slice(DERIVED_TAG_PREFIX.length) : undefined;
+  // This machine's images, read before the record is: nothing is awaited
+  // between reading the record and claiming it.
+  const tags = derivedName ? await provider.listImageTags().catch(() => undefined) : undefined;
+  const existing = derivedName ? store.getDerivedImage(derivedName) : undefined;
+  // Another import or the Images page may have taken this name since the
+  // preflight. Claim the shared BUILDING record before any provider await,
+  // so one failed build cannot delete another build's successful record.
+  if (existing?.status === 'BUILDING') throw new TransferError(`The image ${recipe.tag} is already building. Wait for it to finish, then import again.`);
+  // Not the same image: other lines, or a base here that builds something else (HB-0986).
+  const same = existing && existing.tag === recipe.tag ? recordBuilds(existing, recipe, tags) : false;
+  if (existing && same === undefined) throw new TransferError("This machine's images could not be read just now. Try the import again.");
+  if (existing && !same) {
+    throw new TransferError(`A different image already has the name ${derivedName}. Import using the default image instead.`);
+  }
+  const newRecord = !!derivedName && !existing;
+  if (newRecord) {
+    // So it shows among this machine's images, and travels again from here.
+    store.upsertDerivedImage({ name: derivedName!, tag: recipe.tag, base: recipe.base, basePackages: [], dockerfile: recipe.lines ?? '', createdBy: ownerId });
+  } else if (derivedName) {
+    store.setDerivedImageStatus(derivedName, 'BUILDING', null);
+  }
+  deps.log?.('import.image_build', { image: recipe.tag });
+  // The provider can throw before it has a build result (for example, a
+  // full disk while creating the build context). Settle the image record
+  // through the same cleanup as a Docker build that returned a failure.
+  const got = await buildRecipeOn(provider, recipe, { where: 'this machine', prefer: existing?.base, expect: checkedOn }).catch((err: unknown) => {
+    rethrowIfCrash(err);
+    return { ok: false as const, problem: String(err instanceof Error ? err.message : err).slice(0, 800) };
+  });
+  if (!got.ok) {
+    // The import rolls back completely; a record for an image that never
+    // existed would not (found by the 26th audit).
+    if (newRecord) store.deleteDerivedImage(derivedName!);
+    else if (derivedName) store.setDerivedImageStatus(derivedName, 'FAILED', got.problem);
+    throw new Error(`the image ${recipe.tag} could not be built here: ${got.problem}`);
+  }
+  if (derivedName) {
+    // What it was built on here, and the base's packages laid on that before
+    // the lines: a Rebuild here builds the same image again, and the lines
+    // stay the owner's alone, under their cap (HB-0986).
+    store.setDerivedImageBase(derivedName, got.base, got.laid);
+    store.setDerivedImageStatus(derivedName, 'READY', null);
+  }
+}
+
+/**
+ * The AI source an import without an explicit choice lands on. One rule for
+ * the import and for a move's preflight, which promised the vendor-matching
+ * source while the import took the ⭐ Default (audit #001).
+ *
+ * The installation's ⭐ Default, when this importer can see it, wins the
+ * silent pick — "preselect this source whenever anyone creates or imports
+ * an agent", as template.ts already did; a restore used to take the
+ * importer's own first (2026-09-30). Otherwise prefer the importer's OWN
+ * profile over one merely shared with the installation — defaulting onto
+ * someone else's shared subscription would silently bill them.
+ * Default → own+vendor-match → own → any vendor-match → anything.
+ */
+export function importProfile(store: ProvisionDeps['store'], ownerId: string, vendor: string | undefined): AIProfile | undefined {
+  const profiles = store.listAIProfiles(ownerId);
+  const mine = profiles.filter((p) => p.ownerId === ownerId);
+  return (profiles.find((p) => p.defaultSource) ??
+    mine.find((p) => p.vendor === vendor) ??
+    mine[0] ??
+    profiles.find((p) => p.vendor === vendor) ??
+    profiles[0]);
+}
+
+export async function importAgent(
+  deps: ProvisionDeps,
+  data: Buffer,
+  opts: ImportOptions,
+): Promise<Agent> {
+  return importAgentInner(deps, data, opts);
+}
+
+async function importAgentInner(
+  deps: ProvisionDeps,
+  data: Buffer,
+  opts: ImportOptions,
+): Promise<Agent> {
+  const { store, secrets, provider } = deps;
+  const log = deps.log ?? (() => {});
+
+  let raw: unknown;
+  try {
+    // Inflated on zlib's threads, not the event loop's (HB-0925), a few at a
+    // time (HB-1162). Its JSON is still parsed here.
+    raw = await inflateWhole(data, MAX_STATE_BYTES, (json) => JSON.parse(json) as unknown);
+  } catch {
+    throw new TransferError("That file isn't a Hatchabot export (or is too large).");
+  }
+  const parsed = ManifestSchema.safeParse(raw);
+  if (!parsed.success) {
+    const bad = parsed.error.issues[0];
+    throw new TransferError(
+      raw && typeof raw === 'object' && [EXPORT_FORMAT, LEGACY_EXPORT_FORMAT].includes((raw as any).format)
+        ? `That export is malformed or from an incompatible version (${bad?.path.join('.') || 'manifest'}).`
+        : "That file isn't a Hatchabot export.",
+    );
+  }
+  const manifest: ExportManifest = parsed.data as ExportManifest;
+  // Belt and suspenders: the slug also has to survive our own slugifier
+  // unchanged before it becomes a container name or workspace path.
+  if (slugify(manifest.agent.slug) !== manifest.agent.slug) {
+    throw new TransferError('That export has an unusable agent id.');
+  }
+
+  // Cap the state on import the way export already caps it (transfer.ts:187) —
+  // the import side had no bound at all, so an oversized/crafted `.hatchabot`
+  // went straight into `tar xz` on the shared volume. This rejects anything past
+  // the ~190 MB gzipped ceiling before it can fill the host disk. (A tighter
+  // extracted-size quota is tracked as a follow-up; decompressing here would
+  // either spike control-plane RAM or reject legit large agents.)
+  const stateBuf = Buffer.from(manifest.state, 'base64');
+  if (stateBuf.length > MAX_RAW_STATE_BYTES) {
+    throw new TransferError(
+      `This archive's state is ~${(stateBuf.length / 1e6).toFixed(0)} MB — too large to import ` +
+        `(the limit is about ${(MAX_RAW_STATE_BYTES / 1e6).toFixed(0)} MB).`,
+    );
+  }
+
+  if (store.listAllActiveAgents().some((a) => a.ownerId === opts.ownerId && a.slug === manifest.agent.slug)) {
+    throw new TransferError(`An agent with slug "${manifest.agent.slug}" already lives here.`);
+  }
+  // A previously deleted agent's tombstone may still hold the slug.
+  store.releaseDeletedSlug(opts.ownerId, manifest.agent.slug);
+  if (manifest.channel && store.findAgentUsingAccount(manifest.channel.accountId)) {
+    throw new TransferError(
+      `Bot @${manifest.channel.accountId} is already wired to an agent here.`,
+    );
+  }
+  if (manifest.channel && store.telegramPoolHas(manifest.channel.accountId)) {
+    throw new TransferError(
+      `Bot @${manifest.channel.accountId} is a spare bot in this machine's pool, where the next new agent could take it. ` +
+        'Remove it from the pool first (⚙ Settings → Messaging → Telegram), then import again.',
+    );
+  }
+
+  const profile = opts.aiProfileId
+    ? store.getAIProfile(opts.aiProfileId)
+    : importProfile(store, opts.ownerId, manifest.ai.vendor);
+  if (!profile) throw new TransferError('Set up an AI source before importing.');
+  const host = opts.hostId
+    ? store.getHost(opts.hostId)
+    : (store.listHosts(opts.ownerId).find((h) => h.kind === 'local') ??
+      store.listHosts(opts.ownerId)[0]);
+  if (!host) throw new TransferError('No host available to import onto.');
+  // Before anything is created: the decision may be the caller's to make.
+  const image = manifest.image ? await settleImage(deps, manifest.image, opts, host.kind === 'local' ? 'this machine' : host.name) : {};
+  // Data written by 2026.8+ cannot be read by 2026.7: refused before anything
+  // is made, not discovered when the agent fails to start (night review).
+  // One rule with a move between machines, moveCrossesDown: this check had
+  // both directions the wrong way round, refusing 2026.7 → 2026.9 (the
+  // normal upgrade) and letting 2026.9 → 2026.7 through (issue #20, 2026-10-09).
+  // The image the OpenClaw check judged, which the build must pick too (HB-0986 review).
+  let checkedOn: string | undefined;
+  if (manifest.openclawVersion) {
+    // The image it will run: its pin, or — when one is to be built — the
+    // image here it is built on, as buildRecipeOn picks it (HB-0986 review);
+    // none yet, the OpenClaw its inputs name, which the image it pulls runs;
+    // else its base by name (HB-0986). This machine's images not read are not
+    // "none": the file's own word would judge it (HB-0986 review).
+    const inputs = image.build?.inputs ? parseBuildInputs(image.build.inputs) : undefined;
+    const tags = image.build ? await deps.provider.listImageTags().catch(() => undefined) : [];
+    if (!tags) throw new TransferError("This machine's images could not be read just now. Try the import again.");
+    const standIn = image.build ? standInAmong(tags, image.build, derivedByTag((n) => store.getDerivedImage(n))(image.build.tag)?.base) : undefined;
+    checkedOn = standIn?.imageId;
+    const here = standIn?.openclawVersion
+      ? { openclawVersion: standIn.openclawVersion }
+      : inputs?.ok
+        ? { openclawVersion: inputs.inputs.openclaw }
+        : await deps.provider.currentImageInfo(image.pin && !image.build ? image.pin : image.build?.base ?? image.pin).catch(() => ({} as { openclawVersion?: string }));
+    if (moveCrossesDown(manifest.openclawVersion, here.openclawVersion)) {
+      throw new TransferError(`This copy was saved by OpenClaw ${manifest.openclawVersion}; this machine would run it on ${here.openclawVersion}, which cannot read it. Update this machine's image first.`);
+    }
+  }
+  // The file's own refusals, before anything is made: the import now answers
+  // as soon as its operation begins and goes on in the background (phase 3),
+  // so a refusal found after the row would no longer be the request's answer.
+  // The archive is untrusted: the same reserved-name policy the web route
+  // enforces applies here — a crafted archive must not smuggle in a
+  // proxy/credential/loader variable. Refuse loudly rather than skip: a
+  // quietly dropped var is this bug in a new costume.
+  for (const v of manifest.envVars ?? []) {
+    const reserved = reservedEnvProblem(v.name);
+    if (reserved) {
+      throw new TransferError(`This archive sets env var "${v.name}", which is not allowed: ${reserved}`);
+    }
+    const badValue = envValueProblem(v.name, v.value);
+    if (badValue) throw new TransferError(`This archive can't be imported: ${badValue}`);
+  }
+  if (manifest.channel && opts.verifyToken) {
+    let username: string;
+    try { username = await opts.verifyToken(manifest.channel.botToken); }
+    catch (err) {
+      if (err instanceof TelegramUnavailableError) throw new TransferError('Telegram did not answer, so the bot token in this file could not be checked. Try the import again in a moment.');
+      throw new TransferError('Telegram rejected the bot token in this file. Export the agent again, or import it and add a bot afterwards.');
+    }
+    if (username.toLowerCase() !== manifest.channel.accountId.toLowerCase()) {
+      throw new TransferError(`The token in this file belongs to @${username}, not @${manifest.channel.accountId}.`);
+    }
+  }
+
+  const now = new Date().toISOString();
+  const agent: Agent = {
+    id: randomUUID(),
+    ownerId: opts.ownerId,
+    name: manifest.agent.name,
+    slug: manifest.agent.slug,
+    state: 'PROVISIONING',
+    aiProfileId: profile.id,
+    hostId: host.id,
+    persona: manifest.agent.persona,
+    // Always shared here, whatever the file says: memory is one per agent (2026-09-29).
+    sharedMemory: true,
+    webOnly: !manifest.channel,
+    icon: validIcon(manifest.agent.icon) ? manifest.agent.icon : undefined,
+    iconColor: validIconColor(manifest.agent.iconColor) ? manifest.agent.iconColor : undefined,
+    // The per-agent model override survives the move only if the destination
+    // profile is cloud and still offers it — landing on a different profile
+    // (or a local one) drops it back to that profile's default rather than
+    // pinning a model the new source can't serve.
+    model:
+      profile.vendor !== 'local' &&
+      manifest.agent.model &&
+      [profile.model, ...(profile.models ?? [])].includes(manifest.agent.model)
+        ? manifest.agent.model
+        : undefined,
+    // Deliberately NOT carried over: a path that exists on the source may not
+    // exist here, and silently mounting a same-named folder would be worse
+    // than mounting nothing. Preflight warns; the owner re-shares explicitly.
+    createdAt: now,
+    updatedAt: now,
+  };
+  // The checks above wait on the network: the machine may have been removed
+  // meanwhile, and an agent placed on it was stranded (HB-0275).
+  if (!store.getHost(host.id)) throw new TransferError('The machine it was going to was removed meanwhile. Import it again onto another.');
+  // And its source, deleted meanwhile: refused, not an agent on nothing (HB-0570).
+  let op: ReturnType<typeof beginOperation>;
+  try {
+    // The agent, its settings and its recovery record are one database
+    // change. A disk-full failure here must leave neither a half-imported
+    // row nor a busy flag with no operation capable of clearing it.
+    op = store.transact(() => {
+      store.insertAgentOnSource(agent);
+      if (manifest.agent.curatedSkills !== undefined) store.setAgentCuratedSkills(agent.id, manifest.agent.curatedSkills);
+      if (image.pin) store.setAgentImage(agent.id, image.pin);
+      // Before provisioning reads them: the container is made with these limits.
+      const limits = importedLimits(manifest.agent, !!opts.mayBuild);
+      if (limits.memoryCap) store.setAgentMemoryCap(agent.id, limits.memoryCap);
+      if (limits.swapAllowance) store.setAgentSwapAllowance(agent.id, limits.swapAllowance);
+      // The switches go into the config written over the restored one; the
+      // setup layer keeps the imported copy re-configurable.
+      const sw = manifest.agent.switches ?? {};
+      if (sw.browser) store.setAgentBrowser(agent.id, true);
+      if (sw.cronTriggers) store.setAgentCronTriggers(agent.id, true);
+      if (sw.richMessages !== undefined) store.setAgentRichMessages(agent.id, sw.richMessages);
+      if (sw.groupAccess) store.setAgentGroupAccess(agent.id, sw.groupAccess);
+      if (sw.filesMaxMb) store.setAgentFilesMaxMb(agent.id, sw.filesMaxMb);
+      // Its tasks come in its volume, and what adopts carried into it is in
+      // the other install's database: adopting a folder into it again matches
+      // them by look, not adding them twice (HB-0985). A move between
+      // installs is this import too.
+      store.markUnrecordedCarriedTasks(agent.id);
+      const setup = manifest.agent.setup;
+      if (setup) {
+        store.setAgentParameters(agent.id, setup.parameters);
+        store.setAgentParamState(agent.id, setup.values ?? null, setup.files ?? null);
+      }
+      // A restart before RUNNING undoes the whole import (resumeImport).
+      return beginOperation(store, 'import', agent.id, { slug: agent.slug, hostId: host.id, from: manifest.exportedAt }, { hostId: host.id, requestedBy: opts.requestedBy ?? opts.ownerId });
+    });
+  } catch (err) {
+    forgetFilesReplacing(agent.id);
+    throw err;
+  }
+  // From here the agent exists but is mid-build: reconcile must not judge it.
+  markBusy(agent.id);
+
+  const secretRef = importSecretRef(agent.id);
+  // Every secret this import makes (env values, deploy keys): rollback deletes them.
+  const envSecretRefs: string[] = [];
+  let runtimeRef: string | undefined;
+  try {
+    opts.onOperation?.(op.id);
+    const dropped = (['setup', 'switches', 'app'] as const).filter((k) => (raw as { agent?: Record<string, unknown> }).agent?.[k] !== undefined && manifest.agent[k] === undefined);
+    if (dropped.length) log('import.parts_dropped', { agentId: agent.id, parts: dropped });
+    // Its data sources come back before the spec is built (the repos are cloned
+    // by the seed, the folders mounted). A folder only when the same path is here
+    // and safe to share — a different machine's path is not quietly mounted. And only for the
+    // machine's owner: the data-sources routes let nobody else name a host folder, and an import
+    // bundle is unsigned, so a member's manifest could have named any folder here (2026-10-24).
+    const hostLocal = host.kind === 'local' && host.ownerId === opts.ownerId;
+    const skippedFolders: string[] = [];
+    const skippedRepos: string[] = [];
+    for (const d of manifest.agent.dataSources ?? []) {
+      if (store.listDataSources(agent.id).some((x) => x.mountName === d.mountName)) continue;
+      if (d.kind === 'folder') {
+        const p = d.hostPath ?? '';
+        if (!hostLocal || !p || folderMountNameProblem(d.mountName) || sharePathProblem(p)
+          || (d.mountAtHostPath && hostPathTargetProblem(p))) { skippedFolders.push(p || d.mountName); continue; }
+        let isFolder = false;
+        try { isFolder = !!statSync(p, { throwIfNoEntry: false })?.isDirectory(); } catch { /* unreadable: not imported */ }
+        if (!isFolder) { skippedFolders.push(p); continue; }
+        store.insertDataSource({ id: randomUUID(), agentId: agent.id, kind: 'folder', access: d.access, mountName: d.mountName, hostPath: p, mountAtHostPath: !!d.mountAtHostPath, createdAt: now });
+        continue;
+      }
+      if (!d.repoUrl) continue;
+      // The clone's name and address reach the sync script's shell lines: an
+      // unsigned bundle is held to what the add route makes (HB-0237).
+      if (!validGitMountName(d.mountName) || !normalizeGitUrl(d.repoUrl)) { skippedRepos.push(d.mountName.slice(0, 64)); continue; }
+      const id = randomUUID();
+      let dsSecretRef: string | undefined;
+      if (d.deployKey) {
+        dsSecretRef = `data-source/${id}`;
+        await secrets.put(dsSecretRef, d.deployKey);
+        envSecretRefs.push(dsSecretRef);
+      }
+      store.insertDataSource({ id, agentId: agent.id, kind: 'git', access: d.access, mountName: d.mountName, repoUrl: d.repoUrl,
+        ...(dsSecretRef ? { secretRef: dsSecretRef } : {}), ...(d.pubKey ? { pubKey: d.pubKey } : {}), createdAt: now });
+    }
+    if (skippedFolders.length) log('import.folders_not_here', { agentId: agent.id, folders: skippedFolders.slice(0, 8) });
+    if (skippedRepos.length) log('import.repos_refused', { agentId: agent.id, names: skippedRepos.slice(0, 8) });
+    op.step('row-made');
+    // Memberships travel verbatim, except the owner seat belongs to whoever
+    // imports — it's their installation now. Inside the try: a malformed row
+    // must roll back with everything else, not strand a half-made agent.
+    // Owner rows first, so a `user` row whose id already equals the importer
+    // can never be inserted BEFORE the owner seat and demote the importer to
+    // a plain member (revocable, no owner privileges). Dedup then drops the
+    // duplicate. Guards against a manifest whose row order isn't joined_at.
+    const ordered = [...manifest.memberships].sort(
+      (a, b) => (a.role === 'owner' ? 0 : 1) - (b.role === 'owner' ? 0 : 1),
+    );
+    const seen = new Set<string>();
+    // The importer's own Telegram, when this machine knows it, as a new agent
+    // is born with it (createAgentRecord): their first message just works. Not
+    // when the file seats that id as somebody else (one person, two seats).
+    const known = store.knownChannelUserId(opts.ownerId);
+    const ownerChannelUserId = known && !manifest.memberships.some((m) => m.role !== 'owner' && m.channelUserId === known) ? known : undefined;
+    const previousOwnerIds = manifest.memberships.flatMap((m) => (m.role === 'owner' && m.channelUserId && m.channelUserId !== known ? [m.channelUserId] : []));
+    for (const m of ordered) {
+      const userId = m.role === 'owner' ? opts.ownerId : m.userId;
+      // Dedup by RESULTING userId: a `user` row whose id already equals the
+      // importer (same Google account on both installs — "family member takes
+      // the agent home") would otherwise collide with the remapped owner row
+      // on UNIQUE(agent_id, user_id) and roll the whole import back.
+      if (seen.has(userId)) continue;
+      seen.add(userId);
+      store.insertMembership({
+        id: randomUUID(),
+        agentId: agent.id,
+        userId,
+        role: m.role,
+        displayName: m.displayName,
+        // The owner seat's telegram id is the PREVIOUS owner's — the importer
+        // is a different person, so drop it and let them claim first contact.
+        // Carrying it over would (a) admit the stranger to this bot and
+        // (b) poison knownChannelUserId so every future agent seeds and skips
+        // the claim onto that stranger's id.
+        channelUserId: m.role === 'owner' ? ownerChannelUserId : m.channelUserId,
+        status: m.status,
+        joinedAt: now,
+      });
+    }
+    op.step('members');
+
+    if (manifest.channel) {
+      // Its token was checked with Telegram before the row was made (above).
+      await secrets.put(secretRef, manifest.channel.botToken);
+      store.insertChannel({
+        id: randomUUID(),
+        agentId: agent.id,
+        kind: manifest.channel.kind,
+        accountId: manifest.channel.accountId,
+        secretRef,
+        // Derived, not imported: accountId is regex-validated, so this cannot be
+        // anything but a t.me link no matter what the archive claimed.
+        deepLink: `https://t.me/${manifest.channel.accountId}`,
+        createdAt: now,
+      });
+    }
+    op.step('channel');
+
+    // Recreate the env vars BEFORE provisioning renders the runtime spec, so
+    // the container boots with them (an agent without its env secrets is
+    // silently broken). Their names were checked before the row was made.
+    for (const v of manifest.envVars ?? []) {
+      const envId = randomUUID();
+      const envRef = `agent-env/${envId}`;
+      await secrets.put(envRef, v.value);
+      envSecretRefs.push(envRef);
+      store.insertAgentEnv({ id: envId, agentId: agent.id, name: v.name, secretRef: envRef, createdAt: now });
+    }
+    op.step('env');
+
+    // Provision creates + seeds the volume; the snapshot then overwrites it
+    // with the real state; a second provision re-applies THIS installation's
+    // config (model, auth mode) over the imported openclaw.json — the seed
+    // never touches existing workspace files, so memory survives.
+    if (image.build) await buildPinned(deps, image.build, opts.ownerId, checkedOn);
+    const spec = await buildRuntimeSpec(deps, agent.id);
+    try {
+      ({ runtimeRef } = await provider.provision(spec));
+    } catch (err) {
+      // provision() makes the volume before it can fail in the seed: rollback
+      // needs its name, or the volume stays as an orphan (audit, 2026-10-23).
+      runtimeRef = provider.runtimeRefFor?.({ agentId: agent.id, slug: agent.slug });
+      throw err;
+    }
+    store.setAgentRuntimeRef(agent.id, runtimeRef);
+    op.step('created');
+    await provider.importState(runtimeRef, stateBuf);
+    op.step('state-copied');
+    const respec = await buildRuntimeSpec(deps, agent.id);
+    await provider.provision(respec);
+    recordApplied(store, agent.id, respec);
+    op.step('configured');
+    await provider.start(runtimeRef);
+    op.step('started');
+    // First boot on an import can be slow (cold image on Docker Desktop's VM,
+    // imported sessions to load) — give it 2 minutes, not the default 30s.
+    await waitForHealthy(
+      provider,
+      runtimeRef,
+      deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+      120,
+    );
+    // Its conversations came pinned to the runtime they ran on there: one this
+    // machine's source does not name (a machine login's claude-cli, here a
+    // token) answered "Not logged in" until a start or rebuild cleared it, as
+    // they do (audit #100). Best-effort, as there.
+    await clearStaleRuntimePins(provider, runtimeRef, agent.slug, (e, d) => log(e, { agentId: agent.id, ...d }))
+      .catch((err) => log('runtime.pin_failed', { agentId: agent.id, error: String(err).slice(0, 200) }));
+    // $HOME rode the archive, but tools installed OUTSIDE it (apt, /usr/local)
+    // come from the image — re-run the on-rebuild hook so an imported agent's
+    // system tools are reconstituted, as rebuild does (audit 2026-09-08).
+    await runRebuildHook(deps, agent.id, runtimeRef, log);
+    // Let the skills/gateway settle before flipping to RUNNING, or a message
+    // landing in the first ~30s starts a fresh session and archives the
+    // imported conversation thread — the same guard rebuild uses (audit 2026-09-08).
+    await waitForSkillsSettled(provider, runtimeRef, agent.slug, deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))), log);
+    await reindexMemoryIfSwitched(deps, agent.id, runtimeRef, log);
+    op.step('settled');
+    // Its app's record last, once nothing can roll the import back: the app's
+    // files and tasks came with the volume, and this is what manages them (audit #006).
+    const app = manifest.agent.app;
+    if (app) {
+      store.setAgentApp({ agentId: agent.id, app: app.app, source: app.source, ref: app.ref, sha: app.sha, manifest: app.manifest,
+        ...(app.previousSha ? { previousSha: app.previousSha, previousManifest: app.previousManifest } : {}),
+        installedAt: app.installedAt, ...(app.testOk !== undefined ? { testOk: app.testOk } : {}) });
+    }
+    log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
+    const done = store.setAgentState(agent.id, 'RUNNING');
+    op.done('Imported.');
+    // Nobody in the owner's seat on its bot: the importer's first message is
+    // claimed, as a new agent's is, rather than left a pairing request to
+    // find and approve by hand (HB-0076).
+    const chan = store.getChannelForAgent(agent.id);
+    if (chan?.kind === 'telegram' && !store.getMembership(agent.id, opts.ownerId)?.channelUserId) {
+      opts.watchOwner?.(done, { accountId: chan.accountId, excludeIds: previousOwnerIds });
+    }
+    return done;
+  } catch (err) {
+    rethrowIfCrash(err);
+    // Roll back completely: a "Retry" on a half-imported agent would boot it
+    // with a fresh seeded volume — an empty-headed impostor of the archive.
+    // Only a confirmed cleanup permits "import again". Otherwise retain the
+    // identity and hold cleanup so a peer cannot restart its source.
+    if (!(await rollbackImport(deps, agent.id, runtimeRef, envSecretRefs))) {
+      const message = 'Import failed, but its runtime could not be removed. Cleanup is waiting; keep the source stopped and retry cleanup when this machine answers.';
+      op.hold(message, { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' });
+      throw new ImportCleanupPending(message);
+    }
+    log('import.rolled_back', { agentId: agent.id, error: String(err) });
+    // 500: room for a build's refusal and how to fix it (HB-0986), under the
+    // operation's 600-character outcome.
+    const e = new TransferError(
+      `Import failed and was rolled back — fix the cause and import again. (${String(
+        err instanceof Error ? err.message : err,
+      ).slice(0, 500)})`,
+    );
+    op.rolledBack(e.userMessage);
+    throw e;
+  } finally {
+    // However this ends, the busy flag must not outlive it: a stuck flag makes
+    // reconcile skip this agent forever.
+    clearBusy(agent.id);
+  }
+}
+
+/** Where an imported agent's bot token is kept. */
+function importSecretRef(agentId: string): string {
+  return `channel/${agentId}/bot-token`;
+}
+
+/**
+ * Undo a half-made import: its runtime and volume, its secrets, its channel
+ * (the bot), its members, then the DELETED tombstone. Each step guarded on its
+ * own so one failing does not skip the rest, but runtime destruction must
+ * finish before any identity is discarded. False means cleanup is unconfirmed
+ * and the held operation can try again without starting a second copy.
+ */
+async function rollbackImport(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string | undefined,
+  envSecretRefs: string[],
+): Promise<boolean> {
+  const { store, secrets, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const step = (fn: () => void) => {
+    try {
+      fn();
+    } catch (e) {
+      log('import.rollback_step_failed', { agentId, error: String(e) });
+    }
+  };
+  // Its memory-search decision was never applied: dropped, as every other failed build does (2026-10-09).
+  forgetEmbedDecision(agentId);
+  if (runtimeRef) {
+    try {
+      await provider.destroy(runtimeRef, { purge: true });
+    } catch (err) {
+      rethrowIfCrash(err);
+      log('import.rollback_step_failed', { agentId, error: String(err) });
+      return false;
+    }
+  }
+  await secrets.delete(importSecretRef(agentId)).catch(() => {});
+  for (const ref of envSecretRefs) await secrets.delete(ref).catch(() => {});
+  step(() => store.deleteChannelForAgent(agentId, 'all'));
+  step(() => store.deleteMemberships(agentId));
+  step(() => { for (const d of store.listDataSources(agentId)) store.deleteDataSource(agentId, d.id); });
+  step(() => store.deleteAgentApp(agentId));
+  // Env rows too — their secrets are already deleted above; a tombstone
+  // keeping references to swept secrets is the residue class the v0.90
+  // audit scrubbed.
+  step(() => store.scrubAgentResidue(agentId));
+  step(() => {
+    const s = store.getAgent(agentId)?.state;
+    if (s && s !== 'DELETING' && s !== 'DELETED') store.setAgentState(agentId, 'DELETING');
+    if (store.getAgent(agentId)?.state === 'DELETING') store.setAgentState(agentId, 'DELETED');
+  });
+  return true;
+}
+
+/**
+ * An import a restart cut off before RUNNING (the design's table, import
+ * row): undo it, as a failed import undoes itself — a half-imported volume
+ * must never start (Retry used to start one). If it reached RUNNING, it is
+ * done. A runtime whose machine does not answer is held: [Try again].
+ */
+export async function resumeImport(deps: ProvisionDeps, opId: string): Promise<void> {
+  const { store } = deps;
+  const op = handleFor(store, opId);
+  const row = op.get();
+  const agent = row.agentId ? store.getAgent(row.agentId) : undefined;
+  // A template accepted from the inbox goes back there, as a failed accept does (HB-0927).
+  const shareId = typeof row.params?.shareId === 'string' ? row.params.shareId : undefined;
+  // A child made from a master (Derive) is made again from it: there is no file.
+  const childOf = typeof row.params?.childOf === 'string' ? row.params.childOf : undefined;
+  // A clone is made again from its source, as a child is (HB-1164).
+  const cloneOf = typeof row.params?.cloneOf === 'string' ? row.params.cloneOf : undefined;
+  const again = shareId ? 'Import interrupted — it is back in your inbox: accept it again.'
+    : childOf !== undefined ? `Making the child of ${childOf} was interrupted — make it again from ${childOf}.`
+    : cloneOf !== undefined ? `Cloning ${cloneOf} was interrupted — clone it again.`
+    : 'Import interrupted — import the file again.';
+  if (!agent || agent.state === 'DELETED') { if (shareId) store.reopenShare(shareId); op.rolledBack(again); return; }
+  if (agent.state === 'RUNNING') { op.done('Imported.'); return; }
+  // Every secret the import made: env values AND imported deploy keys. The
+  // keys' rows are deleted by the rollback, and with them the only record of
+  // where the keys were kept (audit #004).
+  const secretRefs = [
+    ...store.listAgentEnv(agent.id).map((e) => e.secretRef),
+    ...store.listDataSources(agent.id).flatMap((d) => (d.secretRef ? [d.secretRef] : [])),
+  ];
+  // A restart inside the first provision comes before its ref is saved, but
+  // the volume may already exist: the ref provision() would answer names it,
+  // as the import's own failure path does (audit #003). Destroying one that
+  // was never made is a no-op.
+  const runtimeRef = agent.runtimeRef ?? deps.provider.runtimeRefFor?.({ agentId: agent.id, slug: agent.slug });
+  const ok = await rollbackImport(deps, agent.id, runtimeRef, secretRefs);
+  if (!ok) {
+    op.hold(
+      'Import interrupted by a restart, and its half-made copy could not be removed yet (its machine is not answering). It will not start.',
+      { actions: [{ action: 'retry', label: 'Try again' }], recommended: 'retry' },
+    );
+    return;
+  }
+  deps.log?.('import.rolled_back', { agentId: agent.id, error: 'interrupted by a restart' });
+  if (shareId) store.reopenShare(shareId);
+  op.rolledBack(again);
+}

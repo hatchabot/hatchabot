@@ -62,6 +62,31 @@ describe('opening a database that predates the current columns', () => {
   });
 });
 
+describe('a window an older release wrote again (HB-1221 review)', () => {
+  it('passes over none of the ids the window before it did: an older release leaves their column as it was', () => {
+    const db = new Database(':memory:');
+    try {
+      const store = new Store(db);
+      const until = new Date(Date.now() + 60_000).toISOString();
+      const first = store.openPairingWindow('a1', until, 'guest', { kind: 'telegram', excludeIds: ['9077'] });
+      expect(store.pairingWindows('a1')[0]).toMatchObject({ excludeIds: ['9077'] });
+      // A write as an older release makes it (before exclude_ids): the window, with this generation.
+      const asAnOlderRelease = (generation: string) => db.prepare(
+        `INSERT INTO pairing_windows (agent_id, seat, until, opened_for, expect, generation)
+         VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id, seat) DO UPDATE SET until = excluded.until,
+             opened_for = excluded.opened_for, expect = excluded.expect, generation = excluded.generation`,
+      ).run('a1', 'telegram:guest', until, 'guest', null, generation);
+      // Its renewal (the same window, its generation): the ids are still that window's.
+      asAnOlderRelease(first);
+      expect(store.pairingWindows('a1')[0]).toMatchObject({ excludeIds: ['9077'] });
+      // Its owner's Reopen (a window of its own), and this release again. Was: still passing them over.
+      asAnOlderRelease('made-up-generation');
+      expect(store.pairingWindows('a1')[0]).not.toHaveProperty('excludeIds');
+    } finally { db.close(); }
+  });
+});
+
 describe('the row moves an upgrade does (night review, 2026-09-27)', () => {
   it('an open window in the old one-per-agent table moves to the per-seat table, its @handle with it', () => {
     const db = new Database(':memory:');

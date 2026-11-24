@@ -249,7 +249,7 @@ export interface Agent {
   curatedSkills?: string[];
   /** Explicit selection last accepted by the runtime; unset means not yet known. */
   appliedCuratedSkills?: string[];
-  /** Its own browser for OpenClaw's browser tool (src/orchestrator/browser.ts). Off by default. */
+  /** Its own browser for OpenClaw's browser tool (src/orchestrator/console/browser.ts). Off by default. */
   browser?: boolean;
   /** Keep its logins (HB-0680): the id of the browser profile it keeps on disk; unset, its browser keeps nothing past a restart. */
   browserLogins?: string;
@@ -407,6 +407,12 @@ export interface DerivedImage {
   tag: string;
   /** Base tag it was built FROM (e.g. "hatchabot-runtime:latest"). */
   base: string;
+  /**
+   * System packages laid on the base before the owner's lines: an imported
+   * image's base had them and the one here does not (HB-0986). Not part of
+   * the lines, so their cap (8000) is the owner's alone. Absent or empty: none.
+   */
+  basePackages?: string[];
   /** The owner's Dockerfile lines, appended verbatim after the FROM. */
   dockerfile: string;
   status: DerivedImageStatus;
@@ -452,4 +458,25 @@ export interface Membership {
   joinedAt?: string;
   /** May talk to the agent from the web app (as its owner — see docs/features.md). */
   webChat?: boolean;
+}
+
+/** A Discord or Slack bot parked in the pool for reuse (orchestrator/channels/discordPool.ts), as the store keeps it. */
+export interface DiscordBotRow {
+  applicationId: string;
+  botUserId?: string;
+  botName?: string;
+  secretRef: string;
+  /** null = shared with everyone on this machine. */
+  ownerId: string | null;
+  servers: Array<{ id: string; name: string }>;
+  warnings: string[];
+  addToServerUrl?: string;
+  checkedAt?: string;
+  addedAt: string;
+  /** Whom the bot wrote to for its previous agent — told "this bot is now X" on reuse. */
+  priorChatIds?: string[];
+  /** The archived agent this bot is kept for: restore takes it back unless someone else did. */
+  archivedFor?: string;
+  /** Which app the bot is for. Discord when absent (the pool began as Discord's). */
+  kind?: 'discord' | 'slack';
 }

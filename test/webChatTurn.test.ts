@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Socket } from 'node:net';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { runWebChatTurn, TURN_SCRIPT, turnScript, WEB_CHAT_SCOPES, webChatSessionKey } from '../src/orchestrator/webChat.js';
+import { runWebChatTurn, TURN_SCRIPT, turnScript, WEB_CHAT_SCOPES, webChatSessionKey } from '../src/orchestrator/conversation/webChat.js';
 
 /**
  * Chat on the web, step 2 (2026-09-29): the in-container client that sends a

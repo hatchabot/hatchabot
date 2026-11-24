@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { listCrons, setCronEnabled, runCronNow, deleteCron, CronSystemOwnedError } from '../src/orchestrator/crons.js';
+import { listCrons, setCronEnabled, runCronNow, deleteCron, CronSystemOwnedError, cronShapeOk } from '../src/orchestrator/schedules/crons.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
@@ -52,6 +52,19 @@ async function seedRuntime(p: MockProvider, slug = 'kitchen', agentId = 'a1') {
 const TG_ID = ['55', '50', '0', '01'].join('');
 
 describe('crons helpers', () => {
+  it('a cron expression a gateway could run passes the shape check, one it could not is caught (HB-1018)', () => {
+    for (const ok of ['0 8 * * 1-5', '*/15 9-17 * * MON-FRI', '0 0 1,15 * *', '30 8 * * 0', '0 30 8 * * 1-5', '0 0 12 L * ? 2027', '0 9 * * 5#3', '@annually', ' 0 8 * * * ',
+      // Every nickname croner takes, any case; steps as croner reads them (parseInt), zero-padded too.
+      '@yearly', '@monthly', '@weekly', '@daily', '@midnight', '@MIDNIGHT', '@hourly', '*/05 * * * *', '0 */05 * * *', '1-10/02 * * * *',
+      // A step ending in L or #n, as croner runs it.
+      '0 8 * * */2#1', '0 8 */2L * *', '0 8 * * 1-5/2#3', '0 8 1-15/2L * *']) {
+      expect(cronShapeOk(ok), ok).toBe(true);
+    }
+    for (const bad of ['every weekday', '0 8 * *', '60 8 * * *', '0 24 * * *', '0 8 32 * *', '0 8 * 13 *', '0 8 * * 8', '0 8 * * 1-', '0 8 */0 * *', '0 8 1/2/3 * *', '0 8 ; * *', '0 8 1,,2 * *', '1 2 3 4 5 6 7 8', '@reboot', '*/00 * * * *', '0 8 * * */0#1', '0 8 */L * *']) {
+      expect(cronShapeOk(bad), bad).toBe(false);
+    }
+  });
+
   it('listCrons parses the openclaw cron list --json shape', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
@@ -363,12 +376,29 @@ describe('POST /v1/agents/:id/crons (create — the verb no interface had)', () 
   });
 
   it('refuses while the agent is being moved or exported, like the other task changes (#65)', async () => {
-    const { beginOperation } = await import('../src/orchestrator/operations.js');
+    const { beginOperation } = await import('../src/orchestrator/lifecycle/operations.js');
     const { provider, f, store } = await world();
     beginOperation(store, 'migrate', 'a1', {});
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'x', message: 'y', everyMinutes: 60 } });
     expect(res.statusCode).toBe(409);
     expect(provider.execLog.some((c) => c[0] === 'cron' && c[1] === 'add')).toBe(false);
+  });
+
+  it('a task on a short nickname (@daily) is created and edited: its shape is the gateway\'s to judge (HB-1018)', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"job-9"}', stderr: '' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'Daily note', message: 'Write the note.', cron: '@daily' } });
+    expect(res.statusCode, res.body).toBe(201);
+    const call = provider.execLog.find((c) => c[0] === 'cron' && c[1] === 'add')!;
+    expect(call[call.indexOf('--cron') + 1]).toBe('@daily');
+    // An empty one is still no schedule.
+    const blank = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'x', message: 'y', cron: '  ' } });
+    expect(blank.statusCode).toBe(400);
+    // An edit to one: its new expression goes to the gateway as given.
+    provider.execResponses.set('cron list', { code: 0, stdout: CRON_JSON, stderr: '' });
+    const edited = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/job-1', headers: as, payload: { cron: '@hourly' } });
+    expect(edited.statusCode, edited.body).toBe(200);
+    expect(provider.execLog.some((c) => c[1] === 'edit' && c.includes('@hourly'))).toBe(true);
   });
 
   it('refuses zero or two schedules, and surfaces CLI failure as 502', async () => {
@@ -457,7 +487,7 @@ describe('POST /v1/agents/:id/ask', () => {
 
 describe('delivery (regression: tasks on a web-only agent failed every run)', () => {
   it('a task that does not announce says --no-deliver', async () => {
-    const { addCron } = await import('../src/orchestrator/crons.js');
+    const { addCron } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     await addCron(p, ref, 'kitchen', { name: 'q', message: 'm', everyMs: 60_000, announce: false });
@@ -472,7 +502,7 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
   });
 
   it('tasks that announce to no one are pointed at the owner\'s chat, or made quiet (2026-09-29)', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     p.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
@@ -491,7 +521,7 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
   });
 
   it('a runner lost mid-pass still hands back the tasks it made quiet, to be pointed later (HB-0289)', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     let quiet = false;
     const edits: string[][] = [];
     const jobs = () => [
@@ -519,7 +549,7 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
   });
 
   it('a task made quiet before the owner was linked is pointed at them once they are (#64)', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     const store = new Store(new Database(':memory:'));
     const p = new MockProvider();
     const ref = await seedRuntime(p);
@@ -561,7 +591,7 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
   });
 
   it('a task created before there is anyone to post to is remembered, and announces once the owner is linked (review A17)', async () => {
-    const { retargetImplicitCrons, addCron } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons, addCron } = await import('../src/orchestrator/schedules/crons.js');
     const { provider, f, store } = await world();
     // A Telegram agent whose owner has not messaged it yet: no one to post to.
     store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'kitchenbot', secretRef: 'channel/a1/bot-token', deepLink: 'https://t.me/kitchenbot', createdAt: 'now' });
@@ -594,7 +624,7 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   const on2026_9 = (p: MockProvider, ref: string) => p.infoOverride.set(ref, { openclawVersion: '2026.9.6' });
 
   it('cronTargetFor: the owner\'s chat first, the console conversation only with no chat app at all', async () => {
-    const { cronTargetFor } = await import('../src/orchestrator/crons.js');
+    const { cronTargetFor } = await import('../src/orchestrator/schedules/crons.js');
     const { store } = await world();
     const agent = store.getAgent('a1')!;
     expect(cronTargetFor(store, agent)).toEqual({ session: 'agent:kitchen:main' });
@@ -607,7 +637,7 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   });
 
   it('conversationDeliverySupported: 2026.9 and later only', async () => {
-    const { conversationDeliverySupported } = await import('../src/orchestrator/crons.js');
+    const { conversationDeliverySupported } = await import('../src/orchestrator/schedules/crons.js');
     expect(conversationDeliverySupported('2026.9.6')).toBe(true);
     expect(conversationDeliverySupported('2026.10.1')).toBe(true);
     expect(conversationDeliverySupported('2027.1.0')).toBe(true);
@@ -618,7 +648,7 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   });
 
   it('addCron binds the task to the conversation (current + its key), announcing with no channel, after making sure it exists', async () => {
-    const { addCron } = await import('../src/orchestrator/crons.js');
+    const { addCron } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     on2026_9(p, ref);
@@ -641,7 +671,7 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   });
 
   it('a conversation target on an older OpenClaw is quiet, as before', async () => {
-    const { addCron } = await import('../src/orchestrator/crons.js');
+    const { addCron } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     p.infoOverride.set(ref, { openclawVersion: '2026.7.1-2' });
@@ -651,7 +681,7 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   });
 
   it('ensureConversation leaves an existing conversation untouched, and refuses odd keys', async () => {
-    const { ensureConversation } = await import('../src/orchestrator/crons.js');
+    const { ensureConversation } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     p.execResponses.set('sh', { code: 0, stdout: 'yes', stderr: '' });
@@ -668,7 +698,7 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   });
 
   it('a failed sessions.create does not stop the task being made', async () => {
-    const { addCron } = await import('../src/orchestrator/crons.js');
+    const { addCron } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     on2026_9(p, ref);
@@ -691,7 +721,7 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   });
 
   it('the sweep binds implicit tasks to the console conversation and leaves ones already bound to a conversation', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     on2026_9(p, ref);
@@ -729,7 +759,7 @@ describe('an agent in no chat app: results go to its console conversation (2026-
   });
 
   it('retargetCron unbinds a task bound to a conversation only when pointing it at a chat (review R10)', async () => {
-    const { retargetCron } = await import('../src/orchestrator/crons.js');
+    const { retargetCron } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     const boundJob = { sessionTarget: 'current', sessionKey: 'agent:kitchen:web:0123456789abcdef' };
@@ -771,7 +801,7 @@ describe('a task an agent makes in its chat is re-pointed within minutes, cheapl
   const madeInChat = { id: 'j1', name: 'Market summary', enabled: true, sessionTarget: 'isolated', delivery: { mode: 'announce' }, payload: { kind: 'agentTurn', message: 'Summarise the markets.' }, updatedAtMs: 1000 };
 
   it('pendingRetarget reads OpenClaw\'s task store with one shell and starts no CLI', async () => {
-    const { pendingRetarget, cronStoreReadShell } = await import('../src/orchestrator/crons.js');
+    const { pendingRetarget, cronStoreReadShell } = await import('../src/orchestrator/schedules/crons.js');
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     p.execResponses.set('sh', storeRead([
@@ -799,7 +829,7 @@ describe('a task an agent makes in its chat is re-pointed within minutes, cheapl
   });
 
   it('the quick pass re-points a web-chat-only agent\'s new task, and starts the CLI only when one is due', async () => {
-    const { CRON_QUICK_CHECK_MS } = await import('../src/orchestrator/crons.js');
+    const { CRON_QUICK_CHECK_MS } = await import('../src/orchestrator/schedules/crons.js');
     expect(CRON_QUICK_CHECK_MS).toBeLessThanOrEqual(10 * 60_000);
     const { provider, f, store } = await world();
     provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.9.8' });
@@ -851,7 +881,7 @@ describe('a task aimed at a chat app the agent is no longer in (HB-0401)', () =>
   const CONSOLE = { session: 'agent:kitchen:main' };
 
   it('the last chat app gone: re-pointed at the console conversation, its old recipient cleared', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     const { p, ref, edits } = await runtime([job()]);
     const r = await retargetImplicitCrons(p, ref, 'kitchen', CONSOLE, [], []);
     expect(r).toEqual({ changed: 1, failed: 0, held: [] });
@@ -860,7 +890,7 @@ describe('a task aimed at a chat app the agent is no longer in (HB-0401)', () =>
   });
 
   it('one of several gone: re-pointed at the app that is left', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     const { p, ref, edits } = await runtime([job()]);
     const r = await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'discord', to: 'user:abc123' }, [], ['discord']);
     expect(r.changed).toBe(1);
@@ -868,7 +898,7 @@ describe('a task aimed at a chat app the agent is no longer in (HB-0401)', () =>
   });
 
   it('nobody to post to yet: quiet and remembered, as a task with no recipient is', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     const { p, ref, edits } = await runtime([job()]);
     const r = await retargetImplicitCrons(p, ref, 'kitchen', undefined, [], ['discord']);
     expect(r).toEqual({ changed: 1, failed: 0, held: ['j1'] });
@@ -876,7 +906,7 @@ describe('a task aimed at a chat app the agent is no longer in (HB-0401)', () =>
   });
 
   it('a task quiet and held with its old channel still on it loses that channel when it goes to the console', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     const { p, ref, edits } = await runtime([job({ delivery: { mode: 'none', channel: 'telegram', to: TG_ID } })]);
     const r = await retargetImplicitCrons(p, ref, 'kitchen', CONSOLE, ['j1'], []);
     expect(r).toEqual({ changed: 1, failed: 0, held: [] });
@@ -884,7 +914,7 @@ describe('a task aimed at a chat app the agent is no longer in (HB-0401)', () =>
   });
 
   it('a task bound to a conversation of its own stays there, without the app it named', async () => {
-    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons } = await import('../src/orchestrator/schedules/crons.js');
     const { p, ref, edits } = await runtime([job({ sessionTarget: 'current', sessionKey: 'agent:kitchen:other' })]);
     await retargetImplicitCrons(p, ref, 'kitchen', CONSOLE, [], []);
     expect(edits()).toEqual([['cron', 'edit', 'j1', '--session', 'current', '--session-key', 'agent:kitchen:other', '--announce', '--best-effort-deliver',
@@ -892,7 +922,7 @@ describe('a task aimed at a chat app the agent is no longer in (HB-0401)', () =>
   });
 
   it('left alone: a task on an app still attached, one Hatchabot does not manage, a quiet one, and OpenClaw\'s own', async () => {
-    const { retargetImplicitCrons, pendingRetarget } = await import('../src/orchestrator/crons.js');
+    const { retargetImplicitCrons, pendingRetarget } = await import('../src/orchestrator/schedules/crons.js');
     const jobs = [
       job(),
       job({ id: 'j2', delivery: { mode: 'announce', channel: 'whatsapp', to: '+15550100' } }),
@@ -908,7 +938,7 @@ describe('a task aimed at a chat app the agent is no longer in (HB-0401)', () =>
   });
 
   it('the quick check finds it, so a removal reaches the task within minutes', async () => {
-    const { pendingRetarget } = await import('../src/orchestrator/crons.js');
+    const { pendingRetarget } = await import('../src/orchestrator/schedules/crons.js');
     const { p, ref } = await runtime([]);
     p.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [job()] }) });
     expect(await pendingRetarget(p, ref, 'kitchen', CONSOLE, [], [])).toEqual({ ids: ['j1'], sig: 'j1@1000' });

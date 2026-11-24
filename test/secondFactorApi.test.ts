@@ -267,6 +267,30 @@ describe('new backup codes', () => {
   });
 });
 
+describe('a new authenticator app in place of the old (HB-1089)', () => {
+  it('a write that fails while it is confirmed leaves the old app working, and the new one can be confirmed again', async () => {
+    h = await publicApp({ off: true });
+    const o = await h.addAccount('owner', { owner: true, totp: true });
+    const call = await priv(h, 'owner', o.password);
+    const old = h.store.listSecondFactors(o.id, { kind: 'totp' })[0]!;
+    const gen = h.store.secondFactorGeneration(o.id);
+    const start = (await call('POST', '/v1/second-factor/totp', { current: o.password })).json();
+    // The disk fills (say) as the new app is marked confirmed, after the old one was deleted.
+    const confirm = h.store.confirmSecondFactor.bind(h.store);
+    h.store.confirmSecondFactor = () => { throw new Error('SQLITE_FULL: database or disk is full'); };
+    expect((await call('POST', '/v1/second-factor/totp/confirm', { id: start.id, code: totp(base32Decode(start.secret)) })).statusCode).toBe(500);
+    h.store.confirmSecondFactor = confirm;
+    expect(h.store.listSecondFactors(o.id, { kind: 'totp' }).map((f) => f.id)).toEqual([old.id]);
+    expect(h.store.secondFactorGeneration(o.id)).toBe(gen); // nothing proved with the old app stopped counting
+    expect(h.app.publicAccess!.secondFactorNeed(o.id)).toBe('yes');
+    // The new app is still waiting, and confirming it again works.
+    const next = totp(base32Decode(start.secret), Date.now() + 30_000);
+    expect((await call('POST', '/v1/second-factor/totp/confirm', { id: start.id, code: next })).statusCode).toBe(200);
+    expect(h.store.listSecondFactors(o.id, { kind: 'totp' }).map((f) => f.id)).toEqual([start.id]);
+    expect(h.store.secondFactorGeneration(o.id)).toBeGreaterThan(gen);
+  });
+});
+
 describe('passkey ceremonies', () => {
   const at = { origin: `https://${PUBLIC_HOST}`, host: PUBLIC_HOST };
 

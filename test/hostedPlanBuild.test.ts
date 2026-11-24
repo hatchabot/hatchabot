@@ -5,7 +5,7 @@ import type { AIProfile } from '../src/domain/types.js';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { buildRuntimeSpec, type ProvisionDeps } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec, type ProvisionDeps } from '../src/orchestrator/lifecycle/provision.js';
 
 function world(kind: 'subscription' | 'api_key') {
   const store = new Store(new Database(':memory:'));

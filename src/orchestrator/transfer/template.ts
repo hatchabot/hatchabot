@@ -1,0 +1,861 @@
+import { validIcon, validIconColor } from '../homeScreen/agentIcons.js';
+import { MAX_DATA_SOURCES, MAX_MOUNT_NAME } from '../apps/dataSourceLimits.js';
+import { gzip, gunzipSync } from 'node:zlib';
+import { promisify } from 'node:util';
+import { z } from 'zod';
+import { PARAM_KEY_RE, TemplateParamSchema } from '../../domain/templateParams.js';
+import type { Agent, TemplateParam } from '../../domain/types.js';
+import { SourceGoneError, type Store } from '../../store/store.js';
+import type { RuntimeProvider } from '../../providers/provider.js';
+import { CORE_FILES, CoreFileTooBigError, MAX_FILE_BYTES, readCoreFile, SnapshotError, workspacePath } from '../files/snapshots.js';
+import { DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSectionEverywhere, SCHEDULED_RESULTS_HEADING } from '../../openclaw/workspace.js';
+import { scanPersonalData, type PersonalScan } from '../../domain/personalData.js';
+import { CuratedSkillSelectionSchema } from '../../openclaw/skills.js';
+
+/**
+ * The sections Hatchabot writes into AGENTS.md for THIS machine and owner:
+ * who the operator is, their folders and repos, their Google accounts, their
+ * other agents, the
+ * memory rules and budget, the install notes. None of it may travel in a
+ * template — it reached another owner's agent and was written back by its
+ * setup values (night review, 2026-09-28). The importer's own build adds
+ * its own.
+ */
+// The install notes' pre-rename heading too: agents built before v1.0.0
+// still carry it (2026-09-30).
+const MANAGED_HEADINGS = [OPERATOR_HEADING, DATA_SOURCES_HEADING, GOOGLE_ACCOUNTS_HEADING, PEERS_HEADING, INSTALL_HEADING, '## Installing tools (managed by AgentClaw)', '## Memory policy', '## Memory budget'];
+// Every copy, under either reading of the agent's fences: one its fences make
+// look quoted to one reader still carries the owner's details (HB-0520 review).
+export function stripManagedSections(agentsMd: string): string {
+  return MANAGED_HEADINGS.reduce((s, h) => removeSectionEverywhere(s, h), agentsMd);
+}
+import { cronShapeOk, listCrons } from '../schedules/crons.js';
+import { zoneIntlTakes } from '../schedules/timezone.js';
+import { createAgentRecord } from '../lifecycle/provision.js';
+import { MACHINE_LOGIN_NO_RUNNER } from '../lifecycle/agentRecords.js';
+import { machineLoginOnly } from '../lifecycle/modelRuntime.js';
+import { inflateWhole, TemplateTaskRefused, TransferError } from './transfer.js';
+import { envValueProblem } from '../../domain/envPolicy.js';
+import { normalizeGitUrl } from '../apps/gitSource.js';
+
+/**
+ * A "template" is a SHAREABLE copy of an agent — its training (SOUL.md +
+ * AGENTS.md), its scheduled tasks and what it expects to run against, with
+ * none of its identity: no bot token, no members, no conversation history;
+ * MEMORY.md only when the sharer explicitly opts in (includeMemory). It is NOT
+ * automatically safe to email: agents write names and addresses into their
+ * own AGENTS.md, so the export reports what it found (scanTemplate) and the
+ * owner reads before sending (2026-09-30). Import stands up a
+ * FRESH agent: the importer owns it, supplies
+ * their own bot (the normal create flow), and re-invites their own people.
+ *
+ * This is deliberately separate from Save/Load (transfer.ts), which carries the
+ * whole identity for re-hosting the SAME agent.
+ */
+export const TEMPLATE_FORMAT = 'hatchabot-template';
+/** Files exported before the rename. */
+export const LEGACY_TEMPLATE_FORMAT = 'agentclaw-template';
+export const TEMPLATE_VERSION = 1;
+/** The longest description a template carries; a full backup's schema (transfer.ts) holds it to the same. */
+export const MAX_PERSONA_CHARS = 8000;
+/** What a template file may hold: older apps refuse a file with more. */
+export const MAX_TEMPLATE_PARAMS = 24;
+export const MAX_TEMPLATE_SCHEDULES = 12;
+export const MAX_TEMPLATE_TASK_MESSAGE = 4000;
+
+/** Always carried: the agent's persona and instructions. */
+const TRAINED_FILES = ['SOUL.md', 'AGENTS.md'];
+/** Files a template may seed on import — the same core set snapshots protect. */
+const SEEDABLE_FILES = CORE_FILES;
+
+// TemplateParam (domain/types.ts): a setup field the template's AUTHOR
+// declares — the importer fills it and the value is substituted into {{key}}
+// placeholders. The manifest carries DEFINITIONS and defaults only, never the
+// author's own filled values — the no-secrets guarantee stays intact. `target`
+// records where the author expects the placeholder; substitution itself
+// follows the placeholders.
+export type { TemplateParam } from '../../domain/types.js';
+
+/** Placeholder syntax: {{ key }}, with a key as PARAM_KEY_RE allows. */
+const PLACEHOLDER_RE = /\{\{\s*([a-z][a-z0-9_]{0,31})\s*\}\}/g;
+
+export interface TemplateManifest {
+  format: typeof TEMPLATE_FORMAT;
+  version: number;
+  exportedAt: string;
+  /** `sharedMemory` is always true, and read by nothing here: written only
+   *  because Hatchabot before v2.170.0 refuses a template without it (HB-0094). */
+  agent: { name: string; persona: string; sharedMemory?: true; icon?: string; iconColor?: string; curatedSkills?: string[] };
+  files: Record<string, string>;
+  ai: { vendor: string };
+  /** What the agent expects to read — declarations only, never secrets. */
+  dataNeeds: Array<{ kind: string; access: string; mountName: string; repoUrl?: string }>;
+  /** Env var NAMES the agent's tools expect — the importer supplies the values. */
+  envNeeds: string[];
+  /** Setup fields the importer fills; substituted into {{key}} placeholders. */
+  parameters: TemplateParam[];
+  /** Scheduled agent-turn tasks (declarations — no scripts, no state). An
+   *  imported/derived copy recreates them once it is RUNNING. */
+  schedules?: Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string; announce?: boolean }>;
+}
+
+const TemplateSchema = z.object({
+  format: z.enum([TEMPLATE_FORMAT, LEGACY_TEMPLATE_FORMAT]),
+  version: z.literal(TEMPLATE_VERSION),
+  exportedAt: z.string().max(64),
+  agent: z.object({
+    name: z.string().min(1).max(64),
+    persona: z.string().max(MAX_PERSONA_CHARS),
+    // `sharedMemory` is accepted and ignored: memory is always shared since
+    // v2.107.0, so an old file's `false` means nothing (HB-0094).
+    sharedMemory: z.boolean().optional(),
+    // Its home-screen icon travels with it; a bad value is dropped, not fatal.
+    icon: z.string().max(16).optional().catch(undefined),
+    iconColor: z.string().max(7).optional().catch(undefined),
+    curatedSkills: CuratedSkillSelectionSchema.optional(),
+  }),
+  files: z
+    .record(z.string().max(200), z.string().max(MAX_FILE_BYTES))
+    .refine((r) => Object.keys(r).length <= 200, { message: 'too many files in template' }),
+  ai: z.object({ vendor: z.string().max(32) }),
+  dataNeeds: z
+    .array(
+      z.object({
+        kind: z.string().max(16),
+        access: z.string().max(8),
+        mountName: z.string().max(MAX_MOUNT_NAME),
+        repoUrl: z.string().max(512).optional(),
+      }),
+    )
+    .max(MAX_DATA_SOURCES)
+    .default([]),
+  envNeeds: z.array(z.string().max(128)).max(64).default([]),
+  // Optional + defaulted: templates from before Phase 2a parse as having none,
+  // and older apps reading a newer template strip the unknown key (zod objects
+  // are non-strict) — no version bump needed in either direction.
+  // Keys unique, as PATCH and the management agent already require: two
+  // fields with one key overwrote each other's value, and an env-target twin
+  // took the key out of the file substitutions altogether (#168).
+  parameters: z
+    .array(TemplateParamSchema)
+    .max(MAX_TEMPLATE_PARAMS)
+    .refine((a) => new Set(a.map((p) => p.key)).size === a.length, { message: 'parameter keys must be unique' })
+    .default([]),
+  schedules: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(80),
+        message: z.string().min(1).max(MAX_TEMPLATE_TASK_MESSAGE),
+        // Any length: the shape is cronShapeOk's (checkedTemplate). Nine at
+        // least refused @daily and the other short nicknames as malformed,
+        // and a clone of a task on one failed (HB-1018).
+        cron: z.string().min(1).max(64).optional(),
+        everyMs: z.number().int().positive().optional(),
+        tz: z.string().max(64).optional(),
+        // false = a quiet task (its runs are read in the app). Absent in older
+        // templates: those announce, as they always did.
+        announce: z.boolean().optional(),
+      }),
+    )
+    .max(MAX_TEMPLATE_SCHEDULES)
+    .optional(),
+});
+
+export interface TemplateDeps {
+  store: Store;
+  provider: RuntimeProvider;
+  log?: (event: string, detail: Record<string, unknown>) => void;
+}
+
+export async function exportTemplate(
+  deps: TemplateDeps,
+  agentId: string,
+  opts: { includeMemory?: boolean } = {},
+): Promise<{ filename: string; data: Buffer; personal: PersonalScan; edited: string[] }> {
+  const { store, provider } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent?.runtimeRef) throw new TransferError('This agent has no runtime to export yet.');
+  if (agent.state !== 'RUNNING') {
+    throw new TransferError(`Start the agent to export a template (it's ${agent.state}).`);
+  }
+  // Export also feeds Send, Clone and Derive. None may return private text
+  // read for an owner or runtime that changed while the reads were pending.
+  const assertSourceCurrent = () => {
+    const now = store.getAgent(agentId);
+    if (!now || now.ownerId !== agent.ownerId || now.runtimeRef !== agent.runtimeRef || now.hostId !== agent.hostId
+        || now.slug !== agent.slug || now.state !== 'RUNNING') {
+      throw new TransferError('The agent changed while preparing its template. Refresh and try again.');
+    }
+  };
+  const profile = store.getAIProfile(agent.aiProfileId);
+
+  // Persona + instructions always; MEMORY.md unless excluded (default: include,
+  // so the copy is faithful to its parent — the caller opts out when the memory
+  // is personal and headed to someone else).
+  const includeMemory = opts.includeMemory !== false;
+  const wanted = includeMemory ? [...TRAINED_FILES, 'MEMORY.md'] : TRAINED_FILES;
+  const tooBig = (name: string) => new TransferError(`Its ${name} is over ${MAX_FILE_BYTES / 1024} KB, too big for a template. Trim it first.`);
+  // A configured copy (or a master that filled its own values) travels as its
+  // raw layer, {{placeholders}} and all — the same source push-definition
+  // uses. Its live files carry the values filled here, so a child or a
+  // recipient got the fields but no placeholders, and their own answers
+  // never replaced the author's (#164).
+  const layer = agent.parameters?.length ? agent.paramFiles : undefined;
+  const files: Record<string, string> = {};
+  // The files whose live text is not what the layer renders: changed outside
+  // the Files editor (by the agent itself, in its console) after the values
+  // were applied. The copy carries the layer without those changes, so the
+  // sharer is told (HB-0117); the layer stays the source, or the author's
+  // answers would travel in place of the fields again (#164).
+  const edited: string[] = [];
+  for (const name of wanted) {
+    const raw = name === 'SOUL.md' ? layer?.soul : name === 'AGENTS.md' ? layer?.agents : undefined;
+    let text: string;
+    if (typeof raw === 'string') {
+      text = raw;
+      const live = await readCoreFile(provider, agent.runtimeRef, agent.slug, name).catch(() => undefined);
+      if (live !== undefined && comparable(live) !== comparable(applyParamValues(raw, agent.paramValues ?? {}))) edited.push(name);
+    } else {
+      try {
+        // A file that is not there exports empty; one that is there but could
+        // not be read stops the export — it went out empty, as if the agent
+        // had no persona or instructions (#119).
+        text = (await readCoreFile(provider, agent.runtimeRef, agent.slug, name)) ?? '';
+      } catch (err) {
+        if (err instanceof CoreFileTooBigError) throw tooBig(name);
+        if (err instanceof SnapshotError) {
+          throw new TransferError(`${err.userMessage.replace(/\.$/, '')} — nothing was exported, so the copy would not be missing it. Try again once the agent is healthy.`);
+        }
+        throw err;
+      }
+    }
+    assertSourceCurrent();
+    files[name] = name === 'AGENTS.md' ? stripManagedSections(text) : text;
+    if (Buffer.byteLength(files[name]!, 'utf8') > MAX_FILE_BYTES) throw tooBig(name);
+  }
+  const persona = typeof layer?.persona === 'string' ? layer.persona : agent.persona;
+
+  // agentTurn crons travel as DECLARATIONS (name/schedule/message) — a daily
+  // briefing's crons arrive scheduled. Command crons carry scripts and stay
+  // behind; so do OpenClaw's own (its skill review, memory dreaming): every
+  // copy gets those from OpenClaw, and a copy of one is a second (#82).
+  let crons: Awaited<ReturnType<typeof listCrons>>;
+  try {
+    crons = await listCrons(provider, agent.runtimeRef, agent.slug);
+  } catch {
+    // An unreadable list exported none, and the copy lost its tasks with
+    // nothing said (#81).
+    throw new TransferError("Couldn't read its scheduled tasks, so the copy would have none — nothing was exported. Try again in a moment.");
+  }
+  assertSourceCurrent();
+  const tasks = crons
+    // enabled only: a task the owner deliberately switched off must not
+    // come back firing on every imported copy (10th audit).
+    .filter((c) => !c.system && c.enabled && c.payloadKind === 'agentTurn' && c.message && (c.scheduleExpr || c.everyMs));
+  // A template holds 12 (older apps refuse a file with more): the rest were
+  // dropped without a word (#102).
+  if (tasks.length > MAX_TEMPLATE_SCHEDULES) {
+    throw new TransferError(
+      `It has ${tasks.length} scheduled tasks switched on; a template carries at most ${MAX_TEMPLATE_SCHEDULES}. ` +
+        'Switch off or remove the ones a copy does not need, then try again.',
+    );
+  }
+  // A task's message travels whole or not at all: one past 4,000 characters
+  // (an agent-made or adopted task; the app caps its own) was cut to fit
+  // without a word, and the copy ran a different task (review, 2026-10-22).
+  const long = tasks.filter((c) => c.message!.length > MAX_TEMPLATE_TASK_MESSAGE);
+  if (long.length) {
+    throw new TransferError(
+      `${long.length === 1 ? 'The scheduled task' : 'The scheduled tasks'} ${long.map((c) => `“${(c.name || 'task').slice(0, 80)}”`).join(', ')} ` +
+        `${long.length === 1 ? 'has a message' : 'have messages'} longer than the 4,000 characters a template carries. ` +
+        'Shorten it or switch it off, then try again.',
+    );
+  }
+
+  const manifest: TemplateManifest = {
+    format: TEMPLATE_FORMAT,
+    version: TEMPLATE_VERSION,
+    exportedAt: new Date().toISOString(),
+    agent: { name: agent.name, persona, sharedMemory: true, icon: agent.icon, iconColor: agent.iconColor,
+      ...(!agent.ops && agent.curatedSkills !== undefined ? { curatedSkills: agent.curatedSkills } : {}) },
+    files,
+    ai: { vendor: profile?.vendor ?? 'anthropic' },
+    schedules: tasks.map((c) => ({
+        name: (c.name || 'task').slice(0, 80),
+        message: c.message!,
+        cron: c.scheduleExpr,
+        everyMs: c.everyMs,
+        tz: c.scheduleTz,
+        // A quiet task stays quiet in every copy: it came back announcing
+        // into the importer's chat (2026-10-10).
+        ...(c.announce === false ? { announce: false } : {}),
+      })),
+    dataNeeds: store.listDataSources(agentId).map((d) => ({
+      kind: d.kind,
+      access: d.access,
+      mountName: d.mountName,
+      repoUrl: d.repoUrl,
+    })),
+    envNeeds: store.listAgentEnv(agentId).map((e) => e.name),
+    parameters: collectParameters(agent, files, persona),
+  };
+  const personal = scanTemplate(manifest);
+  deps.log?.('template.exported', { agentId, emails: personal.emails, phones: personal.phones, tokens: personal.tokens });
+  return {
+    filename: `${agent.slug}.template.hatchabot`,
+    // Compressed off the event loop: in one go on it, a template with its
+    // memory held every other request up meanwhile (HB-1162).
+    data: await gzipAsync(Buffer.from(JSON.stringify(manifest))),
+    personal,
+    edited,
+  };
+}
+
+const gzipAsync = promisify(gzip);
+
+/**
+ * A core file as the agent's own text: without the sections Hatchabot writes
+ * for this machine (they differ from the layer's by design), trailing spaces
+ * or runs of blank lines. Two files the same here differ in nothing anyone wrote.
+ */
+function comparable(text: string): string {
+  // Every copy, as for the other managed sections: removeSection leaves one
+  // its fences make unsure where it is (ninth review).
+  return removeSectionEverywhere(stripManagedSections(text), SCHEDULED_RESULTS_HEADING)
+    .split('\n').map((l) => l.trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** A clone's memory budget: what one exec's output can carry with room to spare. */
+export const CLONE_MEMORY_FILE_BYTES = 1024 * 1024;
+export const CLONE_MEMORY_TOTAL_BYTES = 5 * 1024 * 1024;
+
+// Runs inside the source agent, in its workspace: USER.md and the text files
+// under memory/ (hidden entries skipped — .dreams is OpenClaw's own state),
+// as JSON. Anything too big, binary or oddly named is listed, not copied, and
+// so is a folder deeper than 8 levels: it was left out unsaid (review
+// 2026-10-22, A48). So is one, or a file, that cannot be read: a folder the
+// runtime user could not open was left out unsaid too (HB-0295).
+const READ_MEMORY_JS = `
+const fs = require('fs');
+const PER = ${CLONE_MEMORY_FILE_BYTES}, TOTAL = ${CLONE_MEMORY_TOTAL_BYTES};
+const files = {}, skipped = []; let total = 0;
+const okName = (rel) => rel.split('/').every((s) => s && !s.startsWith('.') && s.length <= 120 && !/[\\u0000-\\u001f\\\\]/.test(s));
+function take(rel) {
+  let st; try { st = fs.lstatSync(rel); } catch { return; }
+  if (!st.isFile()) return;
+  if (!okName(rel) || st.size > PER || total + st.size > TOTAL) { skipped.push(rel); return; }
+  let b; try { b = fs.readFileSync(rel); } catch { skipped.push(rel); return; }
+  const t = b.toString('utf8');
+  if (!Buffer.from(t, 'utf8').equals(b)) { skipped.push(rel); return; }
+  files[rel] = t; total += st.size;
+}
+function walk(dir, depth) {
+  let names; try { names = fs.readdirSync(dir).sort(); } catch (e) { if (!e || e.code !== 'ENOENT') skipped.push(dir + '/'); return; }
+  for (const n of names) {
+    if (n.startsWith('.')) continue;
+    const rel = dir + '/' + n;
+    let st; try { st = fs.lstatSync(rel); } catch (e) { if (!e || e.code !== 'ENOENT') skipped.push(rel); continue; }
+    if (st.isDirectory()) { if (depth < 8) walk(rel, depth + 1); else skipped.push(rel + '/'); } else take(rel);
+  }
+}
+take('USER.md'); walk('memory', 1);
+process.stdout.write(JSON.stringify({ files, skipped }));
+`;
+
+/**
+ * What a clone takes from its source beyond MEMORY.md: USER.md and the daily
+ * notes under memory/. That is where agents keep most of what they save — one
+ * agent's memory/ holds 624 KB beside a 3.7 KB MEMORY.md — so a clone
+ * of MEMORY.md alone was not the faithful copy it promised (2026-09-30). Only
+ * clones read this: the owner copying their own agent. Shared copies never
+ * carry it. One exec; a failure copies nothing and says so.
+ */
+export async function readCloneMemory(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+): Promise<{ files: Record<string, string>; skipped: string[]; failed?: boolean }> {
+  const b64 = Buffer.from(READ_MEMORY_JS).toString('base64');
+  const res = await provider
+    .execShell(runtimeRef, `cd ${JSON.stringify(workspacePath(slug, '.'))} && node -e "$(printf %s ${b64} | base64 -d)"`)
+    .catch(() => undefined);
+  try {
+    if (!res || res.code !== 0) throw new Error('read failed');
+    const out = JSON.parse(res.stdout) as { files?: Record<string, unknown>; skipped?: unknown };
+    const files: Record<string, string> = {};
+    // Names come from inside the agent: only USER.md and memory/… are seeds a
+    // clone may carry, never a path that climbs out of its workspace.
+    for (const [name, text] of Object.entries(out.files ?? {})) {
+      if (typeof text !== 'string') continue;
+      if (name !== 'USER.md' && !/^memory\/(?!\.)(?!.*\/\.)[^\\\0]+$/.test(name)) continue;
+      files[name] = text;
+    }
+    const skipped = Array.isArray(out.skipped) ? out.skipped.filter((s): s is string => typeof s === 'string').slice(0, 50) : [];
+    return { files, skipped };
+  } catch {
+    return { files: {}, skipped: [], failed: true };
+  }
+}
+
+/**
+ * Every place in a template that can mention a person — the files, the
+ * description, each task's message, setup-field text, repo addresses — and
+ * the email addresses, phone numbers and key-shaped strings found there.
+ */
+export function scanTemplate(m: TemplateManifest): PersonalScan {
+  return scanPersonalData([
+    ...Object.entries(m.files).map(([name, text]) => ({ where: name, text })),
+    // Its name too: it travels in the file (HB-0291).
+    { where: 'Name', text: m.agent.name },
+    { where: 'Description', text: m.agent.persona },
+    // Names, labels and options travel too: an address in one went out
+    // unwarned (review, 2026-10-22).
+    ...(m.schedules ?? []).map((s) => ({ where: `Scheduled task “${s.name}”`, text: `${s.name}\n${s.message}` })),
+    ...m.parameters.map((p) => ({ where: `Setup field “${p.label}”`, text: [p.label, p.help, p.default, ...(p.options ?? [])].filter(Boolean).join('\n') })),
+    ...m.dataNeeds.map((d) => ({ where: `Data source “${d.mountName}”`, text: d.repoUrl })),
+  ]);
+}
+
+/**
+ * The template's setup fields: what the author DECLARED on the agent, plus any
+ * {{key}} placeholder hand-written into SOUL/AGENTS/persona that was never
+ * declared — auto-derived as a required text field, so writing a placeholder is
+ * enough to make sharing ask for it (no declaration UI required).
+ */
+function collectParameters(
+  agent: Agent,
+  files: Record<string, string>,
+  persona: string,
+): TemplateParam[] {
+  const declared = agent.parameters ?? [];
+  const seen = new Set(declared.map((p) => p.key));
+  const derived: TemplateParam[] = [];
+  const scan = (text: string | undefined, target: 'soul' | 'agents') => {
+    for (const m of (text ?? '').matchAll(PLACEHOLDER_RE)) {
+      const key = m[1]!;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      derived.push({ key, label: key.replace(/_/g, ' '), required: true, type: 'text', target });
+    }
+  };
+  scan(files['SOUL.md'], 'soul');
+  scan(persona, 'soul');
+  scan(files['AGENTS.md'], 'agents');
+  const all = [...declared, ...derived];
+  // Past the cap the rest were cut off: the copy never asked for them and
+  // kept their {{placeholders}} in its instructions (#172).
+  if (all.length > MAX_TEMPLATE_PARAMS) {
+    const over = all.slice(MAX_TEMPLATE_PARAMS).map((p) => `{{${p.key}}}`);
+    throw new TransferError(
+      `Its files use ${all.length} setup fields; a template carries at most ${MAX_TEMPLATE_PARAMS}. ` +
+        `Fill in or remove some {{placeholders}} first (past the limit: ${over.slice(0, 8).join(', ')}${over.length > 8 ? ', …' : ''}).`,
+    );
+  }
+  return all;
+}
+
+/**
+ * A child's setup fields after a push of its master's definition: what the
+ * master declares, plus each undeclared {{key}} in the pushed text — as
+ * derive made them (collectParameters), keeping the child's own wording for
+ * a key it already had. The master's declarations alone could not say "none
+ * now": an empty list is stored as none, the same as never declared, so a
+ * master that removed all its fields left the child asking for them
+ * (review, 2026-10-22).
+ */
+export function pushedParameters(
+  masterParams: TemplateParam[] | undefined,
+  text: { soul?: string; agents?: string; persona?: string },
+  childParams: TemplateParam[] = [],
+): TemplateParam[] {
+  const declared = new Set((masterParams ?? []).map((p) => p.key));
+  const prior = new Map(childParams.map((p) => [p.key, p]));
+  return collectParameters({ parameters: masterParams } as Agent, { 'SOUL.md': text.soul ?? '', 'AGENTS.md': text.agents ?? '' }, text.persona ?? '')
+    .map((p) => (declared.has(p.key) ? p : prior.get(p.key) ?? p));
+}
+
+/**
+ * Replace {{key}} placeholders with the importer's values (or the declared
+ * default). Unknown placeholders are left verbatim — a doc showing the syntax
+ * must not get mangled.
+ */
+export function applyParamValues(text: string, values: Record<string, string>): string {
+  return text.replace(PLACEHOLDER_RE, (whole, key: string) =>
+    Object.hasOwn(values, key) ? values[key]! : whole,
+  );
+}
+
+/**
+ * A rendered core file over the limit snapshots.ts holds every core file to:
+ * the raw template was within it, its placeholders filled it is not. Refused
+ * before anything is made or written (review R16, 2026-10-23).
+ */
+export function renderedTooBig(name: string): TransferError {
+  return new TransferError(`With these setup values, ${name} would be over ${MAX_FILE_BYTES / 1024} KB — too big for an agent's core file. Give shorter answers, or trim the template.`);
+}
+
+/**
+ * The description with its placeholders filled, refused when that passes the
+ * limit a template or backup of the agent is read under: a short persona
+ * with a placeholder used five times took a 2,000-character answer to
+ * 10,000, and the agent's own backup could not be imported (HB-0309).
+ */
+export function renderPersona(text: string, values: Record<string, string>): string {
+  const out = applyParamValues(text, values);
+  if (out.length > MAX_PERSONA_CHARS) {
+    throw new TransferError(`With these setup values, the description would be over ${MAX_PERSONA_CHARS.toLocaleString('en-US')} characters — too long to copy or back up. Give shorter answers, or trim the template.`);
+  }
+  return out;
+}
+
+/**
+ * Validate the importer's values against the template's declared fields.
+ * Returns the effective values (importer's, else defaults) or throws a
+ * TransferError naming every problem at once — the caller renders one form,
+ * the importer should see one list.
+ */
+export function resolveParamValues(
+  params: TemplateParam[],
+  values: Record<string, string> = {},
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const problems: string[] = [];
+  for (const p of params) {
+    // Own keys only: a field keyed "constructor" read Object's function and
+    // crashed on .trim() (review, 2026-10-22).
+    const given: unknown = Object.hasOwn(values, p.key) ? values[p.key] : undefined;
+    let v = given === undefined || given === null ? p.default : String(given);
+    if (p.type === 'boolean' && v !== undefined) {
+      // Only a known yes or no: anything else ("tru") was read as no and
+      // turned the option off without a word (#83). Blank stays no.
+      const b = v.trim().toLowerCase();
+      if (/^(true|yes|1|on)$/.test(b)) v = 'true';
+      else if (/^(false|no|0|off|)$/.test(b)) v = 'false';
+      else {
+        problems.push(`"${p.label}" must be yes or no (true/false), not "${v.slice(0, 40)}"`);
+        continue;
+      }
+    }
+    // Options compared as declared now (trimmed): a field stored before
+    // declarations were trimmed must still be fillable (#169).
+    const options = p.options?.map((o) => o.trim());
+    if (p.type === 'choice' && v !== undefined && options?.length) {
+      // Blank clears an optional choice, as it does any other field; a
+      // required one is refused as required below, not as off the list (HB-0363).
+      if (v.trim() === '') v = '';
+      else if (!options.includes(v.trim())) {
+        problems.push(`"${p.label}" must be one of: ${options.join(', ')}`);
+        continue;
+      }
+      v = v.trim();
+    }
+    // multichoice: the value is a comma-separated SUBSET of the options,
+    // normalized to "a, b" — that string is what lands in the {{placeholder}},
+    // so it must read naturally in prose.
+    if (p.type === 'multichoice' && v !== undefined && v !== '' && options?.length) {
+      const picks = v.split(',').map((s) => s.trim()).filter(Boolean);
+      const bad = picks.filter((s) => !options.includes(s));
+      if (bad.length) {
+        problems.push(`"${p.label}" allows only: ${options.join(', ')} (got ${bad.join(', ')})`);
+        continue;
+      }
+      v = picks.join(', ');
+    }
+    // Spaces alone are blank: three passed as an answer (review, 2026-10-22).
+    if (p.required && (v === undefined || v.trim() === '')) {
+      problems.push(`"${p.label}" is required`);
+      continue;
+    }
+    if (v !== undefined) out[p.key] = v;
+  }
+  if (problems.length) {
+    throw new TransferError(`This template needs setup values — ${problems.join('; ')}.`);
+  }
+  return out;
+}
+
+// A template is trained text files; 64 MB decompressed is already generous and
+// bounds a decompression bomb even if a future caller reaches parseTemplate
+// without the peekFormat gate in front of it.
+const MAX_TEMPLATE_BYTES = 64 * 1024 * 1024;
+
+export function parseTemplate(data: Buffer): TemplateManifest {
+  let json: unknown;
+  try {
+    json = JSON.parse(gunzipSync(data, { maxOutputLength: MAX_TEMPLATE_BYTES }).toString('utf8'));
+  } catch {
+    throw new TransferError('That file is not a readable Hatchabot template.');
+  }
+  return checkedTemplate(json);
+}
+
+/**
+ * parseTemplate, with the file inflated off the event loop (zlib's thread
+ * pool): what reads a template while other requests wait (HB-0960), and
+ * what each import reads its file with before importTemplate (HB-1162). Its
+ * JSON is still parsed here.
+ */
+export async function readTemplate(data: Buffer): Promise<TemplateManifest> {
+  let json: unknown;
+  try {
+    // A few at a time across the process (inflateWhole, HB-1162).
+    json = await inflateWhole(data, MAX_TEMPLATE_BYTES, (text) => JSON.parse(text) as unknown);
+  } catch {
+    throw new TransferError('That file is not a readable Hatchabot template.');
+  }
+  return checkedTemplate(json);
+}
+
+/**
+ * A template's setup fields as its importer is asked them: none when its
+ * file does not read (an Accept then says why). What the inbox keeps beside
+ * a share (HB-0960).
+ */
+export async function templateParameters(data: Buffer): Promise<TemplateParam[]> {
+  try {
+    return (await readTemplate(data)).parameters;
+  } catch {
+    return [];
+  }
+}
+
+function checkedTemplate(json: unknown): TemplateManifest {
+  const parsed = TemplateSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new TransferError('That template file is malformed or from an incompatible version.');
+  }
+  const problem = scheduleProblem(parsed.data.schedules);
+  if (problem) throw new TemplateTaskRefused(problem.name, problem.why);
+  return parsed.data as TemplateManifest;
+}
+
+/**
+ * A task of the template's that could never run, and why. Made anyway, the
+ * agent's task was parked, refused by the gateway at every start and every
+ * Try again, with nothing anyone could change to make it run: one with no
+ * schedule, a cron expression that is not one, or a time zone no machine
+ * knows (HB-1018).
+ */
+function scheduleProblem(schedules: Array<{ name: string; cron?: string; everyMs?: number; tz?: string }> | undefined): { name: string; why: string } | undefined {
+  for (const s of schedules ?? []) {
+    if (!s.cron && !s.everyMs) return { name: s.name, why: 'has no schedule (a cron expression or an interval)' };
+    if (s.cron && !cronShapeOk(s.cron)) return { name: s.name, why: `has a cron expression that can't run ("${s.cron}")` };
+    // Any zone Intl takes, as the gateway's parser reads it: offsets too.
+    if (s.tz && !zoneIntlTakes(s.tz)) return { name: s.name, why: `names a time zone that isn't one ("${s.tz}")` };
+  }
+  return undefined;
+}
+
+export interface ImportTemplateResult {
+  agent: Agent;
+  /** What the importer still needs to wire up (data sources, env-var names). */
+  needs: { dataSources: TemplateManifest['dataNeeds']; envVars: string[] };
+  /**
+   * Filled env-target setup fields (sharing Phase 2b): NAME=VALUE pairs the
+   * caller must materialize as agent env vars via the SecretStore BEFORE
+   * provisioning. Returned instead of created here — this module is sync and
+   * deliberately secret-free; the async route layer owns secret writes. These
+   * values are never persisted in paramValues (they're credentials).
+   */
+  envValues: Array<{ name: string; value: string }>;
+  /**
+   * Filled datasource-target setup fields: each is a git repo URL (already
+   * validated + normalized here) the caller must materialize as a git data
+   * source — deploy key + SecretStore write, the same async pair the env
+   * values need — BEFORE provisioning, so the first build clones it. Split
+   * off like env values (no file substitution, not stored in paramValues):
+   * after import the data source record is the single source of truth, and
+   * the Data tab is where the binding is managed.
+   */
+  dataSourceValues: Array<{ key: string; sshUrl: string; repoName: string }>;
+}
+
+/**
+ * A template stood up as a fresh agent, in one turn. `data`: the template as
+ * readTemplate read it, off the event loop, as every import reads it; a
+ * file is read here, on the loop (parseTemplate), for a caller that has no
+ * other request waiting (a test, a script).
+ */
+export function importTemplate(
+  deps: TemplateDeps,
+  data: Buffer | TemplateManifest,
+  opts: {
+    ownerId: string;
+    aiProfileId?: string;
+    hostId?: string;
+    name?: string;
+    /** Importer's answers to the template's setup fields ({{key}} → value). */
+    values?: Record<string, string>;
+    /** Clone mode: required fields with no value are skipped instead of
+     *  refused. A clone copies an agent the caller already owns — its env
+     *  vars and repo bindings exist on the source, and demanding them again
+     *  made cloning any master with a required no-default field (every
+     *  required datasource field) impossible (10th audit). */
+    lenient?: boolean;
+  },
+): ImportTemplateResult {
+  const { store } = deps;
+  const manifest = Buffer.isBuffer(data) ? parseTemplate(data) : data;
+  // Validate BEFORE creating anything — a missing required value must not
+  // leave a half-made agent behind.
+  const effectiveParams = opts.lenient
+    ? manifest.parameters.map((p) => ({ ...p, required: false }))
+    : manifest.parameters;
+  const resolved = resolveParamValues(effectiveParams, opts.values);
+  // Own keys only: an optional field keyed "constructor" left blank read
+  // Object's function and crashed (HB-0298).
+  const given = (k: string): string | undefined => (Object.hasOwn(resolved, k) ? resolved[k] : undefined);
+  // Env-target fields (Phase 2b) split off: their values become agent env
+  // vars (write-only secrets), never file substitutions or stored paramValues.
+  const envKeys = new Set(manifest.parameters.filter((p) => p.target === 'env').map((p) => p.key));
+  const envValues = [...envKeys]
+    .filter((k) => given(k) !== undefined && given(k) !== '')
+    .map((k) => ({ name: k.toUpperCase(), value: given(k)! }));
+  const badValue = envValues.map((v) => envValueProblem(v.name, v.value)).find(Boolean);
+  if (badValue) throw new TransferError(badValue);
+  // Datasource-target fields: validate every pasted repo URL BEFORE creating
+  // anything (same no-half-made-agent rule as resolveParamValues above). The
+  // reserved-name and clash rules mirror the data-sources route — a template
+  // must not be a way around them.
+  const RESERVED_MOUNTS = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace', 'connections', 'credentials', 'state', 'npm', 'devices', 'identity', 'cron', 'media', 'extensions', 'plugins', 'bin', 'data']);
+  const dataSourceValues: Array<{ key: string; sshUrl: string; repoName: string }> = [];
+  const dsProblems: string[] = [];
+  for (const p of manifest.parameters) {
+    if (p.target !== 'datasource') continue;
+    const v = given(p.key);
+    if (v === undefined || v === '') continue; // optional and unfilled
+    const git = normalizeGitUrl(v);
+    if (!git) {
+      dsProblems.push(`"${p.label}" is not a recognizable git repo — use git@host:owner/repo.git or https://host/owner/repo`);
+      continue;
+    }
+    if (git.repoName.length > MAX_MOUNT_NAME) {
+      dsProblems.push(`"${p.label}": the repo name is over ${MAX_MOUNT_NAME} characters, longer than a copy of the agent can carry`);
+      continue;
+    }
+    if (RESERVED_MOUNTS.has(git.repoName) || git.repoName.startsWith('.')) {
+      dsProblems.push(`"${p.label}": the repo name "${git.repoName}" is reserved — it would collide with the agent's own files`);
+      continue;
+    }
+    if (dataSourceValues.some((d) => d.repoName === git.repoName)) {
+      dsProblems.push(`"${p.label}": two fields point at repos both named "${git.repoName}" — they would clone to the same place`);
+      continue;
+    }
+    dataSourceValues.push({ key: p.key, sshUrl: git.sshUrl, repoName: git.repoName });
+  }
+  if (dsProblems.length) {
+    throw new TransferError(`This template needs setup values — ${dsProblems.join('; ')}.`);
+  }
+  // Both split-off kinds (env creds, repo URLs) leave the substitution set:
+  // their materialized records — env vars, data sources — are the truth, so
+  // neither lands in files or paramValues.
+  const dsKeys = new Set(manifest.parameters.filter((p) => p.target === 'datasource').map((p) => p.key));
+  const values = Object.fromEntries(
+    Object.entries(resolved).filter(([k]) => !envKeys.has(k) && !dsKeys.has(k)),
+  );
+
+  // The importer's OWN profile, vendor-matched — same rule as a full Load, so a
+  // template never silently bills someone else's shared subscription. A
+  // caller-supplied id is validated HERE (not per-route) so every import path
+  // enforces it: it must be the importer's own profile or one shared with
+  // them — getAIProfile alone is unscoped, and an arbitrary UUID would bind
+  // the new agent to (and bill) another owner's subscription.
+  const profiles = store.listAIProfiles(opts.ownerId);
+  const mine = profiles.filter((p) => p.ownerId === opts.ownerId);
+  // The installation default (single-select, owner opt-in to sharing) wins
+  // the SILENT pick when visible to this importer — that's what "default for
+  // new agents" means; an explicit aiProfileId always overrides.
+  const profile = opts.aiProfileId
+    ? store.getAIProfile(opts.aiProfileId)
+    : (profiles.find((p) => p.defaultSource) ??
+      mine.find((p) => p.vendor === manifest.ai.vendor) ??
+      mine[0] ??
+      profiles.find((p) => p.vendor === manifest.ai.vendor) ??
+      profiles[0]);
+  if (opts.aiProfileId && profile && profile.ownerId !== opts.ownerId && !profile.shared) {
+    throw new TransferError('Unknown AI profile.');
+  }
+  if (!profile) throw new TransferError('Set up an AI source before importing a template.');
+  // Same rule for the host: only one the importer can already use — getHost
+  // is unscoped, and a foreign host id would provision onto someone else's
+  // machine.
+  const usableHosts = store.listHosts(opts.ownerId);
+  const host = opts.hostId
+    ? usableHosts.find((h) => h.id === opts.hostId)
+    : (usableHosts.find((h) => h.kind === 'local') ?? usableHosts[0]);
+  if (opts.hostId && !host) throw new TransferError('Unknown host.');
+  if (!host) throw new TransferError('No host available to import onto.');
+  // A machine-login Max source mounts this machine's ~/.claude, which a
+  // runner cannot see: refused here, as Create refuses it, not after the
+  // agent was made and its first build failed (HB-1122).
+  if (machineLoginOnly(profile) && host.kind !== 'local') throw new TransferError(MACHINE_LOGIN_NO_RUNNER);
+
+  const name = (opts.name ?? manifest.agent.name).trim();
+  // The same rule as creating one: a name of 1–64 characters.
+  if (!name || name.length > 64) throw new TransferError('Give the agent a name of 1 to 64 characters.');
+
+  // The trained files as they will be seeded (and MEMORY.md if the template
+  // carried it). Setup-field values are substituted into the TRAINED files
+  // only — memory is verbatim history, never a substitution surface. Built
+  // BEFORE the record: a small file with many placeholders and a long answer
+  // rendered past the core-file limit, and the agent it made could not be
+  // edited or snapshotted (review R16, 2026-10-23).
+  const seed: Record<string, string> = {};
+  for (const n of SEEDABLE_FILES) {
+    if (typeof manifest.files[n] !== 'string') continue;
+    seed[n] = TRAINED_FILES.includes(n)
+      ? applyParamValues(manifest.files[n], values)
+      : manifest.files[n];
+    if (Buffer.byteLength(seed[n], 'utf8') > MAX_FILE_BYTES) throw renderedTooBig(n);
+  }
+  const persona = renderPersona(manifest.agent.persona, values);
+  let agent: Agent;
+  try {
+    // Fresh identity: importer owns it, provisions their own bot, invites their
+    // own people. createAgentRecord slugifies the name and binds the owner seat.
+    agent = createAgentRecord(store, {
+      ownerId: opts.ownerId,
+      name,
+      persona,
+      aiProfileId: profile.id,
+      hostId: host.id,
+    });
+  } catch (err) {
+    // Its source deleted meanwhile is that, not a name taken: 409, in its own words.
+    if (err instanceof SourceGoneError) throw err;
+    throw new TransferError(`Couldn't create "${name}" — an agent with that name may already exist here. Import under a different name.`);
+  }
+  if (validIcon(manifest.agent.icon)) {
+    store.setAgentIcon(agent.id, manifest.agent.icon, validIconColor(manifest.agent.iconColor) ? manifest.agent.iconColor : null);
+  }
+
+  store.setAgentSeed(agent.id, seed);
+  // Only reviewed catalog IDs travel; custom skill files and credentials do
+  // not. An empty choice stays empty instead of restoring the gog default.
+  if (manifest.agent.curatedSkills !== undefined) store.setAgentCuratedSkills(agent.id, manifest.agent.curatedSkills);
+
+  // A configured copy stays RE-configurable: keep the field declarations (so
+  // re-sharing works and the values panel knows its schema), the values as
+  // applied, and the raw placeholder-bearing layer they rendered into — so
+  // values can be edited or reset later without a re-import.
+  if (manifest.parameters.length) {
+    store.setAgentParameters(agent.id, manifest.parameters);
+    store.setAgentParamState(agent.id, values, {
+      soul: manifest.files['SOUL.md'],
+      agents: manifest.files['AGENTS.md'],
+      persona: manifest.agent.persona,
+    });
+  }
+
+  // Schedules apply once the agent is RUNNING (the gateway must exist) —
+  // parked on the record; provision's final step materializes and clears.
+  if (manifest.schedules?.length) store.setPendingSchedules(agent.id, manifest.schedules);
+  // Another agent's tasks, perhaps ones an adopt carried: this one has no
+  // record of them, so adopting that folder into it again matches them by
+  // look and does not add them twice (HB-0985). Clone, derive, a template
+  // imported and a share accepted all come here.
+  if (manifest.schedules?.length) store.markUnrecordedCarriedTasks(agent.id);
+
+  deps.log?.('template.imported', { agentId: agent.id });
+  return { agent, needs: { dataSources: manifest.dataNeeds, envVars: manifest.envNeeds }, envValues, dataSourceValues };
+}

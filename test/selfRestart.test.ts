@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import { parseCgroupMemory } from '../src/providers/provider.js';
 
 /**

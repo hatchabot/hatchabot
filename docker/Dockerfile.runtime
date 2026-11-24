@@ -274,3 +274,16 @@ CMD ["openclaw", "gateway"]
 # the same for every release.
 ARG HATCHABOT_RELEASE=
 LABEL org.hatchabot.release="${HATCHABOT_RELEASE}"
+
+# What this image was built from, in full (HB-0986): another machine matches
+# an image of its own to a moved or imported agent's base by this, never by a
+# tag's name, which can be :latest of another OpenClaw or a hand-named build.
+# Every ARG the build script or a workflow passes is in it
+# (test/buildInputs.test.ts); the pins left out (gog, the embedding model)
+# are never a build's arguments, only this file's. SET_BY_HAND is the
+# script's: the settings it was given by hand. A tag's name is never in it.
+# src/orchestrator/machines/buildInputs.ts reads it; a field's order and form
+# change only with its `v1`.
+ARG NODE_IMAGE
+ARG SET_BY_HAND=
+LABEL org.hatchabot.build-inputs="v1;openclaw=${OPENCLAW_VERSION};engine=${EMBED_ENGINE};packages=${EXTRA_PACKAGES};node=${NODE_IMAGE};channels=${CHANNEL_PLUGINS};channel-plugins=${CHANNEL_PLUGIN_VERSION};plugins=${BAKED_PLUGINS};plugin-install=${PLUGIN_INSTALL};embed-plugin=${LLAMA_CPP_PROVIDER_VERSION};claude-code=${CLAUDE_CODE_VERSION};by-hand=${SET_BY_HAND};release=${HATCHABOT_RELEASE}"

@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import Database from 'better-sqlite3';
 import { inFlightCountForTests, LocalDockerProvider, resetVolumeWritersForTests, setVolumeEventSink, volumeEntriesForTests } from '../src/providers/localDockerProvider.js';
-import { runtimeEventLog } from '../src/orchestrator/operations.js';
-import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { runtimeEventLog } from '../src/orchestrator/lifecycle/operations.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import { Store } from '../src/store/store.js';
 
 /**
@@ -584,4 +584,88 @@ describe('a seed that timed out and could not be removed is a stale writer, not 
     expect(res).toMatchObject({ code: 1, stderr: expect.stringContaining(`still writing to the agent's files: ${seedShot} is still running`) });
     expect(argv()).not.toMatch(/^run .*echo note/m);
   }, 20_000);
+
+  // A retry or a rebuild ran the migration and the seed with no look at all,
+  // beside the one still running, and the late old seed could write its
+  // config last (HB-1071).
+  it('nor does a retry or a rebuild: refused, and nothing run on the volume beside it', async () => {
+    const { LocalDockerProvider: Fresh } = await import('../src/providers/localDockerProvider.js');
+    vi.spyOn(process, 'getuid').mockReturnValue(1000);
+    const { ref } = AGENT;
+    stub({ run: 'case "$*" in *seed.sh*) exec sleep 5 ;; esac', rm: 'echo "error during connect" >&2; exit 1' });
+    const p = new Fresh({ docker: bin, image: 'test-image:latest', reapRetryMs: 10 });
+    const spec = {
+      agentId: 'df918a55-88cd-4d00-a17c-b8415a26ceb6', slug: 'kitchen-helper', previousRef: ref,
+      workspace: { files: { 'SOUL.md': '# soul' }, configPatch: { agentId: 'kitchen-helper', authMode: 'api-key' } }, env: {},
+    } as any;
+    await expect(p.provision(spec)).rejects.toThrow();
+    const runs = () => argv().split('\n').filter((l) => l.startsWith('run ')).length;
+    const before = runs();
+    await expect(p.provision(spec)).rejects.toMatchObject({ userMessage: expect.stringMatching(/an earlier setup is still writing to its files/) });
+    expect(runs()).toBe(before);
+    expect(argv()).not.toMatch(/^create --name/m);
+  }, 20_000);
+});
+
+describe('a seed a restart left running is removed before a retry seeds (HB-1071)', () => {
+  it('looked for first, removed, then the migration and the seed', async () => {
+    const { ref, vol } = AGENT;
+    // The process that ran it is gone (this one has looked at nothing yet).
+    seed('hatchabot-vx-0b0b0b0b0b0b', 'running', vol, true);
+    await provider().provision({
+      agentId: 'df918a55-88cd-4d00-a17c-b8415a26ceb6', slug: 'kitchen-helper', previousRef: ref,
+      workspace: { files: { 'SOUL.md': '# soul' }, configPatch: { agentId: 'kitchen-helper', authMode: 'api-key' } }, env: {},
+    } as any);
+    const lines = argv().split('\n');
+    const at = (re: RegExp) => lines.findIndex((l) => re.test(l));
+    expect(left()).not.toContain('hatchabot-vx-0b0b0b0b0b0b');
+    expect(at(new RegExp(`^ps -a --filter volume=${vol} `))).toBeGreaterThan(-1);
+    expect(at(/^rm -f hatchabot-vx-0b0b0b0b0b0b$/)).toBeGreaterThan(at(new RegExp(`^ps -a --filter volume=${vol} `)));
+    expect(at(/^run .*agentclaw-home-v2/)).toBeGreaterThan(at(/^rm -f hatchabot-vx-0b0b0b0b0b0b$/));
+    expect(at(/^run .*seed\.sh/)).toBeGreaterThan(at(/^run .*agentclaw-home-v2/));
+    // A rebuild after that in the same process does not ask again: nothing was given up.
+    const looks = lines.filter((l) => l.startsWith(`ps -a --filter volume=${vol} `)).length;
+    await provider().provision({
+      agentId: 'df918a55-88cd-4d00-a17c-b8415a26ceb6', slug: 'kitchen-helper', previousRef: ref,
+      workspace: { files: { 'SOUL.md': '# soul' }, configPatch: { agentId: 'kitchen-helper', authMode: 'api-key' } }, env: {},
+    } as any);
+    expect(argv().split('\n').filter((l) => l.startsWith(`ps -a --filter volume=${vol} `)).length).toBe(looks);
+  });
+});
+
+describe('two ssh users on one runner are two daemons (HB-1058)', () => {
+  // Each user's own rootless Docker: the same volume name on both is two
+  // volumes. Keyed by machine and port only, one's look for writers spared
+  // the other's first look, and one's restore refused the other's writes.
+  const on = (who: string) => new LocalDockerProvider({ docker: bin, image: 'test-image:latest', reapRetryMs: 10, host: `ssh://${who}@10.0.0.9`, reachProbe: async () => true });
+  const { ref, vol } = AGENT;
+
+  it("each looks for its own daemon's writers; one user's two addresses still share a look", async () => {
+    expect(await on('alpha').execShellOnVolume(ref, 'echo a > /home/node/a.md')).toMatchObject({ code: 0 });
+    expect(await on('beta').execShellOnVolume(ref, 'echo b > /home/node/b.md')).toMatchObject({ code: 0 });
+    expect(lists(vol)).toBe(2);
+    const sameUser = new LocalDockerProvider({ docker: bin, image: 'test-image:latest', host: 'ssh://alpha@10.0.0.9:22', reachProbe: async () => true });
+    expect(await sameUser.execShellOnVolume(ref, 'echo c > /home/node/c.md')).toMatchObject({ code: 0 });
+    expect(lists(vol)).toBe(2);
+  });
+
+  it("a restore on one user's daemon does not refuse a write on the other's", async () => {
+    const gate = join(dir, 'gate');
+    writeFileSync(gate, '');
+    stub({ ps: `while [ -f ${JSON.stringify(gate)} ]; do sleep 0.02; done` });
+    const restore = on('alpha').stopVolumeWriters(ref);
+    for (let i = 0; i < 300 && !lists(vol); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(lists(vol)).toBe(1); // the restore's look, held
+    const write = on('beta').execShellOnVolume(ref, 'echo b > /home/node/b.md');
+    setTimeout(() => rmSync(gate, { force: true }), 100);
+    expect(await write).toMatchObject({ code: 0 });
+    expect(await restore).toBeUndefined();
+    // On the restore's own daemon, a write is still refused while it runs.
+    writeFileSync(gate, '');
+    const again = on('alpha').stopVolumeWriters(ref);
+    for (let i = 0; i < 300 && lists(vol) < 3; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(await on('alpha').execShellOnVolume(ref, 'echo a > /home/node/a.md')).toMatchObject({ code: 1, stderr: expect.stringMatching(/a restore is running/) });
+    rmSync(gate, { force: true });
+    expect(await again).toBeUndefined();
+  });
 });

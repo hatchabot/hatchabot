@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
 import type { AgentState } from '../src/domain/types.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/busy.js';
-import { beginOperation } from '../src/orchestrator/operations.js';
-import { voiceNetworkReady } from '../src/orchestrator/voiceNetwork.js';
+import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
+import { voiceNetworkReady } from '../src/orchestrator/voice/voiceNetwork.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 

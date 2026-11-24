@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ExecResult, RuntimeProvider } from '../src/providers/provider.js';
-import { configureVoice, readVoiceStatus, VoiceSetupError } from '../src/orchestrator/voice.js';
+import { configureVoice, readVoiceStatus, VoiceSetupError } from '../src/orchestrator/voice/voice.js';
 
 const REF = 'mock://voice-agent';
 const result = (payload: unknown): ExecResult => ({ code: 0, stdout: JSON.stringify(payload), stderr: '' });

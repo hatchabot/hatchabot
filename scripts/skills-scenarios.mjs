@@ -85,6 +85,11 @@ export async function runSkillsScenarios(lib, { keep = false, runId = randomByte
     assert(passed, `${label} failed; later steps were not run`);
   };
   const readFile = (path) => command(['node', '-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1],"utf8"))', path]);
+  const usage = async () => {
+    const response = await request(`/v1/agents/${agent.id}/usage`);
+    assert(response.status === 200 && Number.isFinite(response.json?.totalTokens), `Could not read the disposable agent's usage (${response.status})`);
+    return response.json;
+  };
   const preview = async () => {
     const response = await request(`/v1/agents/${agent.id}/skills/${PACK}/file`);
     assert(response.status === 200 && /^[a-f0-9]{64}$/.test(response.json.revision) && typeof response.json.catalog?.content === 'string', 'Could not preview the disposable skill file');
@@ -179,6 +184,8 @@ export async function runSkillsScenarios(lib, { keep = false, runId = randomByte
     });
     await phase('S3b API practice observes both skill and sample reads', async () => {
       const before = await preview();
+      // The agent's usage before: its practice must show up in it exactly once (HB-0933).
+      const usageBefore = await usage();
       const response = await request(`/v1/agents/${agent.id}/skills/${PACK}/try`, { method: 'POST',
         body: { expectedRevision: before.revision }, timeoutMs: Math.max(1, Math.min(90_000, deadline - Date.now())) });
       assert(response.status === 200, `Practice request failed (${response.status})`);
@@ -188,6 +195,16 @@ export async function runSkillsScenarios(lib, { keep = false, runId = randomByte
         'Practice did not verify reads of both the skill and sample');
       assert(typeof result.output === 'string' && result.output.trim(), 'Practice returned no answer');
       assert(await readFile(skillPath) === customized, 'Practice modified the actual skill instructions');
+      // Counted once: the practice's own tokens (what Practice recorded) are in
+      // the agent's total, not lost with its folder and not twice. A call of the
+      // agent's own in the window (a heartbeat, say) adds to the rise, so it is
+      // held to at least the practice's tokens and under twice them.
+      const usageAfter = await usage();
+      const practiced = (usageAfter.practice?.tokens ?? 0) - (usageBefore.practice?.tokens ?? 0);
+      const rose = usageAfter.totalTokens - usageBefore.totalTokens;
+      assert(practiced > 0, "The practice was not recorded in the agent's usage");
+      assert(rose >= practiced, `The practice's ${practiced} tokens are in the agent's usage ${rose <= 0 ? 'not at all' : `only as ${rose}`}`);
+      assert(rose < 2 * practiced, `The practice's ${practiced} tokens are in the agent's usage ${rose === 2 * practiced ? 'twice' : `as ${rose}, twice or more`}`);
     });
   };
   try {

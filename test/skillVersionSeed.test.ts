@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CURATED_SKILLS } from '../src/openclaw/skills.js';
 import { buildWorkspaceSeed } from '../src/openclaw/workspace.js';
-import { mutateSkillFile, readSkillFile } from '../src/orchestrator/skillFiles.js';
+import { mutateSkillFile, readSkillFile } from '../src/orchestrator/skills/skillFiles.js';
 
 const input = { agentName: 'Garden Notes', slug: 'garden-notes', persona: '', sharedMemory: true };
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');

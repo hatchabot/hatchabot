@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
-import { BROWSER_CHROMIUM_ARGV, BROWSER_READY_FILE, BROWSER_START_SCRIPT, browserImage } from '../src/orchestrator/browser.js';
+import { browserImage } from '../src/orchestrator/console/browser.js';
+import { BROWSER_CHROMIUM_ARGV, BROWSER_READY_FILE, BROWSER_START_SCRIPT } from '../src/providers/browserContainer.js';
 
 const dirs: string[] = [];
 afterEach(() => {

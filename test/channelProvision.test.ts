@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { buildRuntimeSpec, createAgentRecord } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec, createAgentRecord } from '../src/orchestrator/lifecycle/provision.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';

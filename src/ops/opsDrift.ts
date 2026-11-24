@@ -59,6 +59,11 @@ export async function checkOpsDrift(
   for (const agent of agents) {
     if (agent.state !== 'RUNNING' || !agent.runtimeRef) continue;
     try {
+      // The key this check judges. A rebuild that finishes while the config
+      // is read mints another and writes the lockdown again: what this read
+      // found is about the retired config and must not revoke the new key
+      // (HB-0915).
+      const seen = deps.store.opsTokenHash(agent.id);
       const provider = deps.providerFor(agent.hostId);
       const parse = (s: string) => { try { return JSON.parse(s.slice(s.indexOf('{'))); } catch { return undefined; } };
       let read: { tools: unknown; mcp: unknown } | undefined;
@@ -76,10 +81,15 @@ export async function checkOpsDrift(
         read = { tools: parse(tools.stdout), mcp: mcp.code === 0 ? parse(mcp.stdout) : {} };
       }
       const problem = lockdownProblem(read.tools, read.mcp);
-      if (problem && !drifted.has(agent.id)) {
+      if (problem) {
+        if (deps.store.opsTokenHash(agent.id) !== seen) continue; // superseded by a rebuild (above)
+        // Revoked first, then said, and at every check that finds it: marked
+        // first, a delete that failed once was never tried again, and the page
+        // said the key was suspended while it still worked (HB-0916).
+        try { if (seen) deps.store.deleteOpsTokenIf(agent.id, seen); }
+        catch (err) { deps.log?.('ops.lockdown_revoke_failed', { agentId: agent.id, problem, error: String(err) }); continue; }
+        if (!drifted.has(agent.id)) deps.log?.('ops.lockdown_drift', { agentId: agent.id, problem });
         drifted.set(agent.id, problem);
-        deps.store.deleteOpsToken(agent.id);
-        deps.log?.('ops.lockdown_drift', { agentId: agent.id, problem });
       }
     } catch { /* unreachable container: the health view covers that */ }
   }
