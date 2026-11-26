@@ -19,6 +19,8 @@ vi.setConfig({ testTimeout: 30_000 });
  * caller.
  */
 const dirs: string[] = [];
+/** A made-up project's publish.toml, as the publish kit writes it. */
+const PUBLISH_TOML = (exclude = '"publish.toml"') => `name = "example"\npublic = "example-owner/example"\nprivate = "example-owner/example-dev"\nmode = "squash"\nexclude = [${exclude}]\n`;
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
 function world() {
@@ -72,7 +74,10 @@ esac
   writeFileSync(join(work, 'scripts', 'promote.sh'), readFileSync('scripts/promote.sh'), { mode: 0o755 });
   // promote.sh lands through land.sh; this throwaway remote has no pull-request rule.
   writeFileSync(join(work, 'scripts', 'land.sh'), readFileSync('scripts/land.sh'), { mode: 0o755 });
+  // Its check of publish.toml against the last release tag's (HB-1492).
+  writeFileSync(join(work, 'scripts', 'publisher-copy.sh'), readFileSync('scripts/publisher-copy.sh'));
   writeFileSync(join(work, 'channels.json'), '{\n  "stable": "v1.0.0",\n  "beta": "v1.0.0"\n}\n');
+  writeFileSync(join(work, 'publish.toml'), PUBLISH_TOML());
   git(work, 'add', '.');
   git(work, 'commit', '-q', '-m', 'init');
   git(work, 'tag', 'v1.1.0');
@@ -446,6 +451,57 @@ describe('scripts/promote.sh asks the publisher for the fast lane (publish kit, 
     const r = w.promote({}, 'v1.1.0');
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("No remote 'public' for the public repo");
+  });
+});
+
+describe('scripts/promote.sh and a publish.toml landed since the last release (HB-1492)', () => {
+  // The publisher's gate holds the fast-lane tag to its copy of publish.toml as it does a release
+  // tag: one on a main whose publish.toml changed since the last release would stay "could not
+  // finish" there until the copy matched, and hold every later promote back.
+  const changePublishToml = (w: ReturnType<typeof world>, also?: () => void) => {
+    writeFileSync(join(w.work, 'publish.toml'), PUBLISH_TOML('"publish.toml", "docs/notes.md"'));
+    also?.();
+    w.git(w.work, 'commit', '-qam', 'Exclude the notes'); w.git(w.work, 'push', '-q', 'origin', 'main');
+    return w.git(w.work, 'rev-parse', 'HEAD').trim();
+  };
+
+  it('stops before anything lands (exit 4), with what to set; the override lands it and asks for the fast lane', () => {
+    const w = world();
+    const main = changePublishToml(w);
+    const r = w.promote({}, 'v1.1.0');
+    expect(r.status, r.stdout + r.stderr).toBe(4);
+    expect(r.stderr).toContain(`✗ publish.toml at ${main.slice(0, 9)} has changed since v1.1.0, the last release tag. The publisher's gate holds the fast-lane tag to its own copy of the file (projects/example.toml in cksci/publisher)`);
+    expect(r.stderr).toContain('    +exclude = ["publish.toml", "docs/notes.md"]');
+    expect(r.stderr).toContain(`kit preflight example --rev ${main.slice(0, 12)} (the owner runs it`);
+    expect(r.stderr).toContain('Once the copy matches: HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES=1 scripts/promote.sh v1.1.0 stable');
+    expect(r.stderr).toContain('Nothing was tagged.\nNothing landed: channels.json on main still says stable → v1.0.0.\n');
+    expect(w.git(w.origin, 'rev-parse', 'main').trim()).toBe(main);
+    expect(w.channels()).toContain('"stable": "v1.0.0"');
+    expect(w.fastLane()).toBe('');
+    const go = w.promote({ HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES: '1' }, 'v1.1.0');
+    expect(go.status, go.stdout + go.stderr).toBe(0);
+    expect(go.stdout.match(/going on, as the publisher's copy was changed to match it/g)).toHaveLength(1);
+    expect(w.fastLane()).toMatch(/hatchabot channels: stable → v1\.1\.0$/);
+  });
+
+  it('the channel already on main: the fast-lane tag is held the same way', () => {
+    const w = world();
+    changePublishToml(w, () => writeFileSync(join(w.work, 'channels.json'), '{\n  "stable": "v1.1.0",\n  "beta": "v1.0.0"\n}\n'));
+    const r = w.promote({}, 'v1.1.0');
+    expect(r.status, r.stdout + r.stderr).toBe(4);
+    expect(r.stdout).toContain('stable already points at v1.1.0 on main.');
+    expect(r.stderr).toContain('has changed since v1.1.0, the last release tag');
+    expect(r.stderr).toContain("Nothing was tagged.\nstable → v1.1.0 is on the dev repo's main already (the promote has landed): only the fast-lane tag is held. Run this again once the copy matches, and it asks the publisher then.\n");
+    expect(w.fastLane()).toBe('');
+  });
+
+  it('released since (the newest release tag has it): promotes with no word about it', () => {
+    const w = world();
+    changePublishToml(w);
+    w.git(w.work, 'tag', 'v1.2.0'); w.git(w.work, 'push', '-q', 'origin', 'v1.2.0'); w.publish('v1.2.0');
+    const r = w.promote({}, 'v1.1.0', 'beta');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout + r.stderr).not.toContain('publish.toml');
   });
 });
 

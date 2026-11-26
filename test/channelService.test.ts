@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { registerChannelRoutes } from '../src/api/channelRoutes.js';
+import { registerChannelRoutes } from '../src/api/chat/channelRoutes.js';
 import { Store } from '../src/store/store.js';
 import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
 import { createChannels, type Channels } from '../src/orchestrator/channels/channels.js';

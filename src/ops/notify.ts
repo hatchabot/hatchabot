@@ -12,6 +12,7 @@
  * dropped. They are serialised per agent, so two builds finishing together
  * cannot run two turns at once.
  */
+import { keyedLock } from '../util/queues.js';
 
 export interface OpsNoteAgent {
   id: string;
@@ -66,7 +67,7 @@ const MAX_QUEUED = 3;
 export function createOpsNotifier(deps: OpsNotifyDeps): OpsNotifier {
   // Per owner (each has one manager): a manager rebuilt or moved while a note
   // waits is the same queue, and a recreated one is too.
-  const chains = new Map<string, Promise<void>>();
+  const chains = keyedLock();
   const queued = new Map<string, number>();
   // No manager, or one that cannot take a turn right now (stopped,
   // rebuilding, moving): the outcome is still on the home screen.
@@ -83,9 +84,8 @@ export function createOpsNotifier(deps: OpsNotifyDeps): OpsNotifier {
         return Promise.resolve();
       }
       queued.set(ownerId, (queued.get(ownerId) ?? 0) + 1);
-      const prev = chains.get(ownerId) ?? Promise.resolve();
-      const next = prev
-        .then(async () => {
+      return chains.run(ownerId, async () => {
+        try {
           // The manager as it is NOW: the one seen when the note was queued
           // may have moved host or been rebuilt while the turn before ran.
           const now = ready(ownerId);
@@ -94,12 +94,11 @@ export function createOpsNotifier(deps: OpsNotifyDeps): OpsNotifier {
             .runTurn(now, opsNoteText(body))
             .catch((err) => ({ ok: false, error: String((err as Error)?.message ?? err) }));
           deps.log?.('ops.note', { agentId: now.id, ok: r.ok, ...(r.ok ? {} : { error: String(r.error ?? '').slice(0, 200) }) });
-        })
-        .finally(() => queued.set(ownerId, Math.max(0, (queued.get(ownerId) ?? 1) - 1)))
-        .catch(() => {});
-      chains.set(ownerId, next);
-      void next.then(() => { if (chains.get(ownerId) === next) chains.delete(ownerId); });
-      return next;
+        } finally {
+          // In the turn, so the next note's turn starts with it counted out.
+          queued.set(ownerId, Math.max(0, (queued.get(ownerId) ?? 1) - 1));
+        }
+      }).catch(() => {});
     },
   };
 }

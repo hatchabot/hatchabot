@@ -65,7 +65,7 @@ export async function moveAgentToHost(
   agentId: string,
   targetHostId: string,
 ): Promise<Agent> {
-  return whileBusy(agentId, () => moveInner(deps, agentId, targetHostId));
+  return whileBusy(agentId, 'move-host', () => moveInner(deps, agentId, targetHostId));
 }
 
 /**

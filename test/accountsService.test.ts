@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
-import { hashPassword, newRecoveryCode, normalizeRecoveryCode } from '../src/api/accountsAuth.js';
+import { hashPassword, newRecoveryCode, normalizeRecoveryCode } from '../src/api/signIn/accountsAuth.js';
 import type { LocalAccount } from '../src/domain/types.js';
 import { createFamilyAccounts, FAMILY_ACCOUNT_EXISTS, FAMILY_SWITCH_WAITING, type FamilyAccountsDeps } from '../src/orchestrator/accounts/familyAccounts.js';
 import { createTelegramRecovery, type TelegramRecoveryDeps } from '../src/orchestrator/accounts/telegramRecovery.js';

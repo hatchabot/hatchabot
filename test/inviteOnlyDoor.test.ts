@@ -322,7 +322,7 @@ describe('the 30th audit: two windows on one agent', () => {
     expect(s.pairingWindows('a1').map((w) => w.seat)).toEqual(['telegram:' + OWNER]);
     expect(writes).not.toContain('allowlist');
     // Now the owner knocks, binds, and only then does the door close.
-    requests = [{ id: '111', code: 'OWNER', meta: { username: 'chris' } }];
+    requests = [{ id: '111', code: 'OWNER', meta: { username: 'robin' } }];
     expect(await ownerClaim).toBe('111');
     expect(s.pairingWindows('a1')).toEqual([]);
     expect(writes[writes.length - 1]).toBe('allowlist');

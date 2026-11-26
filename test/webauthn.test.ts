@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cborDecode, parseAuthenticatorData, verifyAssertion, verifyRegistration, WebAuthnError } from '../src/api/webauthn.js';
+import { cborDecode, parseAuthenticatorData, verifyAssertion, verifyRegistration, WebAuthnError } from '../src/api/signIn/webauthn.js';
 import { SoftAuthenticator, cborEncode, type Alg } from './helpers/softAuthenticator.js';
 
 const rpId = 'box.example.com';

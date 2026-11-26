@@ -78,7 +78,58 @@ release the next patch version. A moved dev tag cancels its release.
 
 Never published (`publish.toml` `exclude`): `publish.toml`,
 `.github/dependabot.yml` (Dependabot runs in the dev repo), `backlog.md`
-(the open bugs and tasks) and the provider `scripts/private-values`.
+(the open bugs and tasks), `docs/architecture-spec.md` (the architecture
+review; its specification is public in `docs/architecture.md`) and the
+provider `scripts/private-values`.
+
+### A change to `publish.toml`
+
+The publisher keeps its own copy of `publish.toml`
+(`projects/hatchabot.toml` in `cksci/publisher`), and its gate holds every
+tag to it, a release's and the fast lane's: the tagged commit's
+`publish.toml` must equal that copy, compared as parsed TOML. A change made
+in the dev repo alone (a path added to `exclude`, a shorter wait) leaves the
+tag incomplete on every run, with the issue `hatchabot: vX.Y.Z: the gate
+could not finish` (`the candidate's publish.toml differs from the
+publisher's copy (exclude)`), until the copy matches. v2.191.0 waited so,
+as a release had before it when `backlog.md` was excluded. So:
+
+1. Land the change in the dev repo as usual.
+2. Let every release tagged but not published yet publish first. A changed
+   copy strands each candidate gated under the old one: it is gated again
+   at the end of its wait, against the copy as it is then, and stays
+   incomplete on every run while the copy differs from its own file
+   (publish kit backlog B-010), until a newer release publishes and
+   supersedes it.
+3. The owner sets `projects/hatchabot.toml` on `cksci/publisher`'s `main` to
+   the new `publish.toml`. `kit preflight hatchabot --tag vX.Y.Z` (the owner
+   runs it, in the dev clone: it reads the publisher's copy, which this
+   machine's token cannot) shows a mismatch before tagging.
+4. Tag: `scripts/release.sh X.Y.Z --publisher-copy-matches`.
+
+A change made on the publisher's side alone (an edit of the copy, `kit
+adopt … --apply`, a kit release that changes the file's form) is not seen
+by the check below and stalls the next tag just the same: mirror it in the
+dev repo's `publish.toml` in the same breath, and land that before the
+next tag (`kit adopt` writes the dev clone's file too, to be committed).
+
+`scripts/release.sh` stops before tagging (exit 4) when the commit's
+`publish.toml` is not the newest release tag's, and when there is no
+release tag to compare with (a first release): it prints what changed, the
+whole file to set the copy to, and the releases and fast-lane tags still
+waiting to publish (a blocked one is listed too; one waiting only because
+its `publish.toml` is already the new file is rescued by the change, not
+stranded). It compares the files byte for byte, where the gate compares
+them parsed: two equal files surely pass the gate, and a comment or
+spacing changed alone, which only stops it needlessly, is gone past with
+`--publisher-copy-matches` (the copy then needs no change). The newest
+release tag is the baseline whether it is published or not, so when it is
+not and its `publish.toml` is not the newest published release's, the
+check passes with a warning (`⚠ … is not published yet and its
+publish.toml is not vA.B.C's …`): a `--publisher-copy-matches` given before
+the copy was changed would otherwise hide the mismatch from every later
+release. Check the publisher's issue for that release then.
+`scripts/promote.sh` stops the same way before a fast-lane tag (below).
 
 ## Channels — releasing fast without moving new users
 
@@ -109,7 +160,17 @@ forward asks GitHub first: it refuses a release whose CI run for the push to
 `main` failed (the dev repo's; for a release from before the dev repo, the
 public repo's), naming the run, waits for one still running, and stops when
 there is no run or no `gh` — `HATCHABOT_PROMOTE_IGNORE_CI=1` goes on without
-the check. Moving a channel back (a rollback) is not held to it.
+the check. Moving a channel back (a rollback) is not held to it. It stops
+(exit 4) when `publish.toml` on `main` has changed since the last release
+tag (`publish.toml at <sha> has changed since vA.B.C, the last release
+tag`): the fast-lane tag goes on `main`, and the publisher's gate holds it
+to its copy of the file as it does a release (above, "A change to
+`publish.toml`"). It asks before the promote lands, so that stop changes
+nothing, and again just before the fast-lane tag: there the channel is on
+`main` already (a promote landed before, or the change landed meanwhile)
+and only the tag is held, as the stop says. Release first, or once the
+owner has changed the copy, `HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES=1`
+goes on.
 
 Once the channel's commit has landed on the dev repo's `main`, it asks the
 publisher for the fast lane: a tag `channels-<UTC time>` on that commit. On
@@ -256,6 +317,29 @@ check on any agent. Only a candidate that passes is tried on one real agent
 (`hatchabot image try "<agent>" hatchabot-runtime:X`), then promoted. The
 management agent stays pinned and moves last.
 
+The gate also runs **one practice turn** (a second model turn,
+`scripts/practice-check.ts`). Practice runs on one OpenClaw release only,
+`PRACTICE_OPENCLAW` in `src/orchestrator/skills/skillTrials.ts`: the one where
+it was checked that a run keeps its transcript in its own state folder, where
+Practice reads what it spent, and not in the agent's own transcripts, which the
+usage sampler reads (counted once). The practice turn checks both on the
+candidate's release. When they hold on a release other than
+`PRACTICE_OPENCLAW`, the gate's last lines say so ("Practice may move to
+OpenClaw X: … A Hatchabot release may now move PRACTICE_OPENCLAW … from Y to
+X"); moving it is a change made by hand, in a release, never by the gate.
+Practice then runs on that release alone: agents still on the old one are
+told to rebuild onto an image with it. When either does not hold, or it could
+not be checked, the step is a warning (⚠), never a failure: the gate judges
+whether the image is ready for agents, and on a release it does not run on
+Practice refuses itself in words of its own. The last lines then say
+"Practice stays on OpenClaw Y: …" and why. Counted once means none of the
+run's calls is among the agent's own by their event ids (by its totals, with
+the heartbeat off, when a release gives them none) and that usage did not
+rise meanwhile, nor in the 8 s after the run ended, when it is read once
+more (a copy written there a moment later); only a run that finished is judged, and only once the usage
+reader is seen to read the agent's turns on that release, the gate's ask
+among them. Anything else is "could not check".
+
 ## Cutting a release
 
 1. `npm test && npm run typecheck && npm run test:ui` green on `main` (the last one drives the real page in headless Chrome, in docker: scripts/ui-clickthrough.mjs), and
@@ -315,6 +399,17 @@ management agent stays pinned and moves last.
    public repo's privacy fingerprints up to date (`--sync-ci`), then makes
    the annotated tag and pushes it, by name, to the dev repo.
    `--commit <sha>` tags an earlier commit on `main` instead of its head.
+   Before the privacy steps it stops (exit 4, nothing changed) when the
+   commit's `publish.toml` is not the newest release tag's: `✗ publish.toml
+   at <sha> has changed since vA.B.C, the last release tag. The publisher's
+   gate holds vX.Y.Z to its own copy of the file (projects/hatchabot.toml in
+   cksci/publisher) …`, then what changed, the file to set the copy to and
+   the releases still waiting (`✗ No release tag on origin to compare
+   publish.toml with (a first release).` when there is none). Once the
+   owner has changed the copy to match (above, "A change to
+   `publish.toml`"), `--publisher-copy-matches` (`hbt release X.Y.Z
+   --publisher-copy-matches`) goes on, saying so. A commit with no
+   `publish.toml` is refused (exit 1).
    Then the publisher (above, "How a release reaches the public repo"):
    skim the digest issue; the release is public an hour or more later.
 5. Deploy it once it is published (below), then promote it when it has held

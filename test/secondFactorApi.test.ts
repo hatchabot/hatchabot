@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { Jar, PUBLIC_HOST, PUBLIC_URL, publicApp, type PublicApp } from './helpers/publicApp.js';
-import { backupCodeHash, base32Decode, totp } from '../src/api/totp.js';
+import { backupCodeHash, base32Decode, totp } from '../src/api/signIn/totp.js';
 import { SoftAuthenticator } from './helpers/softAuthenticator.js';
-import { seal, unseal } from '../src/api/secondFactor.js';
+import { seal, unseal } from '../src/api/signIn/secondFactor.js';
 
 let h: PublicApp | undefined;
 afterEach(async () => { await h?.close(); h = undefined; });

@@ -37,6 +37,9 @@ async function init() {
   }
   if (info.webChat) return initWebChat(info);
   ways = Array.isArray(info.channels) && info.channels.length ? info.channels : [{ kind: 'telegram' }];
+  // Signed in here already (HB-1149): they choose whether the seat is that account's. Never their own agent's.
+  const you = info.own || info.alreadyMember ? '' : info.signedInAs || '';
+  const passwords = info.authMode === 'accounts' || !!info.localAccounts;
   card.innerHTML = `
     <div style="color:var(--dim);font-size:14px">You've been invited to</div>
     <div class="agent">${esc(info.agentName)}</div>
@@ -50,13 +53,21 @@ async function init() {
       <div class="ways" role="radiogroup">${ways.map((w, i) => `
         <label class="way"><input type="radio" name="way" value="${esc(w.kind)}"${i === 0 ? ' checked' : ''}>
           <span><b>${LABEL[w.kind] || esc(w.kind)}</b>${whereText(w)}</span></label>`).join('')}</div>` : ''}
+    <div class="notice" id="factorNote" role="alert" hidden></div>
     <div id="gsi" style="display:flex;justify-content:center;margin:12px 0"></div>
-    <button id="joinBtn">Join with ${LABEL[ways[0]?.kind] || 'Telegram'} only</button>
+    ${you ? `<button id="joinAsBtn">Join as ${esc(you)}</button>` : ''}
+    <button id="joinBtn"${you ? ' class="btn alt"' : ''}>Join with ${LABEL[ways[0]?.kind] || 'Telegram'} only</button>
+    ${you ? `<div class="hint">Join as ${esc(you)} and the agent is also on your home screen here. Not you? Join with the app only.</div>`
+      : info.alreadyMember ? `<div class="hint">You are already on ${esc(info.agentName)} as ${esc(info.signedInAs || 'your account here')}: nothing to join. Not you? Join with the app only.</div>`
+      : passwords && !info.own && !info.factor ? '<div class="hint">Have an account on this Hatchabot? Sign in to it first, then open this link again to join as yourself.</div>' : ''}
     <div class="err" id="err"></div>`;
   document.querySelectorAll('input[name=way]').forEach((r) => r.addEventListener('change', () => {
     document.getElementById('joinBtn').textContent = `Join with ${LABEL[r.value] || r.value} only`;
   }));
   document.getElementById('joinBtn').onclick = () => join();
+  const asBtn = document.getElementById('joinAsBtn');
+  if (asBtn) asBtn.onclick = () => join(undefined, true);
+  if (info.factor) showFactorNote(info.factor);
   setupSignIn();
 }
 
@@ -96,16 +107,21 @@ async function setupSignIn(onToken = join) {
   document.head.appendChild(s);
 }
 
-async function join(idToken) {
-  const btn = document.getElementById('joinBtn');
+/** `asAccount`: "Join as <name>" was pressed, so the seat is the account this browser is signed in as (HB-1149). */
+async function join(idToken, asAccount = false) {
+  const btn = document.getElementById('joinBtn'), asBtn = document.getElementById('joinAsBtn');
   const chosen = document.querySelector('input[name=way]:checked')?.value || ways[0]?.kind || 'telegram';
   btn.disabled = true;
+  if (asBtn) asBtn.disabled = true;
+  document.getElementById('err').textContent = '';
   try {
     const res = await fetch('/v1/join', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code, name: document.getElementById('name').value, idToken, channel: chosen }),
+      body: JSON.stringify({ code, name: document.getElementById('name').value, idToken, channel: chosen, ...(asAccount ? { asAccount: true } : {}) }),
     });
     const data = await res.json();
+    // Signed in, but this address wants their second factor first: said, and the app only is still there.
+    if (res.status === 401 && data.secondFactor) { showFactorNote(data); btn.disabled = false; if (asBtn) asBtn.disabled = false; return; }
     if (!res.ok) throw new Error(data.error ?? 'Something went wrong');
     // Stopped, asleep or being rebuilt: the join is kept, and the window for their first message opens once it runs (HB-0992).
     const waits = data.notRunning ? `<div class="notice">It's not running right now; your first message will be let in as soon as it is.</div>` : '';
@@ -144,6 +160,7 @@ async function join(idToken) {
   } catch (e) {
     document.getElementById('err').textContent = e.message;
     btn.disabled = false;
+    if (asBtn) asBtn.disabled = false;
   }
 }
 /**

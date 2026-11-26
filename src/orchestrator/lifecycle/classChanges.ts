@@ -1,7 +1,7 @@
 import type { AIProfile, Agent, AgentClass } from '../../domain/types.js';
 import { effectiveSwapAllowance } from '../../domain/swap.js';
 import type { Store } from '../../store/store.js';
-import { inQueue, semaphore, sixAtATime } from '../../util/queues.js';
+import { keyedLock, semaphore, sixAtATime } from '../../util/queues.js';
 import { isBusy } from './busy.js';
 import { snapshotModels } from '../usage/modelLedger.js';
 import { operationRefusal } from './operations.js';
@@ -35,7 +35,15 @@ import { machineLoginOnly, modelOverrideProblem, type ModelRuntime } from './mod
  * transaction: a process killed in the middle leaves none of them.
  */
 
-/** What detachClassIfDrifted did: the tag came off (`detached`), will be decided once its class's edit is done ('pending'), or stays. `limits`: those put on now. */
+/**
+ * What detachClassIfDrifted did: the tag came off (`detached`), will be
+ * decided once its class's edit is done ('pending'), or stays. `limits`:
+ * those put on now, which its callers wait for before they answer, as the
+ * answer says a container that kept its old limits (keptSaid's
+ * memoryPending and limitsKept, which the app and the manager's receipt
+ * word). Only those: after a rebuild under way, or once a class's edit is
+ * done, they go on off the request (HB-0642).
+ */
 export type Detach = { detached: boolean | 'pending'; limits?: Promise<Kept> };
 /**
  * What a class change's turn in its queue hands back: a refusal to send
@@ -65,10 +73,13 @@ export const classKey = (c: ClassTarget, unpin: boolean): string => JSON.stringi
  * of the class. `since`: what it ran when it was read for the check (a
  * change of its own made after stands: changedSince); `pin`: its own
  * model then, where the check and the write read it; `for`: the class
- * settings checked (classKey).
+ * settings checked (classKey). `on`, on a check whose machine's questions
+ * were all answered: what those read besides the class settings
+ * (checkedOn), so an edit's next try keeps its answers while that is the
+ * same (checkEditMembers, HB-0642).
  */
-export type ClassCheck = { since: Since; for: string; error: string } | {
-  since: Since; for: string; switching: boolean; target: AIProfile; imageChange: boolean; unpin: boolean;
+export type ClassCheck = { since: Since; for: string; on?: string; error: string } | {
+  since: Since; for: string; on?: string; switching: boolean; target: AIProfile; imageChange: boolean; unpin: boolean;
   dropPin: boolean; modelWaitsForRebuild: boolean; pin?: string | null;
 };
 /** A class's machine-login Max source for an agent on a runner: refused at its check and again at its write. */
@@ -128,8 +139,12 @@ export interface ClassChanges {
   checkClassFor(agent: Agent, cls: ClassTarget, unpinAsked?: boolean): Promise<ClassCheck>;
   /** A class written to one agent, checked by checkClassFor: its record only, in one transaction. */
   applyClassToAgent(agent: Agent, cls: ClassTarget, check: ClassCheck, opts: { from: string | null; ledger?: (before: ModelsBefore) => void }): ClassWrite;
-  /** Each member of an edited class checked against its new settings, outside the class's queue. */
-  checkEditMembers(e: ClassEdit): Promise<Map<string, ClassCheck>>;
+  /**
+   * Each member of an edited class checked against its new settings, outside
+   * the class's queue. `before`: the checks of the edit's try before, each
+   * kept for a member it still fits without asking its machine again.
+   */
+  checkEditMembers(e: ClassEdit, before?: Map<string, ClassCheck>): Promise<Map<string, ClassCheck>>;
   /** An edit's records, in its class's queue: the class row, then each member with its check. */
   writeClassEdit(e: ClassEdit, checks: Map<string, ClassCheck>, last: boolean, ledger: (before: ModelsBefore) => void): ClassStep | { again: true };
   /** It runs what a class last wrote to it: a change found since a check was its class's, not its owner's. */
@@ -296,10 +311,10 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
    * queued for in one order, so two moves the other way round never wait on
    * each other.
    */
-  const classQueues = new Map<string, Promise<unknown>>();
+  const classQueues = keyedLock();
   const inClassQueue = <T>(classIds: Array<string | null | undefined>, fn: () => Promise<T>): Promise<T> => {
     const ids = [...new Set(classIds.filter((c): c is string => !!c))].sort();
-    return ids.reduceRight<() => Promise<T>>((inner, id) => () => inQueue(classQueues, id, inner), fn)();
+    return ids.reduceRight<() => Promise<T>>((inner, id) => () => classQueues.run(id, inner), fn)();
   };
   const runsModel = (a: Agent): string | undefined => { const p = store.getAIProfile(a.aiProfileId); return p ? effectiveModel(a, p) : a.model; };
   const sinceOf = (a: Agent): Since => ({ gen: store.modelGeneration(a.id), model: runsModel(a), aiProfileId: a.aiProfileId, image: a.image });
@@ -329,7 +344,30 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
     if (switching && isBusy(agentId)) return 'busy (a rebuild, a move or a backup) — apply the class again when that is done';
     return undefined;
   };
-  const checkClassFor = async (agent: Agent, cls: ClassTarget, unpinAsked = false): Promise<ClassCheck> => {
+  /**
+   * What a check's questions to the agent's machine (an image pin, the
+   * runtime a model needs) read besides the class settings: what it runs
+   * (`since`), its own model, its owner, the machine it is on and its
+   * container there, its state and the time its record last changed (a
+   * rebuild, a start, a stop or a move writes it), and the source it was
+   * checked against, as stored. The same in a later check of the same
+   * settings, with nothing under way on it then, the machine is asked the
+   * same questions of the same container: its answers stand (HB-0642).
+   * Not in it: the image a tag names on the machine. A tag rebuilt between
+   * two tries is not seen, as one rebuilt between the write and the rebuild
+   * that puts the pin on is not either (nothing checks it then); a kept
+   * answer widens that window by the seconds of one try.
+   */
+  const checkedOn = (a: Agent, since: Since, target: AIProfile): string => JSON.stringify([
+    since, a.model ?? null, a.ownerId, !!a.ops, a.hostId, store.getHost(a.hostId)?.kind ?? null, a.runtimeRef ?? null, a.state, a.updatedAt, target,
+  ]);
+  /**
+   * `before`: an earlier check of this agent (an edit's try before): kept,
+   * without asking its machine again, while it is for these settings and
+   * what its machine's questions read is the same (checkedOn). The checks
+   * that read only the store are made again whatever it says.
+   */
+  const checkClassFor = async (agent: Agent, cls: ClassTarget, unpinAsked = false, before?: ClassCheck): Promise<ClassCheck> => {
     const since = sinceOf(agent), key = classKey(cls, unpinAsked);
     // Validate the WHOLE class against the agent's TARGET source before writing
     // anything — a failed model check must not leave the agent half-switched.
@@ -355,6 +393,17 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
       const prob = modelOverrideProblem(target, cls.model);
       if (prob) return { since, for: key, error: prob }; // e.g. local source, or model not on this source
     }
+    // What follows was asked of its machine by the check before, for these
+    // settings and the agent as it is now, and nothing is under way on it
+    // (a rebuild, a move, a backup): those answers stand.
+    const on = checkedOn(agent, since, target);
+    if (before?.on === on && before.for === key && !inFlight(agent.id) && !isBusy(agent.id)) return before;
+    // Kept for the next try only when every machine asked below answered:
+    // a container or an image that gave no OpenClaw version passes these
+    // checks, and is asked again.
+    let answered = true;
+    const heard = <T extends { unanswered?: true }>(r: T): T => { if (r.unanswered) answered = false; return r; };
+    const kept = (): { on?: string } => (answered ? { on } : {});
     // The class image pins the agent (applied on its next rebuild); no class
     // image leaves whatever pin the agent has, unless the class edit cleared
     // the image that pinned it (unpin: back to the fleet default). Checked
@@ -364,8 +413,8 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
     const unpin = unpinAsked && !!agent.image;
     const imageChange = unpin || (!!cls.image && cls.image !== (agent.image ?? undefined));
     if (imageChange) {
-      const pin = await imagePinCheck(agent, unpin ? null : cls.image!);
-      if (pin.problem) return { since, for: key, error: pin.problem };
+      const pin = heard(await imagePinCheck(agent, unpin ? null : cls.image!));
+      if (pin.problem) return { since, for: key, ...kept(), error: pin.problem };
     }
     // The class's model on a subscription, against the OpenClaw it will run
     // on: the image a source or image change rebuilds it on, and the
@@ -381,21 +430,21 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
     const rebuildOn = unpin ? null : (cls.image ?? agent.image ?? null);
     if (cls.model) {
       if (switching || imageChange) {
-        const tooOld = (await finalModelCheck(agent, target, { pin: cls.model, rebuildOn })).problem;
-        if (tooOld) return { since, for: key, error: tooOld };
+        const tooOld = heard(await finalModelCheck(agent, target, { pin: cls.model, rebuildOn })).problem;
+        if (tooOld) return { since, for: key, ...kept(), error: tooOld };
       }
       if (!switching) {
-        const tooOld = (await finalModelCheck(agent, target, { pin: cls.model })).problem;
-        if (tooOld && !imageChange) return { since, for: key, error: tooOld };
+        const tooOld = heard(await finalModelCheck(agent, target, { pin: cls.model })).problem;
+        if (tooOld && !imageChange) return { since, for: key, ...kept(), error: tooOld };
         modelWaitsForRebuild = !!tooOld;
       }
     } else if (switching || imageChange) {
-      const runtime = await finalModelCheck(agent, target, { switching, rebuildOn });
-      if (runtime.problem) return { since, for: key, error: runtime.problem };
+      const runtime = heard(await finalModelCheck(agent, target, { switching, rebuildOn }));
+      if (runtime.problem) return { since, for: key, ...kept(), error: runtime.problem };
       dropPin = !!runtime.dropPin;
     }
     return {
-      since, for: key, switching, target, imageChange, unpin, dropPin, modelWaitsForRebuild,
+      since, for: key, ...kept(), switching, target, imageChange, unpin, dropPin, modelWaitsForRebuild,
       // Its own model, which the checks above and the write read (a class without one).
       ...(!cls.model && (switching || imageChange) ? { pin: agent.model ?? null } : {}),
     };
@@ -516,10 +565,17 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
   };
   const unpinFor = (e: ClassEdit, a: Agent): boolean => !e.image && !!e.cls.image && a.image === e.cls.image;
   const editTarget = (e: ClassEdit): ClassTarget => ({ id: e.cls.id, model: e.model, aiProfileId: e.aiProfileId, image: e.image });
-  /** Each member of an edited class checked against its new settings, outside the class's queue. */
-  const checkEditMembers = async (e: ClassEdit): Promise<Map<string, ClassCheck>> => {
+  /**
+   * Each member of an edited class checked against its new settings, outside
+   * the class's queue. Tried again (writeClassEdit's `again`: one joined, the
+   * class changed), a member whose check of the try before still fits keeps
+   * it, and its machine is not asked again: only one changed since, and one
+   * new, are (checkClassFor's `before`). Each try asked every member's
+   * machine again, so a slow or sleeping runner held each one (HB-0642).
+   */
+  const checkEditMembers = async (e: ClassEdit, before?: Map<string, ClassCheck>): Promise<Map<string, ClassCheck>> => {
     const members = store.listAgentsInClass(e.cls.id).filter((a) => a.state !== 'ARCHIVED');
-    const checked = await sixAtATime(members, async (a) => [a.id, await checkClassFor(a, editTarget(e), unpinFor(e, a))] as const);
+    const checked = await sixAtATime(members, async (a) => [a.id, await checkClassFor(a, editTarget(e), unpinFor(e, a), before?.get(a.id))] as const);
     return new Map(checked);
   };
   /**

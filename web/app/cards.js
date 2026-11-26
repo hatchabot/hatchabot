@@ -1,4 +1,4 @@
-// web/app/cards.js: the cards your Hatchabot agent files (its proposals), and refresh() with its polling.
+// web/app/cards.js: the cards your Hatchabot agent files (its proposals), the people knocking on your agents (renderV2Joins, approve, denyPair), and refresh() with its polling.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -35,6 +35,15 @@ function mgmtProposalCard(p, into) {
   // (Right-size): the headline, then the evidence, then each risk, marked.
   head.textContent = p.check ? String(p.summary).split('\n')[0] : p.summary;
   card.appendChild(head);
+  // Filed again after a restart (HB-1053): its words, evidence and warnings
+  // are its first filing's, and it says when that was.
+  if (p.firstFiledAtMs) {
+    const was = document.createElement('div');
+    was.className = 'sub prop-refiled';
+    was.style.cssText = 'margin-top:4px';
+    was.textContent = `Filed again after a restart: first filed ${new Date(p.firstFiledAtMs).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}, so what it says is as of then.`;
+    card.appendChild(was);
+  }
   if (p.check) {
     if (p.check.evidence) {
       const ev = document.createElement('div');
@@ -128,8 +137,164 @@ function mgmtCardPlace(p) {
   return { label: `Open ${v2Find(p.agentId)?.name ?? 'this agent'}`, go: () => openV2Agent(p.agentId, tab) };
 }
 
+/** Changes the assistant prepared, waiting for Confirm. Survives reloads and
+ *  restarts; whatever prepared them (today the chat, later an agent). */
+let v2PropSig = '';
+let v2PendingCount = 0;
+async function loadProposals() {
+  let r; try { r = await api('/v1/proposals'); } catch { return; }
+  if (!Array.isArray(r?.pending)) r = { pending: [] }; // an older server mid-deploy
+  // A change that failed when you confirmed it used to vanish with its card,
+  // taking the reason with it (2026-09-19). Keep recent failures on screen.
+  const failed = (Array.isArray(r.recent) ? r.recent : [])
+    .filter(x => x.status === 'confirmed' && /^⚠/.test(String(x.outcome ?? '')))
+    .filter(x => Date.now() - (x.resolvedAtMs ?? 0) < 60 * 60_000)
+    .filter(x => !v2PropDismissed.has(x.confirmId))
+    .slice(0, 3);
+  // Cost and model cards (recommended: true) are Usage → Recommended items now, marked as the agent's (v2.158.0); the console still shows every card.
+  const cards = r.pending.filter(p => !p.recommended);
+  // A card filed again elsewhere (another tab, the phone) changes no id, but loses File it again: in the signature too.
+  const sig = [...r.pending.map(p => p.confirmId), ...failed.map(f => `f:${f.confirmId}${f.refiled ? ':refiled' : ''}`)].join(',');
+  $('v2Proposals').hidden = !(cards.length || failed.length || renderV2Joins());
+  $('v2PropCount').textContent = cards.length || '';
+  v2PendingCount = cards.length;
+  // While you talk to your management agent, what it prepares shows right
+  // above the conversation — in Hatchabot's frame, which the agent can't draw in.
+  const inConsole = $('consoleDlg').open && v2Find(consoleAgentId)?.ops;
+  const cp = $('consoleProps');
+  cp.hidden = !(inConsole && r.pending.length);
+  if (sig === v2PropSig && cp.__sig === (inConsole ? sig : '')) return; // don't rebuild under a finger
+  v2PropSig = sig; cp.__sig = inConsole ? sig : '';
+  const list = $('v2PropList');
+  list.innerHTML = ''; cp.innerHTML = '';
+  for (const p of r.pending) { if (!p.recommended) mgmtProposalCard(p, list); if (inConsole) mgmtProposalCard(p, cp); }
+  for (const f of failed) { mgmtFailedCard(f, list); if (inConsole) mgmtFailedCard(f, cp); }
+}
+
+/** A change you confirmed that did not go through, with the reason and a way
+ *  to put it out of sight. */
+function mgmtFailedCard(f, into) {
+  const card = document.createElement('div');
+  card.style.cssText = 'align-self:stretch;border:1px solid var(--bad);border-radius:10px;padding:10px 12px;font-size:14px';
+  const head = document.createElement('div');
+  head.style.cssText = 'white-space:pre-wrap';
+  head.textContent = String(f.outcome || `⚠ Failed — ${f.summary}`);
+  card.appendChild(head);
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;margin-top:8px;justify-content:flex-end';
+  // One a restart cut off (HB-1053): the same change as a new card, for you to
+  // confirm once you have checked it did not happen. Nothing retries it by itself.
+  if (f.interrupted && !f.refiled) {
+    const again = document.createElement('button');
+    again.textContent = 'File it again';
+    again.title = 'A new card with the same change, waiting for your Confirm. Check first that it did not happen.';
+    again.addEventListener('click', async () => {
+      again.disabled = true;
+      try {
+        const r = await api(`/v1/proposals/${encodeURIComponent(f.confirmId)}/again`, { method: 'POST', body: {} });
+        v2DismissProp(f.confirmId);
+        // Where the new card is, by the cards list's rule: a cost or model card is a Usage → Recommended item.
+        toast(`Filed again: its card is ${r?.where === 'recommended' ? 'under Usage → Recommended' : 'under Alerts'}. Confirm it there once you are sure it did not happen.`, 6000);
+        v2PropSig = '';
+        await loadProposals();
+      } catch (e) { toast(e.message, 9000); again.disabled = false; }
+    });
+    row.appendChild(again);
+  }
+  const hide = document.createElement('button');
+  hide.textContent = 'Dismiss';
+  hide.addEventListener('click', () => { card.remove(); v2DismissProp(f.confirmId); });
+  row.appendChild(hide); card.appendChild(row);
+  into.appendChild(card);
+}
+/** Dismissed failure cards, remembered across reloads — Dismiss used to last
+ *  until the page was refreshed, and the card came straight back (2026-09-19).
+ *  A failure is only shown for an hour, so a short list is plenty. */
+const v2PropDismissed = (() => {
+  try { return new Set(JSON.parse(localStorage.getItem('hb-prop-dismissed') || '[]')); } catch { return new Set(); }
+})();
+function v2DismissProp(id) {
+  v2PropDismissed.add(id);
+  try { localStorage.setItem('hb-prop-dismissed', JSON.stringify([...v2PropDismissed].slice(-50))); } catch { /* private window */ }
+}
+setInterval(() => { if ($('consoleDlg').open && v2Find(consoleAgentId)?.ops) void loadProposals(); }, 4000);
+
+/**
+ * People knocking on your agents, on the home screen beside the changes waiting
+ * for you. Admitting someone used to be the retired Telegram bot's job; without
+ * this the only sign was a badge on that agent's icon (2026-09-19).
+ */
+function renderV2Joins() {
+  const box = $('v2JoinList');
+  if (!box) return 0;
+  const rows = [];
+  for (const a of agents ?? []) {
+    if (!v2Mine(a)) continue;
+    for (const p of pairings[a.id] ?? []) {
+      const kind = p.kind || 'telegram';
+      const who = p.meta?.firstName || p.meta?.username || p.id;
+      const self = kind !== 'telegram' || !myAccount.telegramUserId;
+      rows.push(`<div class="v2join">
+        <span class="grow">🔑 <b class="pii">${esc(who)}</b> wants to talk to <b>${esc(a.name)}</b>${kind === 'telegram' ? '' : ` on ${V2_CHAN_LABEL[kind] || kind}`}</span>
+        <button ${onAction('click', 'denyPair', [`${a.id ?? ''}`, `${p.code ?? ''}`, `${who ?? ''}`, `${kind}`])} title="Turn this request away — they can ask again by messaging the bot">Not now</button>
+        ${self ? `<button ${onAction('click', 'approve', [`${a.id ?? ''}`, `${p.code ?? ''}`, true, `${kind}`, `${(p.meta?.firstName || p.meta?.username || p.id) ?? ''}`])} title="This is you: admit and link this account to your login">That's me</button>` : ''}
+        ${a.ops ? '' /* the manager is its owner's alone: the server answers 400 (review, 2026-10-09) */ : `<button class="primary" ${onAction('click', 'approve', [`${a.id ?? ''}`, `${p.code ?? ''}`, false, `${kind}`])}>Let them in</button>`}
+      </div>`);
+    }
+  }
+  box.innerHTML = rows.join('');
+  // The panel belongs to proposals; joins can open it too.
+  if (rows.length) $('v2Proposals').hidden = false;
+  return rows.length;
+}
+
+async function approve(id, code, asSelf, kind = 'telegram', who = '') {
+  // "That's me" is the one tap that grants an identity rather than a seat: it
+  // binds that chat account to YOUR account, so every agent you make from then
+  // on admits it at birth. A mis-tap on a stranger's card would hand them the
+  // run of the fleet, and the name on that card is theirs to choose — so this
+  // one asks, and says the name back.
+  if (asSelf && !confirm(`Link ${who || 'this account'} to you?\n\nOnly do this if that is YOUR OWN ${V2_CHAN_LABEL[kind] || kind} account. It becomes your identity everywhere: every agent you create will admit it without asking.\n\nIf it is somebody else, press Cancel and use "Let them in" instead.`)) return;
+  try {
+    const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code, kind, ...(asSelf ? { asSelf: true } : {}) } });
+    pairingsDrop(id, code, kind);
+    if (asSelf && kind !== 'telegram') {
+      toast(`Linked — that ${V2_CHAN_LABEL[kind] || kind} account is you on this agent.`, 6000);
+    } else if (asSelf) {
+      toast('Linked — this Telegram is you now. Every agent you make admits you automatically.', 8000);
+      loadMyAccount(); // the card + Settings reflect the link immediately
+    } else {
+      toast(res.member?.alreadyMember
+        ? `${res.member.displayName} is already a member — access restored`
+        : `${res.member?.displayName ?? 'Guest'} is in — now a member`);
+    }
+    pairTick = 0; // refetch members on next poll
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function denyPair(id, code, who, kind = 'telegram') {
+  // "Not now", not a ban — say so, so nobody assumes this blocks them for good.
+  if (!confirm(`Turn away ${who}'s request to talk to this agent?\n\nThey are not blocked — they can ask again by messaging the bot.`)) return;
+  try {
+    const r = await api(`/v1/agents/${id}/pairing/deny`, { method: 'POST', body: { code, kind } });
+    pairingsDrop(id, code, kind); // turned away, or no longer there: either way not to be answered again
+    toast(r.denied ? `${who}'s request was turned away` : 'That request is no longer pending');
+    pairTick = 0; // refetch pairing on the next poll so the card/badge clears
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
 
 
+
+
+// ---- polling ------------------------------------------------------------------
+
+// ---- management-bot presence card --------------------------------------------
+// The mgmt bot is a separate process; it heartbeats to the control plane and
+// this strip is that heartbeat made visible. Deliberately NOT an agent card —
+// it has no container, no volume, no members — just a slim always-on rail.
+let mgmtTick = 0; // counts polls, so the heavier meta reads run every 4th
 
 let pollTimer, pairTick = 0, pollPaused = false;
 // Refreshes overlap (a poll, and one after a change): an older answer that

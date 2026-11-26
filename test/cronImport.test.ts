@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -165,6 +165,146 @@ describe('self-path rewriting', () => {
       execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: dir } });
       expect(readFileSync(join(dir, 'MEMORY.md'), 'utf8')).toBe(want);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  /** The node pass the re-point sends into the container, and its patterns, to run here on a folder of its own. */
+  const rewritePass = async () => {
+    const pairs = selfPathReplacements({ id: 'agent', workspace: '/source/agent' }, 'agent-2');
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'agent-2', workspace: { files: {}, configPatch: { agentId: 'agent-2', authMode: 'api-key' } }, env: {} });
+    await rewriteWorkspaceFiles({ provider }, runtimeRef, 'agent-2', pairs);
+    const shell = provider.execLog.map((a) => a.join(' ')).find((s) => s.includes('node -e'))!;
+    return { json: /PAIRS='([^']*)'/.exec(shell)![1]!, script: /node -e '([^']*)'/.exec(shell)![1]!, to: WORKSPACE_DIR_TEMPLATE.replace('{slug}', 'agent-2') };
+  };
+
+  // HB-0629: the agent reads its files while the pass runs; one written in
+  // place could be read cut short (emptied, then filled).
+  it('replaces each file it changes whole, through a file of its own, keeping its mode; a link is written through', async () => {
+    const { json, script, to } = await rewritePass();
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    const outside = mkdtempSync(join(tmpdir(), 'acl-rw-target-'));
+    try {
+      mkdirSync(join(dir, 'memory'));
+      writeFileSync(join(dir, 'SOUL.md'), 'Read /source/agent/notes.md.');
+      chmodSync(join(dir, 'SOUL.md'), 0o640);
+      writeFileSync(join(dir, 'memory', 'day.md'), 'Kept in /source/agent/memory.');
+      writeFileSync(join(dir, 'AGENTS.md'), 'Nothing to re-point here.');
+      writeFileSync(join(dir, 'USER.md'), 'Read-only, in /source/agent/user.');
+      chmodSync(join(dir, 'USER.md'), 0o444);
+      writeFileSync(join(outside, 'shared.md'), 'Shared from /source/agent/shared.');
+      symlinkSync(join(outside, 'shared.md'), join(dir, 'TOOLS.md'));
+      const ino = (p: string) => statSync(p).ino;
+      const before = { soul: ino(join(dir, 'SOUL.md')), day: ino(join(dir, 'memory', 'day.md')), agents: ino(join(dir, 'AGENTS.md')), shared: ino(join(outside, 'shared.md')) };
+      execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: dir } });
+      expect(readFileSync(join(dir, 'SOUL.md'), 'utf8')).toBe(`Read ${to}/notes.md.`);
+      expect(readFileSync(join(dir, 'memory', 'day.md'), 'utf8')).toBe(`Kept in ${to}/memory.`);
+      // Replaced by a new file renamed over it, not written into: a reader has the old one or the new one.
+      expect(ino(join(dir, 'SOUL.md'))).not.toBe(before.soul);
+      expect(ino(join(dir, 'memory', 'day.md'))).not.toBe(before.day);
+      expect(statSync(join(dir, 'SOUL.md')).mode & 0o777).toBe(0o640);
+      expect(statSync(join(dir, 'SOUL.md')).uid).toBe(process.getuid!());
+      // A read-only file is replaced too, and stays read-only: its folder decides.
+      expect(readFileSync(join(dir, 'USER.md'), 'utf8')).toBe(`Read-only, in ${to}/user.`);
+      expect(statSync(join(dir, 'USER.md')).mode & 0o777).toBe(0o444);
+      // One with nothing to change is left alone.
+      expect(ino(join(dir, 'AGENTS.md'))).toBe(before.agents);
+      // A link stays a link, and what it points at is written as before.
+      expect(lstatSync(join(dir, 'TOOLS.md')).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(outside, 'shared.md'), 'utf8')).toBe(`Shared from ${to}/shared.`);
+      expect(ino(join(outside, 'shared.md'))).toBe(before.shared);
+      // Nothing of its own is left behind.
+      expect(readdirSync(dir).sort()).toEqual(['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'USER.md', 'memory']);
+      expect(readdirSync(join(dir, 'memory'))).toEqual(['day.md']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('writes in place, as before, a file with another hard link and one in a folder it cannot add a file to', async () => {
+    const { json, script, to } = await rewritePass();
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    try {
+      writeFileSync(join(dir, 'MEMORY.md'), 'Notes in /source/agent/notes.md.');
+      linkSync(join(dir, 'MEMORY.md'), join(dir, 'MEMORY.bak'));
+      mkdirSync(join(dir, 'locked'));
+      writeFileSync(join(dir, 'locked', 'USER.md'), 'Lives in /source/agent/user.');
+      chmodSync(join(dir, 'locked'), 0o555);
+      execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: dir } });
+      expect(readFileSync(join(dir, 'MEMORY.md'), 'utf8')).toBe(`Notes in ${to}/notes.md.`);
+      expect(readFileSync(join(dir, 'MEMORY.bak'), 'utf8')).toBe(`Notes in ${to}/notes.md.`);   // still one file
+      expect(readFileSync(join(dir, 'locked', 'USER.md'), 'utf8')).toBe(`Lives in ${to}/user.`);
+      expect(readdirSync(join(dir, 'locked'))).toEqual(['USER.md']);
+    } finally {
+      chmodSync(join(dir, 'locked'), 0o755);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a file whose name is near the longest a name can be: its new file is named apart from it', async () => {
+    const { json, script, to } = await rewritePass();
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    try {
+      const long = `${'n'.repeat(237)}.md`;   // 240 bytes, under the 255-byte limit
+      writeFileSync(join(dir, long), 'Read /source/agent/notes.md.');
+      const before = statSync(join(dir, long)).ino;
+      execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: dir } });
+      expect(readFileSync(join(dir, long), 'utf8')).toBe(`Read ${to}/notes.md.`);
+      expect(statSync(join(dir, long)).ino).not.toBe(before);
+      expect(readdirSync(dir)).toEqual([long]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a file as it was when its new file cannot be filled, synced or renamed (a full disk, a quota, an I/O error)', async () => {
+    const { json, script } = await rewritePass();
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    const tools = mkdtempSync(join(tmpdir(), 'acl-rw-fs-'));
+    try {
+      // The first file to be written fails in its write, the next in its
+      // sync, the next in its rename: made up here, in the pass's own fs.
+      const failing = join(tools, 'failing.cjs');
+      writeFileSync(failing, [
+        'const fs = require("fs"); const n = { w: 0, s: 0, r: 0 };',
+        'const no = (code) => Object.assign(new Error(code), { code });',
+        'const { writeFileSync, fsyncSync, renameSync } = fs;',
+        'fs.writeFileSync = (f, ...a) => { if (typeof f === "number" && ++n.w === 1) throw no("EDQUOT"); return writeFileSync(f, ...a); };',
+        'fs.fsyncSync = (fd) => { if (++n.s === 1) throw no("ENOSPC"); return fsyncSync(fd); };',
+        'fs.renameSync = (a, b) => { if (++n.r === 1) throw no("EIO"); return renameSync(a, b); };',
+      ].join('\n'));
+      const was: Record<string, string> = { 'SOUL.md': 'Read /source/agent/notes.md.', 'AGENTS.md': 'Keep /source/agent/rules.md.', 'MEMORY.md': 'Kept in /source/agent/memory.' };
+      for (const [name, text] of Object.entries(was)) writeFileSync(join(dir, name), text);
+      const ino = (name: string) => statSync(join(dir, name)).ino;
+      const before = Object.fromEntries(Object.keys(was).map((n) => [n, ino(n)]));
+      execFileSync(process.execPath, ['-r', failing, '-e', script], { env: { PAIRS: json, WSDIR: dir } });
+      for (const name of Object.keys(was)) {
+        expect(readFileSync(join(dir, name), 'utf8'), name).toBe(was[name]);
+        expect(ino(name), name).toBe(before[name]);
+      }
+      // Its new files are gone with it.
+      expect(readdirSync(dir).sort()).toEqual(['AGENTS.md', 'MEMORY.md', 'SOUL.md']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(tools, { recursive: true, force: true });
+    }
+  });
+
+  it('reads a link only when it points at a regular file: one to a fifo is passed by, not waited on', async () => {
+    const { json, script, to } = await rewritePass();
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    const outside = mkdtempSync(join(tmpdir(), 'acl-rw-target-'));
+    try {
+      execFileSync('mkfifo', [join(outside, 'pipe')]);
+      symlinkSync(join(outside, 'pipe'), join(dir, 'TOOLS.md'));
+      writeFileSync(join(dir, 'SOUL.md'), 'Read /source/agent/notes.md.');
+      execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: dir }, timeout: 10_000 });
+      expect(readFileSync(join(dir, 'SOUL.md'), 'utf8')).toBe(`Read ${to}/notes.md.`);
+      expect(lstatSync(join(dir, 'TOOLS.md')).isSymbolicLink()).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
 

@@ -3,7 +3,7 @@ import { agentMemoryLimits, formatSwapAllowance, parseSwapAllowance } from '../.
 import type { Agent } from '../../domain/types.js';
 import { ProviderError, type RuntimeProvider } from '../../providers/provider.js';
 import type { Store } from '../../store/store.js';
-import { inQueue, sixAtATimeWhenReady } from '../../util/queues.js';
+import { keyedLock, sixAtATimeWhenReady } from '../../util/queues.js';
 import { containerUp, type UpWait } from './afterRestart.js';
 import { busyDone, isBusy } from './busy.js';
 import { syncMemoryBudget } from './provision.js';
@@ -178,9 +178,9 @@ export function createMemoryLimits(deps: MemoryLimitsDeps): MemoryLimits {
    *   later one refused, or the change refused at its write, HB-0570):
    *   neither, which puts the container back on what the store says.
    */
-  const limitApplies = new Map<string, Promise<unknown>>();
+  const limitApplies = keyedLock();
   /** An agent's turn for its container memory limits (applyCurrentLimits): limitsTold takes it for a class path, PATCH for its own cap or swap. */
-  const inLimitsTurn = <T>(agentId: string, fn: () => Promise<T>): Promise<T> => inQueue(limitApplies, agentId, fn);
+  const inLimitsTurn = <T>(agentId: string, fn: () => Promise<T>): Promise<T> => limitApplies.run(agentId, fn);
   const applyCurrentLimits = async (agentId: string, how: { change?: LimitsChange; forClass?: boolean } = {}): Promise<LimitsOut> => {
     const { change } = how;
     const now = store.getAgent(agentId);

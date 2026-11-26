@@ -10,7 +10,7 @@ import Fastify from 'fastify';
 import { as, makeWorld, MemSecrets, seedRunningAgent, type World } from './support/world.js';
 import { Store } from '../src/store/store.js';
 import { importsTook } from '../src/providers/mockProvider.js';
-import { registerMgmtChat } from '../src/api/mgmtChat.js';
+import { registerMgmtChat } from '../src/api/ops/mgmtChat.js';
 import * as gitSource from '../src/orchestrator/apps/gitSource.js';
 import { GOOGLE_CLIENT_REF, materializeConnection } from '../src/orchestrator/google/googleConnections.js';
 import { exportTemplate, parseTemplate } from '../src/orchestrator/transfer/template.js';

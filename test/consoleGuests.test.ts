@@ -7,11 +7,11 @@ import type { AddressInfo } from 'node:net';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { FrameReader, GUEST_CONNECT_TIMEOUT_MS, GUEST_IDLE_TO_CLOSE_MS, GUEST_ROOM_EVERY_MS, MAX_GUEST_CONSOLES, encodeFrame } from '../src/api/consoleProxy.js';
+import { FrameReader, GUEST_CONNECT_TIMEOUT_MS, GUEST_IDLE_TO_CLOSE_MS, GUEST_ROOM_EVERY_MS, MAX_GUEST_CONSOLES, encodeFrame } from '../src/api/console/consoleProxy.js';
 import { consoleIdentity, guestConsoleSessionKey, OWNER_ROLE } from '../src/openclaw/consoleIdentity.js';
 import { ConsoleAccess, consoleAllowUsers, consoleSyncBatch, parseConsoleState } from '../src/orchestrator/console/consoleAccess.js';
-import { TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH } from '../src/api/controlUiRebase.js';
-import { CONTROL_UI_MATH_PREFIX, CONTROL_UI_MATH_SCRIPT_PATH, CONTROL_UI_MATH_SOURCE_PATH, KATEX_SCRIPT_PATH, KATEX_STYLES_PATH } from '../src/api/controlUiMath.js';
+import { TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH } from '../src/api/console/controlUiRebase.js';
+import { CONTROL_UI_MATH_PREFIX, CONTROL_UI_MATH_SCRIPT_PATH, CONTROL_UI_MATH_SOURCE_PATH, KATEX_SCRIPT_PATH, KATEX_STYLES_PATH } from '../src/api/console/controlUiMath.js';
 
 /**
  * The console with identities, end to end through the real routes: who may
@@ -1182,6 +1182,178 @@ describe("a guest's socket", () => {
     expect(gw.upgrades.at(-1)!.headers['x-openclaw-scopes']).toBeUndefined();
     expect(JSON.stringify(hello)).toContain('owner-somebody'); // nothing scrubbed for the owner
     expect((await c.call('1', 'config.get')).ok).toBe(true);
+  });
+
+  /**
+   * A guest's new chat at the door, step by step and in this order (HB-0645):
+   * the chats still connecting are counted, then all of theirs; past the
+   * limit, room is promised; then the time it has to connect starts, from
+   * when it was let in, which is also when it was last used until it is.
+   */
+  describe('the door, in order (HB-0645)', () => {
+    /** A browser that asks for a console and then sends nothing at all. */
+    const knock = async (port: number) => {
+      const { connect } = await import('node:net');
+      const sock = connect(port, '127.0.0.1');
+      toClose.push({ close: () => sock.destroy() });
+      sock.on('error', () => {});
+      const state = { gone: false, got: Buffer.alloc(0) };
+      sock.on('close', () => { state.gone = true; });
+      sock.on('data', (d: Buffer) => { state.got = Buffer.concat([state.got, d]); });
+      await new Promise((r) => sock.once('connect', r));
+      sock.write([
+        'GET /v1/agents/a1/ui HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+        `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13', `Cookie: hbu=${GUEST}`, '', '',
+      ].join('\r\n'));
+      return state;
+    };
+    const realSetTimeout = globalThis.setTimeout;
+    const until = async (pred: () => boolean) => { for (let i = 0; i < 150 && !pred(); i++) await new Promise((r) => realSetTimeout(r, 20)); return pred(); };
+    /** The connect time limits started from now on (setTimeout with GUEST_CONNECT_TIMEOUT_MS); `shortTo` makes each that long instead. */
+    const connectLimits = (shortTo?: number) => {
+      let n = 0;
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+        if (ms === GUEST_CONNECT_TIMEOUT_MS) n++;
+        return (realSetTimeout as unknown as (...a: unknown[]) => NodeJS.Timeout)(fn, ms === GUEST_CONNECT_TIMEOUT_MS && shortTo !== undefined ? shortTo : ms, ...rest);
+      }) as never);
+      return () => n;
+    };
+    /** What the door logged: its refusals, and the chats it closed for room. */
+    const doorLog = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls.filter(([, msg]) => typeof msg === 'string' && /^console\.guest_(too_many|oldest_closed|connect_timeout)/.test(msg));
+    const openAll = async (port: number, n = MAX_GUEST_CONSOLES) => {
+      const open: Array<ReturnType<typeof openConsole>> = [];
+      for (let i = 0; i < n; i++) {
+        const c = openConsole(port, GUEST);
+        expect((await c.ready)?.ok).toBe(true);
+        open.push(c);
+        await new Promise((r) => realSetTimeout(r, 5)); // each a little later than the last
+      }
+      return open;
+    };
+
+    it(`chats still connecting are counted first: with all ${MAX_GUEST_CONSOLES} places taken by ones connecting, one more is refused as too many connecting, before room is looked for, with no time limit started and no room promised`, async () => {
+      const { port, gw, guestId, access, app } = await world();
+      const open = await openAll(port);
+      // All unused for GUEST_ROOM_EVERY_MS (phones that slept): room can always be made from them.
+      laterOn(GUEST_ROOM_EVERY_MS + 1000);
+      gw.holdFor = guestId;
+      const limits = connectLimits();
+      const warn = vi.spyOn(app.log, 'warn');
+      const knocks = [];
+      for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+        knocks.push(await knock(port));
+        expect(await until(() => gw.held.length === i + 1)).toBe(true);
+      }
+      // Each was promised one of the eight as its room: those count as gone, the ones connecting in their place.
+      expect(access.openGuests('a1', GUEST, 'connecting')).toBe(MAX_GUEST_CONSOLES);
+      expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+      expect(limits()).toBe(MAX_GUEST_CONSOLES);
+      expect(doorLog(warn)).toEqual([]);
+      const extra = await knock(port);
+      expect(await until(() => extra.gone)).toBe(true);
+      expect(extra.got.length).toBe(0);
+      expect(gw.held).toHaveLength(MAX_GUEST_CONSOLES); // it never reached the agent
+      expect(limits()).toBe(MAX_GUEST_CONSOLES); // nor started a time limit
+      // Refused for the ones connecting, not for want of room (there is none left to promise, which would say "too many").
+      expect(doorLog(warn)).toEqual([[{ agent: 'a1', userId: GUEST }, 'console.guest_too_many_connecting']]);
+      // It promised nothing: as the eight connect, each closes the one promised to it, and no more is closed.
+      gw.letIn();
+      expect(await until(() => open.every((c) => c.isClosed()))).toBe(true);
+      expect(await until(() => access.openGuests('a1', GUEST, 'connecting') === 0)).toBe(true);
+      expect(knocks.filter((k) => k.gone)).toEqual([]);
+      expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+      expect(doorLog(warn).slice(1)).toEqual(Array(MAX_GUEST_CONSOLES).fill([{ agent: 'a1', userId: GUEST }, 'console.guest_oldest_closed']));
+    });
+
+    it(`with all ${MAX_GUEST_CONSOLES} chats in use, one more is refused at the door as too many, logged with why, with no time limit started, and never reaches the agent`, async () => {
+      const { port, gw, guestId, access, app } = await world();
+      const open = await openAll(port);
+      const guestUpgrades = () => gw.upgrades.filter((u) => u.headers['x-hatchabot-user'] === guestId).length;
+      const before = guestUpgrades();
+      const limits = connectLimits();
+      const warn = vi.spyOn(app.log, 'warn');
+      const extra = await knock(port);
+      expect(await until(() => extra.gone)).toBe(true);
+      expect(extra.got.length).toBe(0);
+      expect(guestUpgrades()).toBe(before);
+      expect(limits()).toBe(0);
+      expect(doorLog(warn)).toEqual([[{ agent: 'a1', userId: GUEST, why: `you have ${MAX_GUEST_CONSOLES} chats open; close one` }, 'console.guest_too_many']]);
+      await new Promise((r) => realSetTimeout(r, 100));
+      expect(open.filter((c) => c.isClosed())).toEqual([]);
+      expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+      expect(access.openGuests('a1', GUEST, 'connecting')).toBe(0);
+    });
+
+    it('the time to connect runs from the door until the agent answers: one that connects in time is not closed by it; one that does not is closed at it, logged, and stops counting', async () => {
+      const { port, gw, guestId, access, app } = await world();
+      const limits = connectLimits(300);
+      const warn = vi.spyOn(app.log, 'warn');
+      const quick = openConsole(port, GUEST);
+      expect((await quick.ready)?.ok).toBe(true);
+      expect(limits()).toBe(1);
+      await new Promise((r) => realSetTimeout(r, 700));
+      expect(quick.isClosed()).toBe(false);
+      expect(doorLog(warn)).toEqual([]);
+      gw.holdFor = guestId;
+      const slow = await knock(port);
+      expect(await until(() => gw.held.length === 1)).toBe(true);
+      expect(limits()).toBe(2);
+      expect(access.openGuests('a1', GUEST, 'connecting')).toBe(1);
+      expect(await until(() => slow.gone)).toBe(true);
+      expect(slow.got.length).toBe(0);
+      expect(doorLog(warn)).toEqual([[{ agent: 'a1', userId: GUEST }, 'console.guest_connect_timeout']]);
+      expect(await until(() => access.openGuests('a1', GUEST) === 1)).toBe(true);
+      expect(access.openGuests('a1', GUEST, 'connecting')).toBe(0);
+      expect(quick.isClosed()).toBe(false);
+      expect((await quick.call('still', 'chat.history'))?.ok).toBe(true);
+    });
+
+    it('a chat was last used when it was let in, until it is used: the time it spent connecting counts as unused, so one that never sends is the one closed for room', async () => {
+      const { port, gw, guestId, access } = await world();
+      const open = await openAll(port, MAX_GUEST_CONSOLES - 1);
+      gw.holdFor = guestId;
+      const silent = await knock(port);
+      expect(await until(() => gw.held.length === 1)).toBe(true);
+      // It takes GUEST_IDLE_TO_CLOSE_MS and more to connect; meanwhile the others are used.
+      laterOn();
+      for (const [i, c] of open.entries()) expect((await c.call(`use-${i}`, 'chat.history'))?.ok).toBe(true);
+      gw.holdFor = undefined;
+      gw.letIn();
+      expect(await until(() => silent.got.toString('latin1').includes('connect.challenge'))).toBe(true);
+      expect(access.openGuests('a1', GUEST, 'connecting')).toBe(0);
+      expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+      // Unused since the door, so the least recently active: one more closes it, not one in use.
+      const ninth = openConsole(port, GUEST);
+      expect((await ninth.ready)?.ok).toBe(true);
+      expect(await until(() => silent.gone)).toBe(true);
+      expect(open.filter((c) => c.isClosed())).toEqual([]);
+      expect(access.openGuests('a1', GUEST)).toBe(MAX_GUEST_CONSOLES);
+    });
+
+    it("the door looks at each of the guest's open chats once, and at nobody else's", async () => {
+      const { port, access } = await world();
+      const long = performance.now() - GUEST_ROOM_EVERY_MS - 1000;
+      const looks = new Map<string, number>();
+      const evicted: string[] = [];
+      for (let i = 0; i < MAX_GUEST_CONSOLES; i++) {
+        const name = `tab-${i}`;
+        looks.set(name, 0);
+        access.trackGuest('a1', GUEST, () => {}, {
+          connecting: () => { looks.set(name, looks.get(name)! + 1); return false; },
+          lastActive: () => long + i,
+          evict: () => evicted.push(name),
+        });
+      }
+      let others = 0;
+      access.trackGuest('a1', OTHER, () => {}, { connecting: () => { others++; return false; }, lastActive: () => { others++; return long; } });
+      const c = openConsole(port, GUEST);
+      expect((await c.ready)?.ok).toBe(true);
+      // Room was made from the least recently active, as before…
+      expect(evicted).toEqual(['tab-0']);
+      // …by asking each of theirs whether it is still connecting once, in one pass (three passes asked it twice).
+      expect([...looks.values()]).toEqual(Array(MAX_GUEST_CONSOLES).fill(1));
+      expect(others).toBe(0);
+    });
   });
 });
 

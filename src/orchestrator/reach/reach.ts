@@ -14,7 +14,7 @@ import { createTailscaleSetup, type TailscaleSetup, type TailscaleSetupDeps } fr
  *    masked at the public address (`publicConfigView`).
  *
  * Public access itself (Funnel, the gate, the safeguards) is not here: it is
- * src/api/publicAccess.ts and src/api/reachRoutes.ts. Built once per process
+ * src/api/publicAccess.ts and src/api/machine/reachRoutes.ts. Built once per process
  * (`registerRoutes` in src/api/routes.ts) and on the shared context
  * (`ctx.reach`); every feature that makes a link reads `address`. Nothing
  * here knows about HTTP. `stop()` ends the probe's timers.

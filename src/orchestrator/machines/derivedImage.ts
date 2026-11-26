@@ -363,53 +363,93 @@ export function dockerfileProblem(snippet: string): string | null {
   // A parser directive (`# escape=`, `# syntax=`) changes how everything
   // below is read — the escape character itself — so none is allowed.
   if (/^\s*#\s*(escape|syntax|check)\s*=/im.test(snippet)) return 'Parser directives (# escape=, # syntax=) are not allowed in a derived image.';
-  const unjoined = snippet
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .filter((l) => !/^\s*#/.test(l))
-    .join('\n');
+  // The lines with comment lines out, and each one's line number.
+  const lines: string[] = [];
+  const lineNo: number[] = [];
+  for (const [n, l] of physical.entries()) if (!/^\s*#/.test(l)) { lines.push(l); lineNo.push(n + 1); }
   // BuildKit joins a continued line with NOTHING: `RUN --net\` + `work=host`
   // is `--network=host`, and `FR\` + `OM x` is FROM. Joined with a space,
   // those passed (night review, 2026-09-28). Judge both joinings, and blank
   // lines inside a continuation vanish as BuildKit drops them.
-  const joinedTight = unjoined.replace(/\\[ \t]*\n(?:[ \t]*\n)*/g, '');
-  const joinedSpaced = unjoined.replace(/\\[ \t]*\n(?:[ \t]*\n)*/g, ' ');
-  const logical = `${joinedTight}\n${joinedSpaced}`;
-  for (const raw of logical.split('\n')) {
-    const line = raw.trim();
-    if (/^FROM\b/i.test(line)) return 'A derived image cannot contain its own FROM — the base field sets it.';
-    // The flag's whole name: `\b` also stopped at a `-`, so a command's own
-    // `--network-timeout` or `--mount-point` was refused as RUN's flag.
-    if (/--mount(?![\w-])/i.test(line)) return 'RUN --mount is not allowed in a derived image.';
-    if (/--network(?![\w-])/i.test(line)) return 'RUN --network is not allowed in a derived image.';
-    // And as RUN's own flags, their quotes and escapes out: `--net"work"=host` is that flag (HB-1291 review).
-    const flags = runFlags(line);
-    if (flags.some((f) => /^--mount(=|$)/i.test(f))) return 'RUN --mount is not allowed in a derived image.';
-    if (flags.some((f) => /^--network(=|$)/i.test(f))) return 'RUN --network is not allowed in a derived image.';
-    // --security=insecure runs the line without the build's sandbox (as
-    // `docker run --privileged` does), and --device gives it a device of this
-    // machine; both are stable Dockerfile syntax (1.20, 1.27). BuildKit runs
-    // them only with an entitlement the daemon allows and the build asks for
-    // (--allow), and no build here asks; but Docker's daemon allows `device`
-    // unless told not to, and a device whose CDI spec lets it in needs no
-    // asking (HB-1291). Only RUN's own flags, read as BuildKit reads them
-    // (runFlags): `--sec"urity"=insecure` is that flag, and the command's
-    // `--device cpu` or `--security` is not (HB-1291 review).
-    if (flags.some((f) => /^--security(=|$)/i.test(f))) return 'RUN --security is not allowed in a derived image.';
-    if (flags.some((f) => /^--device(=|$)/i.test(f))) return 'RUN --device is not allowed in a derived image.';
-    if (/^USER\b/i.test(line)) return 'USER is managed for you (root during your lines, node at the end).';
-    // Hatchabot's own labels say what the image was built from, and a base's
-    // are read to match it on another machine (HB-0986): lines that plainly
-    // set them are told so here. Quotes and escapes come out of a key first
-    // (`o"rg".hatchabot…`). One named from a variable, or hidden, is found in
-    // the image built (labelProblem), so a variable in the owner's own label
-    // (`LABEL v=${VER}`) is theirs (HB-0986 review). So are the ones its
-    // agents' containers carry (hatchabot.console-port, .agent, .role), as a
-    // key (`hatchabot.x=` or `LABEL hatchabot.x y`): a container takes its
-    // image's labels, and the status reads them (HB-0986 review).
-    const keys = line.replace(/["'\\]/g, '');
-    if (/^(ONBUILD\s+)?LABEL\b/i.test(line) && (/org\.(hatchabot|agentclaw)\./i.test(keys) || /(^|\s)hatchabot\.[^\s=]*=/i.test(keys) || /^(ONBUILD\s+)?LABEL\s+hatchabot\./i.test(keys))) {
-      return "A derived image cannot set Hatchabot's own labels (org.hatchabot.…, hatchabot.…): they say what its base was built from, and what its agents' containers are.";
+  const each = joinEachLine(lines);
+  // How this reads the lines: where each instruction starts, and which lines
+  // are a heredoc's text. It decides only which USER lines are text, and the
+  // rules that keep this reading plain (a line ending in \\, a heredoc's
+  // name): nothing below that keeps the image on its base depends on it.
+  const instructions = joinInstructions(each);
+  const starts = new Set(instructions.map((ins) => ins.start));
+  const text = heredocText(lines, instructions);
+  // A line that ends with \\ does not go on for BuildKit, whose continuation
+  // needs its last \ not to follow another (CONTINUED): refused, so that
+  // every instruction that goes on ends with one \. Not in a heredoc's text,
+  // whose lines docker never joins.
+  const doubled = lines.findIndex((l, i) => !text.has(i) && /\\\\[ \t]*$/.test(l));
+  if (doubled >= 0) return `Line ${lineNo[doubled]} ends with \\\\: docker reads that as an escaped \\, not as a line that goes on. End it with one \\ to go on to the next line, or with none.`;
+  // Every line is judged as the start of an instruction, joined from there
+  // as BuildKit would join it, whatever this reading of the lines takes it
+  // for (HB-1032 review). Docker starts each instruction at a line's start,
+  // so no misreading of a heredoc or of a continuation, in any BuildKit
+  // version, can hide an instruction from these rules: four rounds of review
+  // found a line this reading took for a heredoc's text, or for part of the
+  // line above, that docker read as an instruction (a FROM, which starts a
+  // stage on any image whose ONBUILD lines run with RUN flags nothing here
+  // reads, before any check of the image built). The rules judged so: FROM;
+  // --mount and --network anywhere on the line; RUN's own flags --mount,
+  // --network, --security and --device (an ONBUILD RUN's too); and
+  // Hatchabot's own labels. The plain-text and parser-directive rules above
+  // are judged on every line already. A line refused so that this reading
+  // takes for a heredoc's text or part of an instruction is told that every
+  // line is judged so, and how to write it. The cost: such a line that
+  // begins as an instruction would (`from os import path` in a script a RUN
+  // writes, or `RUN echo a\` then `FROM …`, one line to BuildKit) is refused.
+  // Only USER is judged where this reading starts an instruction outside a
+  // heredoc: a script a RUN writes may set `USER=…` (HB-1032). A USER that
+  // docker reads as an instruction where it is taken for text here only
+  // changes who the lines after it run as, never more than root, which they
+  // run as already; the image built must run as node (useBuiltImage).
+  for (let i = 0; i < lines.length; i++) {
+    const reads = starts.has(i) && !text.has(i);
+    const why = (rule: string) => (reads ? rule : `${rule} Hatchabot judges every line as if an instruction began on it, since its reading of heredocs and of lines that go on may not be docker's. Write line ${lineNo[i]} another way, such as joined to the line before it, or have a RUN write that file's line with printf.`);
+    for (const joined of [each[i]!.tight, each[i]!.spaced]) {
+      const line = joined.trim();
+      if (/^FROM\b/i.test(line)) return why('A derived image cannot contain its own FROM — the base field sets it.');
+      // The flag's whole name: `\b` also stopped at a `-`, so a command's own
+      // `--network-timeout` or `--mount-point` was refused as RUN's flag.
+      // Anywhere on the line, so on the line an instruction starts on: one
+      // that goes on is a part of it.
+      if (starts.has(i) && /--mount(?![\w-])/i.test(line)) return why('RUN --mount is not allowed in a derived image.');
+      if (starts.has(i) && /--network(?![\w-])/i.test(line)) return why('RUN --network is not allowed in a derived image.');
+      // And as RUN's own flags, their quotes and escapes out: `--net"work"=host` is that flag (HB-1291 review).
+      const flags = runFlags(line);
+      if (flags.some((f) => /^--mount(=|$)/i.test(f))) return why('RUN --mount is not allowed in a derived image.');
+      if (flags.some((f) => /^--network(=|$)/i.test(f))) return why('RUN --network is not allowed in a derived image.');
+      // --security=insecure runs the line without the build's sandbox (as
+      // `docker run --privileged` does), and --device gives it a device of this
+      // machine; both are stable Dockerfile syntax (1.20, 1.27). BuildKit runs
+      // them only with an entitlement the daemon allows and the build asks for
+      // (--allow), and no build here asks; but Docker's daemon allows `device`
+      // unless told not to, and a device whose CDI spec lets it in needs no
+      // asking (HB-1291). Only RUN's own flags, read as BuildKit reads them
+      // (runFlags): `--sec"urity"=insecure` is that flag, and the command's
+      // `--device cpu` or `--security` is not (HB-1291 review).
+      if (flags.some((f) => /^--security(=|$)/i.test(f))) return why('RUN --security is not allowed in a derived image.');
+      if (flags.some((f) => /^--device(=|$)/i.test(f))) return why('RUN --device is not allowed in a derived image.');
+      if (reads && /^USER\b/i.test(line)) return 'USER is managed for you (root during your lines, node at the end).';
+      // Hatchabot's own labels say what the image was built from, and a base's
+      // are read to match it on another machine (HB-0986): lines that plainly
+      // set them are told so here. Quotes and escapes come out of a key first
+      // (`o"rg".hatchabot…`). One named from a variable, or hidden, is found in
+      // the image built (labelProblem), so a variable in the owner's own label
+      // (`LABEL v=${VER}`) is theirs (HB-0986 review). So are the ones its
+      // agents' containers carry (hatchabot.console-port, .agent, .role), as a
+      // key (`hatchabot.x=` or `LABEL hatchabot.x y`): a container takes its
+      // image's labels, and the status reads them (HB-0986 review).
+      if (/^(ONBUILD\s+)?LABEL\b/i.test(line)) {
+        const keys = line.replace(/["'\\]/g, '');
+        if (/org\.(hatchabot|agentclaw)\./i.test(keys) || /(^|\s)hatchabot\.[^\s=]*=/i.test(keys) || /^(ONBUILD\s+)?LABEL\s+hatchabot\./i.test(keys)) {
+          return why("A derived image cannot set Hatchabot's own labels (org.hatchabot.…, hatchabot.…): they say what its base was built from, and what its agents' containers are.");
+        }
+      }
     }
   }
   // The USER node appended after the snippet must stay an instruction of its
@@ -417,52 +457,179 @@ export function dockerfileProblem(snippet: string): string | null {
   // between are dropped first), so `RUN echo installed \` swallowed it and
   // the image stayed root (B002); an unterminated heredoc (`RUN <<EOF` with
   // no EOF line) would take it in as text the same way.
-  if (/\\\s*$/.test(unjoined)) return 'The last line ends with a \\ that continues it into nothing — finish that instruction.';
-  const lines = unjoined.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    // A line that starts an instruction is read from an unquoted start, so a
-    // `<<` inside its quotes is text, as BuildKit reads it: `RUN echo "a
-    // <<EOF"` was refused as an open heredoc (review, 2026-10-22). A line
-    // continuing another (`\` before it, blank lines between) may start
-    // inside a quote, so every `<<` on it still counts.
-    let prev = i - 1;
-    while (prev >= 0 && !lines[prev]!.trim()) prev--;
-    const fresh = prev < 0 || !/\\\s*$/.test(lines[prev]!);
-    const quoted = fresh ? quotedSpans(lines[i]!) : [];
-    for (const hit of lines[i]!.matchAll(/(?<!<)<<(?!<)(-?)\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?/g)) {
-      const [, dash, word] = hit;
-      if (quoted.some(([a, b]) => hit.index! > a && hit.index! < b)) continue;
-      const closed = lines.slice(i + 1).some((l) => (dash ? l.replace(/^\t+/, '') : l) === word);
-      if (!closed) return `The heredoc <<${word} is never closed by a line "${word}".`;
+  const last = [...lines].reverse().find((l) => l.trim());
+  if (last !== undefined && CONTINUED.test(last)) return 'The last line ends with a \\ that continues it into nothing — finish that instruction.';
+  // The heredocs each instruction opens, as this reads them (not a
+  // heredoc's text, whose lines docker never reads for one), joined as
+  // BuildKit joins it: a `<<` split over a continued line (`RUN cat <\` then
+  // `<'CMD\'`) is one there (HB-1032 review).
+  for (const ins of instructions) {
+    if (text.has(ins.start)) continue;
+    for (const { dash, word, plain, written } of heredocsOn(ins.tight)) {
+      // A name is a plain word, so this reading closes it where BuildKit
+      // does. BuildKit names a heredoc by the whole word after `<<`, its
+      // quotes and escapes taken out: `<<'CMD\'` is named `CMD\`, so the
+      // line `CMD\` closes it, where a reading that took `CMD` joined that
+      // line to the next (HB-1032 review). `<<EOF;` and `<<EOF>/x` are
+      // named `EOF;` and `EOF>/x` there too.
+      if (!plain) return `The heredoc ${written} is not named with a plain word. A heredoc's name must be a plain word such as EOF (letters, digits and _, quoted or not: <<EOF, <<'EOF').`;
+      const body = (l: string) => (dash ? l.replace(/^\t+/, '') : l);
+      const close = lines.findIndex((l, n) => n > ins.end && body(l) === word);
+      if (close < 0) return `The heredoc <<${word} is never closed by a line "${word}".`;
+      // Nor a line that is its name with a \ after it. It is text to
+      // BuildKit, which ends a heredoc only at its name alone, but the lines'
+      // joinings carry it into the line after it: refused, so where the
+      // heredoc ends is never in doubt.
+      const escaped = lines.slice(ins.end + 1, close).find((l) => new RegExp(`^${word}\\\\[ \t]*$`).test(body(l)));
+      if (escaped !== undefined) return `The heredoc <<${word} has a line "${escaped.trim()}" that ends with a \\. A heredoc ends at a line that is its name alone, ${word}, with nothing after it.`;
     }
   }
   return null;
 }
 
+/** A line that goes on to the next, as BuildKit's continuation reads it: a last \ (spaces and tabs after it aside) that does not follow another \. */
+const CONTINUED = /(?:^|[^\\])\\[ \t]*$/;
+
+interface Heredoc {
+  dash: boolean;
+  /** Its name, quotes and escapes out. */
+  word: string;
+  /** Letters, digits and _ only, its quotes closed: the only names taken. */
+  plain: boolean;
+  /** As the line has it, from its `<<`, for a refusal. */
+  written: string;
+}
+
 /**
- * The quoted stretches of one line, as [open, close] indexes, read the way
- * the shell (and BuildKit's lexer) does: no escapes inside '…', `\` escapes
- * the next character inside "…" and outside. A quote left open runs to the
- * end of the line.
+ * The heredocs BuildKit opens on an instruction, joined as BuildKit joins it
+ * (heredocsFromLine, as since v0.22): none unless it has a `<<`; else each
+ * shell word that begins with `<<` (or `<<-`), digits before it allowed,
+ * then a name with no `<` in it, after any spaces or tabs a `<<` keeps in
+ * its word (shellWords). BuildKit fills in no variable there (SkipUnsetEnv),
+ * so a word that begins with `$` opens none. So `$((1<<2))` opens none,
+ * `1 << 4` one named `4`, and `<<=` one named `=`.
  */
-function quotedSpans(line: string): Array<[number, number]> {
-  const spans: Array<[number, number]> = [];
-  let open = -1;
-  let q = '';
+function heredocsOn(instruction: string): Heredoc[] {
+  if (!instruction.includes('<<')) return [];
+  const found: Heredoc[] = [];
+  for (const w of shellWords(instruction)) {
+    const m = /^[0-9]*<<(-?)[ \t]*/.exec(w);
+    if (!m) continue;
+    const rest = w.slice(m[0].length);
+    if (!rest || rest.includes('<')) continue; // BuildKit: no name, or a < in it, is no heredoc (`<<<` among them)
+    const { name, whole } = unquoted(rest);
+    found.push({ dash: m[1] === '-', word: name, plain: whole && /^[A-Za-z0-9_]+$/.test(name), written: w.slice(w.indexOf('<<')) });
+  }
+  return found;
+}
+
+/**
+ * An instruction's shell words as BuildKit's lexer splits them for its
+ * heredocs (quotes and escapes kept): at a space or a tab outside quotes and
+ * ${…}; none inside '…'; a \ takes the character after it; a ${…} runs to
+ * its } (quotes and ${…} inside it read as well); and a `<<` keeps the
+ * spaces and tabs after it (processPossibleHeredoc, BuildKit v0.22 and
+ * later), so `<< EOF` is one word.
+ */
+function shellWords(line: string): string[] {
+  const words: string[] = [];
+  let text = '';
+  const stack: string[] = [];
   for (let i = 0; i < line.length; i++) {
-    const c = line[i]!;
-    if (q === "'") {
-      if (c === "'") { spans.push([open, i]); q = ''; }
+    const c = line[i]!, top = stack.at(-1);
+    if (top === "'") { text += c; if (c === "'") stack.pop(); continue; }
+    if (c === '\\') { text += line.slice(i, i + 2); i++; continue; }
+    if (c === '$' && line[i + 1] === '{') { stack.push('{'); text += '${'; i++; continue; }
+    if (top === '"') { text += c; if (c === '"') stack.pop(); continue; }
+    if (c === '}' && top === '{') { text += c; stack.pop(); continue; }
+    if (c === '"' || c === "'") { stack.push(c); text += c; continue; }
+    if (c === '<' && line[i + 1] === '<' && !stack.length) { const op = /^<<[ \t]*/.exec(line.slice(i))![0]; text += op; i += op.length - 1; continue; }
+    if ((c === ' ' || c === '\t') && !stack.length) { if (text) words.push(text); text = ''; continue; }
+    text += c;
+  }
+  if (text) words.push(text);
+  return words;
+}
+
+/** A heredoc's name with its quotes and escapes out, as BuildKit takes them (none inside '…'; in "…", a \ before ", $, ` or \ only); `whole` when every quote is closed. */
+function unquoted(rest: string): { name: string; whole: boolean } {
+  let name = '';
+  for (let i = 0; i < rest.length; i++) {
+    const c = rest[i]!;
+    if (c === "'") {
+      const close = rest.indexOf("'", i + 1);
+      if (close < 0) return { name, whole: false };
+      name += rest.slice(i + 1, close); i = close;
+    } else if (c === '"') {
+      let j = i + 1;
+      for (; j < rest.length && rest[j] !== '"'; j++) {
+        if (rest[j] === '\\' && j + 1 < rest.length) { name += '"$`\\'.includes(rest[j + 1]!) ? rest[j + 1]! : `\\${rest[j + 1]!}`; j++; } else name += rest[j]!;
+      }
+      if (j >= rest.length) return { name, whole: false };
+      i = j;
     } else if (c === '\\') {
-      i++;
-    } else if (q === '"') {
-      if (c === '"') { spans.push([open, i]); q = ''; }
-    } else if (c === '"' || c === "'") {
-      q = c; open = i;
+      if (i + 1 >= rest.length) return { name: name + c, whole: false };
+      name += rest[++i]!;
+    } else name += c;
+  }
+  return { name, whole: true };
+}
+
+/**
+ * Each line (comment lines out) joined forward as BuildKit joins an
+ * instruction that starts on it: while a line goes on (CONTINUED), its \ out
+ * and the next line after it, blank lines between dropped. Joined with
+ * nothing (`tight`, BuildKit's) and with a space (`spaced`); `end`: the last
+ * line taken. Built from the last line back, so each line's is its own part
+ * and the next one's.
+ */
+function joinEachLine(lines: readonly string[]): Array<{ end: number; tight: string; spaced: string }> {
+  const out: Array<{ end: number; tight: string; spaced: string }> = new Array(lines.length);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]!;
+    if (!CONTINUED.test(l)) { out[i] = { end: i, tight: l, spaced: l }; continue; }
+    const part = l.replace(/\\[ \t]*$/, '');
+    let j = i + 1;
+    while (j < lines.length && /^[ \t]*$/.test(lines[j]!)) j++; // a blank line inside a continuation, dropped as BuildKit drops it
+    out[i] = j < lines.length ? { end: out[j]!.end, tight: part + out[j]!.tight, spaced: `${part} ${out[j]!.spaced}` } : { end: lines.length - 1, tight: part, spaced: part };
+  }
+  return out;
+}
+
+/** The instructions as this reads the lines: one starts on the first line, and each on the line after the last the one before it takes (joinEachLine). */
+function joinInstructions(each: ReturnType<typeof joinEachLine>): Array<{ start: number; end: number; tight: string; spaced: string }> {
+  const out: Array<{ start: number; end: number; tight: string; spaced: string }> = [];
+  for (let i = 0; i < each.length; i = each[i]!.end + 1) out.push({ start: i, ...each[i]! });
+  return out;
+}
+
+/**
+ * The lines (comment lines out) that are a heredoc's text, as this reads
+ * them: after a RUN, COPY or ADD (or an ONBUILD of one) that opens heredocs
+ * (heredocsOn), each one's text up to the line that closes it, in turn. Not
+ * the closing lines. A heredoc never closed takes nothing: the lines are
+ * refused for it. On these lines a USER is not judged (HB-1032), nor the
+ * rules that keep this reading plain; docker may read one as an
+ * instruction, so FROM and the rules that keep the image on its base are
+ * judged on every line, these too (dockerfileProblem).
+ */
+function heredocText(lines: readonly string[], instructions: ReturnType<typeof joinInstructions>): Set<number> {
+  const text = new Set<number>();
+  let next = 0; // the first line no heredoc has taken yet
+  for (const ins of instructions) {
+    if (ins.start < next) continue; // a heredoc's text, as this reads it
+    next = ins.end + 1;
+    if (!/^[ \t]*(ONBUILD[ \t]+)?(RUN|COPY|ADD)([ \t]|$)/i.test(ins.tight)) continue;
+    for (const { dash, word, plain } of heredocsOn(ins.tight)) {
+      if (!plain) return text; // refused, so its text is no matter
+      let close = next;
+      while (close < lines.length && (dash ? lines[close]!.replace(/^\t+/, '') : lines[close]) !== word) close++;
+      if (close >= lines.length) return text;
+      for (let t = next; t < close; t++) text.add(t);
+      next = close + 1;
     }
   }
-  if (q) spans.push([open, line.length]);
-  return spans;
+  return text;
 }
 
 /** The base's packages (an imported image's, HB-0986) go on first, as root, then the owner's lines. */

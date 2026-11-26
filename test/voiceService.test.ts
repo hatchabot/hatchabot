@@ -12,7 +12,7 @@ vi.mock('../src/orchestrator/voice/voice.js', async (importOriginal) => ({
 }));
 
 /**
- * The voice service (HB-0808 step 13), driven as src/api/voiceRoutes.ts
+ * The voice service (HB-0808 step 13), driven as src/api/console/voiceRoutes.ts
  * drives it but with no HTTP server: a real store on an in-memory database,
  * and the runtime's reads and writes stubbed.
  */

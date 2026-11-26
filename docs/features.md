@@ -129,7 +129,12 @@ The header holds:
 - **Alerts** collects what needs you: changes your manager prepared
   (Confirm / Cancel; its cost and model changes are items under Usage →
   Recommended since v2.158.0), the ones that were confirmed and then *failed*, with the
-  reason, and **people knocking** — an *expected* join request (strangers
+  reason (one that a restart of Hatchabot cut off says *Interrupted*: check
+  whether it happened, and if not press **File it again**, which files the
+  same change as a new card for you to confirm, here or, for a cost or model
+  change, under Usage → Recommended, saying that what it says is as of when
+  it was first filed; nothing is tried again by
+  itself, and your manager is told of it when Hatchabot starts), and **people knocking** — an *expected* join request (strangers
   never get this far; see *Members & invites*) with **Let them in**,
   **That's me** and **Not now**, which is where someone is admitted now that
   the Telegram management bot is retired.
@@ -1510,6 +1515,12 @@ To let someone in, tap **Invite…** in the agent's Sharing tab:
   agent's memory is shared, the join page tells them so before they accept.
 - **Several apps?** The join page asks which one they'll use (Telegram,
   Slack or Discord) and gives them that app's link.
+- **Already signed in here?** The join page offers **Join as …** beside
+  **Join with … only**. Only **Join as …** makes the seat their account's,
+  so the agent is on their home screen and web chat can be given to them;
+  the app only never takes the account, so a shared computer binds nobody
+  by accident. Someone with a password account who isn't signed in signs in
+  first, then opens the link again. Its owner is never offered it.
 - **Off your network?** Send the agent's Telegram link (or the QR code)
   instead. Copying or sharing it from the dialog holds the door open for 30
   minutes: when they message it in that time, a "wants to talk" card appears
@@ -1900,8 +1911,11 @@ existing swap file (or makes a `/swapfile` if there is none), now and at every
 boot through a small unit (`hatchabot-compressed-swap.service`) — no reboot,
 no boot-loader edit. It sets `vm.swappiness` only if you say yes. `--zram`
 uses zram instead (on Ubuntu cloud images it needs
-`linux-modules-extra-$(uname -r)`; the script says so); `--status` shows the
-state and the compression ratio; `--undo` puts it all back.
+`linux-modules-extra-$(uname -r)`; the script says so). zram turns zswap off,
+so `--zram` is refused while a disk swap is on: use zswap in front of it, or
+turn the disk swap and its `/etc/fstab` line off first. `--status` shows the
+state and the compression ratio; `--undo` puts it all back. When the check at
+the end finds no compressed swap after all, the script says so and exits 1.
 
 **What it does for an idle agent** (measured 2026-10-01 on four idle OpenClaw
 gateways, and 2026-10-02 on an Ubuntu 24.04 VM with the script):
@@ -2028,8 +2042,10 @@ Before a candidate goes near a real agent, the host can run the **candidate
 gate** — `scripts/candidate-gate.sh <tag>` — which builds a throwaway agent
 on it and checks everything Hatchabot relies on in OpenClaw (config accepted,
 memory search indexes and answers, the CLI's JSON, the files it reads, the
-console loaded through the proxy as a browser would, one model turn), then
-deletes the agent. See docs/releasing.md. `hatchabot console <agent> --check`
+console loaded through the proxy as a browser would, one model turn, and one
+practice turn, whose transcript must be where Practice reads it and counted
+once before Practice may run on that OpenClaw), then deletes the agent. See
+docs/releasing.md. `hatchabot console <agent> --check`
 runs the console check alone on any agent.
 
 **Without its own memory search engine.** The build drawer's tick box (or
@@ -2160,8 +2176,11 @@ tenant on one machine: see [docs/shared-host.md](shared-host.md) for the
 recipe (host loopback on, the 10.0.2.2 host alias, the per-user firewall
 rule that keeps tenants apart, memory limits). Two rules follow from every
 container of a rootless daemon reaching Hatchabot from 127.0.0.1: loopback is
-not "this machine" there (the first account needs the setup code, a
-forwarded-for header is not trusted; `HATCHABOT_CONTAINERS_ON_LOOPBACK=1`
+not "this machine" there (the first account needs the setup code, and a
+forwarded-for header is read only on the listener for `tailscale serve`, and
+there only from another user's program: a container reaches that port
+through its tenant's own user and is counted as itself, while another
+tenant's processes are kept off it by the tenant's firewall rule; `HATCHABOT_CONTAINERS_ON_LOOPBACK=1`
 says so explicitly, and it is detected at boot), and the manager's doorman
 opens every connection to the door with its own per-build key, so a
 manager's key alone opens nothing from another container.
@@ -2685,10 +2704,17 @@ getting them right by hand is expert work. The tab lists every derived image in
 one table (state, contents, what pins it) with Rebuild, Log and Delete. Your
 lines run as **root** (the base ends as `USER node`), then the image restores
 `USER node`, the runtime contract the volume (uid 1000) and Claude Code depend
-on; you never write your own `FROM`/`USER`. A build whose image would not run
+on; you never write your own `FROM`/`USER` (a heredoc's text may say `USER`:
+a script's `USER=…` is the script's). Every line is judged as an instruction,
+since docker could read it as one: a line that begins with `FROM`, with a
+`RUN` whose flags are not allowed (such as `--device`), or with a `LABEL` of
+Hatchabot's own is refused even in a heredoc's text or in a line that goes
+on. A heredoc's name is a
+plain word such as `EOF` (letters, digits and `_`, quoted or not), and a line
+that goes on to the next ends with one `\`, never two. A build whose image would not run
 as `node` (a line that hides that last `USER node`), or is not built on its
-base (a `FROM` hidden in the lines), fails, saying so, and the image agents run
-on is left as it was. The image is tagged
+base (a `FROM` hidden in the lines), fails, saying so, and the image agents
+run on is left as it was. The image is tagged
 `hatchabot-runtime:derived-<name>`; the Dockerfile is kept so **Rebuild**
 reruns it against a promoted base after a fleet upgrade. Delete is refused while
 an agent still pins it. From the CLI:

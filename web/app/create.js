@@ -572,6 +572,15 @@ async function doAdopt({ path, name, reuse, web, token, bot, onStatus }) {
   }
 }
 
+/** Adopt's scheduled tasks that did not come across, said: unread ones read as none (review of 2026-10-22). */
+function adoptTasksMissed(c) {
+  if (!c) return '';
+  const parts = [];
+  if (c.failed) parts.push(`${c.failed} scheduled task${c.failed > 1 ? 's' : ''} could not be carried`);
+  if (c.error) parts.push(`its scheduled tasks were not all read: ${c.error}`);
+  return parts.length ? ` · ${parts.join('; ')}.` : '';
+}
+
 // After adopting, an agent may reference data folders that live outside its
 // workspace — invisible inside the container. Detect them and offer to share
 // them read-only, bound at their original path so existing references resolve.

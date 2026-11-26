@@ -155,6 +155,67 @@ describe("a recipe's build is used only once it runs as node, on its base (HB-10
     refused(m);
   });
 
+  // A USER in a heredoc's text passes the lines' check (HB-1032); whatever
+  // docker makes of it, the image built must run as node, for a move's or an
+  // import's build as for one here.
+  it("a USER in a heredoc's text passes the lines' check, and an image built that runs as root is not used (HB-1032)", async () => {
+    const derived = { tag: 'hatchabot-runtime:derived-media', base: V, packages: [], channels: [], lines: 'RUN cat <<EOF\nUSER root\nEOF' };
+    expect(recipeProblem(derived)).toBeNull();
+    const m = machine();
+    m.buildRunsAs = 'root';
+    expect(await buildRecipeOn(m, derived)).toEqual({ ok: false, problem: `the rebuild failed: The built image would run as root, not node: ${NODE_WORDS}`, refused: true });
+    expect(m.tagged).toEqual([]);
+    expect(m.tags.map((t) => t.tag)).toEqual(['hatchabot-runtime:latest', V]);
+  });
+
+  // A FROM there is refused, in a file's recipe as in lines typed here, and
+  // nothing is built: a stage it starts runs its image's ONBUILD lines in
+  // the build, before the image built can be looked at (review of HB-1032).
+  it.each([
+    'RUN echo a<<EOF\nFROM other.example/fixture AS \\\nEOF\nRUN true',
+    'RUN echo a<<EOF\nFROM registry.example/onbuild-fixture AS stage\nFROM hatchabot-runtime:latest\nCOPY --from=stage / /opt/x\nRUN cat <<"EOF"\nEOF',
+  ])("a FROM that the lines' reading would take for a heredoc's text is refused, and nothing is built: %j", async (lines) => {
+    await refusedBeforeBuilding(lines, 'A derived image cannot contain its own FROM — the base field sets it.');
+  });
+
+  // Every line is judged as an instruction's start, whatever the lines'
+  // reading takes it for, in a file's recipe as in lines typed here: a FROM
+  // or a RUN --device after a heredoc's closing line that the reading joined
+  // to it (BuildKit names `<<'CMD\'` and `<<"CMD\\"` `CMD\`), with the `<<`
+  // split over a continued line, with spaces or a tab after it (BuildKit
+  // 0.22 and later), in an ONBUILD RUN; and a line ending in \\, which goes
+  // on for no one (HB-1032 review).
+  const DOUBLED = 'Line 1 ends with \\\\: docker reads that as an escaped \\, not as a line that goes on. End it with one \\ to go on to the next line, or with none.';
+  const JUDGED = (why: string, n: number) => `${why} Hatchabot judges every line as if an instruction began on it, since its reading of heredocs and of lines that go on may not be docker's. Write line ${n} another way, such as joined to the line before it, or have a RUN write that file's line with printf.`;
+  const OWN_FROM = 'A derived image cannot contain its own FROM — the base field sets it.';
+  it.each([
+    ["RUN cat <<'CMD\\' >/dev/null\nCMD\\\nFROM registry.example/onbuild-fixture AS stage\nCMD\nRUN cat <<'CMD\\' >/dev/null\nCMD\\\nFROM hatchabot-runtime:latest\nCMD\nCOPY --from=stage / /opt/x", JUDGED(OWN_FROM, 3)],
+    ['RUN cat <<"CMD\\\\" >/dev/null\nCMD\\\nFROM registry.example/onbuild-fixture AS stage\nCMD\nRUN cat <<"CMD\\\\" >/dev/null\nCMD\\\nFROM hatchabot-runtime:latest\nCMD\nCOPY --from=stage / /opt/x', JUDGED(OWN_FROM, 3)],
+    ["RUN cat <\\\n<'CMD\\' >/dev/null\nCMD\\\nFROM registry.example/onbuild-fixture AS stage\nCMD\nRUN cat <\\\n<'CMD\\' >/dev/null\nCMD\\\nFROM hatchabot-runtime:latest\nCMD\nCOPY --from=stage / /opt/x", JUDGED(OWN_FROM, 4)],
+    ["RUN cat <\\\n# a note\n<-\"CMD\\\\\" >/dev/null\nCMD\\\nFROM registry.example/onbuild-fixture AS stage\nCMD", JUDGED(OWN_FROM, 5)],
+    ["RUN cat << 'CMD\\' >/dev/null\nCMD\\\nFROM registry.example/onbuild-fixture AS stage\nCMD", JUDGED(OWN_FROM, 3)],
+    ["RUN cat <<\t'CMD\\' >/dev/null\nCMD\\\nRUN --device=vendor.example/gpu=all true\nCMD", JUDGED('RUN --device is not allowed in a derived image.', 3)],
+    ["ONBUILD RUN cat << 'CMD\\' >/dev/null\nCMD\\\nFROM registry.example/onbuild-fixture AS stage\nCMD", JUDGED(OWN_FROM, 3)],
+    // A line ending in \\ goes on for no one: what follows it is an instruction.
+    ['RUN echo a\\\\\nFROM registry.example/onbuild-fixture AS stage', DOUBLED],
+    ['RUN echo a\\\\\nRUN --device=vendor.example/gpu=all true', DOUBLED],
+    ['RUN echo a\\\\\nRUN --security=insecure true', DOUBLED],
+  ])("lines BuildKit reads otherwise are refused, in a file's recipe too, and nothing is built: %j", async (lines, why) => {
+    await refusedBeforeBuilding(lines, why);
+  });
+
+  /** Refused by the recipe's check and by its build, before the base is even pulled: the machine is as it was. */
+  async function refusedBeforeBuilding(lines: string, why: string) {
+    const derived = { tag: 'hatchabot-runtime:derived-media', base: V, packages: [], channels: [], lines };
+    expect(recipeProblem(derived)).toBe(why);
+    const m = machine();
+    const before = m.tags.map((t) => t.tag);
+    expect(await buildRecipeOn(m, derived)).toEqual({ ok: false, problem: why, refused: true });
+    expect(m.built).toEqual([]);
+    expect(m.tagged).toEqual([]);
+    expect(m.tags.map((t) => t.tag)).toEqual(before);
+  }
+
   it('an image that cannot be seen is not used: the check fails closed', async () => {
     const m = machine();
     const real = m.inspectImage.bind(m);

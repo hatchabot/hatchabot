@@ -8,7 +8,7 @@ import { classChangedThrice, classKey, type ClassEdit } from '../src/orchestrato
 import { keptSaid, memoryCapProblem, swapAllowanceProblem } from '../src/orchestrator/lifecycle/memoryLimits.js';
 import { machineLoginOnly, modelOverrideProblem } from '../src/orchestrator/lifecycle/modelRuntime.js';
 import { createSourceHolds } from '../src/orchestrator/lifecycle/sourceHolds.js';
-import { inQueue, sixAtATime } from '../src/util/queues.js';
+import { keyedLock, sixAtATime } from '../src/util/queues.js';
 
 /**
  * The agent settings service (HB-0807): classes, models and memory limits,
@@ -80,13 +80,13 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
 const modelsSet = (w: World) => w.provider.execLog.filter((argv) => argv[0] === 'models' && argv[1] === 'set').map((argv) => argv[2]);
 
 describe('the queue helpers (src/util/queues.ts)', () => {
-  it('inQueue runs one at a time per key, in order, and a failure does not stop the next', async () => {
-    const queues = new Map<string, Promise<unknown>>();
+  it('keyedLock runs one at a time per key, in order, and a failure does not stop the next', async () => {
+    const queues = keyedLock();
     const ran: string[] = [];
     const g = gate();
-    const first = inQueue(queues, 'a', async () => { ran.push('first starts'); await g.held; ran.push('first ends'); throw new Error('first failed'); });
-    const second = inQueue(queues, 'a', async () => { ran.push('second'); return 2; });
-    const other = inQueue(queues, 'b', async () => { ran.push('other key'); return 'b'; });
+    const first = queues.run('a', async () => { ran.push('first starts'); await g.held; ran.push('first ends'); throw new Error('first failed'); });
+    const second = queues.run('a', async () => { ran.push('second'); return 2; });
+    const other = queues.run('b', async () => { ran.push('other key'); return 'b'; });
     expect(await other).toBe('b');
     expect(ran).toEqual(['first starts', 'other key']);
     g.open();
@@ -352,6 +352,29 @@ describe('class changes', () => {
     expect(classes.writeClassEdit(edit, checks, true, ledger)).toBe(classChangedThrice);
     expect(w.store.getAgentClass('c1')?.model).toBeUndefined();
     expect(w.store.getAgent(a.id)?.model).toBeUndefined();
+  });
+
+  it('an edit tried again keeps a check that still fits, but not for a member with a rebuild under way or busy (HB-0642)', async () => {
+    const w = world(), { classes } = w.settings;
+    const a = await w.agent('a1'), b = await w.agent('a2', 'Garden'), c = await w.agent('a3', 'Pantry');
+    const cls = fast(w, {});
+    for (const id of [a.id, b.id, c.id]) w.store.setAgentClassIf(id, null, 'c1');
+    w.provider.tags.push({ tag: 'hatchabot-runtime:newer', imageId: 'newer-image', openclawVersion: '2026.9.8' });
+    const reads = new Map<string, number>();
+    const info = w.provider.info.bind(w.provider);
+    w.provider.info = async (r) => { reads.set(r ?? '', (reads.get(r ?? '') ?? 0) + 1); return info(r); };
+    const edit: ClassEdit = { cls, row: JSON.stringify(cls), name: 'Fast', image: 'hatchabot-runtime:newer', b: {} };
+    const first = await classes.checkEditMembers(edit);
+    // Nothing in their records changed since: one is being rebuilt, one is busy (a backup), one has nothing under way.
+    const rebuild = gate();
+    w.flights.set(a.id, rebuild.held);
+    markBusy(b.id); busyIds.push(b.id);
+    const second = await classes.checkEditMembers(edit, first);
+    expect(second.get(c.id)).toBe(first.get(c.id));
+    expect(second.get(a.id)).not.toBe(first.get(a.id));
+    expect(second.get(b.id)).not.toBe(first.get(b.id));
+    expect([a.ref, b.ref, c.ref].map((r) => reads.get(r))).toEqual([2, 2, 1]);
+    rebuild.open();
   });
 
   it('takes the class off an agent that drifted from it, and puts the limits that apply on its container', async () => {

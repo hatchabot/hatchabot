@@ -103,7 +103,7 @@ export function createAgentSnapshots(deps: AgentSnapshotsDeps): AgentSnapshots {
 
   // The files turn first, then the busy flag, as Apply values takes them.
   const restore: AgentSnapshots['restore'] = (agent, snapshotId, requestedBy) =>
-    (onOperation?: (id: string) => void) => withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+    (onOperation?: (id: string) => void) => withCoreFilesTurn(agent.id, () => whileBusy(agent.id, 'restore-snapshot', async () => {
       // Where it runs as it is at its turn: moved while this waited, the
       // restore wrote the snapshot to where it was (HB-0566).
       const fresh = store.getAgent(agent.id);

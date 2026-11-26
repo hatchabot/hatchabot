@@ -25,6 +25,7 @@ import { EmbedderUntouchedError, type RuntimeProvider } from '../providers/provi
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
 import { processAlive } from '../domain/processAlive.js';
+import { keyedLock } from '../util/queues.js';
 
 /** llama.cpp's server image, by digest (proven 2026-09-18 on arm64 and amd64). */
 export const EMBEDDER_IMAGE = 'ghcr.io/ggml-org/llama.cpp:server@sha256:f26a6403915b6131b903717458aeeadd2527d2a6b8bf64bc9264bc6d16a40474';
@@ -130,7 +131,7 @@ export function sha256File(path: string): Promise<string> {
  * at once removed each other's half-made copy (HB-0346). One fetch per file
  * at a time; the next finds it there and checked.
  */
-const modelTurns = new Map<string, Promise<void>>();
+const modelTurns = keyedLock();
 
 /**
  * Half-made copies of `dest` whose maker is gone: a restart during a copy
@@ -226,11 +227,7 @@ export class EmbedderService {
   /** The model file: out of the runtime image if possible, else downloaded — checked either way. */
   ensureModel(): Promise<void> {
     const dest = this.modelPath;
-    const next = (modelTurns.get(dest) ?? Promise.resolve()).then(() => this.#ensureModelNow(dest));
-    const turn = next.catch(() => {});
-    modelTurns.set(dest, turn);
-    void turn.then(() => { if (modelTurns.get(dest) === turn) modelTurns.delete(dest); });
-    return next;
+    return modelTurns.run(dest, () => this.#ensureModelNow(dest));
   }
   async #ensureModelNow(dest: string): Promise<void> {
     const want = this.#o.modelSha256 ?? EMBED_MODEL_SHA256;

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
-import { registerMgmtChat } from '../src/api/mgmtChat.js';
+import { registerMgmtChat } from '../src/api/ops/mgmtChat.js';
 import { getOpsHandlers, setOpsHandlers } from '../src/ops/opsServer.js';
 import { grantVoiceNetwork, voiceNetworkHosts, voiceNetworkReady } from '../src/orchestrator/voice/voiceNetwork.js';
 

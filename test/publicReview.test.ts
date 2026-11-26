@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { connect } from 'node:net';
 import { Jar, PUBLIC_HOST, publicApp, type PublicApp } from './helpers/publicApp.js';
-import { _loginThrottleKeys } from '../src/api/auth.js';
+import { _loginThrottleKeys } from '../src/api/signIn/auth.js';
 import { addressBucket } from '../src/api/trust.js';
 import { createInvite } from '../src/orchestrator/members/invite.js';
 import { evaluateSafeguards, failingSafeguards } from '../src/api/safeguards.js';
 import { parseFunnelStatus, targetsPort } from '../src/ops/tailnet.js';
-import { SESSION_COOKIE_NAME } from '../src/api/sessionCookie.js';
+import { SESSION_COOKIE_NAME } from '../src/api/signIn/sessionCookie.js';
 
 /**
  * What an adversarial review of the public listener found (2026-10-01), one
@@ -77,8 +77,8 @@ describe('sign-in limits cannot be used to fill memory', () => {
     expect(keys.length).toBeGreaterThanOrEqual(4);
     expect(Math.max(...keys.map((k) => k.length))).toBeLessThan(120);
     // An ordinary name is still its own readable bucket.
-    await h.pub('/v1/login', { body: { username: 'Chris', password: 'nope' } });
-    expect(_loginThrottleKeys()).toContain('pub:user:chris');
+    await h.pub('/v1/login', { body: { username: 'Robin', password: 'nope' } });
+    expect(_loginThrottleKeys()).toContain('pub:user:robin');
   }, 20_000);
 
   it('IPv6 visitors are counted by their /64, not by an address they can change at will', async () => {

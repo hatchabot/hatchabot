@@ -52,11 +52,12 @@ function addSetupField() {
     f.options = options;
   }
   editParams.push(f);
-  $('paramKey').value = ''; $('paramLabel').value = ''; $('paramDefault').value = '';
-  $('paramOptions').value = ''; $('paramRequired').checked = false;
   // The field is in the list now, which holds it until Save fields (editParamsSaved): what
   // is left in the boxes above it (a type, a target) is no edit of its own.
-  v2SheetBaseline('setupFieldsRow');
+  sheetFill(['setupFieldsRow'], () => {
+    $('paramKey').value = ''; $('paramLabel').value = ''; $('paramDefault').value = '';
+    $('paramOptions').value = ''; $('paramRequired').checked = false;
+  });
   renderParamList();
 }
 
@@ -65,18 +66,17 @@ function addSetupField() {
 function removeSetupField(i) { editParams.splice(i, 1); renderParamList(); }
 
 async function saveSetupFields() {
-  $('paramSaveBtn').disabled = true;
   $('editErr').textContent = '';
-  const forId = editAgentId, f = forAgent(forId), sent = JSON.stringify(editParams), n = editParams.length, fills = editParamsFills;
+  const f = sheetSave().hold('paramSaveBtn'), sent = JSON.stringify(editParams), n = editParams.length, fills = editParamsFills;
   try {
-    await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { parameters: n ? editParams : null } });
+    await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { parameters: n ? editParams : null } });
     // Filled again meanwhile (the sheet closed and opened, or another agent and back): the list
     // shown is that fill's, and it is the baseline; the one sent noted under it held the sheet for good.
     f.draw(() => { if (editParamsFills === fills) editParamsSaved = sent; });
     f.say(n ? `Saved ${n} setup field${n > 1 ? 's' : ''} — shared copies now ask for them` : 'Setup fields cleared');
     await refresh(false);
   } catch (e) { f.fail(e); }
-  finally { $('paramSaveBtn').disabled = false; }
+  finally { f.done(); }
 }
 
 // --- Setup VALUES (a configured template copy's current answers) -------------
@@ -85,48 +85,49 @@ async function saveSetupFields() {
 
 function renderSetupValues(a) {
   const row = $('setupValuesRow');
-  // Any RUNNING agent with declared fields is editable: imported copies carry
-  // their raw layer already, and on a master the server seeds the layer from
-  // the live files on the first Apply (so authors never need Send→Import).
-  const fileParams = (a?.parameters ?? []).filter(p => p.target !== 'env' && p.target !== 'datasource');
-  const envParams = (a?.parameters ?? []).filter(p => p.target === 'env');
-  const dsParams = (a?.parameters ?? []).filter(p => p.target === 'datasource');
-  const editable = !!(fileParams.length && a?.state === 'RUNNING');
-  row.hidden = !editable;
-  if (!editable) { v2SheetBaseline(row); return; }
-  const envNote = envParams.length
-    ? `<div class="sub">🔑 ${envParams.map(p => esc(p.key.toUpperCase())).join(', ')} — credential${envParams.length > 1 ? 's' : ''}; change under Advanced → Environment.</div>`
-    : '';
-  const dsNote = dsParams.length
-    ? `<div class="sub">📚 ${dsParams.map(p => esc(p.label || p.key)).join(', ')} — repo binding${dsParams.length > 1 ? 's' : ''}; manage under the Data tab.</div>`
-    : '';
-  $('setupValuesList').innerHTML = envNote + dsNote + fileParams.map(p => {
-    const cur = (a.paramValues ?? {})[p.key] ?? p.default ?? '';
-    const help = p.help ? `<div class="sub">${esc(p.help)}</div>` : '';
-    let input;
-    if (p.type === 'choice') {
-      // An optional choice can be cleared: a blank first option (HB-0363).
-      const pick = choiceStart(p.options ?? [], cur);
-      input = `<select id="spv-${esc(p.key)}" style="width:auto">${p.required ? '' : `<option value=""${pick === '' ? ' selected' : ''}>(none)</option>`}${(p.options ?? [])
-        .map(o => `<option value="${esc(o)}"${o === pick ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
-    } else if (p.type === 'multichoice') {
-      const picked = String(cur).split(',').map(s => s.trim());
-      input = `<div id="spv-${esc(p.key)}" style="display:flex;flex-wrap:wrap;gap:10px">${(p.options ?? [])
-        .map(o => `<label style="display:flex;gap:5px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer">
-          <input type="checkbox" data-opt="${esc(o)}"${picked.includes(o) ? ' checked' : ''} style="width:auto;flex:none"> ${esc(o)}</label>`).join('')}</div>`;
-    } else if (p.type === 'boolean') {
-      input = `<label style="display:flex;gap:6px;align-items:center;width:auto;font-weight:400;margin:0;cursor:pointer">
-        <input type="checkbox" id="spv-${esc(p.key)}" style="width:auto;flex:none"${paramYes(cur) ? ' checked' : ''}> enabled</label>`;
-    } else if (p.type === 'longtext') {
-      input = `<textarea id="spv-${esc(p.key)}" rows="2" style="flex:1;font-size:13px">${esc(cur)}</textarea>`;
-    } else {
-      input = `<input type="text" id="spv-${esc(p.key)}" value="${esc(cur)}" style="flex:1;min-width:120px">`;
-    }
-    return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <span style="min-width:180px">${esc(p.label)}${p.required ? ' *' : ''}</span>${input}
-    </div>${help}`;
-  }).join('');
-  v2SheetBaseline(row);
+  sheetFill([row], () => {
+    // Any RUNNING agent with declared fields is editable: imported copies carry
+    // their raw layer already, and on a master the server seeds the layer from
+    // the live files on the first Apply (so authors never need Send→Import).
+    const fileParams = (a?.parameters ?? []).filter(p => p.target !== 'env' && p.target !== 'datasource');
+    const envParams = (a?.parameters ?? []).filter(p => p.target === 'env');
+    const dsParams = (a?.parameters ?? []).filter(p => p.target === 'datasource');
+    const editable = !!(fileParams.length && a?.state === 'RUNNING');
+    row.hidden = !editable;
+    if (!editable) return;
+    const envNote = envParams.length
+      ? `<div class="sub">🔑 ${envParams.map(p => esc(p.key.toUpperCase())).join(', ')} — credential${envParams.length > 1 ? 's' : ''}; change under Advanced → Environment.</div>`
+      : '';
+    const dsNote = dsParams.length
+      ? `<div class="sub">📚 ${dsParams.map(p => esc(p.label || p.key)).join(', ')} — repo binding${dsParams.length > 1 ? 's' : ''}; manage under the Data tab.</div>`
+      : '';
+    $('setupValuesList').innerHTML = envNote + dsNote + fileParams.map(p => {
+      const cur = (a.paramValues ?? {})[p.key] ?? p.default ?? '';
+      const help = p.help ? `<div class="sub">${esc(p.help)}</div>` : '';
+      let input;
+      if (p.type === 'choice') {
+        // An optional choice can be cleared: a blank first option (HB-0363).
+        const pick = choiceStart(p.options ?? [], cur);
+        input = `<select id="spv-${esc(p.key)}" style="width:auto">${p.required ? '' : `<option value=""${pick === '' ? ' selected' : ''}>(none)</option>`}${(p.options ?? [])
+          .map(o => `<option value="${esc(o)}"${o === pick ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+      } else if (p.type === 'multichoice') {
+        const picked = String(cur).split(',').map(s => s.trim());
+        input = `<div id="spv-${esc(p.key)}" style="display:flex;flex-wrap:wrap;gap:10px">${(p.options ?? [])
+          .map(o => `<label style="display:flex;gap:5px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer">
+            <input type="checkbox" data-opt="${esc(o)}"${picked.includes(o) ? ' checked' : ''} style="width:auto;flex:none"> ${esc(o)}</label>`).join('')}</div>`;
+      } else if (p.type === 'boolean') {
+        input = `<label style="display:flex;gap:6px;align-items:center;width:auto;font-weight:400;margin:0;cursor:pointer">
+          <input type="checkbox" id="spv-${esc(p.key)}" style="width:auto;flex:none"${paramYes(cur) ? ' checked' : ''}> enabled</label>`;
+      } else if (p.type === 'longtext') {
+        input = `<textarea id="spv-${esc(p.key)}" rows="2" style="flex:1;font-size:13px">${esc(cur)}</textarea>`;
+      } else {
+        input = `<input type="text" id="spv-${esc(p.key)}" value="${esc(cur)}" style="flex:1;min-width:120px">`;
+      }
+      return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="min-width:180px">${esc(p.label)}${p.required ? ' *' : ''}</span>${input}
+      </div>${help}`;
+    }).join('');
+  });
 }
 
 function collectSetupValues(a) {
@@ -148,42 +149,28 @@ function collectSetupValues(a) {
 }
 
 async function saveSetupValues() {
-  const forId = editAgentId, f = forAgent(forId);
-  const a = agents.find(x => x.id === forId);
+  const f = sheetSave();
+  const a = agents.find(x => x.id === f.id);
   if (!a) return;
   try {
-    const r = await api(`/v1/agents/${forId}/params`, { method: 'PUT', body: { values: collectSetupValues(a) } });
+    const r = await api(`/v1/agents/${f.id}/params`, { method: 'PUT', body: { values: collectSetupValues(a) } });
     // Said, not hidden: a description changed meanwhile that these values could not fill in (HB-0567).
     f.say(r?.warning ? `Values applied, but ⚠ ${r.warning}` : 'Values applied — SOUL/AGENTS re-rendered (snapshot taken first).', r?.warning ? 12000 : undefined);
     await refresh(false);
     // Drawn again only in its own forms: another agent's values being typed stay (HB-0475).
-    f.draw(() => renderSetupValues(agents.find(x => x.id === forId)));
+    f.draw(() => renderSetupValues(agents.find(x => x.id === f.id)));
   } catch (e) { f.fail(e); }
 }
 
 async function resetSetupValues() {
-  const forId = editAgentId, f = forAgent(forId);
-  const a = agents.find(x => x.id === forId);
+  const f = sheetSave();
+  const a = agents.find(x => x.id === f.id);
   if (!a) return;
   if (!confirm('Reset every setup value to its declared default and re-render the files?\n\nA snapshot is taken first.')) return;
   try {
-    const r = await api(`/v1/agents/${forId}/params`, { method: 'PUT', body: { reset: true } });
+    const r = await api(`/v1/agents/${f.id}/params`, { method: 'PUT', body: { reset: true } });
     f.say(r?.warning ? `Reset to defaults, but ⚠ ${r.warning}` : 'Reset to defaults.', r?.warning ? 12000 : undefined);
     await refresh(false);
-    f.draw(() => renderSetupValues(agents.find(x => x.id === forId)));
+    f.draw(() => renderSetupValues(agents.find(x => x.id === f.id)));
   } catch (e) { f.fail(e); }
 }
-
-const EVENT_WORDS = {
-  'runtime.provisioned': 'runtime created', 'runtime.started': 'started',
-  'runtime.healthy': 'came online', 'runtime.rebuilt': 'rebuilt',
-  'provision.failed': 'failed to set up', 'rebuild.failed': 'rebuild failed',
-  'channel.provisioned': 'got its Telegram bot', 'claim.bound': 'owner linked on Telegram',
-  'member.admitted': 'let someone in', 'member.revoked': 'removed a member',
-  'snapshot.captured': 'snapshot saved', 'snapshot.restored': 'files restored',
-  'agent.exported': 'exported', 'agent.imported': 'imported',
-  'migrate.done': 'moved to another server', 'migrate.rolled_back': 'move undone',
-  'reconcile.unhealthy': 'stopped answering', 'reconcile.runtime_missing': 'runtime went missing',
-  'reconcile.marked_stopped': 'found stopped', 'reconcile.marked_running': 'found running',
-  'import.rolled_back': 'import undone',
-};

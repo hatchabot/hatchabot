@@ -20,13 +20,14 @@ import { resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import type { ChannelConnector, ConnectorKind } from '../channels/connector.js';
 import { ensureOpsServer } from '../ops/opsServer.js';
-import { hashPassword, newRecoveryCode, normalizeRecoveryCode } from './accountsAuth.js';
-import { loopbackIsRemote } from './auth.js';
-import { readSessionCookie } from './sessionCookie.js';
+import { hashPassword, newRecoveryCode, normalizeRecoveryCode } from './signIn/accountsAuth.js';
+import { loopbackIsRemote } from './signIn/auth.js';
+import { proxyListenerState, proxyPort } from './proxyListener.js';
+import { readSessionCookie } from './signIn/sessionCookie.js';
 import { formatMemoryCap } from '../domain/memoryCap.js';
 import { agentMemoryLimits, COMPRESSED_SWAP_FIX, defaultSwapAllowance } from '../domain/swap.js';
 import { APP_VERSION } from '../domain/appVersion.js';
-import { pageScripts, registerJoinPage, registerPageFiles, registerPageRoutes } from './pageRoutes.js';
+import { pageScripts, registerJoinPage, registerPageFiles, registerPageRoutes } from './machine/pageRoutes.js';
 import {
   effectiveModel,
   forgetEmbedDecision,
@@ -38,7 +39,7 @@ import {
   scrubRemovedDataSources,
   SEARCH_KEY_REF,
 } from '../orchestrator/lifecycle/provision.js';
-import { AgentBusyError, clearBusy, freedWithin, isBusy, markBusy, OWED_BUSY_WAIT_MS, OWED_BUSY_WAITS, whileBusy } from '../orchestrator/lifecycle/busy.js';
+import { AgentBusyError, freedWithin, isBusy, OWED_BUSY_WAIT_MS, OWED_BUSY_WAITS, whileBusy } from '../orchestrator/lifecycle/busy.js';
 import { NAME_TAKEN_WHY, retryPendingSchedulesWhenUp } from '../orchestrator/lifecycle/provision.js';
 import { containerUp, sleepUnref, UP_TRIES, upEveryMs, type UpWait } from '../orchestrator/lifecycle/afterRestart.js';
 import { listCrons } from '../orchestrator/schedules/crons.js';
@@ -47,66 +48,66 @@ import { stashOldPendingSecrets } from '../orchestrator/apps/appPending.js';
 import { MACHINE } from '../orchestrator/usage/budgets.js';
 import { syncContextCap } from '../orchestrator/memory/compaction.js';
 import type { OpenclawDistTags } from '../openclaw/npmVersion.js';
-import { completeWithProfile, pickMgmtProfile, runMgmtCompletion } from './mgmtLlm.js';
+import { completeWithProfile, pickMgmtProfile, runMgmtCompletion } from './ops/mgmtLlm.js';
 import { opsDriftOf } from '../ops/opsDrift.js';
 import { recordChanges, snapshotModels, type ChangeMeta } from '../orchestrator/usage/modelLedger.js';
 import type { PendingConfirm } from '../mgmt/pendingStore.js';
 import { createOpsPush } from '../ops/push.js';
 import { OPS_AGENT_SEARCHES } from '../orchestrator/settings/searchUsage.js';
 import type { IconCompleter } from '../orchestrator/homeScreen/agentIcons.js';
-import { registerMgmtChat } from './mgmtChat.js';
-import { registerReachRoutes } from './reachRoutes.js';
-import { registerInspectRoutes } from './inspectRoutes.js';
-import { registerClassRoutes } from './classRoutes.js';
-import { registerModelRoutes } from './modelRoutes.js';
-import { registerAiSourceRoutes } from './aiSourceRoutes.js';
-import { registerChannelRoutes } from './channelRoutes.js';
-import { registerBackupRoutes } from './backupRoutes.js';
-import { registerAppRoutes } from './appRoutes.js';
-import { registerMachineRoutes } from './machineRoutes.js';
-import { registerImageRoutes } from './imageRoutes.js';
-import { registerUsageRoutes } from './usageRoutes.js';
-import { registerGoogleRoutes } from './googleRoutes.js';
-import { registerHealthRoutes } from './healthRoutes.js';
-import { registerOpsAgentRoutes } from './opsAgentRoutes.js';
-import { registerProblemReportRoutes } from './problemReportRoutes.js';
-import { registerTransferRoutes } from './transferRoutes.js';
-import { registerAdoptRoutes } from './adoptRoutes.js';
+import { interruptedConfirmsNote, registerMgmtChat, type InterruptedConfirm } from './ops/mgmtChat.js';
+import { registerReachRoutes } from './machine/reachRoutes.js';
+import { registerInspectRoutes } from './agents/inspectRoutes.js';
+import { registerClassRoutes } from './agents/classRoutes.js';
+import { registerModelRoutes } from './agents/modelRoutes.js';
+import { registerAiSourceRoutes } from './usage/aiSourceRoutes.js';
+import { registerChannelRoutes } from './chat/channelRoutes.js';
+import { registerBackupRoutes } from './data/backupRoutes.js';
+import { registerAppRoutes } from './data/appRoutes.js';
+import { registerMachineRoutes } from './machine/machineRoutes.js';
+import { registerImageRoutes } from './machine/imageRoutes.js';
+import { registerUsageRoutes } from './usage/usageRoutes.js';
+import { registerGoogleRoutes } from './data/googleRoutes.js';
+import { registerHealthRoutes } from './machine/healthRoutes.js';
+import { registerOpsAgentRoutes } from './ops/opsAgentRoutes.js';
+import { registerProblemReportRoutes } from './ops/problemReportRoutes.js';
+import { registerTransferRoutes } from './data/transferRoutes.js';
+import { registerAdoptRoutes } from './data/adoptRoutes.js';
 import { createTransfers } from '../orchestrator/transfer/transfers.js';
-import { registerSkillRoutes } from './skillRoutes.js';
-import { registerVoiceRoutes } from './voiceRoutes.js';
-import { registerFileRoutes } from './fileRoutes.js';
-import { registerEmbedderRoutes } from './embedderRoutes.js';
-import { registerConversationRoutes } from './conversationRoutes.js';
+import { registerSkillRoutes } from './data/skillRoutes.js';
+import { registerVoiceRoutes } from './console/voiceRoutes.js';
+import { registerFileRoutes } from './data/fileRoutes.js';
+import { registerEmbedderRoutes } from './machine/embedderRoutes.js';
+import { registerConversationRoutes } from './chat/conversationRoutes.js';
 import { createConversations } from '../orchestrator/conversation/conversations.js';
-import { registerConsultRoutes } from './consultRoutes.js';
+import { registerConsultRoutes } from './chat/consultRoutes.js';
 import { createConsults } from '../orchestrator/consult/consults.js';
-import { registerMemoryRoutes } from './memoryRoutes.js';
+import { registerMemoryRoutes } from './chat/memoryRoutes.js';
 import { createAgentMemory } from '../orchestrator/memory/agentMemory.js';
-import { registerDefinitionRoutes } from './definitionRoutes.js';
+import { registerDefinitionRoutes } from './agents/definitionRoutes.js';
 import { createAgentDefinition } from '../orchestrator/definition/agentDefinition.js';
-import { registerAgentSecretRoutes } from './agentSecretRoutes.js';
+import { registerAgentSecretRoutes } from './agents/agentSecretRoutes.js';
 import { createAgentSecrets } from '../orchestrator/agentSecrets/agentSecrets.js';
-import { registerHomeScreenRoutes } from './homeScreenRoutes.js';
+import { registerHomeScreenRoutes } from './agents/homeScreenRoutes.js';
 import { createHomeScreen } from '../orchestrator/homeScreen/homeScreen.js';
-import { registerModelChangeRoutes } from './modelChangeRoutes.js';
+import { registerModelChangeRoutes } from './usage/modelChangeRoutes.js';
 import { createModelChanges } from '../orchestrator/usage/modelChanges.js';
 import { createMemorySearch } from '../orchestrator/memorySearch/memorySearch.js';
 import { createFiles } from '../orchestrator/files/files.js';
 import { createSkills } from '../orchestrator/skills/skills.js';
 import { createAgentVoice } from '../orchestrator/voice/agentVoice.js';
-import { registerMachineSettingsRoutes } from './machineSettingsRoutes.js';
-import { registerTailscaleRoutes } from './tailscaleRoutes.js';
-import { registerConfigRoutes } from './configRoutes.js';
-import { registerAccountsRoutes } from './accountsRoutes.js';
+import { registerMachineSettingsRoutes } from './machine/machineSettingsRoutes.js';
+import { registerTailscaleRoutes } from './machine/tailscaleRoutes.js';
+import { registerConfigRoutes } from './machine/configRoutes.js';
+import { registerAccountsRoutes } from './signIn/accountsRoutes.js';
 import { createReach } from '../orchestrator/reach/reach.js';
-import { signinLinkAudience } from './signinLink.js';
+import { signinLinkAudience } from './signIn/signinLink.js';
 import { createAccounts } from '../orchestrator/accounts/accounts.js';
 import { createMachineSettings } from '../orchestrator/settings/machineSettings.js';
 import { createAgentSettings } from '../orchestrator/lifecycle/agentSettings.js';
 import { createAgentLifecycle } from '../orchestrator/lifecycle/agentLifecycle.js';
 import { createAgentEdits } from '../orchestrator/lifecycle/agentEdits.js';
-import { registerLifecycleRoutes } from './lifecycleRoutes.js';
+import { registerLifecycleRoutes } from './agents/lifecycleRoutes.js';
 import { createAiSources } from '../orchestrator/sources/aiSources.js';
 import { createWarmLocalModels } from '../orchestrator/sources/warmModels.js';
 import { createChannels } from '../orchestrator/channels/channels.js';
@@ -115,18 +116,18 @@ import { createAppsAndSources } from '../orchestrator/apps/appsAndSources.js';
 import { createConsoles } from '../orchestrator/console/consoles.js';
 import { createMembersAndInvites } from '../orchestrator/members/membersAndInvites.js';
 import { resumeFirstContacts } from '../orchestrator/members/claim.js';
-import { registerBrowserRoutes } from './browserRoutes.js';
-import { consoleSessionWatch, registerConsoleRoutes } from './consoleRoutes.js';
+import { registerBrowserRoutes } from './console/browserRoutes.js';
+import { consoleSessionWatch, registerConsoleRoutes } from './console/consoleRoutes.js';
 import { createMachines } from '../orchestrator/machines/machines.js';
-import { registerMemberRoutes } from './memberRoutes.js';
+import { registerMemberRoutes } from './chat/memberRoutes.js';
 import { createUsageAndBudgets } from '../orchestrator/usage/usageAndBudgets.js';
 import { createSchedules } from '../orchestrator/schedules/schedules.js';
-import { registerScheduleRoutes } from './scheduleRoutes.js';
+import { registerScheduleRoutes } from './data/scheduleRoutes.js';
 import { createConnectionsAndAccess } from '../orchestrator/google/connectionsAndAccess.js';
 import { createProblemReports } from '../orchestrator/diagnostics/problemReports.js';
 import { createHealthChecks } from '../orchestrator/health/healthChecks.js';
 import { createHatchabotAgent } from '../orchestrator/ops/hatchabotAgent.js';
-import { inQueue, sixAtATimeWhenReady } from '../util/queues.js';
+import { sixAtATimeWhenReady } from '../util/queues.js';
 import { HOST_GOING, IMAGE_TAG_RE, IMPORT_HEAD_MAX_BYTES, IMPORT_WITH_VALUES, NO_COMPRESS, OPS_ALONE, type RouteContext } from './routeContext.js';
 import { forgetDmPolicy } from '../orchestrator/channels/dmPolicyMemo.js';
 import { GOOGLE_SERVICES, syncConnections } from '../orchestrator/google/googleConnections.js';
@@ -139,13 +140,13 @@ import type { EmbedderService } from '../embedder/embedder.js';
 import { hibernateSweep, wakeAgent, wakeSweep, type HibernateDeps } from '../orchestrator/lifecycle/hibernate.js';
 import { clearStaleRuntimePinsWhenUp } from '../orchestrator/sources/runtimePins.js';
 import { rebuildPolicy } from '../domain/rebuildPolicy.js';
-import { holdDeleteEnds, KIND_LABEL, noteFilesReplacing, operationRefusal, operationsOverFor, publicOperation, STARTS_IT_AT_ITS_END } from '../orchestrator/lifecycle/operations.js';
+import { holdDeleteEnds, KIND_LABEL, operationRefusal, operationsOverFor, publicOperation, STARTS_IT_AT_ITS_END } from '../orchestrator/lifecycle/operations.js';
 import { recoverOperation, startOperationRetryLoop, startResumeOperations, type ResumeContext, type ResumingOperations } from '../orchestrator/lifecycle/operationsResume.js';
 import type { buildDerivedImage, removeDerivedImage } from '../orchestrator/machines/derivedImage.js';
 import type { Agent, AIProfile, Host } from '../domain/types.js';
 import { ownerIdOf } from './principal.js';
-import { registerWebChatRoutes, webChatBusy } from './webChat.js';
-import type { IdentityVerifier } from './identity.js';
+import { registerWebChatRoutes, webChatBusy } from './chat/webChat.js';
+import type { IdentityVerifier } from './signIn/identity.js';
 
 
 
@@ -653,7 +654,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   const envNum = (name: string, dflt: number): number => {
     const n = Number(process.env[name]); return Number.isFinite(n) && process.env[name] !== '' && process.env[name] !== undefined ? n : dflt;
   };
-  /** Web chat turns in flight, `${agentId} ${userId}` (api/webChat.ts): one per person at a time. */
+  /** Web chat turns in flight, `${agentId} ${userId}` (api/chat/webChat.ts): one per person at a time. */
   const webChatInFlight = new Set<string>();
   const A2A_MAX_CONCURRENT = Math.max(1, envNum('HATCHABOT_A2A_MAX_CONCURRENT', 8));
   const A2A_PER_HOUR = Math.max(1, envNum('HATCHABOT_A2A_PER_HOUR', 60));
@@ -1255,6 +1256,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   const reach = createReach({
     publicUrl: () => deps.publicUrl,
     port: () => Number(process.env.PORT ?? 8080),
+    proxyPort: () => proxyPort(),
+    proxyListener: () => proxyListenerState(),
     envPath: () => join(process.cwd(), '.env'),
     signinLinkAudience: () => signinLinkAudience(),
     publicStatus: () => app.publicAccess?.status(),
@@ -1331,7 +1334,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   // ---- app ----------------------------------------------------------------
 
-  // The page and its scripts (src/api/pageRoutes.ts, HB-0811); the join page's scripts come from there too.
+  // The page and its scripts (src/api/machine/pageRoutes.ts, HB-0811); the join page's scripts come from there too.
   const pageScriptsOf = deps.webIndexPath ?? deps.webJoinPath;
   const scripts = pageScriptsOf ? pageScripts(dirname(pageScriptsOf)) : undefined;
   if (scripts) registerPageRoutes(app, { webIndexPath: deps.webIndexPath, version: deps.appVersion ?? APP_VERSION }, scripts);
@@ -1396,7 +1399,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * refused or failed one was lost (HB-0834 review). Never rejects.
    */
   const syncDocsFor = (a: Agent, provider: RuntimeProvider, ask: string, waits = OWED_BUSY_WAITS): Promise<void> =>
-    whileBusy(a.id, () => syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id), { turn: (write) => withAgentsMdTurn(a.id, write) }))
+    whileBusy(a.id, 'docs-sync', () => syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id), { turn: (write) => withAgentsMdTurn(a.id, write) }))
       .then((current) => { if (current) store.clearAgentHold(a.id, 'docs-sync', ask); })
       .catch((err: unknown) => {
         // The sync failed, or the database is closing: still owed. Busy: its turn is waited for.
@@ -1656,13 +1659,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    */
   const warmLocalModels = createWarmLocalModels();
 
-  // Telegram, Discord and Slack (src/api/channelRoutes.ts, HB-0808): an agent's bots, the spare pools, the bot census, the account's chat identities, and pairing.
+  // Telegram, Discord and Slack (src/api/chat/channelRoutes.ts, HB-0808): an agent's bots, the spare pools, the bot census, the account's chat identities, and pairing.
   registerChannelRoutes(app, ctx);
 
-  // Keys, web search and the machine's defaults (src/api/machineSettingsRoutes.ts, HB-0808 step 15): the fleet's Gemini and Brave keys, which search the fleet uses and an agent's search test, Defaults for this machine.
+  // Keys, web search and the machine's defaults (src/api/machine/machineSettingsRoutes.ts, HB-0808 step 15): the fleet's Gemini and Brave keys, which search the fleet uses and an agent's search test, Defaults for this machine.
   registerMachineSettingsRoutes(app, ctx);
 
-  // AI sources (src/api/aiSourceRoutes.ts, HB-0808): each source, the agents moved onto one, its default model and its model list.
+  // AI sources (src/api/usage/aiSourceRoutes.ts, HB-0808): each source, the agents moved onto one, its default model and its model list.
   registerAiSourceRoutes(app, ctx);
 
   // ---- management bot ------------------------------------------------------
@@ -2132,6 +2135,25 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       await afterStartOwed;
       await docsSynced;
     },
+    /**
+     * At boot (HB-1053): each owner with confirmed changes this restart cut
+     * off (markInterruptedConfirms) is told through their management agent,
+     * one note in its own conversation once its container is up, as the
+     * settings' waits are (afterRestart.ts). A courtesy: a manager not
+     * running, not up in time or busy is told nothing, and the cards say it
+     * all. Never rejects.
+     */
+    tellInterruptedConfirms: async (cards: InterruptedConfirm[]) => {
+      const owners = cards.map((c) => c.ownerId).filter((o, i, all) => all.indexOf(o) === i);
+      await Promise.all(owners.map(async (ownerId) => {
+        try {
+          const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
+          if (!ops || ops.state !== 'RUNNING' || !ops.runtimeRef) return;
+          if (!(await containerUp(providerFor(ops.hostId), ops.runtimeRef, bootUpWait))) return;
+          await opsNotifier.notify(ownerId, interruptedConfirmsNote(cards.filter((c) => c.ownerId === ownerId)));
+        } catch (err) { app.log.warn({ ownerId, err: String(err) }, 'mgmt.interrupted_note_failed'); }
+      }));
+    },
     /** Ask again, every 10 minutes, the questions a held operation is waiting on. */
     startOperationRetryLoop: (intervalMs?: number) => startOperationRetryLoop(opsCtx, intervalMs),
     clientSecretSweep: google.delivery.clientSecretSweep,
@@ -2144,6 +2166,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 export interface RoutesHandle {
   stashOldPendingSecrets(): Promise<void>;
   resumeOperations(): Promise<void>;
+  /** At boot: tell each owner's management agent of their confirmed changes the restart cut off (HB-1053). Never rejects. */
+  tellInterruptedConfirms(cards: InterruptedConfirm[]): Promise<void>;
   startOperationRetryLoop(intervalMs?: number): NodeJS.Timeout;
   /** The pass for a new Google client secret still owed (HB-0463): run every 10 minutes here, and by tests. */
   clientSecretSweep(): Promise<{ pushing: number; waiting: number } | undefined>;

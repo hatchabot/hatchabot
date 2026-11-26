@@ -19,6 +19,8 @@ import { REST_BY_NAME } from '../src/mgmt/restTools.js';
 import { COVERAGE } from '../src/mgmt/coverage.js';
 import { publicClassFor } from '../src/api/publicRoutes.js';
 import { OPS_AGENTS_MD, OPS_MODEL_REVIEW_MESSAGE } from '../src/ops/opsAgent.js';
+import { markInterruptedConfirms } from '../src/api/ops/mgmtChat.js';
+import { clockOf } from '../src/orchestrator/usage/tokenHealth.js';
 
 /** Recommended (docs/recommendations-design.md). Every name, figure and id is made up. */
 
@@ -533,6 +535,81 @@ describe('the routes', () => {
     put('c_other', 'claude-sonnet-5');
     expect((await list()).items.some((x: { proposalId?: string }) => x.proposalId === 'c_other')).toBe(true);
     expect(await card('c_other')).toMatchObject({ recommended: true });
+  });
+
+  describe('File it again on a cost or model card says where its card is, and that what it says is as of its first filing (review of HB-1053)', () => {
+    /** A card confirmed an hour ago, whose change a restart then cut off. */
+    const cutOff = (store: Store, id: string, fields: Partial<PendingConfirm>, at = Date.now() - HOUR) => {
+      store.putMgmtProposal({ id, ownerId: OWNER, chatId: 0, fromUserId: 0, messageId: 0, createdAtMs: at, expiresAtMs: at + DAY, status: 'pending', source: 'agent', ...fields } as PendingConfirm);
+      store.resolveMgmtProposal(id, 'confirmed', at);
+      markInterruptedConfirms(store);
+      return at;
+    };
+    const again = (f: Awaited<ReturnType<typeof app>>['f'], id: string) => f.inject({ method: 'POST', url: `/v1/proposals/${id}/again`, headers: as() });
+    const MODEL = {
+      tool: 'set_model', resolved: { agentId: 'stock', agentName: 'Stock Watcher', model: 'claude-haiku-4-5', check: { evidence: '12 turns on claude-sonnet-5 over 4 days, 2 failures', warnings: ['It used tools on 9 of them'] } },
+      summary: '🧠 Switch Stock Watcher to claude-haiku-4-5',
+    } as unknown as Partial<PendingConfirm>;
+
+    it('a model card: its new card is under Usage → Recommended, the answer and the second try say so, and its item says its evidence is as of the first filing', async () => {
+      const { f, store } = await app();
+      const at = cutOff(store, 'c_model_cut', MODEL);
+      const r = await again(f, 'c_model_cut');
+      expect(r.statusCode, r.body).toBe(200);
+      const { confirmId, where } = r.json() as { confirmId: string; where: string };
+      expect(where).toBe('recommended');
+      expect(store.getMgmtProposal<PendingConfirm>(confirmId)!.firstFiledAtMs).toBe(at);
+      const card = (await f.inject({ method: 'GET', url: '/v1/proposals', headers: as() })).json().pending.find((p: { confirmId: string }) => p.confirmId === confirmId);
+      expect(card).toMatchObject({ recommended: true, firstFiledAtMs: at });
+      const item = (await f.inject({ method: 'GET', url: '/v1/recommendations', headers: as() })).json().items.find((x: { proposalId?: string }) => x.proposalId === confirmId);
+      expect(item.evidence).toEqual([`Filed again after a restart: first filed ${clockOf(at)}, so what it says is as of then`, '12 turns on claude-sonnet-5 over 4 days, 2 failures', '⚠ It used tools on 9 of them']);
+      const twice = await again(f, 'c_model_cut');
+      expect(twice.statusCode).toBe(409);
+      expect(twice.json().error).toBe('It was filed again already: its card is under Usage → Recommended.');
+      // Once that card is no longer waiting, it is not said to be anywhere.
+      expect((await f.inject({ method: 'POST', url: `/v1/proposals/${confirmId}/cancel`, headers: as() })).statusCode).toBe(200);
+      expect((await again(f, 'c_model_cut')).json().error).toBe('It was filed again already, and that card is not waiting any more.');
+    });
+
+    it('the guard\'s switch back: its Before and After are said to be as of the first filing', async () => {
+      const { f, store } = await app();
+      const at = cutOff(store, 'c_guard_cut', {
+        tool: 'set_model', source: 'guard', risk: 'disruptive', resolved: { agentId: 'stock', agentName: 'Stock Watcher', model: 'claude-sonnet-5', guardOf: 'mc_none' } as never,
+        summary: '↩️ Switch Stock Watcher back to claude-sonnet-5\nIt does worse since the switch\nBefore: 2 failures in 40 turns\nAfter: 9 failures in 40 turns',
+      });
+      const { confirmId } = (await again(f, 'c_guard_cut')).json() as { confirmId: string };
+      const item = (await f.inject({ method: 'GET', url: '/v1/recommendations', headers: as() })).json().items.find((x: { proposalId?: string }) => x.proposalId === confirmId);
+      expect(item.kind).toBe('switch-back');
+      expect(item.evidence).toEqual([`Filed again after a restart: first filed ${clockOf(at)}, so what it says is as of then`, 'Before: 2 failures in 40 turns', 'After: 9 failures in 40 turns']);
+    });
+
+    it('the guard\'s switch back filed again: the model change\'s ledger names the new card, not the one a restart cut off', async () => {
+      const { f, store } = await app();
+      const change = recordChange(store, { agentId: 'stock', from: 'claude-sonnet-5', to: 'claude-haiku-4-5', by: 'owner', via: 'app', source: 'model' }, Date.now() - 8 * DAY)!;
+      expect(store.claimModelChangeGuard(change.id, 'c_guard_cut')).toBe(true);
+      cutOff(store, 'c_guard_cut', {
+        tool: 'set_model', source: 'guard', risk: 'disruptive', resolved: { agentId: 'stock', agentName: 'Stock Watcher', model: 'claude-sonnet-5', guardOf: change.id } as never,
+        summary: '↩️ Switch Stock Watcher back to claude-sonnet-5\nBefore: 2 failures in 40 turns\nAfter: 9 failures in 40 turns',
+      });
+      const { confirmId } = (await again(f, 'c_guard_cut')).json() as { confirmId: string };
+      expect(store.getModelChange(change.id)!.guardProposalId).toBe(confirmId);
+      // Only that change's, and only from that card.
+      expect(store.moveModelChangeGuard(change.id, 'c_guard_cut', 'c_other')).toBe(false);
+    });
+
+    it('a card Recommended does not show (the agent archived since) is under Alerts, as the cards list shows it; one filed again twice keeps its first filing\'s time', async () => {
+      const { f, store } = await app();
+      const at = cutOff(store, 'c_model_cut', MODEL, Date.now() - 2 * HOUR);
+      store.setAgentState('stock', 'ARCHIVED');
+      const r = (await again(f, 'c_model_cut')).json() as { confirmId: string; where: string };
+      expect(r.where).toBe('alerts');
+      expect((await again(f, 'c_model_cut')).json().error).toBe('It was filed again already: its card is under Alerts.');
+      // That card confirmed, and cut off by a restart too: filed again, it is still as of the first filing.
+      store.resolveMgmtProposal(r.confirmId, 'confirmed', Date.now());
+      markInterruptedConfirms(store);
+      const third = (await again(f, r.confirmId)).json() as { confirmId: string };
+      expect(store.getMgmtProposal<PendingConfirm>(third.confirmId)!.firstFiledAtMs).toBe(at);
+    });
   });
 
   it('the cards list never fails or writes for Recommended: a build that throws shows every card, and the poll prunes nothing (HB-1269 review)', async () => {

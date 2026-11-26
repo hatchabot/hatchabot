@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { base32Decode, base32Encode, hotp, newBackupCode, normalizeBackupCode, backupCodeHash, otpauthUri, totp, totpStep, totpVerify } from '../src/api/totp.js';
+import { base32Decode, base32Encode, hotp, newBackupCode, normalizeBackupCode, backupCodeHash, otpauthUri, totp, totpStep, totpVerify } from '../src/api/signIn/totp.js';
 
 describe('HOTP / TOTP (RFC 4226, RFC 6238 test vectors)', () => {
   const seed = Buffer.from('12345678901234567890', 'ascii');
@@ -58,9 +58,9 @@ describe('HOTP / TOTP (RFC 4226, RFC 6238 test vectors)', () => {
   });
 
   it('the QR holds a standard otpauth address', () => {
-    const u = new URL(otpauthUri(seed, 'chris'));
+    const u = new URL(otpauthUri(seed, 'robin'));
     expect(u.protocol).toBe('otpauth:');
-    expect(decodeURIComponent(u.pathname)).toContain('Hatchabot:chris');
+    expect(decodeURIComponent(u.pathname)).toContain('Hatchabot:robin');
     expect(u.searchParams.get('secret')).toBe(base32Encode(seed));
     expect(u.searchParams.get('digits')).toBe('6');
     expect(u.searchParams.get('period')).toBe('30');

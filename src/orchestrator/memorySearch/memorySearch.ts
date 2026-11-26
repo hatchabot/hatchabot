@@ -22,7 +22,7 @@ import type { ProvisionDeps } from '../lifecycle/provision.js';
  * the fleet's engine choice (`fleetView`, `setDefault`, `moveAll`) and the
  * boot start and health loop (`startTimers`, ended by `stop()`). Built once
  * in `registerRoutes` and on the route context as `ctx.memorySearch`; its
- * routes are in src/api/embedderRoutes.ts. It knows nothing of HTTP.
+ * routes are in src/api/machine/embedderRoutes.ts. It knows nothing of HTTP.
  */
 export interface MemorySearch {
   /** This machine's service. */

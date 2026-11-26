@@ -236,7 +236,7 @@ export async function applyWorkspace(
 ): Promise<{ files: number; bytes: number }> {
   // Busy while the workspace is being replaced: a Rebuild passing its own
   // guards mid-copy would docker rm the container underneath the restore.
-  return whileBusy(agentId, () => applyWorkspaceInner(deps, agentId, sourceDir));
+  return whileBusy(agentId, 'adopt-workspace', () => applyWorkspaceInner(deps, agentId, sourceDir));
 }
 
 async function applyWorkspaceInner(

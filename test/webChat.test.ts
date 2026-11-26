@@ -8,8 +8,8 @@ import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { registerAuth, _resetLoginThrottle } from '../src/api/auth.js';
-import { hashPassword } from '../src/api/accountsAuth.js';
+import { registerAuth, _resetLoginThrottle } from '../src/api/signIn/auth.js';
+import { hashPassword } from '../src/api/signIn/accountsAuth.js';
 import { HISTORY_SCRIPT, historyScript, stripWebChatPrefix, webChatPrefix, webChatSessionKey, webChatStoreKey } from '../src/orchestrator/conversation/webChat.js';
 import { MemSecrets } from './support/world.js';
 
@@ -786,7 +786,7 @@ describe('inviting someone to chat on the web', () => {
       store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]),
       channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any, authMode: 'accounts',
     });
-    for (const [id, username, hostOwner] of [['acct-owner', 'chris', true], ['acct-jo', 'jo', false]] as const) {
+    for (const [id, username, hostOwner] of [['acct-owner', 'robin', true], ['acct-jo', 'jo', false]] as const) {
       const { hash, salt } = await hashPassword('a-long-password');
       store.insertLocalAccount({ id, username, pwHash: hash, pwSalt: salt, hostOwner, disabled: false, createdAt: 'now' });
     }
@@ -798,7 +798,7 @@ describe('inviting someone to chat on the web', () => {
       const c = r.cookies.find((x) => x.name === 'hatchabot_session')!;
       return `hatchabot_session=${c.value}`;
     };
-    const owner = await login('chris');
+    const owner = await login('robin');
     const inv = await f.inject({ method: 'POST', url: '/v1/agents/a1/invites', headers: { cookie: owner }, payload: { webChat: true } });
     expect(inv.statusCode, inv.body).toBe(201);
     const code = inv.json().code;

@@ -10,12 +10,18 @@
 # writes OpenClaw's own formats (docs/embedder-and-openclaw-port-design.md,
 # "The rest of the 2026.9 port"): the config it wrote is accepted, memory
 # search indexes and answers, the CLI JSON shapes it parses, the files it reads,
-# the console address. One real model turn. The agent is deleted at the end,
-# pass or fail (--keep leaves it for a look).
+# the console address. Two real model turns: an ask, and one practice, whose
+# transcript must be where Practice reads it and counted once (HB-1418): that
+# step only warns (⚠), and its last lines say whether Practice may move to this
+# OpenClaw or stays where it is. The agent is deleted at the end, pass or fail
+# (--keep leaves it for a look).
 #
-# Exit status: 0 only if every step passed. Then: try it on one agent.
+# Exit status: 0 only if every step passed (a warning is no failure). Then: try
+# it on one agent.
 set -uo pipefail
 HB="${HATCHABOT_CLI:-hatchabot}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PRACTICE=""
 TAG=""; PROFILE=""; KEEP=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -29,10 +35,12 @@ done
 
 NAME="gate-$(date +%m%d-%H%M%S)"
 NONCE="$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
-PASS=0; FAILED=0; RESULTS=()
+PASS=0; FAILED=0; WARNED=0; RESULTS=()
 step() { STEP="$1"; STEP_T=$(date +%s); printf '▸ %s … ' "$1"; }
 ok()   { PASS=$((PASS + 1)); RESULTS+=("✓ $STEP"); echo "ok ($(( $(date +%s) - STEP_T ))s)"; }
 bad()  { FAILED=$((FAILED + 1)); RESULTS+=("✗ $STEP — $1"); echo "FAILED — $1"; }
+# Said, never counted against the image: the practice turn (HB-1418).
+warn() { WARNED=$((WARNED + 1)); RESULTS+=("⚠ $STEP — $1"); echo "WARNING — $1"; }
 json() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s);console.log(String(($1)(v)??''))}catch(e){console.log('')}})"; }
 # `docker exec` in the agent's container, as the agent (uid 1000, HOME on the volume).
 inagent() { docker exec "$CONTAINER" bash -lc "$1" 2>&1; }
@@ -123,8 +131,37 @@ if echo "$stat" | grep -qi 'Embeddings: *ready' && echo "$stat" | grep -qi 'Sema
 else bad "index: $(echo "$idx" | tr '\n' ' ' | head -c 160) · status: $(echo "$stat" | grep -iE 'embeddings|vectors' | tr '\n' ' ') · hit: $(echo "$hit" | head -c 120)"; fi
 
 step "ask: it answers (one real model turn on the candidate)"
+# When it began: the practice turn below holds the usage reader to seeing it.
+# By the container's clock, which the transcripts' times come from; the
+# machine's when it gives none in milliseconds (a date without %N).
+ASK_AT="$(docker exec "$CONTAINER" date +%s%3N 2>/dev/null)"
+case "$ASK_AT" in ''|*[!0-9]*) ASK_AT="$(node -e 'process.stdout.write(String(Date.now()))')" ;; esac
 r=$($HB ask "$NAME" "Reply with exactly this token and nothing else: PING-$NONCE" 2>&1)
 echo "$r" | grep -q "PING-$NONCE" && ok || bad "reply: $(echo "$r" | head -c 200)"
+
+# Practice runs on one OpenClaw release, PRACTICE_OPENCLAW, the one where it was
+# read that a run's transcript stays in the run's own state folder, which the
+# usage sampler never reads (skillTrials.ts, HB-0933). One practice turn here,
+# with this release let in, checks that again: a release may move the pin by
+# hand once it holds; the gate never moves it (HB-1418). It only warns: on a
+# release it does not run on, Practice refuses itself, in words of its own,
+# so the image is no less ready for agents.
+step "one practice turn: its transcript is where Practice reads it, and it is counted once"
+# The release Practice stays on, read from its source as practice-check.ts would say it.
+P_OC="$(sed -n "s/^export const PRACTICE_OPENCLAW = '\([^']*\)';.*/\1/p" "$ROOT/src/orchestrator/skills/skillTrials.ts" 2>/dev/null)"
+if [ -x "$ROOT/node_modules/.bin/tsx" ]; then
+  out="$(cd "$ROOT" && node_modules/.bin/tsx scripts/practice-check.ts "$CONTAINER" "$SLUG" "$VERSION" ${ASK_AT:+--ask-at "$ASK_AT"} 2>&1)"; rc=$?
+  last="$(printf '%s\n' "$out" | tail -n 1)"
+  # Its verdict is its last line when it ends with one (0 holds, 1 does not, 3 could not tell); anything else stopped it.
+  case "$rc" in
+    0|1|3) PRACTICE="$last" ;;
+    *) why="${last:0:300}"; PRACTICE="Practice stays on OpenClaw ${P_OC:-the release it runs on}: could not check: the practice check stopped (${why:-exit $rc})" ;;
+  esac
+  [ "$rc" = 0 ] && { ok; echo "  $PRACTICE"; } || warn "$PRACTICE"
+else
+  PRACTICE="Practice stays on OpenClaw ${P_OC:-the release it runs on}: could not check: no node_modules/.bin/tsx in $ROOT: run npm ci there first"
+  warn "$PRACTICE"
+fi
 
 step "sessions list --json has the shape the app reads (sessions[].updatedAt, key agent:$SLUG:main)"
 s="$(inagent "openclaw sessions list --agent $SLUG --json 2>/dev/null" | json "v=>(v.sessions||[]).filter(s=>typeof s.updatedAt==='number'&&s.key==='agent:$SLUG:main').length")"
@@ -185,8 +222,9 @@ ddg="$(inagent 'openclaw plugins list --json 2>/dev/null' | json 'v=>{const a=Ar
 
 DONE=1
 echo
-echo "Results ($PASS passed, $FAILED failed) for $TAG:"
+echo "Results ($PASS passed, $FAILED failed$([ "$WARNED" = 0 ] || echo ", $WARNED warned")) for $TAG:"
 printf '  %s\n' "${RESULTS[@]}"
+[ -z "$PRACTICE" ] || echo "$PRACTICE"
 if [ "$KEEP" = 1 ]; then echo "kept: $NAME (pinned to $TAG)"; else $HB delete "$NAME" --yes >/dev/null 2>&1 && echo "cleaned up: $NAME deleted"; fi
 if [ "$FAILED" = 0 ]; then
   echo "✅ $TAG passes the gate. Next: try it on one real agent — hatchabot image try \"<agent>\" $TAG"

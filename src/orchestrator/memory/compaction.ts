@@ -8,6 +8,7 @@ import { parseLoopLines } from '../../domain/loopLines.js';
 import { OPENCLAW_HANDLER_TIMEOUT_MS } from '../channels/channelTimeout.js';
 import { modelRefOf, runningModelOf, THRESHOLDS } from '../usage/tokenHealth.js';
 import { compactingNow } from './compactionState.js';
+import { keyedLock } from '../../util/queues.js';
 
 /**
  * Compaction and the context cap: the token steward's two changes (docs/
@@ -366,13 +367,9 @@ type CapOutcome = 'applied' | 'removed' | 'unchanged' | 'skipped' | 'changed-by-
  * a removal answered while the first apply was still writing, and that apply
  * then put the old cap in with no row left to take it out (HB-0312).
  */
-const capSyncs = new Map<string, Promise<unknown>>();
+const capSyncs = keyedLock();
 export function syncContextCap(deps: CapDeps, agent: Agent, runtimeRef: string, now?: number): Promise<CapOutcome> {
-  const next = (capSyncs.get(agent.id) ?? Promise.resolve()).catch(() => {})
-    .then(() => syncContextCapNow(deps, deps.store.getAgent(agent.id) ?? agent, runtimeRef, now ?? Date.now()));
-  const settled = next.catch(() => {}).finally(() => { if (capSyncs.get(agent.id) === settled) capSyncs.delete(agent.id); });
-  capSyncs.set(agent.id, settled);
-  return next;
+  return capSyncs.run(agent.id, () => syncContextCapNow(deps, deps.store.getAgent(agent.id) ?? agent, runtimeRef, now ?? Date.now()));
 }
 
 async function syncContextCapNow(deps: CapDeps, agent: Agent, runtimeRef: string, now: number): Promise<CapOutcome> {

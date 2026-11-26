@@ -172,6 +172,13 @@ tries_open "$TRIES" "hatchabot-follow-channel-tries-$KEY" "$TARGET"
 # tried again on the next (review of HB-0637). A pin's record alone is no
 # cut: that upgrade.sh sees through, or takes back.
 cut_due() { [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ]; }
+# That record, and the release it names (`from`). A kept one (kept_record, a
+# copy of upgrade-helpers.sh's) is of a release put back whose restart did
+# not come up: no upgrade was cut off, and past the cap of restarts it is
+# only looked at (review of HB-1456).
+cut_rec() { if [ -f .swapping ]; then echo .swapping; else echo "$STATE/upgrade-$KEY.from"; fi; }
+kept_record() { grep -qx back "$1" 2>/dev/null || grep -q '^tries ' "$1" 2>/dev/null; }
+put_back() { local r; r="$(sed -n 's/^from //p' "$(cut_rec)" 2>/dev/null | sed -n 1p || true)"; echo "${r:-$1}"; }
 # disk_waiting: 0 while the wait after the disk's last failure lasts (an
 # hour at most), from that failure (T_DLAST), as follow-latest.sh has it.
 # A repair the disk stopped (5) is counted the disk's (note_try 2), not a
@@ -183,7 +190,8 @@ if [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then TAG_HELD="was set aside,
 elif tries_waiting; then TAG_HELD="is tried again later"; fi
 if [ -n "$TAG_HELD" ] && cut_due; then
   ! disk_waiting || exit 0
-  echo "$TARGET $TAG_HELD. This tick repairs the upgrade that was cut off, and only that."
+  if kept_record "$(cut_rec)"; then echo "$TARGET $TAG_HELD. This tick looks again at $(put_back 'the release put back'), which was not up, and only that."
+  else echo "$TARGET $TAG_HELD. This tick repairs the upgrade that was cut off, and only that."; fi
   rc=0; HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_REPAIR_ONLY=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL" || rc=$?
   if [ "$rc" = 5 ]; then
     note_try 2
@@ -227,10 +235,16 @@ else
   # this waited: routine, the tick ends 0 and counts nothing (ninth and
   # thirteenth reviews). A full disk (5) ends 1, so the unit shows
   # it failed, but counts only towards the wait, never against the release.
+  # 6 = the release put back by an earlier upgrade is not up, and this tick
+  # had nothing to upgrade it to (the channel names it, or an older one):
+  # nothing was tried, so nothing is counted; it ends 1, a failed unit to see
+  # (review of HB-1456). Named as the record names it: TARGET may be older.
   # But a pin upgrade.sh took back is not tried again: the channel is, next tick.
   if [ "$rc" = 4 ]; then
     echo "Another upgrade of $DIR is running, or this machine's channel changed while this tick waited (above): it leaves $TARGET to the next tick."
     exit 0
+  elif [ "$rc" = 6 ]; then
+    echo "$(put_back 'The release put back') is on this machine but not up (above), and there was nothing to upgrade it to. This does not count against $TARGET."
   elif [ "$rc" != 1 ] && [ -n "$PINNED" ] && [ "$(remembered)" != "$PINNED" ]; then
     echo "Upgrading to $PINNED did not complete (see above), so this machine is no longer pinned to it."
   elif [ "$rc" = 1 ]; then

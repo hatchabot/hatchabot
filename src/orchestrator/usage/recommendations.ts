@@ -151,6 +151,14 @@ export function inRecommended(store: Store, p: Pick<PendingConfirm, 'tool' | 're
   return !!a && a.ownerId === p.ownerId && listed(a);
 }
 
+/**
+ * A card filed again after a restart cut it off (HB-1053) carries the words
+ * of its first filing: a model card's evidence and warnings, the guard's
+ * Before and After. Said, ahead of them, with when that was.
+ */
+const refiledLine = (p: PendingConfirm, now: number): string[] =>
+  p.firstFiledAtMs ? [`Filed again after a restart: first filed ${clockOf(p.firstFiledAtMs, now)}, so what it says is as of then`] : [];
+
 /** The label a card's click carries: what that card will do, from its own call. */
 function cardLabel(p: PendingConfirm): string {
   const body = (p.resolved?.rest?.call.body ?? {}) as Record<string, unknown>;
@@ -333,7 +341,7 @@ function switchBackItem(c: Ctx, p: PendingConfirm): Recommendation | undefined {
     id: `switch-back:${change?.id ?? p.id}`, kind: 'switch-back', agents: [ref(a)],
     title: `${a.name} does worse on ${bare(change?.to ?? after?.model ?? 'its new model')}`,
     concern: change ? `since it moved from ${bare(change.from ?? from)} on ${new Date(change.at).toISOString().slice(0, 10)}: ${(change.reasons ?? []).join('; ') || 'more failures than before'}` : lines[1] ?? '',
-    evidence: lines.filter((l) => /^(Before|After)\b/.test(l)),
+    evidence: [...refiledLine(p, c.now), ...lines.filter((l) => /^(Before|After)\b/.test(l))],
     effect: { text: `back on ${bare(from)}, where it did better; the guard does not ask about this switch again`, billing: c.billing(a) === 'plan' ? 'plan' : 'api' },
     action: confirmCard(p), secondary: [{ kind: 'open-agent', label: 'Details', agentId: a.id }],
     proposedBy: 'guard', proposalId: p.id,
@@ -473,7 +481,7 @@ function cardItem(c: Ctx, p: PendingConfirm): Recommendation | undefined {
   return {
     id: `card:${p.id}`, kind: 'proposal', agents: [ref(a)],
     title: (head ?? '').replace(/^\W+\s*/u, '') || cardLabel(p), concern: '',
-    evidence: [...(p.resolved.check ? [p.resolved.check.evidence, ...p.resolved.check.warnings.map((w) => `⚠ ${w}`)] : rest), ...(p.note ? [`Its reason: “${p.note}”`] : [])].filter(Boolean),
+    evidence: [...refiledLine(p, c.now), ...(p.resolved.check ? [p.resolved.check.evidence, ...p.resolved.check.warnings.map((w) => `⚠ ${w}`)] : rest), ...(p.note ? [`Its reason: “${p.note}”`] : [])].filter(Boolean),
     action: confirmCard(p), secondary: [{ kind: 'open-agent', label: 'Details', agentId: a.id }],
     proposedBy: 'agent', proposalId: p.id,
     rank: { group: GROUP.proposal, money: 0 },

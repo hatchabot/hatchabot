@@ -19,7 +19,7 @@ import { createTokenSteward, type TokenSteward, type TokenStewardDeps } from './
  *    the master's playbook.
  *
  * Built once in `registerRoutes` and on the route context as `ctx.memory`;
- * its routes are in src/api/memoryRoutes.ts. The checkpoint, the ask and
+ * its routes are in src/api/chat/memoryRoutes.ts. The checkpoint, the ask and
  * the distillation take the agent's one turn, the consult service's
  * `turns` (`a2aInFlight`), so none of them interleaves with a consult.
  * Nothing here knows HTTP. `stop()` ends the recovery slots' timers.

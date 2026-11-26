@@ -17,8 +17,8 @@ import { Store } from '../src/store/store.js';
  * reason; a `.catch` is usually shorter.
  */
 const CANNOT_REJECT: Record<string, string> = {
-  // Lock tails: each is the `run.catch(...)` or `run.then(f, f)` of the line above it.
-  tail: 'a queue tail, already caught', turn: 'a queue tail, already caught', settled: 'a queue tail, already caught', next: 'ops/notify.ts: the chain ends in .catch',
+  // The keyed lock's tails (src/util/queues.ts, `keep`): each one it is given ends in a two-handler `.then(f, f)`.
+  tail: 'a queue tail, already caught',
   // Their own bodies catch what can fail.
   'this.#reapOneShot': 'catches the docker call', 'this.#settleOneShot': 'catches every docker call, and its callback only notes the volume and resolves',
   browsersNow: 'ends in .catch', syncDocsHeld: 'ends in .catch', runUsageSample: 'ends in .catch',

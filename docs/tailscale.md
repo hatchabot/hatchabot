@@ -46,8 +46,55 @@ disabled. `tailscale serve` puts a real HTTPS cert in front:
 ```sh
 # one-time, needs your password / admin rights:
 sudo tailscale set --operator=$USER     # let your user manage serve
-tailscale serve --bg http://localhost:8080
+tailscale serve --bg http://127.0.0.1:8094
 ```
+
+Port 8094 is Hatchabot's listener for `tailscale serve`
+(`HATCHABOT_PROXY_PORT`, on 127.0.0.1 only; `src/api/proxyListener.ts`).
+Every tailnet device arrives through serve from 127.0.0.1, so the address
+Tailscale adds to `X-Forwarded-For` is the only thing that tells two devices
+apart: Hatchabot reads it there and nowhere else, and reads the last value,
+the one Tailscale set (since Tailscale 1.40 it replaces whatever the client
+sent; `ipn/ipnlocal/serve.go`, `addProxyForwardedHeaders`). So each device
+has its own sign-in limit, and on port 8080 nothing on this machine can
+choose one by sending that header (HB-1239, HB-1435). Even on 8094 the
+header is believed only from a program of a user other than Hatchabot's
+own: tailscaled runs as root, so it is; an agent's container, which reaches
+this machine's loopback through programs of Hatchabot's own user under
+rootless Docker or Docker Desktop, is counted as itself. Tailscale itself
+running as your own user (a `tailscaled --tun=userspace-networking` you
+started) is not believed either: every device then shares one sign-in
+limit, and `hatchabot doctor` says so. Run tailscaled as root (its system
+service), or list its uid in `HATCHABOT_PROXY_TRUST_UIDS` (then every
+program of your user can choose its limit there). A tailscaled without a
+TUN device (userspace networking, as the official Tailscale container runs
+unless `TS_USERSPACE=false`) dials 127.0.0.1 for any tailnet connection to
+this machine's own address, so any device on your tailnet can open port
+8094 itself, as tailscaled, and name its own address there; `hatchabot
+doctor` warns. Run it with a TUN device (`/dev/net/tun`).
+
+**On a Mac** the header is not believed yet, whichever Tailscale app runs,
+so every device on your tailnet shares one sign-in limit there, and
+`hatchabot doctor` says so. Run as your user, `lsof` sees only your own
+programs, one after another, so root's connections (the Standalone app's)
+are never found; Hatchabot asks it which program holds the other end of a
+connection only when your uid is listed in `HATCHABOT_PROXY_TRUST_UIDS`. The
+App Store app runs as you; listing your uid believes your own programs'
+connections, that app's but also every other one's, an agent's container
+under Docker Desktop included. A connection `lsof` does not find, or one
+that closed while it looked, is not believed.
+
+**Set up before 2.192.0**, with `http://localhost:8080`? At each start
+Hatchabot points serve's entries that land on its own port at 8094 instead,
+on the same address and path. A Funnel entry and a `tailscale serve` running
+in a terminal are left as they are. Where Tailscale refuses (a Linux user who
+is not its operator), the log, `hatchabot doctor` and the setup guide say so
+and give the command, `tailscale serve --bg http://127.0.0.1:8094` (with
+`sudo` if Tailscale says access denied); the setup guide's **Move it to port
+8094** does the same. Hatchabot never moves serve, or turns it on, while its
+listener for it is not open (another program has the port, say): it leaves
+serve as it is and says why, in the log, `hatchabot doctor` and the setup
+guide. Set `HATCHABOT_PROXY_PORT` to a free port and restart.
 
 If the second command mentions enabling HTTPS certificates: admin console →
 **DNS** → *Enable HTTPS*, then rerun it. Afterwards the app lives at
@@ -57,9 +104,9 @@ If the second command mentions enabling HTTPS certificates: admin console →
 HATCHABOT_PUBLIC_URL=https://<your-machine>.<your-tailnet>.ts.net
 ```
 
-`serve` proxies 443 → localhost:8080, so everything that talks to
-`http://localhost:8080` directly (the CLI, cron scripts, the ops door)
-keeps working unchanged, and cert renewal is Tailscale's problem. If you're
+`serve` proxies 443 → 127.0.0.1:8094, the same app, so everything that
+talks to `http://localhost:8080` directly (the CLI, cron scripts, the ops
+door) keeps working unchanged, and cert renewal is Tailscale's problem. If you're
 using Google sign-in, add the new `https://…ts.net` origin to the OAuth
 client's authorized JavaScript origins in the GCP console — the old
 `http://…:8080` origin stops matching.

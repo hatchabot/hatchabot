@@ -25,7 +25,8 @@ and not fixed.
                the same Hatchabot app
                        ▲
    0.0.0.0:8080    the private listener ── this machine, the LAN, the tailnet
-                       ▲                    (`tailscale serve` on 443 lands here)
+   127.0.0.1:8094  its door for `tailscale serve` (443 lands here): private too
+                       ▲
         browsers at home / on the tailnet, the CLI, agents, runners
 ```
 
@@ -34,6 +35,36 @@ trust class, and nothing else does** (`src/api/trust.ts`): every socket the
 public listener accepts is recorded when it connects, and a request is
 "public" if and only if its socket is one of those. Funnel is pointed at the
 public listener's port and no other.
+
+The private side has a second door, for `tailscale serve` alone
+(`src/api/proxyListener.ts`, `HATCHABOT_PROXY_PORT`, 8094, on 127.0.0.1).
+It is private, as port 8080 is, and changes no trust class; it only says
+whose address a sign-in miss counts against. Its sockets are recorded the
+same way, and only on them is `X-Forwarded-For` read: the last value, the
+one tailscaled sets (HB-1239, HB-1435), and only from a connection made by
+a program of a user other than Hatchabot's own (`src/ops/peerUser.ts`,
+decided once per connection; the connections waiting share one read of
+the kernel's tables at a time, and past 256 waiting at once a connection is
+not believed, so a flood of them costs a bounded amount of work; a
+connection left that way, or not found, is asked again at its next request,
+one at a time, and that request is not believed while the answer is out). On port
+8080 the peer is itself, whatever it sends. An agent's container that is a
+loopback peer (a rootless daemon, Docker Desktop) can reach this port too,
+but it connects through programs of Hatchabot's own user (slirp4netns or
+pasta, Docker Desktop's backend), so it cannot choose its sign-in limit here
+either: it is counted as itself.
+Another user's programs on the machine can choose theirs here: tailscaled
+runs as root and Caddy as its own user, which is why, on a home machine,
+only proxies should run as other users; on a shared host the tenant's
+firewall rule keeps the other tenants off this port (docs/shared-host.md).
+A Tailscale that runs as Hatchabot's own user (the Mac App Store app, a
+userspace `tailscaled`) is not believed unless its uid is listed in
+`HATCHABOT_PROXY_TRUST_UIDS`; `hatchabot doctor` says when that is so.
+On a Mac nothing else is believed yet: `lsof`, which Hatchabot asks there,
+sees only its own user's programs, one after another, so a connection it
+does not find (root's, or one that closed while it looked) is not
+believed, and every tailnet device shares one sign-in limit.
+Funnel pointed at this port fails safeguard d, as at 8080.
 
 Why not read a header? Funnel traffic reaches Hatchabot from `127.0.0.1`
 (tailscaled proxies it) and tailscaled marks it `Tailscale-Funnel-Request: ?1`.
@@ -47,7 +78,7 @@ visitor sends, and no header a proxy forgets, moves a request between classes.
 | Who | Where they connect | What they are to Hatchabot |
 |---|---|---|
 | Anyone on the internet | the public address (`https://<machine>.<tailnet>.ts.net:8443`) | **public**: the least trusted class. Never "on this machine", never the tailnet. |
-| A device on your tailnet | `https://<machine>.<tailnet>.ts.net` (`tailscale serve`) or `http://…:8080` | private, as before |
+| A device on your tailnet | `https://<machine>.<tailnet>.ts.net` (`tailscale serve`, to `127.0.0.1:8094`) or `http://…:8080` | private, as before |
 | A device on your LAN | `http://<machine>:8080` | private, as before |
 | This machine itself | `http://localhost:8080` | private; "on this machine" for first-run set-up, as before |
 | Agents, runners, the CLI, another Hatchabot | port 8080 or the doors (8091, 8093) | private, by their own tokens, as before |
@@ -59,13 +90,13 @@ What is different for a public request, everywhere in the code:
 
 | Place | Private (unchanged) | Public |
 |---|---|---|
-| "On this machine" (`onThisMachine`, the first-run set-up code) | loopback with no proxy headers | never |
+| "On this machine" (`onThisMachine`, the first-run set-up code) | loopback with no proxy headers, not through the listener for `tailscale serve` | never |
 | Creating the first account; the owner's first claim | allowed on the machine, or with the set-up code | refused |
 | In-process calls of the management agent (`internalPrincipal`) | accepted from loopback with the process secret | refused |
 | `x-hatchabot-owner` (test switch `HATCHABOT_ALLOW_OWNER_HEADER`) | read when the switch is on | never read; and the switch being on fails safeguard d |
 | Command-line tokens, peer (rehost) tokens, Google bearer tokens | accepted | not looked at: a browser session is the only way in |
 | HTTPS (which decides `__Host-`/`Secure` cookies) | from `X-Forwarded-Proto`, TLS, or the public URL's host | always |
-| The visitor's address for limits | the socket; `X-Forwarded-For` only from loopback | the address tailscaled reports (the last `X-Forwarded-For` value) |
+| The visitor's address for limits | the socket; on the listener for `tailscale serve` (`HATCHABOT_PROXY_PORT`, 8094) only, the last `X-Forwarded-For` value, the one tailscaled sets | the address tailscaled reports (the last `X-Forwarded-For` value) |
 | Sign-in failure counts | per address and per account | separate `pub:` buckets, so the internet can lock an account out of the public address only |
 | A session | the session cookie | the session cookie **and** the public pass (below) |
 | A request replayed inside the process (a confirmed change of the management agent) | private | stays public: it is stamped with a secret that never leaves the process |
@@ -148,7 +179,7 @@ has no second factor yet, so the owner can send each a reset link.
 ### The second factor
 
 - **Passkeys** (WebAuthn), implemented with `node:crypto` and a small CBOR
-  reader (`src/api/webauthn.ts`), no dependency. Attestation is `none`: no
+  reader (`src/api/signIn/webauthn.ts`), no dependency. Attestation is `none`: no
   statement is asked for or verified. The RP ID is the public host; the
   origin, the challenge (single use, five minutes), user presence, the
   signature and the signature counter are all checked; a counter that does not
@@ -318,6 +349,7 @@ reads inside the agent (docs/access-overview-design.md).
 | open | Account invitations and password reset links (the code is the credential; never the machine owner's first claim) |
 | open | Forgotten password (Telegram link, recovery code) |
 | second-step | The second-factor screen |
+| signed-in | Filing again a change a restart cut off (the new card waits for Confirm) |
 | signed-in | Your own account (who am I, sign out everywhere, security notices) |
 | signed-in | Command-line tokens: list and revoke |
 | signed-in | An agent's OpenClaw console (the owner, or a web-chat guest in their own conversation) |

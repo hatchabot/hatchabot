@@ -4,7 +4,7 @@ import type { Agent } from '../../domain/types.js';
 import type { RuntimeProvider } from '../../providers/provider.js';
 import type { SecretStore } from '../../secrets/secretStore.js';
 import type { Store } from '../../store/store.js';
-import { clearBusy, markBusy, whileBusy } from '../lifecycle/busy.js';
+import { markBusy, whileBusy } from '../lifecycle/busy.js';
 import { claimFirstContact } from '../members/claim.js';
 import { modelOverrideProblem } from '../lifecycle/modelRuntime.js';
 import { generateDeployKey } from '../apps/gitSource.js';
@@ -155,7 +155,7 @@ export function createCopies(deps: CopiesDeps): Copies {
     // clone's is, or a Delete meanwhile tore it down and the write still under
     // way put its credential back on the tombstone (HB-0926). Taken before the
     // first wait, in the turn the record was made in.
-    markBusy(agent.id);
+    const release = markBusy(agent.id, 'template-answers');
     // The answers live in this request alone until stored: a restart part way
     // left the draft with some of its credentials, the boot's reconcile marked
     // it FAILED, and Retry built it without the rest (HB-0927). An import's
@@ -203,7 +203,7 @@ export function createCopies(deps: CopiesDeps): Copies {
       try { op?.rolledBack(e.userMessage); } catch { /* the error below is what the user sees */ }
       throw e;
     } finally {
-      clearBusy(agent.id);
+      release();
     }
   };
 
@@ -221,7 +221,7 @@ export function createCopies(deps: CopiesDeps): Copies {
     // quiesces then tars the volume (minutes on a large agent), and without
     // the flag a concurrent Start passed its guards and booted the container
     // to write the volume mid-`tar`, silently tearing the archive.
-    download: (agent) => whileBusy(agent.id, () =>
+    download: (agent) => whileBusy(agent.id, 'download', () =>
       exportAgent(
         { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
           log: trace(agent.id) },
@@ -272,7 +272,7 @@ export function createCopies(deps: CopiesDeps): Copies {
           throw new TransferError('The source agent changed while copying. Refresh and try again.');
         }
       };
-      markBusy(agent.id);
+      const release = markBusy(agent.id, 'clone-source');
       try {
         const { data } = await exportInTurn(agent, deps, true);
         // Read off the event loop, then made in one turn (HB-1162).
@@ -306,7 +306,7 @@ export function createCopies(deps: CopiesDeps): Copies {
         let carried: Awaited<ReturnType<typeof readCloneMemory>>;
         // The draft appears in the roster while its private settings copy.
         // A concurrent lifecycle action must not provision it half-filled.
-        markBusy(clone.id);
+        const releaseClone = markBusy(clone.id, 'clone-draft');
         // Its settings live in this request alone until copied: a restart part
         // way left the copy with some of its variables, the boot's reconcile
         // marked it FAILED, and Retry built it without the rest (HB-1164). An
@@ -370,13 +370,13 @@ export function createCopies(deps: CopiesDeps): Copies {
           try { op?.rolledBack(e.userMessage); } catch { /* the error below is what the user sees */ }
           throw e;
         } finally {
-          clearBusy(clone.id);
+          releaseClone();
         }
         if (envNotCopied.length) trace(clone.id)('agent.clone_env_skipped', { sourceAgentId: agent.id, names: envNotCopied.join(', ') });
         kickProvision(clone.id, { webOnlyIfNoBot: true });
         return { clone, notCopied, envNotCopied, ...(modelNotCopied ? { modelNotCopied } : {}), carried };
       } finally {
-        clearBusy(agent.id);
+        release();
       }
     },
 

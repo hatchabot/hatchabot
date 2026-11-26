@@ -4,7 +4,7 @@ import { Jar, PUBLIC_HOST, PUBLIC_URL, publicApp, type PublicApp } from './helpe
 import { SoftAuthenticator } from './helpers/softAuthenticator.js';
 import { agentRow, closeAfterEach, ctx, privCookie, world } from './helpers/publicWorld.js';
 import { createInvite } from '../src/orchestrator/members/invite.js';
-import { totp } from '../src/api/totp.js';
+import { totp } from '../src/api/signIn/totp.js';
 import { readPage } from '../scripts/page-source.mjs';
 
 /**

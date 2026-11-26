@@ -1,4 +1,4 @@
-// web/app/sheet.js: an agent's settings sheet: its tabs, files, Apps in agents and running an app from a repo, web chat, Telegram.
+// web/app/sheet.js: an agent's settings sheet: its tabs and panes (v2Pane), keeping it current while open (v2RefreshSheet), Apps in agents and running an app from a repo, usage, files, members, web chat, Telegram.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -46,7 +46,7 @@ function v2EmbedPanes(a, tab) {
   // cleared here), and its forms are filled again when one of their tabs opens (v2EditFor, the
   // refill below). Kept on its Schedule tab, an edit left in them held this agent's redraw (HB-0475).
   // The same agent's forms filled again (after a redraw for its state) are noted afresh by
-  // prepareEdit, and controls drawn over since drop out (v2SheetBaseline).
+  // prepareEdit, and controls drawn over since drop out (v2SheetUnsaved).
   if (v2NotesFor !== a.id) { v2SheetNotes.clear(); v2NotesFor = a.id; v2EditFor = null; }
   if (tab === 'files') { void v2LoadFiles(a.id, v2FilesPath.get(a.id) ?? ''); return; }
   const list = V2_EMBED[tab]; if (!list) return;
@@ -97,7 +97,7 @@ function v2EmbedPanes(a, tab) {
     // The runtime menus by the image's rule: refilled with their forms; on another tab of this
     // agent, a choice not saved yet stays (and counts as unsaved), the rest follows the record.
     if (blockId === 'embedModeRow') {
-      if (refilled || !v2KeepsChoice('editEmbedMode', a.embedMode || 'baked')) { $('editEmbedMode').value = a.embedMode || 'baked'; v2SheetBaseline('editEmbedMode'); }
+      if (refilled || !v2KeepsChoice('editEmbedMode', a.embedMode || 'baked')) sheetFill(['editEmbedMode'], () => { $('editEmbedMode').value = a.embedMode || 'baked'; });
       $('embedModeStatus').textContent = embedModeText(a);
     }
     if (blockId === 'memoryCapRow') fillMemoryCapRow(a, !refilled);
@@ -174,6 +174,125 @@ function v2RenderSheet() {
   if ($('v2Voice')) void v2LoadVoice(a.id);
   if ($('v2Skills')) void v2LoadSkills(a.id);
 }
+
+// Keep an open sheet current as the poll brings news (a pairing request, a
+// finished rebuild), but never repaint a pane someone is typing in.
+/** Tabs that load their own content (a volume listing, the channels, the
+ *  usage read): repainted only when the agent itself changed, never on a
+ *  plain poll — each repaint reloaded them, and an upload lost its progress. */
+const V2_SELF_LOADING = { files: 1, channels: 1, slack: 1, usage: 1 };
+let v2SheetSig = '';
+/** The state the open tab was drawn in. */
+let v2SheetDrawnState = null;
+/**
+ * Each control in the sheet's edit sections with its value as filled or last saved (its
+ * baseline): one whose value differs is an unsaved edit. A state redraw fills the edit sections
+ * again, so it waits while there is one (HB-0444). Whatever fills a control does it through
+ * sheetFill, which notes it as filled (v2SheetBaseline): prepareEdit, prepareCrons and each render
+ * or fill helper, and an answer drawn in by its handle's fill (HB-0644). A refill then moves the
+ * baseline with it. A control the sheet draws itself (a Telegram token box) is compared with its
+ * value as drawn. A save that does not draw its controls again notes what it sent, for the agent
+ * it saved (sheetSave: v2SheetSaving). Noted on a first press or focus instead, a value code put
+ * in afterwards (a model menu drawn for a class, a connection attached) read as an edit for good,
+ * and the tab never redrew again (HB-0475).
+ */
+let v2SheetNotes = new Map();
+const V2_CONTROLS = 'input, select, textarea';
+const v2CtlValue = (el) => el.type === 'checkbox' || el.type === 'radio' ? String(el.checked)
+  : el.multiple ? [...el.selectedOptions].map(o => o.value).join('\n') : el.value;
+/** As the page drew it: what a control holds before anyone changes it. */
+const v2CtlDrawn = (el) => el.type === 'checkbox' || el.type === 'radio' ? String(el.defaultChecked)
+  : el.tagName === 'SELECT' ? ([...el.options].filter(o => o.defaultSelected).map(o => o.value).join('\n') || (el.multiple ? '' : el.options[0]?.value ?? ''))
+  : el.defaultValue;
+/** The edit sections the sheet borrows, and the blocks it moves: what prepareEdit fills. */
+const V2_SHEET_FORMS = ['paneDef', 'paneEditSnap', 'paneEditAi', 'paneEditData', 'paneEditConn', 'paneEditTg', 'paneEditPeers', 'paneEditEnv',
+  'tgMembersBlock', 'imagePinRow', 'embedModeRow', 'memoryCapRow'];
+/** The controls in `where`: ids or elements, of controls or of what holds them. A task's own switches are not edits. */
+/**
+ * A control whose value is an edit of the sheet's: not one whose change saves it (marked
+ * data-saves: Group, Class, Browser, Who can reach it, the task triggers switch…), nor a
+ * task's own switches in the list. The one rule for what is baselined (v2SheetControlsOf)
+ * and what a person's change counts (v2SheetCounts).
+ */
+const v2SheetEdits = (el) => !el.hasAttribute('data-saves') && !el.closest('#cronList');
+const v2SheetControlsOf = (where) => where.flatMap(w => { const el = typeof w === 'string' ? $(w) : w; return !el ? [] : el.matches(V2_CONTROLS) ? [el] : [...el.querySelectorAll(V2_CONTROLS)]; })
+  .filter(v2SheetEdits);
+/** Each control's fills, counted (v2SheetBaseline): its form revision (HB-0644). A save's values are its baseline only while no fill came after the press. */
+const v2SheetFills = new WeakMap();
+/**
+ * A menu the sheet fills from the record on a tab drawn again: whether a choice in it is not
+ * saved yet (not its baseline, the value of its fill or its last save) and is not what the
+ * record holds now. That one stays, and counts as unsaved; otherwise the menu is filled again.
+ */
+function v2KeepsChoice(id, record) {
+  const el = $(id), note = el ? v2SheetNotes.get(el) : undefined;
+  return note !== undefined && el.value !== note && el.value !== record;
+}
+/** What `where` holds now is as filled. Only sheetFill calls it (scripts/sheet-state.mjs), for whatever just filled it. */
+function v2SheetBaseline(...where) {
+  for (const el of v2SheetControlsOf(where)) { v2SheetNotes.set(el, v2CtlValue(el)); v2SheetFills.set(el, (v2SheetFills.get(el) || 0) + 1); }
+}
+/**
+ * Before a save sends them: what `where` holds now. Call what it returns with the agent saved,
+ * once it is: those values become the baseline, when the forms are still that agent's and
+ * each control is as it was at the press. Refilled meanwhile (the sheet closed and opened
+ * again, or another agent and back), it shows what the fill put there: the sent value noted
+ * under it held the redraw for good, and a later press sent the old value.
+ * Only sheetSave calls it: `const f = sheetSave('editDesc'); … f.saved();`. Not for a save
+ * whose success draws its controls again: that drawing notes them.
+ */
+function v2SheetSaving(...where) {
+  const sent = v2SheetControlsOf(where).map(el => [el, v2CtlValue(el), v2SheetFills.get(el) || 0]);
+  return (forId) => {
+    if (editAgentId !== forId || (v2AgentId && v2AgentId !== forId)) return;
+    for (const [el, value, fills] of sent) if ((v2SheetFills.get(el) || 0) === fills) v2SheetNotes.set(el, value);
+  };
+}
+function v2SheetUnsaved() {
+  // Controls drawn over since (their tab's HTML replaced) are gone: their notes go with them. The
+  // one place they go while the sheet is open (not at each fill); closing it lets all of them go.
+  for (const el of v2SheetNotes.keys()) if (!el.isConnected) v2SheetNotes.delete(el);
+  // Edit on a task fills its form with a press: its Save is armed until saved or cancelled. A
+  // redraw of the Schedule tab starts the form afresh, so it counts while the form is in the sheet.
+  if (cronEditingId && $('v2Pane').contains($('cronBody'))) return true;
+  // Setup fields added or removed with a press, not saved yet, in the forms filled for this sheet
+  // (not left from an agent shown before, which its next fill replaces).
+  if (v2EditFor && v2EditFor === editAgentId && JSON.stringify(editParams) !== editParamsSaved) return true;
+  for (const [el, note] of v2SheetNotes) if (v2CtlValue(el) !== note) return true;
+  return false;
+}
+const v2SheetSigOf = (a) => JSON.stringify([a.id, a.state, a.hibernatedAt ?? null, a.runtimeRef ?? null, a.botUsername ?? null, a.otherChannels ?? [], pairings[a.id] ?? []]);
+function v2RefreshSheet() {
+  if (!v2AgentDlg.open) return;
+  const pane = $('v2Pane');
+  const a = v2Find(v2AgentId);
+  const same = V2_SELF_LOADING[v2Tab] && a && v2Mine(a) && v2SheetSigOf(a) === v2SheetSig;
+  // A tab of edit sections was drawn for one state: "It is stopped — start it" stayed
+  // after Start from the bar. Redrawn, and its forms filled again, unless the person
+  // has an edit in them or a field in use: then the next poll asks again (HB-0444).
+  if (V2_EMBED[v2Tab] && a && a.state !== v2SheetDrawnState && !v2SheetUnsaved() && !(pane.contains(document.activeElement) && document.activeElement.matches('input, textarea, select'))) {
+    const top = pane.scrollTop;
+    v2EditFor = null;
+    v2RenderSheet();
+    pane.scrollTop = top;
+    return;
+  }
+  // Tabs holding the edit sections manage their own state; only repaint the bar.
+  const busy = V2_EMBED[v2Tab] || same || pane.querySelector('#healthDlgBody') || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
+  if (busy) v2RenderSheetBar(); else { const top = pane.scrollTop; v2RenderSheet(); pane.scrollTop = top; }
+}
+// The close event arrives a task later: reopened by then (close one agent,
+// open the next), it must not clear the agent now showing — that left the
+// sheet deaf to updates and its Usage tab on "Loading…" (2026-09-29).
+v2AgentDlg.addEventListener('close', () => { if (v2AgentDlg.open) return; v2ParkPanes(); endCronEdit(); v2AgentId = null; v2EditFor = null; v2NotesFor = null; v2SheetNotes.clear(); });
+// Only a person's change fires these; a form being filled does not. Counted by v2SheetEdits: one
+// whose change only shows or hides others (Group chats, the room picker) counts, its Save being a
+// separate press, so having an onchange says nothing.
+const v2SheetCounts = (el) => !!el?.matches?.(V2_CONTROLS) && v2SheetEdits(el);
+// One with no baseline (drawn by the sheet itself): compared with its value as drawn.
+for (const ev of ['input', 'change']) $('v2Pane').addEventListener(ev, (e) => {
+  if (v2SheetCounts(e.target) && !v2SheetNotes.has(e.target)) v2SheetNotes.set(e.target, v2CtlDrawn(e.target));
+});
 
 // ---- Apps in agents (docs/apps-in-agents.md): the agent page's App row ----------------
 /** Which app it runs and from where, with Update, Roll back and Stop app (the machine's owner only). */

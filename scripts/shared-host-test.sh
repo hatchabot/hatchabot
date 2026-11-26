@@ -134,11 +134,12 @@ EOF
 grep -q "prepped" "$OUT/hostprep.log" && ok "host prepared: $(grep -o 'prepped.*' "$OUT/hostprep.log" | tail -1)" || { bad "host prep — $(tail -3 "$OUT/hostprep.log" | tr '\n' ' ')"; exit 1; }
 
 # ---- 2. tenants -----------------------------------------------------------------
-# Tenant i owns: PORT 8100+i, ops door 8300+i, memory-search door 8500+i, gateway ports 19i00–19i99
-# (the same three ranges bin/hc uses; 8090+i and 8190+i met other slots' ports from slot 11).
-declare -A PORT OPS EMBED GWBASE UIDOF TOKEN
+# Tenant i owns: PORT 8100+i, ops door 8300+i, memory-search door 8500+i, the listener for a proxy 8700+i
+# (HATCHABOT_PROXY_PORT, where X-Forwarded-For is believed: HB-1239), gateway ports 19i00–19i99
+# (the same ranges bin/hc uses; 8090+i and 8190+i met other slots' ports from slot 11).
+declare -A PORT OPS EMBED PROXY GWBASE UIDOF TOKEN
 for i in $(seq 1 "$TENANTS"); do
-  u="t$i"; PORT[$u]=$((8100 + i)); OPS[$u]=$((8300 + i)); EMBED[$u]=$((8500 + i)); GWBASE[$u]=$((19000 + i * 100))
+  u="t$i"; PORT[$u]=$((8100 + i)); OPS[$u]=$((8300 + i)); EMBED[$u]=$((8500 + i)); PROXY[$u]=$((8700 + i)); GWBASE[$u]=$((19000 + i * 100))
   root >"$OUT/$u-user.log" 2>&1 <<EOF
 set -e
 id $u >/dev/null 2>&1 || useradd -m -s /bin/bash $u
@@ -170,6 +171,7 @@ EOF
   ENV_LINES="DOCKER_HOST=unix:///run/user/${UIDOF[$u]}/docker.sock
 HATCHABOT_OPS_PORT=${OPS[$u]}
 HATCHABOT_EMBED_PORT=${EMBED[$u]}
+HATCHABOT_PROXY_PORT=${PROXY[$u]}
 HATCHABOT_GATEWAY_PORT_BASE=${GWBASE[$u]}
 HATCHABOT_PREFIX=$u
 HATCHABOT_MAX_AGENTS_TOTAL=3
@@ -195,8 +197,8 @@ HATCHABOT_PUBLIC_URL=http://127.0.0.1:${PORT[$u]}"
   # Once per tenant, not once per run (a kept VM used to stack a copy each time). The real host persists
   # these through bin/hc's /etc/hatchabot-cloud/hb.nft; the bed's rules live until the VM reboots.
   root >"$OUT/$u-nft.log" 2>&1 <<EOF
-nft list chain inet hb out 2>/dev/null | grep -q "dport { ${PORT[$u]}," || \
-nft add rule inet hb out oif lo tcp dport { ${PORT[$u]}, ${OPS[$u]}, ${EMBED_RULE}${GWBASE[$u]}-$((GWBASE[$u] + 99)) } meta skuid != { ${UIDOF[$u]}, \$(id -u caddy), 0 } reject with tcp reset
+nft list chain inet hb out 2>/dev/null | grep -q "dport { ${PORT[$u]}, ${PROXY[$u]}," || \
+nft add rule inet hb out oif lo tcp dport { ${PORT[$u]}, ${PROXY[$u]}, ${OPS[$u]}, ${EMBED_RULE}${GWBASE[$u]}-$((GWBASE[$u] + 99)) } meta skuid != { ${UIDOF[$u]}, \$(id -u caddy), 0 } reject with tcp reset
 EOF
 done
 
@@ -333,12 +335,19 @@ if [ "$TENANTS" -ge 2 ]; then
   own=$(code $a "http://127.0.0.1:${PORT[$a]}/v1/config"); [ "$own" = 200 ] && ok "$a reaches its own Hatchabot (${PORT[$a]})" || bad "$a cannot reach its own port ${PORT[$a]} ($own)"
   x=$(code $a "http://127.0.0.1:${PORT[$b]}/v1/config"); [ "$x" = 000 ] && ok "$a's shell cannot reach $b's Hatchabot (${PORT[$b]})" || bad "$a's shell reached $b's port ${PORT[$b]} ($x)"
   x=$(code $a "http://127.0.0.1:${OPS[$b]}/"); [ "$x" = 000 ] && ok "$a's shell cannot reach $b's door (${OPS[$b]})" || bad "$a's shell reached $b's door ${OPS[$b]} ($x)"
+  # The listener for a proxy believes X-Forwarded-For from a user other than its tenant's (HB-1239): another
+  # tenant reaching it could choose its sign-in bucket there, so the tenant's rule must cover it too.
+  x=$(code $a "http://127.0.0.1:${PROXY[$a]}/v1/config"); [ "$x" = 200 ] && ok "$a reaches its own listener for a proxy (${PROXY[$a]})" || bad "$a cannot reach its own listener for a proxy ${PROXY[$a]} ($x)"
+  x=$(code $a "http://127.0.0.1:${PROXY[$b]}/v1/config"); [ "$x" = 000 ] && ok "$a's shell cannot reach $b's listener for a proxy (${PROXY[$b]})" || bad "$a's shell reached $b's listener for a proxy ${PROXY[$b]} ($x)"
   # …and from inside one of a's containers (its connections arrive as a, through slirp4netns).
   probe() { tenant "$a" "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/docker.sock; docker run --rm --pull=never alpine sh -c 'wget -q -T4 -O /dev/null http://10.0.2.2:$1/v1/config 2>/dev/null && echo yes || echo no' 2>/dev/null || (docker pull -q alpine >/dev/null 2>&1; docker run --rm alpine sh -c 'wget -q -T4 -O /dev/null http://10.0.2.2:$1/v1/config 2>/dev/null && echo yes || echo no')" | tr -d '\r' | tail -1; }
   x=$(probe "${PORT[$a]}"); [ "$x" = yes ] && ok "$a's container reaches $a's Hatchabot at 10.0.2.2:${PORT[$a]}" || bad "$a's container cannot reach its own Hatchabot at 10.0.2.2:${PORT[$a]}"
   x=$(probe "${PORT[$b]}"); [ "$x" = no ] && ok "$a's container cannot reach $b's Hatchabot at 10.0.2.2:${PORT[$b]}" || bad "$a's container reached $b's Hatchabot at 10.0.2.2:${PORT[$b]}"
+  x=$(probe "${PROXY[$b]}"); [ "$x" = no ] && ok "$a's container cannot reach $b's listener for a proxy at 10.0.2.2:${PROXY[$b]}" || bad "$a's container reached $b's listener for a proxy at 10.0.2.2:${PROXY[$b]}"
   x=$(code caddy "http://127.0.0.1:${PORT[$a]}/v1/config"); y=$(code caddy "http://127.0.0.1:${PORT[$b]}/v1/config")
   [ "$x" = 200 ] && [ "$y" = 200 ] && ok "the router user reaches both (${PORT[$a]}, ${PORT[$b]})" || bad "the router user cannot reach both ($x, $y)"
+  x=$(code caddy "http://127.0.0.1:${PROXY[$a]}/v1/config"); y=$(code caddy "http://127.0.0.1:${PROXY[$b]}/v1/config")
+  [ "$x" = 200 ] && [ "$y" = 200 ] && ok "the router user reaches both listeners for a proxy (${PROXY[$a]}, ${PROXY[$b]})" || bad "the router user cannot reach both listeners for a proxy ($x, $y)"
   x=$(L exec "$VM" -- sh -c "curl -s -o /dev/null -m 4 -w '%{http_code}' http://127.0.0.1:${PORT[$b]}/v1/config"); [ "$x" = 200 ] && ok "root reaches a tenant's port (the provisioner's smoke test)" || bad "root cannot reach ${PORT[$b]} ($x)"
   # The other tenant's Docker socket and home are closed — each probed on its
   # own: the first line of one combined ls was always the socket's refusal,

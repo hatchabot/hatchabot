@@ -20,8 +20,20 @@ export interface TailnetInfo {
   up?: boolean;
   /** This machine's MagicDNS name, without the trailing dot. */
   dns?: string;
-  /** `tailscale serve` is proxying 443 to the port we asked about. */
+  /** `tailscale serve` is proxying to Hatchabot: to the port asked about, or (`oldPort`) to the app's own. */
   serving?: boolean;
+  /**
+   * tailscaled runs without a TUN device (userspace networking: status's `TUN: false`; the
+   * official container's default). It then reaches this machine's own address on 127.0.0.1, as
+   * itself, so any tailnet device can open the listener for serve directly (HB-1239 review).
+   */
+  userspace?: true;
+  /**
+   * It still lands on the app's own port (PORT), where it was pointed before
+   * the proxy had a listener of its own (HB-1239): there every device on the
+   * tailnet shares one sign-in limit, until it is pointed at the new one.
+   */
+  oldPort?: boolean;
   /**
    * The address actually answered. `serving` only says the proxy is
    * configured — it says nothing about whether a certificate was ever issued,
@@ -70,6 +82,8 @@ async function firstBin(): Promise<string | undefined> {
   // test can ever reach the machine's real Tailscale (HATCHABOT_TAILSCALE_BIN).
   const named = process.env.HATCHABOT_TAILSCALE_BIN?.trim();
   if (named) return (await run(named, ['--version'], 2500)) ? named : undefined;
+  // Nor even looked up: under a test runner, a test that named none has none.
+  if (process.env.VITEST) return undefined;
   for (const b of BINS) {
     if (b.startsWith('/') && !existsSync(b)) continue;
     if (await run(b, ['--version'], 2500)) return b;
@@ -97,7 +111,8 @@ export async function enableServe(port: number): Promise<{ ok: boolean; error?: 
   const bin = await firstBin();
   if (!bin) return { ok: false, error: 'The tailscale command is not on this machine.' };
   const out = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
-    execFile(bin, ['serve', '--bg', `http://localhost:${port}`], { timeout: 20_000, encoding: 'utf8' },
+    // 127.0.0.1, not localhost: the proxy's listener is on IPv4 loopback only (src/api/proxyListener.ts).
+    execFile(bin, ['serve', '--bg', `http://127.0.0.1:${port}`], { timeout: 20_000, encoding: 'utf8' },
       (err, stdout, stderr) => resolve(err
         ? { ok: false, error: (String(stderr || stdout || err.message).trim().split('\n').slice(0, 4).join(' ').slice(0, 400)) }
         : { ok: true }));
@@ -105,7 +120,12 @@ export async function enableServe(port: number): Promise<{ ok: boolean; error?: 
   return out;
 }
 
-export async function tailnetInfo(port: number): Promise<TailnetInfo> {
+/**
+ * `port`: where `tailscale serve` should land (the proxy's listener).
+ * `mainPort`: the app's own port, where it landed before (HB-1239); found
+ * there, it is `serving` with `oldPort`.
+ */
+export async function tailnetInfo(port: number, mainPort?: number): Promise<TailnetInfo> {
   const bin = await firstBin();
   if (!bin) {
     const app = APP_BUNDLES.find((a) => a && existsSync(a));
@@ -115,18 +135,21 @@ export async function tailnetInfo(port: number): Promise<TailnetInfo> {
   }
   const statusRaw = await run(bin, ['status', '--json']);
   let dns: string | undefined;
-  let up = false;
+  let up = false, userspace = false;
   try {
-    const st = JSON.parse(statusRaw ?? '{}') as { Self?: { DNSName?: string; TailscaleIPs?: string[] }; BackendState?: string };
+    const st = JSON.parse(statusRaw ?? '{}') as { Self?: { DNSName?: string; TailscaleIPs?: string[] }; BackendState?: string; TUN?: boolean };
     dns = st.Self?.DNSName?.replace(/\.$/, '') || undefined;
     up = st.BackendState === 'Running' && !!st.Self?.TailscaleIPs?.length;
+    userspace = st.TUN === false;
   } catch { /* not connected, or an older CLI */ }
   if (!dns) return { installed: true, up, cliPath: bin };
   // `serve status` prints the proxy table; we only need to know whether 443
   // lands on our port. The JSON shape has changed across releases, so match
   // the port in either form rather than parsing a schema.
   const serveRaw = (await run(bin, ['serve', 'status'])) ?? (await run(bin, ['serve', 'status', '--json'])) ?? '';
-  const serving = new RegExp(`(127\\.0\\.0\\.1|localhost):${port}\\b`).test(serveRaw);
+  const lands = (p: number) => new RegExp(`(127\\.0\\.0\\.1|localhost):${p}\\b`).test(serveRaw);
+  const oldPort = mainPort !== undefined && mainPort !== port && lands(mainPort);
+  const serving = lands(port) || oldPort;
   if (!serving) return { installed: true, up, dns, serving: false, cliPath: bin };
   // Ask the address itself. A proxy with no certificate is configured and
   // useless, and saying "reachable at …" about it sends people to a browser
@@ -136,6 +159,8 @@ export async function tailnetInfo(port: number): Promise<TailnetInfo> {
     .catch((err: unknown) => ({ ok: false, why: String((err as Error)?.message ?? err).slice(0, 160) }));
   return {
     installed: true, up, dns, serving, cliPath: bin,
+    ...(oldPort ? { oldPort: true } : {}),
+    ...(userspace ? { userspace: true as const } : {}),
     reachable: probe.ok,
     unreachableWhy: probe.ok ? undefined : probe.why,
     url: probe.ok ? `https://${dns}` : undefined,
@@ -338,16 +363,19 @@ export interface FunnelResult { ok: boolean; error?: string; link?: string; url?
  * lands on the public listener. `tailscale serve` on 443 (the private tailnet
  * address) is a separate entry and is left alone.
  */
-export async function funnelOn(localPort: number, funnelPort: number, privatePort: number): Promise<FunnelResult> {
+export async function funnelOn(localPort: number, funnelPort: number, privatePort: number, proxyPort?: number): Promise<FunnelResult> {
   if (!FUNNEL_PORTS.includes(funnelPort)) return { ok: false, error: `Funnel listens on ${FUNNEL_PORTS.join(', ')} only.` };
   const command = `tailscale funnel --bg --https=${funnelPort} http://127.0.0.1:${localPort}`;
   if (changesRefusedInTests()) return { ok: false, error: 'Tests never change this machine\'s Tailscale (set HATCHABOT_TAILSCALE_BIN to a shim).', command };
   const bin = await firstBin();
   if (!bin) return { ok: false, error: 'The tailscale command is not on this machine.', command };
   const before = parseFunnelStatus(await run(bin, ['funnel', 'status', '--json']));
-  const stray = before.entries.find((e) => targetsPort(e, privatePort));
+  // The proxy's listener is private too (src/api/proxyListener.ts): internet traffic there would be a tailnet device's.
+  const onPrivate = (e: FunnelEntry) => targetsPort(e, privatePort) || (proxyPort !== undefined && targetsPort(e, proxyPort));
+  const stray = before.entries.find(onPrivate);
   if (stray) {
-    return { ok: false, command, error: `Funnel already publishes ${stray.hostPort} to the private port ${privatePort}. Turn that off first (tailscale funnel --https=${stray.port} off): internet traffic there is treated as this machine.` };
+    const to = targetsPort(stray, privatePort) ? privatePort : proxyPort;
+    return { ok: false, command, error: `Funnel already publishes ${stray.hostPort} to the private port ${to}. Turn that off first (tailscale funnel --https=${stray.port} off): internet traffic there is treated as this machine.` };
   }
   const run1 = await runFull(bin, ['funnel', '--bg', `--https=${funnelPort}`, `http://127.0.0.1:${localPort}`]);
   if (!run1.ok) {
@@ -355,7 +383,7 @@ export async function funnelOn(localPort: number, funnelPort: number, privatePor
   }
   const after = parseFunnelStatus(await run(bin, ['funnel', 'status', '--json']));
   const mine = after.entries.find((e) => e.port === funnelPort);
-  const wrong = after.entries.find((e) => targetsPort(e, privatePort));
+  const wrong = after.entries.find(onPrivate);
   if (!after.readable || !mine || !targetsPort(mine, localPort) || wrong) {
     // Not what was asked for: take it back rather than leave something half-published.
     await runFull(bin, ['funnel', `--https=${funnelPort}`, 'off']);
@@ -385,6 +413,169 @@ export async function funnelOff(localPort: number, funnelPort: number): Promise<
   if (!after.readable) return { ok: false, command, error: lastErr || 'Funnel\'s configuration could not be read back.' };
   if (left) return { ok: false, command, error: lastErr || `Funnel still publishes ${left.hostPort}.` };
   return { ok: true, command };
+}
+
+// ---- `tailscale serve` moved to the proxy's listener (HB-1239) ---------------
+
+/** The port of the listener `tailscale serve` is pointed at (src/api/proxyListener.ts), on 127.0.0.1. */
+export const PROXY_PORT_DEFAULT = 8094;
+
+/** HATCHABOT_PROXY_PORT, or its default. */
+export function proxyPort(env: NodeJS.ProcessEnv = process.env): number {
+  const v = env.HATCHABOT_PROXY_PORT?.trim();
+  const n = Number(v);
+  return v && Number.isInteger(n) && n >= 1 && n <= 65535 ? n : PROXY_PORT_DEFAULT;
+}
+
+/** The command that points `tailscale serve` (443, the tailnet address) at that listener. */
+export const serveCommand = (port: number): string => `tailscale serve --bg http://127.0.0.1:${port}`;
+
+/** Whether this process's listener for `tailscale serve` is open, and why not (src/api/proxyListener.ts). */
+export interface ProxyListenerState { listening: boolean; port: number; error?: string }
+
+/**
+ * Why serve was not moved or turned on: never onto a listener that did not
+ * open, where the tailnet address would stop answering (the owner's call,
+ * 2026-11-24). `why` is the listener's own reason, when there is one.
+ */
+export const listenerNotOpen = (port: number, why?: string): string =>
+  `Tailscale serve was left as it is: Hatchabot's listener for it, 127.0.0.1:${port}, is not open.${why ? ` ${/[.!?]$/.test(why) ? why : `${why}.`}` : ''}`;
+
+/**
+ * The start's log line when the listener did not open, saying what is true
+ * for the tailnet from serve's own handlers: cut off when serve already sends
+ * it there; one shared sign-in limit when serve is still on the app's own
+ * port; nothing more when serve is not set up (HB-1239).
+ */
+export function listenerDownWords(handlers: ServeHandler[], mainPort: number, port: number, why?: string): string {
+  const to = (p: number) => handlers.some((h) => !h.funnel && loopbackTarget(h.proxy, p));
+  const what = to(port) ? ' Tailscale serve sends your tailnet there, so your tailnet address does not answer until it opens.'
+    : to(mainPort) ? ` Tailscale serve still sends your tailnet to port ${mainPort}, where every device on it shares one sign-in limit.`
+    : '';
+  return `${listenerNotOpen(port, why)}${what} hatchabot doctor says what to do.`;
+}
+
+/** One web handler `tailscale serve` (or Funnel) has: where it listens, and what it passes on to. */
+export interface ServeHandler {
+  hostPort: string;
+  port: number;
+  /** The path it is mounted at ("/" for the whole address). */
+  mount: string;
+  /** Its target (`http://127.0.0.1:8080`), or undefined for a file or text handler. */
+  proxy?: string;
+  /** Served over HTTPS (--https), not plain HTTP (--http). */
+  https: boolean;
+  /** Published to the internet too. */
+  funnel: boolean;
+  /** Made by a `tailscale serve` still running in a terminal (no --bg): only that session can change it. */
+  foreground: boolean;
+}
+
+/** `tailscale serve status --json` (the same configuration Funnel's status prints): every web handler. */
+export function parseServeStatus(raw: string | undefined): { readable: boolean; handlers: ServeHandler[] } {
+  if (raw === undefined) return { readable: false, handlers: [] };
+  interface Cfg {
+    TCP?: Record<string, { HTTPS?: boolean; HTTP?: boolean }>;
+    Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }>;
+    AllowFunnel?: Record<string, boolean>;
+    Foreground?: Record<string, Cfg | null>;
+  }
+  let cfg: Cfg;
+  try { cfg = JSON.parse(raw.trim() || '{}') ?? {}; } catch { return { readable: false, handlers: [] }; }
+  if (typeof cfg !== 'object' || Array.isArray(cfg)) return { readable: false, handlers: [] };
+  const handlers: ServeHandler[] = [];
+  const read = (c: Cfg, foreground: boolean): void => {
+    for (const [hostPort, web] of Object.entries(c.Web ?? {})) {
+      const port = Number(hostPort.split(':').pop());
+      const https = c.TCP?.[String(port)]?.HTTP !== true;
+      for (const [mount, h] of Object.entries(web?.Handlers ?? {})) {
+        handlers.push({ hostPort, port, mount, proxy: typeof h?.Proxy === 'string' ? h.Proxy : undefined, https, funnel: c.AllowFunnel?.[hostPort] === true, foreground });
+      }
+    }
+  };
+  read(cfg, false);
+  for (const fg of Object.values(cfg.Foreground ?? {})) if (fg && typeof fg === 'object') read(fg, true);
+  return { readable: true, handlers };
+}
+
+/** A target on this machine's loopback, at this port: what Hatchabot and its guide have ever pointed serve at. */
+const loopbackTarget = (proxy: string | undefined, port: number): boolean =>
+  !!proxy && new RegExp(`^(?:https?|https\\+insecure)://(?:127\\.\\d+\\.\\d+\\.\\d+|localhost|\\[::1\\]):${port}(?:/|$)`, 'i').test(proxy);
+
+/** The command that points one handler at the proxy's listener, keeping where it listens, its path, and its target's path. */
+export function repointArgs(h: ServeHandler, proxyPort: number): string[] {
+  const targetPath = /^[a-z+]+:\/\/[^/]+(\/.+)$/i.exec(h.proxy ?? '')?.[1] ?? '';
+  return ['serve', '--bg', `--${h.https ? 'https' : 'http'}=${h.port}`, ...(h.mount !== '/' ? [`--set-path=${h.mount}`] : []), `http://127.0.0.1:${proxyPort}${targetPath}`];
+}
+
+export interface ServeLeft {
+  /** Where it listens (`box.tailnet.ts.net:443`, and its path when not "/"). */
+  where: string;
+  /** What to run; none for one only its own terminal can change. */
+  command?: string;
+  why?: string;
+}
+export interface RepointResult {
+  /** Handlers pointed at the proxy's listener now. */
+  moved: string[];
+  /** Handlers still on the app's own port, each with what to do. */
+  left: ServeLeft[];
+  /** Why nothing could be looked at or changed. */
+  error?: string;
+  /** Nothing was changed because the listener for serve is not open (`listenerNotOpen`). */
+  noListener?: true;
+}
+
+/** What still lands on the app's own port, and the command for each (read only: hatchabot doctor). */
+export function serveLeftOnMainPort(handlers: ServeHandler[], mainPort: number, proxyPort: number): ServeLeft[] {
+  return handlers.filter((h) => !h.funnel && loopbackTarget(h.proxy, mainPort)).map((h) => ({
+    where: `${h.hostPort}${h.mount === '/' ? '' : h.mount}`,
+    ...(h.foreground
+      ? { why: `a \`tailscale serve\` running in a terminal made it: stop that one (Ctrl+C), then run tailscale ${repointArgs({ ...h, foreground: false }, proxyPort).join(' ')}` }
+      : { command: `tailscale ${repointArgs(h, proxyPort).join(' ')}` }),
+  }));
+}
+
+/** What `tailscale serve` passes on now, read only. */
+export async function serveStatus(): Promise<{ readable: boolean; handlers: ServeHandler[] }> {
+  const bin = await firstBin();
+  if (!bin) return { readable: false, handlers: [] };
+  return parseServeStatus(await run(bin, ['serve', 'status', '--json']));
+}
+
+/**
+ * Point `tailscale serve` at the proxy's listener wherever it still lands on
+ * the app's own port (an install from before HB-1239, whose serve was turned
+ * on from the setup guide or by hand): each handler on this machine's
+ * loopback at that port, keeping where it listens and its path, then read
+ * back. Never a Funnel entry (internet traffic on a private port is refused
+ * as it always was: tailscale funnel reset), nor one a foreground `tailscale
+ * serve` holds, nor a target elsewhere: those are said, with the command.
+ * Run at every start; nothing to do is the usual answer. Never onto a
+ * listener that did not open (`listener`, this process's): then nothing is
+ * changed, and the answer says why.
+ */
+export async function repointServe(mainPort: number, listener: ProxyListenerState): Promise<RepointResult> {
+  const proxyPort = listener.port;
+  if (mainPort === proxyPort) return { moved: [], left: [] };
+  const bin = await firstBin();
+  if (!bin) return { moved: [], left: [] };
+  const before = parseServeStatus(await run(bin, ['serve', 'status', '--json']));
+  if (!before.readable) return { moved: [], left: [], error: 'Tailscale\'s serve configuration could not be read.' };
+  const stale = before.handlers.filter((h) => !h.funnel && !h.foreground && loopbackTarget(h.proxy, mainPort));
+  if (!stale.length) return { moved: [], left: serveLeftOnMainPort(before.handlers, mainPort, proxyPort) };
+  if (!listener.listening) return { moved: [], left: serveLeftOnMainPort(before.handlers, mainPort, proxyPort), error: listenerNotOpen(proxyPort, listener.error), noListener: true };
+  if (changesRefusedInTests()) return { moved: [], left: serveLeftOnMainPort(before.handlers, mainPort, proxyPort), error: 'Tests never change this machine\'s Tailscale (set HATCHABOT_TAILSCALE_BIN to a shim).' };
+  let error: string | undefined;
+  for (const h of stale) {
+    const r = await runFull(bin, repointArgs(h, proxyPort));
+    if (!r.ok) error = r.out.split('\n').slice(0, 4).join(' ').slice(0, 400) || 'tailscale serve failed.';
+  }
+  const after = parseServeStatus(await run(bin, ['serve', 'status', '--json']));
+  if (!after.readable) return { moved: [], left: stale.map((h) => ({ where: `${h.hostPort}${h.mount === '/' ? '' : h.mount}`, command: `tailscale ${repointArgs(h, proxyPort).join(' ')}` })), error: error ?? 'Tailscale\'s serve configuration could not be read back.' };
+  const moved = stale.filter((h) => after.handlers.some((a) => a.hostPort === h.hostPort && a.mount === h.mount && loopbackTarget(a.proxy, proxyPort)))
+    .map((h) => `${h.hostPort}${h.mount === '/' ? '' : h.mount}`);
+  return { moved, left: serveLeftOnMainPort(after.handlers, mainPort, proxyPort), ...(error ? { error } : {}) };
 }
 
 /** Take a setting out of force in .env: its live lines become comments (the file's next tidy lists it with its default). */

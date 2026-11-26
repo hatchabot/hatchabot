@@ -1,4 +1,5 @@
 import { ENV_GROUPS, ENV_SETTINGS, type EnvSetting } from './envCatalog.js';
+import { keyedLock } from '../util/queues.js';
 
 /**
  * .env rebuilt from the catalog (Chris, 2026-09-29): every setting listed,
@@ -344,7 +345,7 @@ export function syncEnvText(existing: string): SyncResult {
   return { ok: true, changed: true, text };
 }
 
-const envLocks = new Map<string, Promise<unknown>>();
+const envLocks = keyedLock();
 
 /**
  * Run one read-modify-write of the .env at `path` with no other in flight on
@@ -354,12 +355,7 @@ const envLocks = new Map<string, Promise<unknown>>();
  */
 export async function withEnvFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   const { resolve } = await import('node:path');
-  const key = resolve(path);
-  const run = (envLocks.get(key) ?? Promise.resolve()).then(fn, fn);
-  const tail = run.then(() => undefined, () => undefined);
-  envLocks.set(key, tail);
-  void tail.then(() => { if (envLocks.get(key) === tail) envLocks.delete(key); });
-  return run;
+  return envLocks.run(resolve(path), fn);
 }
 
 /** Write `text` to a staging file of its own beside `path`, then rename it over `path`. */

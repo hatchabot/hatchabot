@@ -7,7 +7,7 @@ import type { Agent } from '../src/domain/types.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
- * The consult service (HB-0808 step 13), driven as src/api/consultRoutes.ts
+ * The consult service (HB-0808 step 13), driven as src/api/chat/consultRoutes.ts
  * drives it, with no HTTP server: a real store on an in-memory database, and
  * containers that answer a turn as the test says. Call tokens are minted at
  * run time (never written here).

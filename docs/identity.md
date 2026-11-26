@@ -99,7 +99,7 @@ phone app follows the identical flow — that's the point.
    finding 8). Sessions are now bound to a hash of the current password, so
    rotating `HATCHABOT_PASSWORD` invalidates outstanding 30-day cookies.
    Covered by test/auth.test.ts.
-2. **Identity mode** — ✅ shipped 2026-08-01. `src/api/identity.ts` verifies
+2. **Identity mode** — ✅ shipped 2026-08-01. `src/api/signIn/identity.ts` verifies
    ID tokens against Google's securetoken certs (no Admin SDK, no service
    account); `auth.ts` accepts Bearer tokens per call and mints a 12h cookie
    from `POST /v1/session`. Web login does Google (GIS credential →

@@ -17,7 +17,7 @@ import { webChatStoreKey } from './webChat.js';
  * the hibernation sweep, the ops agent's turns, the memory search service's
  * move), which are told of it as functions; on the route context as
  * `ctx.conversations`; its routes (/v1/recent, POST /v1/agents/:id/seen) are
- * in src/api/conversationRoutes.ts. It knows nothing of HTTP.
+ * in src/api/chat/conversationRoutes.ts. It knows nothing of HTTP.
  *
  * It owns the sessions cache (`sessionsCache`), the quiet tasks' cache
  * (`quietTasksCache`) and the Recent capture (`RecentTracker`). Both caches

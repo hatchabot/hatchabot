@@ -30,7 +30,7 @@ import { createGoogleClient, type GoogleClient } from './googleClient.js';
  * it too: a start or wake syncs the agent's accounts and looks at what it
  * can reach (`connSyncDeps`). Nothing here knows about HTTP: who is asking,
  * the consent's cookie, the redirect address and the reply's words are the
- * route file's (src/api/googleRoutes.ts). `stop()` ends the two passes'
+ * route file's (src/api/data/googleRoutes.ts). `stop()` ends the two passes'
  * timers.
  *
  * The rules themselves are their own modules, used beyond this feature:

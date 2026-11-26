@@ -1,6 +1,6 @@
 import type { Agent } from '../../domain/types.js';
 import type { Store } from '../../store/store.js';
-import { inQueue } from '../../util/queues.js';
+import { keyedLock } from '../../util/queues.js';
 import { AgentBusyError } from '../lifecycle/busy.js';
 
 /** A change refused once its turn came (withCoreFilesTurn): the answer's status and words. */
@@ -17,14 +17,15 @@ const AGENT_GONE = 'It was deleted.';
  * (HB-0808 step 13, part of the agent files service, files.ts). Every
  * caller shares it: a save of a core file, an upload, a skill file changed
  * or practised, a snapshot taken or restored by hand, setup values, a
- * pushed definition, a proposal merged, and the AGENTS.md budget's and the
- * held syncs' writes (src/api/routes.ts and the services hand these
- * functions on; none builds its own).
+ * pushed definition, a proposal merged, a template or share read, an
+ * adopt's snapshot first and its re-point of the files (HB-0629), and the
+ * AGENTS.md budget's and the held syncs' writes (src/api/routes.ts and the
+ * services hand these functions on; none builds its own).
  *
- * Its state: `agentsMdTurns` (the queue, a lock: what waits in it ends with
- * the process) and `turnWaits` (the deadlines of the changes waiting for
- * their turn, which `stop()` brings forward: each is refused at once, as its
- * deadline would refuse it, and never runs).
+ * Its state: `agentsMdTurns`, a keyed lock (keyedLock, src/util/queues.ts):
+ * the queue (what waits in it ends with the process) and the deadlines of
+ * the changes waiting for their turn, which `stop()` brings forward: each
+ * is refused at once, as its deadline would refuse it, and never runs.
  */
 export interface CoreFileTurns {
   /**
@@ -36,9 +37,9 @@ export interface CoreFileTurns {
   withAgentsMdTurn<T>(agentId: string, fn: () => Promise<T>): Promise<T>;
   /**
    * One agent's changes that write its core files (setup values, a definition
-   * pushed to it, a snapshot restored, a file saved, a proposal merged) and
-   * its snapshots taken by hand take turns: a snapshot taken during such a change held some files
-   * from before and some from after (HB-0566). Narrower than the busy flag: a
+   * pushed to it, a snapshot restored, a file saved, a proposal merged, an
+   * adopt's re-point) and its snapshots taken by hand take turns: a snapshot taken during such a change held some files
+   * from before and some from after (HB-0566, HB-0629). Narrower than the busy flag: a
    * backup, a task switched on, an app install does not hold a snapshot up.
    * One waits CORE_FILES_WAIT_MS at most (or `waitMs`, what is left of a
    * deadline it shares), then is refused (AgentBusyError) and never runs: a
@@ -64,30 +65,15 @@ export interface CoreFileTurnsDeps {
 
 export function createCoreFileTurns(deps: CoreFileTurnsDeps): CoreFileTurns {
   const { store, agentGone } = deps;
-  const agentsMdTurns = new Map<string, Promise<unknown>>();
-  const withAgentsMdTurn = <T>(agentId: string, fn: () => Promise<T>): Promise<T> => inQueue(agentsMdTurns, agentId, fn);
-
   // The AGENTS.md budget/docs writers take this same queue. Holding it for
   // the whole transaction also protects snapshots and partial-write rollback.
-  const coreFileTurns = agentsMdTurns;
-  /** The waits for a turn under way: each one's deadline, and its refusal. */
-  const turnWaits = new Set<{ late: NodeJS.Timeout; refuse: () => void }>();
-  const withCoreFilesTurn = <T>(agentId: string, fn: () => Promise<T>, waitMs = CORE_FILES_WAIT_MS): Promise<T> => {
-    const before = coreFileTurns.get(agentId) ?? Promise.resolve();
-    const turn = new Promise<void>((resolve, reject) => {
-      const refuse = () => reject(new AgentBusyError('Another change to its files is still running; try again when it ends.'));
-      const wait = { late: setTimeout(() => { turnWaits.delete(wait); refuse(); }, waitMs), refuse };
-      turnWaits.add(wait);
-      void before.then(() => { clearTimeout(wait.late); turnWaits.delete(wait); resolve(); }, () => {});
-    });
-    const run = turn.then(fn);
-    // The next one waits for the one before this too: one that gave up does
-    // not let it in while that one still runs.
-    const tail = before.then(() => run).then(() => {}, () => {});
-    coreFileTurns.set(agentId, tail);
-    void tail.then(() => { if (coreFileTurns.get(agentId) === tail) coreFileTurns.delete(agentId); });
-    return run;
-  };
+  // A change of core files waits for its turn CORE_FILES_WAIT_MS at most;
+  // one that gave up never runs, and the next still waits for the one
+  // before it. An AGENTS.md write waits as long as it takes.
+  const agentsMdTurns = keyedLock({ refusal: () => new AgentBusyError('Another change to its files is still running; try again when it ends.') });
+  const withAgentsMdTurn = <T>(agentId: string, fn: () => Promise<T>): Promise<T> => agentsMdTurns.run(agentId, fn);
+  const withCoreFilesTurn = <T>(agentId: string, fn: () => Promise<T>, waitMs = CORE_FILES_WAIT_MS): Promise<T> =>
+    agentsMdTurns.run(agentId, fn, waitMs);
 
   const freshRunning = (agentId: string, notRunning: (a: Agent) => string): Agent & { runtimeRef: string } => {
     const fresh = store.getAgent(agentId);
@@ -96,10 +82,7 @@ export function createCoreFileTurns(deps: CoreFileTurnsDeps): CoreFileTurns {
     return fresh as Agent & { runtimeRef: string };
   };
 
-  const stop = (): void => {
-    for (const wait of turnWaits) { clearTimeout(wait.late); wait.refuse(); }
-    turnWaits.clear();
-  };
+  const stop = (): void => agentsMdTurns.stop();
 
   return { withAgentsMdTurn, withCoreFilesTurn, freshRunning, stop };
 }

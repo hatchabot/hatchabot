@@ -11,7 +11,7 @@ import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
  * The agent secrets service (HB-0808 step 15, part C), driven as
- * src/api/agentSecretRoutes.ts drives it, with no HTTP server: a real store
+ * src/api/agents/agentSecretRoutes.ts drives it, with no HTTP server: a real store
  * on an in-memory database, a secret store in memory, a Telegram channel
  * that records what it is handed, and Telegram's getMe stubbed. Every token
  * and value here is made at run time and made up.

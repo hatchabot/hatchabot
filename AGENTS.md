@@ -23,7 +23,7 @@ there before reading code:
 
    Confirm with the entry's Check before you rely on it.
 2. **`docs/architecture-map.md`: where each feature's code is.**
-   Each feature's routes are a file in `src/api/` and its rules a service
+   Each feature's routes are a file in a folder of `src/api/` and its rules a service
    in `src/orchestrator/` (`src/api/routes.ts` only builds them), and the
    web app's code is spread over `web/app/`, so search for the route
    strings and function names the map gives.
@@ -66,8 +66,8 @@ key that expired), not a bug. Say which it is.
   `python3 -I scripts/kit_checks.py`. Fix a hit rather than except it
   (docs/releasing.md, "The kit checks").
 - **A change to a public-access guard** (the sign-in and its limits in
-  `src/api/auth.ts` and `src/api/accountsAuth.ts`, `src/api/publicAccess.ts`,
-  `src/api/safeguards.ts`, `src/api/reachRoutes.ts`, `src/api/publicRoutes.ts`,
+  `src/api/signIn/auth.ts` and `src/api/signIn/accountsAuth.ts`, `src/api/publicAccess.ts`,
+  `src/api/safeguards.ts`, `src/api/machine/reachRoutes.ts`, `src/api/publicRoutes.ts`,
   the second factor, or any file `scripts/public-access-mutants.mjs` names):
   run `node scripts/public-access-mutants.mjs --check` (each mutant's text
   is still there, once), then the whole run, `node
@@ -102,6 +102,10 @@ key that expired), not a bug. Say which it is.
     has had it;
   - a `void` call handles a rejection, or `test/floatingPromises.test.ts` lists
     why it cannot reject (Node ends the process on an unhandled one);
+  - a change to `scripts/upgrade-helpers.sh` (the helpers `upgrade.sh` and
+    `deploy-release.sh` share) sets its new git blob id as `HELPERS_BLOB` in
+    both scripts: each reads only the file it was made with, by that id, and
+    `test/upgradeHelpers.test.ts` prints the line to set;
   - a Map or Set that outlives a request has a row in
     `docs/architecture.md` ("In-memory state, sorted"): a lock or a
     cache (`test/inMemoryState.test.ts`). What a restart may not lose is

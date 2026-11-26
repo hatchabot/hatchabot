@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createHmac } from 'node:crypto';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
-import { mintSession } from '../src/api/accountsAuth.js';
+import { _resetLoginThrottle, registerAuth } from '../src/api/signIn/auth.js';
+import { mintSession } from '../src/api/signIn/accountsAuth.js';
 import { principalOf } from '../src/api/principal.js';
 import { Store } from '../src/store/store.js';
 

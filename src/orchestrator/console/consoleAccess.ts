@@ -224,6 +224,46 @@ export interface RoomPromise {
   release(): void;
 }
 
+/** A guest's new console at the door (ConsoleAccess.admitGuest): the limits it is held to, and what the caller has open for it. */
+export interface GuestDoor {
+  /** How many consoles one guest may have open at once, connecting ones among them (MAX_GUEST_CONSOLES). */
+  max: number;
+  /** How long a connected one must have gone unused before it may be closed to make room (GUEST_IDLE_TO_CLOSE_MS). */
+  idleFor: number;
+  /** One unused for less than this may be closed for room at most once in this long (GUEST_ROOM_EVERY_MS). */
+  every: number;
+  /** How long it may take to connect, from the door (GUEST_CONNECT_TIMEOUT_MS). */
+  connectTimeoutMs: number;
+  /** Close what it has open: the browser's socket, the request to the gateway, the gateway's socket once there is one. */
+  destroy: () => void;
+  /** It did not connect within connectTimeoutMs (said before it is closed, for the log). */
+  timedOut?: () => void;
+}
+
+/** What a connected guest console is asked by the door's rules: whether it is being answered, and to close (GuestSplice). */
+export interface GuestLine {
+  answering(): boolean;
+  close(code: number, reason: string): void;
+}
+
+/** A guest's console let in at the door (ConsoleAccess.admitGuest). */
+export interface GuestAdmission {
+  /** When the person last used it (performance.now()): when it was let in, until `used` says. */
+  readonly usedAt: number;
+  /** The person used it at `at` (performance.now()). */
+  used(at: number): void;
+  /**
+   * The gateway answered and the console is spliced (`line`): its time to
+   * connect stops, it is no longer connecting, and the console promised as its
+   * room is closed (`closed`: the agent that one was on). `refused`: that one
+   * was used again meanwhile, so this one gives way: it is forgotten here, and
+   * the caller closes it.
+   */
+  connected(line: GuestLine): { closed?: string; refused?: boolean };
+  /** It ended, connected or not (its socket closed): forgotten, its time to connect stopped, the room promised for it given back, and what it has open closed. */
+  closed(): void;
+}
+
 /**
  * Per process: what each agent's gateway runs, and whether it has been
  * brought in step. Cheap to ask: a state read is cached for 15 s, a
@@ -498,18 +538,27 @@ export class ConsoleAccess {
     return entry.forget;
   }
 
-  /** A guest's least recently active connected console, unused for `idleFor` ms at least, and not promised already. */
-  #idlest(userId: string, idleFor: number): { agentId: string; e: GuestConsole; at: number } | undefined {
+  /**
+   * A guest's consoles, in one pass over every open one (HB-0645): how many
+   * of theirs are open and how many still connecting (one promised as room is
+   * counted as neither), and their least recently active connected one unused
+   * for `idleFor` ms at least, not promised already. Nobody else's console is
+   * asked anything.
+   */
+  #look(userId: string, idleFor: number): { open: number; connecting: number; idlest?: { agentId: string; e: GuestConsole; at: number } } {
     const before = performance.now() - idleFor;
-    let oldest: { agentId: string; e: GuestConsole; at: number } | undefined;
+    let open = 0, connecting = 0;
+    let idlest: { agentId: string; e: GuestConsole; at: number } | undefined;
     for (const [agentId, set] of this.#sockets) {
       for (const e of set) {
-        if (e.userId !== userId || e.promised || e.connecting?.()) continue;
+        if (e.userId !== userId || e.promised) continue;
+        open++;
+        if (e.connecting?.()) { connecting++; continue; }
         const at = e.lastActive?.() ?? 0;
-        if (at <= before && (!oldest || at < oldest.at)) oldest = { agentId, e, at };
+        if (at <= before && (!idlest || at < idlest.at)) idlest = { agentId, e, at };
       }
     }
-    return oldest;
+    return { open, connecting, idlest };
   }
 
   /** When room was last promised from one of each guest's consoles unused for under the window (performance.now()). */
@@ -521,32 +570,29 @@ export class ConsoleAccess {
   }
 
   /**
-   * The console promiseRoom would set aside: the least recently active,
-   * unused for `idleFor` ms. Unused for `every` or more (a phone that
-   * slept), it may always go; for less, only when none such went in the last
-   * `every`, so idle tabs that reconnect cannot close each other in turn.
-   */
-  #closable(userId: string, idleFor: number, every: number): { agentId: string; e: GuestConsole; at: number; dead: boolean } | undefined {
-    const oldest = this.#idlest(userId, idleFor);
-    if (!oldest) return undefined;
-    const dead = performance.now() - oldest.at >= every;
-    return dead || this.#roomDue(userId, every) ? { ...oldest, dead } : undefined;
-  }
-
-  /**
    * Room for a guest's new console (MAX_GUEST_CONSOLES), promised at the
    * door: their least recently active connected console, on any agent, unused
-   * for `idleFor` ms (#closable), is set aside, counted as gone from now on,
-   * so a second new one cannot be let in on it too. It is closed only once
-   * the new one has connected (RoomPromise.keep); if that fails, nothing is
-   * (release). Undefined when there is none to promise.
+   * for `idleFor` ms, is set aside, counted as gone from now on, so a second
+   * new one cannot be let in on it too. Unused for `every` or more (a phone
+   * that slept), it may always be; for less, only when none such was in the
+   * last `every`, so idle tabs that reconnect cannot close each other in
+   * turn. It is closed only once the new one has connected
+   * (RoomPromise.keep); if that fails, nothing is (release). Undefined when
+   * there is none to promise. admitGuest promises room itself; this is the
+   * same rule on its own (for tests).
    */
   promiseRoom(userId: string, how: { idleFor: number; every: number }): RoomPromise | undefined {
+    return this.#promise(userId, this.#look(userId, how.idleFor).idlest, how);
+  }
+
+  /** promiseRoom, with the least recently active console already found (#look). */
+  #promise(userId: string, idlest: { agentId: string; e: GuestConsole; at: number } | undefined, how: { idleFor: number; every: number }): RoomPromise | undefined {
     const now = performance.now();
     for (const [u, at] of this.#roomMade) if (now - at >= how.every) this.#roomMade.delete(u); // expired ones go
-    const c = this.#closable(userId, how.idleFor, how.every);
-    if (!c) return undefined;
-    const { agentId, e, dead } = c;
+    if (!idlest) return undefined;
+    const dead = performance.now() - idlest.at >= how.every;
+    if (!dead && !this.#roomDue(userId, how.every)) return undefined;
+    const { agentId, e } = idlest;
     e.promised = true;
     const had = this.#roomMade.get(userId); // what the window was before this promise
     if (!dead) this.#roomMade.set(userId, now);
@@ -573,6 +619,70 @@ export class ConsoleAccess {
         if (settled) return;
         settled = true;
         giveBack();
+      },
+    };
+  }
+
+  /**
+   * Let a guest's new console in at the door, or refuse it (HB-0645). In this
+   * order, from one look at their consoles (#look):
+   *
+   *  1. Counted from here, not once the gateway answers, connecting and
+   *     connected together, so ones opened at the same moment are counted
+   *     too. At most `max` may be connecting: one more is refused
+   *     ('connecting'), before any room is looked for.
+   *  2. With `max` open, room is promised (promiseRoom's rule), so the next
+   *     one sees it taken; with none to promise it is refused ('full'), so
+   *     tabs in use cannot close each other in turn. A browser gone without
+   *     a word (a phone that slept) never locks them out: its console is the
+   *     least recently active.
+   *  3. Let in: it was last used now (`usedAt`), and counts as connecting
+   *     until `connected`.
+   *  4. It has `connectTimeoutMs` to connect: then `timedOut`, and it is
+   *     closed. Until the gateway answers, its place is held by the request:
+   *     closing the guest's socket (`closed`) aborts it too.
+   *
+   * A refused one is not counted, promises nothing and starts nothing. Once
+   * connected, the console promised as its room is closed ("opened in
+   * another tab", 1001); if it does not connect, nothing is, and the room
+   * goes back. The caller calls `closed` when its socket closes.
+   */
+  admitGuest(agentId: string, userId: string, door: GuestDoor): { admitted: GuestAdmission; refused?: undefined } | { refused: 'connecting' | 'full'; admitted?: undefined } {
+    const seen = this.#look(userId, door.idleFor);
+    if (seen.connecting >= door.max) return { refused: 'connecting' };
+    let room: RoomPromise | undefined;
+    if (seen.open >= door.max) {
+      room = this.#promise(userId, seen.idlest, door);
+      if (!room) return { refused: 'full' };
+    }
+    let line: GuestLine | undefined;
+    let usedAt = performance.now(); // a wall clock set forward makes nothing idle
+    let timer: NodeJS.Timeout | undefined;
+    // Not connected (it failed, timed out, or the guest left): the room promised goes back.
+    const drop = () => { clearTimeout(timer); room?.release(); room = undefined; door.destroy(); };
+    const forget = this.trackGuest(agentId, userId, drop, {
+      connecting: () => !line,
+      // Being answered (a reply streaming) is not idle.
+      lastActive: () => line?.answering() ? performance.now() : usedAt,
+      evict: () => { if (line) line.close(1001, 'opened in another tab'); else drop(); },
+    });
+    timer = setTimeout(() => { door.timedOut?.(); drop(); }, door.connectTimeoutMs);
+    timer.unref?.();
+    return {
+      admitted: {
+        get usedAt() { return usedAt; },
+        used: (at) => { usedAt = at; },
+        connected: (l) => {
+          clearTimeout(timer);
+          line = l;
+          // Used again meanwhile (rare), the one promised stays, and this one gives way.
+          const promised = room;
+          room = undefined;
+          const kept = promised?.keep() ?? {};
+          if (kept.refused) forget();
+          return kept;
+        },
+        closed: () => { forget(); drop(); },
       },
     };
   }

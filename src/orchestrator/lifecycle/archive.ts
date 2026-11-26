@@ -83,7 +83,7 @@ export interface ArchiveOutcome {
 }
 
 export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<ArchiveOutcome> {
-  return whileBusy(agentId, async () => {
+  return whileBusy(agentId, 'archive', async () => {
     const { store, secrets, provider, channel, log } = deps;
     const agent = store.getAgent(agentId);
     if (!agent) throw new ArchiveError('No such agent.');

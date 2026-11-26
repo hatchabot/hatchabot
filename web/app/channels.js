@@ -1,4 +1,4 @@
-// web/app/channels.js: Slack and Discord, skills, voice, the browser panel, an agent's rooms.
+// web/app/channels.js: Slack and Discord, skills, voice, an agent's browser and the browser panel, its rooms, renaming its bot (syncBotName).
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -41,7 +41,10 @@ async function v2LoadChans(id) {
       }[kind];
       return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b>
         ${can && canChange ? `<button ${setup}>Set up…</button>` : ''}</div>
-        <div class="sub">${can ? blurb : `Its base image can't do ${label} yet. Promote a base image that includes it (Settings → Advanced → Runtime images), then Rebuild.`}</div>
+        <div class="sub">${can ? blurb : `Its base image can't do ${label} yet. ${myAccount?.hostOwner === false
+          // The Image picker and Promote are the machine owner's (review, N2).
+          ? 'Ask the machine\'s owner to rebuild it onto an image that can (or to promote one).'
+          : 'Rebuild it onto one that can: pick that Image in its Advanced tab, under Runtime, and press Pin & rebuild; or, unless HATCHABOT_IMAGE pins the fleet default, promote one (Settings → Advanced → Runtime images) and Rebuild.'}`}</div>
         ${kind === 'telegram' ? `<div id="v2TgToken" hidden style="flex-basis:100%;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <input type="text" id="v2TgTokenIn" placeholder="123456789:AA…" autocomplete="off" style="flex:1;min-width:200px">
           <button class="primary" ${onAction('click', 'v2AddTelegram', [`${id ?? ''}`, true])}>Connect</button>
@@ -266,7 +269,6 @@ async function openChanSetup(id, kind) {
   chanDlg.querySelector('input')?.focus();
   if (kind === 'slack') void chanPrefillSlackLink(a.name, gen);
 }
-/** The agent's own sleep and file policy (Advanced tab): saved and applied at once. */
 /** Its own browser (docs/browser.md): switching rebuilds it. */
 async function v2SetBrowser(id, on, el) {
   if (!confirmRebuild(id, on ? 'Giving it a browser' : 'Taking its browser away')) { if (el) el.value = on ? 'off' : 'on'; return; }
@@ -1025,10 +1027,6 @@ const bpMods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 
     resizing = setTimeout(() => { if (bp.panel) bpSend({ k: 'size', ...bpWrapSize() }); }, 300);
   });
 })();
-async function v2SetAgentPolicy(id, body) {
-  try { const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body }); r?.filesCapPending ? toast(r.filesCapPending, 8000) : toast('Saved.'); await refresh(false); }
-  catch (e) { toast(e.message, 6000); await refresh(false); }
-}
 /** Slack creates an app from a manifest given in the address: no copy, no paste. */
 async function chanPrefillSlackLink(name, gen) {
   try {
@@ -1180,180 +1178,16 @@ async function chanRemove(id, kind) {
   } catch (e) { toast(e.message, 8000); }
 }
 
-/**
- * Where an agent stands in its group under My order: the agents of yours in
- * that group as the home screen shows them (the stored order, the manager and
- * child agents aside: those are not moved by hand), or null when it has no
- * place to change.
- */
-function v2PlaceInGroup(a) {
-  if (!a || !v2Mine(a) || a.ops || a.state === 'ARCHIVED') return null;
-  const liveIds = new Set(liveAgents().map(x => x.id));
-  const nested = (x) => !!x.parentAgentId && liveIds.has(x.parentAgentId);
-  if (nested(a)) return null;
-  const order = liveAgents().filter(x => v2Mine(x) && !x.ops && !nested(x) && (x.group || '') === (a.group || '')).map(x => x.id);
-  const i = order.indexOf(a.id);
-  return order.length > 1 && i >= 0 ? { order, i } : null;
-}
-/** Switch the home screen to My order (when moving an agent by hand); true if it was on another sort. */
-function v2UseManual() {
-  if (v2Sort.key === 'manual' && (v2View !== 'cost' || v2CostSort.key === 'manual')) return false;
-  v2Sort = { key: 'manual', dir: 1 };
-  try { localStorage.setItem('hb-v2-sort', JSON.stringify(v2Sort)); } catch {}
-  if (v2View === 'cost') { v2CostSort = { key: 'manual', dir: 1 }; try { localStorage.setItem('hb-v2-sort-cost', JSON.stringify(v2CostSort)); } catch {} }
-  return true;
-}
-/** The sheet's Move earlier / later: one place in its group (Shift: to the start or the end). The keyboard's drag. */
-async function v2MoveInGroup(id, delta, ev) {
-  const a = v2Find(id), place = v2PlaceInGroup(a);
-  if (!place) return;
-  const { order, i } = place;
-  const j = ev?.shiftKey ? (delta < 0 ? 0 : order.length - 1) : Math.max(0, Math.min(order.length - 1, i + delta));
-  if (j === i) { toast(delta < 0 ? 'Already first in its group' : 'Already last in its group', 1800); return; }
-  const before = order.filter(x => x !== id)[j] ?? null; // its place in the list without it
+async function syncBotName(id, name, kind = 'telegram') {
+  const label = V2_CHAN_LABEL[kind] || kind;
   try {
-    await api(`/v1/agents/${id}/move`, { method: 'POST', body: before ? { before } : { before: null, group: a.group || '' } });
-    if (v2UseManual()) toast('The home screen now shows My order — the order you arrange.', 5000);
+    const r = await api(`/v1/agents/${id}/bot-name/sync`, { method: 'POST', body: { kind } });
+    if (r.ok) toast(`${label} bot renamed to “${r.name}”.`);
+    else if (r.retryAt) {
+      const when = new Date(r.retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      toast(`${label} won't accept another rename for this bot until ${when} — it's queued and will apply then.`);
+    } else toast(`${label} refused the rename: ${r.error || 'unknown reason'}`, 9000);
     await refresh(false);
-  } catch (e) { toast(e.message); return; }
-  // The row, whether or not the sheet was redrawn; the keyboard stays on the button pressed.
-  if (!v2AgentDlg.open || v2AgentId !== id || v2Tab !== 'overview') return;
-  const now = v2PlaceInGroup(v2Find(id));
-  if (!now || !$('v2Place')) return;
-  $('v2Place').textContent = $('v2Place').textContent.replace(/^\d+ of \d+/, `${now.i + 1} of ${now.order.length}`);
-  $('v2MoveEarlier').disabled = now.i === 0;
-  $('v2MoveLater').disabled = now.i === now.order.length - 1;
-  const mine = $(delta < 0 ? 'v2MoveEarlier' : 'v2MoveLater'), other = $(delta < 0 ? 'v2MoveLater' : 'v2MoveEarlier');
-  (mine.disabled ? other : mine).focus();
-}
-
-async function v2SetGroup(id, value) {
-  let group = value;
-  if (value === V2_NEW_GROUP) {
-    group = (prompt('Name the new group:') || '').trim();
-    if (!group) { $('v2GroupSel').value = v2Find(id)?.group || ''; return; }
-  }
-  try {
-    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { group: group || null } });
-    toast(group ? `Moved to ${group}` : 'Moved out of its group');
-    await refresh(false);
+    if (kind !== 'telegram') v2LoadChans(id);
   } catch (e) { toast(e.message); }
 }
-
-// Keep an open sheet current as the poll brings news (a pairing request, a
-// finished rebuild), but never repaint a pane someone is typing in.
-/** Tabs that load their own content (a volume listing, the channels, the
- *  usage read): repainted only when the agent itself changed, never on a
- *  plain poll — each repaint reloaded them, and an upload lost its progress. */
-const V2_SELF_LOADING = { files: 1, channels: 1, slack: 1, usage: 1 };
-let v2SheetSig = '';
-/** The state the open tab was drawn in. */
-let v2SheetDrawnState = null;
-/**
- * Each control in the sheet's edit sections with its value as filled or last saved (its
- * baseline): one whose value differs is an unsaved edit. A state redraw fills the edit sections
- * again, so it waits while there is one (HB-0444). Whatever fills a control notes it as it fills
- * it (v2SheetBaseline): prepareEdit, prepareCrons and each render or fill helper. A refill then
- * moves the baseline with it. A control the sheet draws itself (a Telegram token box) is
- * compared with its value as drawn. A save that does not draw its controls again notes what it
- * sent, for the agent it saved (v2SheetSaving). Noted on a first press or focus instead, a value
- * code put in afterwards (a model menu drawn for a class, a connection attached) read as an
- * edit for good, and the tab never redrew again (HB-0475).
- */
-let v2SheetNotes = new Map();
-const V2_CONTROLS = 'input, select, textarea';
-const v2CtlValue = (el) => el.type === 'checkbox' || el.type === 'radio' ? String(el.checked)
-  : el.multiple ? [...el.selectedOptions].map(o => o.value).join('\n') : el.value;
-/** As the page drew it: what a control holds before anyone changes it. */
-const v2CtlDrawn = (el) => el.type === 'checkbox' || el.type === 'radio' ? String(el.defaultChecked)
-  : el.tagName === 'SELECT' ? ([...el.options].filter(o => o.defaultSelected).map(o => o.value).join('\n') || (el.multiple ? '' : el.options[0]?.value ?? ''))
-  : el.defaultValue;
-/** The edit sections the sheet borrows, and the blocks it moves: what prepareEdit fills. */
-const V2_SHEET_FORMS = ['paneDef', 'paneEditSnap', 'paneEditAi', 'paneEditData', 'paneEditConn', 'paneEditTg', 'paneEditPeers', 'paneEditEnv',
-  'tgMembersBlock', 'imagePinRow', 'embedModeRow', 'memoryCapRow'];
-/** The controls in `where`: ids or elements, of controls or of what holds them. A task's own switches are not edits. */
-/**
- * A control whose value is an edit of the sheet's: not one whose change saves it (marked
- * data-saves: Group, Class, Browser, Who can reach it, the task triggers switch…), nor a
- * task's own switches in the list. The one rule for what is baselined (v2SheetControlsOf)
- * and what a person's change counts (v2SheetCounts).
- */
-const v2SheetEdits = (el) => !el.hasAttribute('data-saves') && !el.closest('#cronList');
-const v2SheetControlsOf = (where) => where.flatMap(w => { const el = typeof w === 'string' ? $(w) : w; return !el ? [] : el.matches(V2_CONTROLS) ? [el] : [...el.querySelectorAll(V2_CONTROLS)]; })
-  .filter(v2SheetEdits);
-/** Each control's fills, counted (v2SheetBaseline): a save's values are its baseline only while no fill came after the press. */
-const v2SheetFills = new WeakMap();
-/**
- * A menu the sheet fills from the record on a tab drawn again: whether a choice in it is not
- * saved yet (not its baseline, the value of its fill or its last save) and is not what the
- * record holds now. That one stays, and counts as unsaved; otherwise the menu is filled again.
- */
-function v2KeepsChoice(id, record) {
-  const el = $(id), note = el ? v2SheetNotes.get(el) : undefined;
-  return note !== undefined && el.value !== note && el.value !== record;
-}
-/** What `where` holds now is as filled: called by whatever just filled it. */
-function v2SheetBaseline(...where) {
-  for (const el of v2SheetControlsOf(where)) { v2SheetNotes.set(el, v2CtlValue(el)); v2SheetFills.set(el, (v2SheetFills.get(el) || 0) + 1); }
-}
-/**
- * Before a save sends them: what `where` holds now. Call what it returns with the agent saved,
- * once it is: those values become the baseline, when the forms are still that agent's and
- * each control is as it was at the press. Refilled meanwhile (the sheet closed and opened
- * again, or another agent and back), it shows what the fill put there: the sent value noted
- * under it held the redraw for good, and a later press sent the old value.
- * `const saved = v2SheetSaving('editDesc'); … saved(forId);` Not for a save whose success
- * draws its controls again: that drawing notes them.
- */
-function v2SheetSaving(...where) {
-  const sent = v2SheetControlsOf(where).map(el => [el, v2CtlValue(el), v2SheetFills.get(el) || 0]);
-  return (forId) => {
-    if (editAgentId !== forId || (v2AgentId && v2AgentId !== forId)) return;
-    for (const [el, value, fills] of sent) if ((v2SheetFills.get(el) || 0) === fills) v2SheetNotes.set(el, value);
-  };
-}
-function v2SheetUnsaved() {
-  // Controls drawn over since (their tab's HTML replaced) are gone: their notes go with them. The
-  // one place they go while the sheet is open (not at each fill); closing it lets all of them go.
-  for (const el of v2SheetNotes.keys()) if (!el.isConnected) v2SheetNotes.delete(el);
-  // Edit on a task fills its form with a press: its Save is armed until saved or cancelled. A
-  // redraw of the Schedule tab starts the form afresh, so it counts while the form is in the sheet.
-  if (cronEditingId && $('v2Pane').contains($('cronBody'))) return true;
-  // Setup fields added or removed with a press, not saved yet, in the forms filled for this sheet
-  // (not left from an agent shown before, which its next fill replaces).
-  if (v2EditFor && v2EditFor === editAgentId && JSON.stringify(editParams) !== editParamsSaved) return true;
-  for (const [el, note] of v2SheetNotes) if (v2CtlValue(el) !== note) return true;
-  return false;
-}
-const v2SheetSigOf = (a) => JSON.stringify([a.id, a.state, a.hibernatedAt ?? null, a.runtimeRef ?? null, a.botUsername ?? null, a.otherChannels ?? [], pairings[a.id] ?? []]);
-function v2RefreshSheet() {
-  if (!v2AgentDlg.open) return;
-  const pane = $('v2Pane');
-  const a = v2Find(v2AgentId);
-  const same = V2_SELF_LOADING[v2Tab] && a && v2Mine(a) && v2SheetSigOf(a) === v2SheetSig;
-  // A tab of edit sections was drawn for one state: "It is stopped — start it" stayed
-  // after Start from the bar. Redrawn, and its forms filled again, unless the person
-  // has an edit in them or a field in use: then the next poll asks again (HB-0444).
-  if (V2_EMBED[v2Tab] && a && a.state !== v2SheetDrawnState && !v2SheetUnsaved() && !(pane.contains(document.activeElement) && document.activeElement.matches('input, textarea, select'))) {
-    const top = pane.scrollTop;
-    v2EditFor = null;
-    v2RenderSheet();
-    pane.scrollTop = top;
-    return;
-  }
-  // Tabs holding the edit sections manage their own state; only repaint the bar.
-  const busy = V2_EMBED[v2Tab] || same || pane.querySelector('#healthDlgBody') || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
-  if (busy) v2RenderSheetBar(); else { const top = pane.scrollTop; v2RenderSheet(); pane.scrollTop = top; }
-}
-// The close event arrives a task later: reopened by then (close one agent,
-// open the next), it must not clear the agent now showing — that left the
-// sheet deaf to updates and its Usage tab on "Loading…" (2026-09-29).
-v2AgentDlg.addEventListener('close', () => { if (v2AgentDlg.open) return; v2ParkPanes(); endCronEdit(); v2AgentId = null; v2EditFor = null; v2NotesFor = null; v2SheetNotes.clear(); });
-// Only a person's change fires these; a form being filled does not. Counted by v2SheetEdits: one
-// whose change only shows or hides others (Group chats, the room picker) counts, its Save being a
-// separate press, so having an onchange says nothing.
-const v2SheetCounts = (el) => !!el?.matches?.(V2_CONTROLS) && v2SheetEdits(el);
-// One with no baseline (drawn by the sheet itself): compared with its value as drawn.
-for (const ev of ['input', 'change']) $('v2Pane').addEventListener(ev, (e) => {
-  if (v2SheetCounts(e.target) && !v2SheetNotes.has(e.target)) v2SheetNotes.set(e.target, v2CtlDrawn(e.target));
-});

@@ -40,7 +40,7 @@ export type ReportView = ReturnType<ProblemReports['reportView']>;
  * Built once per process (`registerRoutes` in src/api/routes.ts) and handed
  * to the route file on the shared context (`ctx.problemReports`). Nothing
  * here knows about HTTP: who is asking comes in as a `ReportCaller`, and the
- * reply's words are the route file's (src/api/problemReportRoutes.ts). The
+ * reply's words are the route file's (src/api/ops/problemReportRoutes.ts). The
  * masking itself and the source search are problemReport.ts's. No state of
  * its own (a search's slots are problemReport.ts's) and no timer.
  */

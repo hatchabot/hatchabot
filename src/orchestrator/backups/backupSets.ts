@@ -137,7 +137,7 @@ export function createBackupSets(deps: BackupSetsDeps): BackupSets {
   };
 
   const restore: BackupSets['restore'] = ({ agent, date, otherKey, requestedBy }) =>
-    (onOperation?: (id: string) => void) => whileBusy(agent.id, () =>
+    (onOperation?: (id: string) => void) => whileBusy(agent.id, 'restore-backup', () =>
       restoreAgentFromBackup({
         ...snapshotDeps(agent),
         // The same second provision Import and Move use: this installation's

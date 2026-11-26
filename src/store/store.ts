@@ -4480,6 +4480,10 @@ export class Store {
   claimModelChangeGuard(id: string, proposalId: string): boolean {
     return this.db.prepare(`UPDATE model_changes SET guard_proposal_id = ? WHERE id = ? AND guard_proposal_id IS NULL`).run(proposalId, id).changes === 1;
   }
+  /** The guard's card for this change filed again (File it again, HB-1053): the ledger names the new card. True when it moved. */
+  moveModelChangeGuard(id: string, from: string, to: string): boolean {
+    return this.db.prepare(`UPDATE model_changes SET guard_proposal_id = ? WHERE id = ? AND guard_proposal_id = ?`).run(to, id, from).changes === 1;
+  }
   /** Give back a claim whose card could not be written, so the next pass files it. */
   releaseModelChangeGuard(id: string, proposalId: string): void {
     this.db.prepare(`UPDATE model_changes SET guard_proposal_id = NULL WHERE id = ? AND guard_proposal_id = ?`).run(id, proposalId);
@@ -5644,13 +5648,32 @@ export class Store {
   setMgmtProposalOutcome(id: string, outcome: string): void {
     this.db.prepare(`UPDATE mgmt_proposals SET outcome = ? WHERE id = ?`).run(outcome.slice(0, 2000), id);
   }
-  /** Confirmed cards with no outcome get the one given (a confirm a restart cut off, HB-1053); how many. */
-  markInterruptedMgmtProposals(outcomeOf: (rec: { summary?: string; tool?: string }) => string): number {
+  /**
+   * Confirmed cards with no outcome get the one given (a confirm a restart cut
+   * off, HB-1053), are marked `interrupted` in their record, and count as
+   * resolved now, so the home screen shows each for its hour from this start,
+   * however long Hatchabot was down. The cards marked.
+   */
+  markInterruptedMgmtProposals(outcomeOf: (rec: { summary?: string; tool?: string }) => string, nowMs = Date.now()): Array<{ id: string; ownerId: string; summary: string; tool?: string }> {
     return this.transact(() => {
-      const rows = this.db.prepare(`SELECT id, record FROM mgmt_proposals WHERE status = 'confirmed' AND outcome IS NULL`).all() as Array<{ id: string; record: string }>;
-      const set = this.db.prepare(`UPDATE mgmt_proposals SET outcome = ? WHERE id = ? AND outcome IS NULL`);
-      for (const r of rows) set.run(outcomeOf(safeJson<{ summary?: string; tool?: string }>(r.record, {})).slice(0, 2000), r.id);
-      return rows.length;
+      const rows = this.db.prepare(`SELECT id, owner_id, record FROM mgmt_proposals WHERE status = 'confirmed' AND outcome IS NULL ORDER BY created_at_ms`).all() as Array<{ id: string; owner_id: string; record: string }>;
+      const set = this.db.prepare(`UPDATE mgmt_proposals SET outcome = ?, record = ?, resolved_at_ms = ? WHERE id = ? AND outcome IS NULL`);
+      return rows.map((r) => {
+        const rec = safeJson<Record<string, unknown>>(r.record, {});
+        const card = { summary: typeof rec.summary === 'string' ? rec.summary : undefined, tool: typeof rec.tool === 'string' ? rec.tool : undefined };
+        set.run(outcomeOf(card).slice(0, 2000), JSON.stringify({ ...rec, interrupted: true }), nowMs, r.id);
+        return { id: r.id, ownerId: r.owner_id, summary: card.summary ?? card.tool ?? 'a change', ...(card.tool ? { tool: card.tool } : {}) };
+      });
+    });
+  }
+  /** An interrupted card filed again as `newId` (HB-1053): once. False when it was already, or is gone. */
+  setMgmtProposalRefiled(id: string, newId: string): boolean {
+    return this.transact(() => {
+      const r = this.db.prepare(`SELECT record FROM mgmt_proposals WHERE id = ?`).get(id) as { record: string } | undefined;
+      const rec = r && safeJson<Record<string, unknown> | undefined>(r.record, undefined);
+      if (!rec || rec.refiledAs) return false;
+      this.db.prepare(`UPDATE mgmt_proposals SET record = ? WHERE id = ?`).run(JSON.stringify({ ...rec, refiledAs: newId }), id);
+      return true;
     });
   }
   /**
@@ -6094,6 +6117,22 @@ export class Store {
   }
 
   // ---- what a restart may not lose (agent_holds, HB-0809) -------------------
+  /**
+   * Holds this process does not serve: of these kinds, kept before this time.
+   * Set when a rollback's note could not be taken at the start (the database
+   * refused the drop, src/store/rollbackMark.ts): the note stays for the next
+   * start, and until then the holds it would have let go of read as not there,
+   * here and only here, where every reader reads them (review of HB-0840).
+   * A hold kept since, of any kind, reads as ever.
+   */
+  #holdsHidden: { before: string; kinds: readonly string[] } | undefined;
+  hideAgentHoldsBefore(beforeIso: string, kinds: readonly AgentHoldKind[]): void {
+    this.#holdsHidden = kinds.length ? { before: beforeIso, kinds: [...kinds] } : undefined;
+  }
+  #hidden(kind: string, at: string): boolean {
+    const h = this.#holdsHidden;
+    return !!h && at < h.before && h.kinds.includes(kind);
+  }
   /** Keep `value` for this agent under `kind`, in place of what was kept. */
   setAgentHold(agentId: string, kind: AgentHoldKind, value: string): void {
     this.db.prepare(`INSERT INTO agent_holds (agent_id, kind, value, at) VALUES (?, ?, ?, ?)
@@ -6101,7 +6140,8 @@ export class Store {
   }
   /** What is kept for this agent under `kind`, or undefined. */
   agentHold(agentId: string, kind: AgentHoldKind): string | undefined {
-    return (this.db.prepare(`SELECT value FROM agent_holds WHERE agent_id = ? AND kind = ?`).get(agentId, kind) as { value: string } | undefined)?.value;
+    const row = this.db.prepare(`SELECT value, at FROM agent_holds WHERE agent_id = ? AND kind = ?`).get(agentId, kind) as { value: string; at: string } | undefined;
+    return row && !this.#hidden(kind, row.at) ? row.value : undefined;
   }
   /** Let it go. `onlyIf`: only while it is still this value (one kept since is another's). True when a row went. */
   clearAgentHold(agentId: string, kind: AgentHoldKind, onlyIf?: string): boolean {
@@ -6109,9 +6149,34 @@ export class Store {
       ? this.db.prepare(`DELETE FROM agent_holds WHERE agent_id = ? AND kind = ?`).run(agentId, kind)
       : this.db.prepare(`DELETE FROM agent_holds WHERE agent_id = ? AND kind = ? AND value = ?`).run(agentId, kind, onlyIf)).changes > 0;
   }
+  /**
+   * Let go of the holds of these kinds kept before `beforeIso` (an ISO time,
+   * as `at` is written): a rollback came since, and the kinds are the ones
+   * that would change an agent if served late (src/store/rollbackMark.ts,
+   * `HOLDS_AFTER_ROLLBACK`; HB-0840). What went, oldest first.
+   */
+  dropAgentHoldsBefore(beforeIso: string, kinds: readonly AgentHoldKind[]): Array<{ agentId: string; kind: AgentHoldKind; at: string }> {
+    if (!kinds.length) return [];
+    const of = `kind IN (${kinds.map(() => '?').join(', ')})`;
+    return this.transact(() => {
+      const rows = this.db.prepare(`SELECT agent_id, kind, at FROM agent_holds WHERE at < ? AND ${of} ORDER BY at, agent_id, kind`).all(beforeIso, ...kinds) as Array<{ agent_id: string; kind: AgentHoldKind; at: string }>;
+      this.db.prepare(`DELETE FROM agent_holds WHERE at < ? AND ${of}`).run(beforeIso, ...kinds);
+      return rows.map((r) => ({ agentId: r.agent_id, kind: r.kind, at: r.at }));
+    });
+  }
+  /**
+   * The kinds of hold kept before `beforeIso` that are not in `known`: kinds
+   * a later release keeps, which this one neither serves nor lets go of
+   * (src/store/rollbackMark.ts, HB-0840). Sorted.
+   */
+  agentHoldKindsBefore(beforeIso: string, known: readonly string[]): string[] {
+    const not = known.length ? ` AND kind NOT IN (${known.map(() => '?').join(', ')})` : '';
+    return (this.db.prepare(`SELECT DISTINCT kind FROM agent_holds WHERE at < ?${not} ORDER BY kind`).all(beforeIso, ...known) as Array<{ kind: string }>).map((r) => r.kind);
+  }
   /** Every agent with something kept under `kind`, oldest first. */
   agentHolds(kind: AgentHoldKind): Array<{ agentId: string; value: string; at: string }> {
     return (this.db.prepare(`SELECT agent_id, value, at FROM agent_holds WHERE kind = ? ORDER BY at, agent_id`).all(kind) as Array<{ agent_id: string; value: string; at: string }>)
+      .filter((r) => !this.#hidden(kind, r.at))
       .map((r) => ({ agentId: r.agent_id, value: r.value, at: r.at }));
   }
 
@@ -6399,7 +6464,7 @@ export class Store {
     }
     // One PERSON, not one row per agent: before account links every approval
     // minted its own member id, so the same Telegram id sat under three ids
-    // and the list said "Julieta, Julieta, Julieta" (Chris, 2026-09-27). Two
+    // and the list showed the same person once per agent (2026-09-27). Two
     // people who share an identity on any channel are one; the one with a
     // real name keeps it, the identities are the union, the other ids ride
     // along so "already on this agent" still sees them. One on two channels

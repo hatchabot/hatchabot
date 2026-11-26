@@ -1,4 +1,4 @@
-// web/app/spend.js: the home screen's foot (Activity, the audit log, the machine line), model prices, budgets, spend over time.
+// web/app/spend.js: the home screen's foot (Activity, the audit log, the machine line), model prices, budgets, an agent's and every agent's usage, spend over time, context now and its caps.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -10,6 +10,20 @@
 // what Status → Health showed that the home screen did not. A machine that
 // is not answering, or backups that are late, are also Alerts on the
 // Hatchabot agent's tile (agentAttention).
+const EVENT_WORDS = {
+  'runtime.provisioned': 'runtime created', 'runtime.started': 'started',
+  'runtime.healthy': 'came online', 'runtime.rebuilt': 'rebuilt',
+  'provision.failed': 'failed to set up', 'rebuild.failed': 'rebuild failed',
+  'channel.provisioned': 'got its Telegram bot', 'claim.bound': 'owner linked on Telegram',
+  'member.admitted': 'let someone in', 'member.revoked': 'removed a member',
+  'snapshot.captured': 'snapshot saved', 'snapshot.restored': 'files restored',
+  'agent.exported': 'exported', 'agent.imported': 'imported',
+  'migrate.done': 'moved to another server', 'migrate.rolled_back': 'move undone',
+  'reconcile.unhealthy': 'stopped answering', 'reconcile.runtime_missing': 'runtime went missing',
+  'reconcile.marked_stopped': 'found stopped', 'reconcile.marked_running': 'found running',
+  'import.rolled_back': 'import undone',
+};
+
 const V2_ACT_N = 12;
 let v2ActAt = 0, v2ActBusy = false;
 const v2ActFolded = () => { try { return localStorage.getItem('hb-activity-folded') === '1'; } catch { return false; } };
@@ -150,6 +164,9 @@ function v2MachineAlerts() {
   const w = bk?.latest && own.size ? v2BackupWarn(bk.latest, bk.ageDays, (bk.miss || []).filter(m => !own.has(m.agentId))) : null;
   const warn = w ? w.why : bk?.warn, key = w ? w.key : bk?.key;
   if (warn) out.push({ key: `backup:${key ?? bk.date ?? 'none'}`, icon: '💾', why: `backups: ${warn} (⚙ Settings → Backups)` });
+  // A reverse proxy still pointed at the app's own port (HB-1239): everyone behind it shares one sign-in limit.
+  const pa = myAccount?.proxyOnAppPort;
+  if (pa) out.push({ key: 'proxy-on-app-port:' + pa.at, icon: '🔀', why: `a proxy on this machine sends visitors to port ${pa.port}, where they all share one sign-in limit: one person's wrong passwords lock out everyone. Point it at 127.0.0.1:${pa.proxyPort} instead (in a Caddyfile: reverse_proxy 127.0.0.1:${pa.proxyPort})` });
   // A restore drill that failed is the machine's: its backups may not bring an agent back.
   const ld = v2Readiness?.drill?.last;
   if (ld && !ld.passed) out.push({ key: 'drill:' + ld.at, icon: '💾', why: `the last restore drill (${String(ld.at).slice(0, 10)}) failed — its backups may not bring every agent back (⚙ Settings → Backups)` });
@@ -439,6 +456,7 @@ function renderModelPrices(d) {
     ${unpriced}`;
 }
 
+const fmtN = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
 function fmtTokens(n) {
   const v = Number(n) || 0; // guard undefined/NaN/string → "0" not "undefined"
   if (v >= 1e9) return (v / 1e9).toFixed(v >= 1e10 ? 0 : 1).replace(/\.0$/, '') + 'B';
@@ -478,11 +496,6 @@ async function loadUsage() {
 // reads, output, new input (left axis, dollars) — and the tokens behind it as
 // a line on the right axis (Chris asked for the second axis, 2026-10-05).
 const SPEND_PARTS = [['cacheWrite', 'Cache writes', '#c9822b'], ['cacheRead', 'Cache reads', '#4f9a8f'], ['output', 'Output', '#7a6fd6'], ['input', 'New input', '#8a8f98']];
-/** A phone-wide screen: the width the stylesheet's phone rules start at. */
-const phoneQuery = typeof matchMedia === 'function' ? matchMedia('(max-width: 640px)') : null;
-function isPhone() {
-  return !!phoneQuery?.matches;
-}
 // The same windows, and words, as View by → Cost's pills (V2_COST_PERIODS; Chris, 2026-10-06).
 const SPEND_RANGE_LABELS = [['1h', '1 hr'], ['3h', '3 hr'], ['6h', '6 hr'], ['9h', '9 hr'], ['12h', '12 hr'], ['day', '1 day'], ['week', '1 wk'], ['month', '1 mo']];
 const SPEND_RANGE_WORDS = { '1h': ['the last hour', '1 hour'], '3h': ['the last 3 hours', '3 hours'], '6h': ['the last 6 hours', '6 hours'], '9h': ['the last 9 hours', '9 hours'], '12h': ['the last 12 hours', '12 hours'], day: ['the last 24 hours', '24 hours'], week: ['the last 7 days', '7 days'], month: ['the last 30 days', '30 days'] };

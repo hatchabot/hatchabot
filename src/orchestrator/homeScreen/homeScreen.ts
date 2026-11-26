@@ -10,7 +10,7 @@ import { createPlannedAgents, type PlannedAgents } from './plannedAgents.js';
  * Everything is per owner.
  *
  * Built once in `registerRoutes` and on the route context as
- * `ctx.homeScreen`; its routes are in src/api/homeScreenRoutes.ts. Its only
+ * `ctx.homeScreen`; its routes are in src/api/agents/homeScreenRoutes.ts. Its only
  * state is the icons' two locks (`iconRuns`, `iconIdeaRuns`); no timer.
  * Nothing here knows HTTP.
  */

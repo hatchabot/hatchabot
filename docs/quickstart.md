@@ -193,8 +193,9 @@ exposed to the internet.
 **Optional: HTTPS without owning a certificate.** The setup guide (**Setup** in the top bar) does this for you: it finds Tailscale — including the macOS app's copy, which is not on the PATH — offers **Turn on HTTPS**, checks the address actually answers before saying so, and offers **Use this address for links**, which writes `HATCHABOT_PUBLIC_URL`. By hand:
 ```sh
 sudo tailscale set --operator=$USER      # once: let your user manage serve
-tailscale serve --bg http://localhost:8080
+tailscale serve --bg http://127.0.0.1:8094
 ```
+Port 8094 is Hatchabot's door for `tailscale serve` (`HATCHABOT_PROXY_PORT`): there each device on your tailnet has its own sign-in limit, except on a Mac and with a tailscaled run as your own user, where every device shares one (docs/tailscale.md; `hatchabot doctor` says so). Set up before 2.192.0 with `http://localhost:8080`? Hatchabot moves it at its next start; `hatchabot doctor` says what to run if Tailscale would not let it.
 If it asks you to enable HTTPS certificates, do that in the admin console under **DNS**, then rerun. The app is now at `https://<machine>.<tailnet>.ts.net` (no port) — update `HATCHABOT_PUBLIC_URL` to match. If you use Google sign-in, add that `https://…ts.net` origin to your OAuth client's authorized JavaScript origins.
 
 **Don't** use `tailscale funnel` for this — it would publish the app to the open internet, with only the sign-in page in front of it. The whole point is that nothing is.

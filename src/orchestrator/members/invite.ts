@@ -116,7 +116,7 @@ export function redeemInvite(
   // chat added to the seat they have (2026-09-29).
   const upgrade = check.webChat && existing?.status === 'active';
   if (existing && existing.status === 'active' && !upgrade) {
-    throw new InviteInvalidError('used'); // already a member of this agent
+    throw new InviteInvalidError('member'); // already a member of this agent: the invite is left unused (HB-1149 review)
   }
   const name = displayName.trim().slice(0, 64) || 'Guest';
   // One time for the redemption and the seat it makes: "Let them in again"
@@ -152,8 +152,11 @@ export function redeemInvite(
   return { membershipUserId: userId, agentId: check.agentId, expectHandle: invite?.expectHandle, webChat: check.webChat };
 }
 
+/** Someone already on the agent, joining again as themselves: the invite stays unused (HB-1149 review). */
+export const ALREADY_MEMBER = 'You are already on this agent, so this invite was not used.';
+
 export class InviteInvalidError extends Error {
-  constructor(readonly reason: 'unknown' | 'expired' | 'used' | 'signin') {
+  constructor(readonly reason: 'unknown' | 'expired' | 'used' | 'signin' | 'member') {
     super(`Invite invalid: ${reason}`);
     this.name = 'InviteInvalidError';
   }
@@ -165,6 +168,8 @@ export class InviteInvalidError extends Error {
         return 'This invite was already used. Ask for a new one.';
       case 'signin':
         return 'Sign in to this Hatchabot first — chatting on the web is done signed in.';
+      case 'member':
+        return ALREADY_MEMBER;
       default:
         return "This invite link isn't valid.";
     }

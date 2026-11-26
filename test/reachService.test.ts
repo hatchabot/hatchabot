@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writePublicUrl, type TailnetInfo } from '../src/ops/tailnet.js';
+import { writePublicUrl, type RepointResult, type TailnetInfo } from '../src/ops/tailnet.js';
 import { createReach, type ReachDeps } from '../src/orchestrator/reach/reach.js';
 import { createAppAddress } from '../src/orchestrator/reach/appAddress.js';
 import { publicConfigView } from '../src/orchestrator/reach/appConfig.js';
@@ -14,15 +14,19 @@ import { publicConfigView } from '../src/orchestrator/reach/appConfig.js';
  */
 const TAILNET = 'https://box.example-tailnet.ts.net';
 
-function reach(over: Partial<ReachDeps> = {}, tailnet: { info?: TailnetInfo; serve?: { ok: boolean; error?: string }; write?: { ok: boolean; replaced?: boolean; error?: string } } = {}) {
+function reach(over: Partial<ReachDeps> = {}, tailnet: { info?: TailnetInfo; serve?: { ok: boolean; error?: string }; write?: { ok: boolean; replaced?: boolean; error?: string }; repoint?: RepointResult } = {}) {
   const traced: Array<[string, Record<string, unknown>]> = [];
   const warned: string[] = [];
   const written: Array<[string, string]> = [];
   let info: TailnetInfo = tailnet.info ?? { installed: false };
   const served: number[] = [];
+  const asked: Array<[number, number | undefined]> = [];
+  const repointed: Array<[number, number]> = [];
   const deps: ReachDeps = {
     publicUrl: () => undefined,
     port: () => 8080,
+    proxyPort: () => 8094,
+    proxyListener: () => ({ listening: true, port: 8094 }),
     envPath: () => '/nowhere/.env',
     publicStatus: () => undefined,
     refreshOn: false,
@@ -34,7 +38,13 @@ function reach(over: Partial<ReachDeps> = {}, tailnet: { info?: TailnetInfo; ser
     loopbackIsRemote: () => false,
     rebuildsAtOnce: () => 2,
     tailnet: {
-      info: async () => info,
+      info: async (port, mainPort) => { asked.push([port, mainPort]); return info; },
+      repointServe: async (mainPort, listener) => {
+        repointed.push([mainPort, listener.port]);
+        const out = tailnet.repoint ?? { moved: ['box.example-tailnet.ts.net:443'], left: [] };
+        if (out.moved.length && !out.left.length) info = { ...info, oldPort: undefined };
+        return out;
+      },
       enableServe: async (port) => {
         served.push(port);
         const out = tailnet.serve ?? { ok: true };
@@ -45,7 +55,7 @@ function reach(over: Partial<ReachDeps> = {}, tailnet: { info?: TailnetInfo; ser
     },
     ...over,
   };
-  return { r: createReach(deps), traced, warned, written, served, setInfo: (i: TailnetInfo) => { info = i; } };
+  return { r: createReach(deps), traced, warned, written, served, asked, repointed, setInfo: (i: TailnetInfo) => { info = i; } };
 }
 
 afterEach(() => { vi.useRealTimers(); });
@@ -148,19 +158,77 @@ describe('Tailscale serve', () => {
     expect(fresh.r.address.appUrl()).toBeUndefined();
     const on = await fresh.r.tailscale.serve();
     expect(on).toEqual({ ok: true, answer: expect.objectContaining({ turnedOn: true, serving: true, url: TAILNET }) });
-    expect(fresh.served).toEqual([8080]);
+    // At the listener for it, not the app's own port (HB-1239); asked where it lands, the app's own port named as the old one.
+    expect(fresh.served).toEqual([8094]);
+    expect(fresh.asked.every(([p, main]) => p === 8094 && main === 8080)).toBe(true);
     expect(fresh.r.address.appUrl()).toBe(TAILNET);
     expect(fresh.traced).toEqual([['tailscale.serve_enabled', { dns: 'box.example-tailnet.ts.net', serving: true }]]);
 
     const refused = reach({}, { info: { installed: true, dns: 'box.example-tailnet.ts.net' }, serve: { ok: false, error: 'Serve is not enabled on your tailnet.' } });
-    expect(await refused.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: 'Serve is not enabled on your tailnet.', command: 'tailscale serve --bg http://localhost:8080' } });
+    expect(await refused.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: 'Serve is not enabled on your tailnet.', command: 'tailscale serve --bg http://127.0.0.1:8094' } });
     expect(refused.warned).toEqual(['tailscale.serve_failed']);
+  });
+
+  it('on, but still at the app\'s own port (HB-1239): moved there, path and all, and a move Tailscale refused is said with the command', async () => {
+    const old = { installed: true, dns: 'box.example-tailnet.ts.net', serving: true, oldPort: true, url: TAILNET };
+    const moving = reach({}, { info: old });
+    const moved = await moving.r.tailscale.serve();
+    expect(moved).toEqual({ ok: true, answer: expect.objectContaining({ turnedOn: true, serving: true, moved: ['box.example-tailnet.ts.net:443'] }) });
+    expect((moved as { answer: Record<string, unknown> }).answer.oldPort).toBeUndefined();
+    expect(moving.repointed).toEqual([[8080, 8094]]);
+    expect(moving.served).toEqual([]);
+
+    const left = reach({}, { info: old, repoint: { moved: [], left: [{ where: 'box.example-tailnet.ts.net:443', command: 'tailscale serve --bg --https=443 http://127.0.0.1:8094' }], error: 'Access denied: serve config denied' } });
+    expect(await left.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: 'Access denied: serve config denied', command: 'tailscale serve --bg --https=443 http://127.0.0.1:8094' } });
+    expect(left.warned).toEqual(['tailscale.serve_repoint_failed']);
+
+    const why = 'a `tailscale serve` running in a terminal made it: stop that one (Ctrl+C), then run tailscale serve --bg --https=10000 http://127.0.0.1:8094';
+    const held = reach({}, { info: old, repoint: { moved: [], left: [{ where: 'box.example-tailnet.ts.net:10000', why }] } });
+    expect(await held.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: `box.example-tailnet.ts.net:10000: ${why}`, command: 'tailscale serve --bg http://127.0.0.1:8094' } });
+  });
+
+  it('says "moved" only when something moved and serve no longer lands on the app\'s own port', async () => {
+    const old = { installed: true, dns: 'box.example-tailnet.ts.net', serving: true, oldPort: true, url: TAILNET };
+    // Serve's configuration could not be read: that, and logged.
+    const unread = reach({}, { info: old, repoint: { moved: [], left: [], error: 'Tailscale\'s serve configuration could not be read.' } });
+    expect(await unread.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: 'Tailscale\'s serve configuration could not be read.' } });
+    expect(unread.warned).toEqual(['tailscale.serve_repoint_failed']);
+    // Nothing it moves (the entry on the app's port is Funnel's, say), and serve still lands there.
+    const funnel = reach({}, { info: old, repoint: { moved: [], left: [] } });
+    expect(await funnel.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: 'Tailscale still sends something to port 8080 from an entry Hatchabot does not move (a Funnel entry, say): run tailscale serve status to see it.' } });
+    expect(funnel.warned).toEqual(['tailscale.serve_repoint_failed']);
+    expect(funnel.traced.some(([e]) => e === 'tailscale.serve_enabled')).toBe(false);
+  });
+
+  it('never moves serve, or turns it on, onto a listener that did not open: it says why, and changes nothing (the owner\'s call, 2026-11-24)', async () => {
+    const why = 'The listener for tailscale serve could not open 127.0.0.1:8094: listen EADDRINUSE: address already in use 127.0.0.1:8094';
+    const closed = { proxyListener: () => ({ listening: false, port: 8094, error: why }) };
+    const said = `Tailscale serve was left as it is: Hatchabot's listener for it, 127.0.0.1:8094, is not open. ${why}.`;
+    const old = reach(closed, { info: { installed: true, dns: 'box.example-tailnet.ts.net', serving: true, oldPort: true, url: TAILNET } });
+    expect(await old.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: said, noListener: true } });
+    expect(old.repointed).toEqual([]);
+    const fresh = reach(closed, { info: { installed: true, dns: 'box.example-tailnet.ts.net' } });
+    expect(await fresh.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: said, noListener: true } });
+    expect(fresh.served).toEqual([]);
+    expect([...old.warned, ...fresh.warned]).toEqual(['tailscale.serve_no_listener', 'tailscale.serve_no_listener']);
+    // None tried at all (a process that never opened one): not open either.
+    const none = reach({ proxyListener: () => undefined }, { info: { installed: true, dns: 'box.example-tailnet.ts.net' } });
+    expect(await none.r.tailscale.serve()).toEqual({ ok: false, refusal: { error: 'Tailscale serve was left as it is: Hatchabot\'s listener for it, 127.0.0.1:8094, is not open.', noListener: true } });
+    // The setup guide is told, to say so instead of offering the command.
+    expect(await old.r.tailscale.status()).toMatchObject({ proxyListening: false, proxyError: why });
   });
 
   it('status tells the address what it found, and answers the port and the address shown', async () => {
     const { r } = reach({}, { info: { installed: true, dns: 'box.example-tailnet.ts.net', serving: true, url: TAILNET } });
-    expect(await r.tailscale.status()).toMatchObject({ installed: true, port: 8080, publicUrl: TAILNET });
+    expect(await r.tailscale.status()).toMatchObject({ installed: true, port: 8080, proxyPort: 8094, serveCommand: 'tailscale serve --bg http://127.0.0.1:8094', publicUrl: TAILNET, proxyListening: true });
     expect(r.address.appUrl()).toBe(TAILNET);
+    expect((await r.tailscale.status()).mac).toBeUndefined();
+  });
+
+  it('status says when this is a Mac, where moving serve does not yet give each device its own sign-in limit (HB-1239 review)', async () => {
+    const info: TailnetInfo = { installed: true, dns: 'box.example-tailnet.ts.net', serving: true, oldPort: true, url: TAILNET };
+    expect(await reach({ platform: 'darwin' }, { info }).r.tailscale.status()).toMatchObject({ oldPort: true, mac: true });
+    expect((await reach({ platform: 'linux' }, { info }).r.tailscale.status()).mac).toBeUndefined();
   });
 });
 
@@ -210,7 +278,7 @@ describe('use for links', () => {
 
   it('the origin check and the cookie\'s https fallback count the written address at once, beside the one the server started with, until stop (HB-1314)', async () => {
     const { foreignRequest } = await import('../src/api/requestOrigin.js');
-    const { requestIsHttps } = await import('../src/api/sessionCookie.js');
+    const { requestIsHttps } = await import('../src/api/signIn/sessionCookie.js');
     const was = process.env.HATCHABOT_PUBLIC_URL;
     process.env.HATCHABOT_PUBLIC_URL = 'http://localhost:8080'; // as an install starts: written over by Use for links
     try {
@@ -242,7 +310,7 @@ describe('use for links', () => {
   });
 
   it('says a restart is needed only where sign-in links still check the address the server started with (HB-1314 review)', async () => {
-    const { signinLinkAudience } = await import('../src/api/signinLink.js');
+    const { signinLinkAudience } = await import('../src/api/signIn/signinLink.js');
     /** Use for links on a process started with this env, with sign-in links judged as the routes judge them. */
     const answer = async (env: NodeJS.ProcessEnv) =>
       (await reach({ signinLinkAudience: () => signinLinkAudience(env) }, { info: { installed: true, url: TAILNET }, write: { ok: true, replaced: true } }).r.tailscale.useForLinks());

@@ -35,7 +35,7 @@ export type SkillsView = ReturnType<Skills['view']>;
  * instruction file previewed, updated, replaced or rolled back, a practice
  * run, and the running agent's inventory read on demand. Built once in
  * `registerRoutes` and on the route context as `ctx.skills`; its routes are
- * in src/api/skillRoutes.ts, which checks who asks, the skill's id and the
+ * in src/api/data/skillRoutes.ts, which checks who asks, the skill's id and the
  * body, then hands over. Nothing here knows HTTP: a refusal is a result with
  * its status and words.
  *
@@ -171,7 +171,7 @@ export function createSkills(deps: SkillsDeps): Skills {
     const session = caller.watch(), before = skillFileContext(agent);
     try {
       const provider = providerFor(agent.hostId);
-      const result = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+      const result = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, 'skill-change', async () => {
         const fresh = caller.owned(agent.id);
         if (!session.valid() || !fresh || agentGone(agent.id)) throw new TurnRefused(404, 'Not found');
         if (!fresh.runtimeRef || fresh.ops || skillFileContext(fresh) !== before || providerFor(fresh.hostId) !== provider || isArchiving(fresh.id) || operationRefusal(store, fresh.id))
@@ -211,7 +211,7 @@ export function createSkills(deps: SkillsDeps): Skills {
           throw new TurnRefused(409, 'The agent changed during practice. Reopen its skill preview.');
         return fresh;
       };
-      return { ok: true, body: await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+      return { ok: true, body: await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, 'skill-trial', async () => {
         const fresh = freshForTrial();
         if ((skillTrialNext.get(agent.id) ?? 0) > Date.now()) throw new TurnRefused(429, 'Wait two minutes between practice tasks on this agent.');
         const file = await readSkillFile(provider, { runtimeRef: fresh.runtimeRef!, slug: fresh.slug }, skillId);

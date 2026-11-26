@@ -324,7 +324,7 @@ trust (`proxy_attribution_required`) — the console proxy strips both
 (v2.60.0/1); (b) the Control UI page is served with an empty base path and
 root-absolute asset links, which through `/v1/agents/<id>/ui/` never load
 ("Control UI did not start") — the proxy moves the document onto its prefix
-(v2.60.3, `src/api/controlUiRebase.ts`). Both passed the gate, which reaches
+(v2.60.3, `src/api/console/controlUiRebase.ts`). Both passed the gate, which reaches
 the gateway from inside the container; the gate now also loads the console
 through the proxy (`hatchabot console <agent> --check`).
 

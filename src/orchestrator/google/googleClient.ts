@@ -10,7 +10,7 @@ import type { GoogleDeps, GoogleHelpers } from './connectionsAndAccess.js';
  * single-use states are one `OAuthStateJar` (googleConnections.ts), in
  * memory on purpose: a restart mid-consent means pressing Connect again.
  * Who may set the client, the browser's cookie and the redirect address are
- * the route's (src/api/googleRoutes.ts).
+ * the route's (src/api/data/googleRoutes.ts).
  */
 export interface GoogleClient {
   /** The client set now, or null. */

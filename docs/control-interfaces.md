@@ -38,7 +38,7 @@ Both authenticate with a **personal access token** (the existing "CLI token"):
 
 Every request then carries `Authorization: Bearer <token>`; it resolves to an
 owner in **both** password and identity modes (`cliTokenOwner` in
-`src/api/auth.ts`). The token is the whole credential, so treat it like a
+`src/api/signIn/auth.ts`). The token is the whole credential, so treat it like a
 password: store it in the OS keystore (app) or an encrypted config (bot), label
 it per device (`"pixel-app"`, `"tg-bot"`), and revoke per device.
 
@@ -377,7 +377,8 @@ like plain HTTP anywhere else. The symptom is a page that loads and then reports
 Ways to satisfy it, cheapest first:
 - browse on the host itself at `http://localhost:8080` (works today, no setup);
 - an SSH tunnel — `ssh -L 8080:127.0.0.1:8080 <host>` — then `http://localhost:8080`;
-- HTTPS via `tailscale serve --bg --https=443 http://127.0.0.1:8080`, which needs
+- HTTPS via `tailscale serve --bg --https=443 http://127.0.0.1:8094` (the app's
+  listener for it, `HATCHABOT_PROXY_PORT`), which needs
   HTTPS Certificates enabled for the tailnet. Note the certificate is published
   in public **Certificate Transparency** logs, so the machine and tailnet names
   become publicly discoverable (not reachable — Tailscale still gates access).

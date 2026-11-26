@@ -34,7 +34,7 @@ export interface AgentTurns {
  *
  * Built once in `registerRoutes` and on the route context as
  * `ctx.consults`; the memory service (orchestrator/memory/) takes `turns`,
- * and the idle sweep reads it. Its routes are in src/api/consultRoutes.ts.
+ * and the idle sweep reads it. Its routes are in src/api/chat/consultRoutes.ts.
  * Nothing here knows HTTP: a refusal is a result with its status and words.
  *
  * It owns `a2aInFlight`, `a2aCallerHolds` and `a2aOwnerLive` (and the

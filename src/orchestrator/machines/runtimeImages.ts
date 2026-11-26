@@ -208,6 +208,27 @@ export async function strandedFollowers(store: Store, hostId: string, provider: 
 export const withTag = (ref: string): string => (/@|:[^:/]*$/.test(ref) ? ref : `${ref}:latest`);
 
 /**
+ * Whether moving `latest` moves the fleet default, the image the agents with
+ * no pin run: not while HATCHABOT_IMAGE (`defaultBase`) names a version tag
+ * or a digest, which is the owner's pin and stays (HB-1187, HB-1256).
+ */
+export const movesFleetDefault = (latest: string, defaultBase: string): boolean => withTag(defaultBase) === withTag(latest);
+
+/**
+ * Why Promote is refused, or null (HB-1256). Promote retags the fleet
+ * default; while HATCHABOT_IMAGE names a version tag, that is the owner's
+ * pin, and retagging it moved every agent on it onto another image at its
+ * next rebuild. A digest cannot be retagged at all. The setting changes
+ * first: to its repository's :latest, which the agents with no pin then run.
+ */
+export function promoteRefusal(defaultBase: string): string | null {
+  const ref = withTag(defaultBase);
+  if (!ref.includes('@') && ref.endsWith(':latest')) return null;
+  const why = ref.includes('@') ? 'a digest cannot be retagged' : 'promoting would retag that pin, so every agent that runs it would move onto another image at its next rebuild';
+  return `Promote is off while HATCHABOT_IMAGE pins the fleet default to ${defaultBase}: ${why}. To promote, set HATCHABOT_IMAGE in .env to ${imageRepository(defaultBase)}:latest (which the agents with no pin then run) and restart Hatchabot first.`;
+}
+
+/**
  * The repository a base build run by hand writes to, as the build script
  * names it (REPO): HATCHABOT_IMAGE_REPO, else HATCHABOT_IMAGE's (the CLI's
  * upgrade-image). The app's own builds write to the fleet's (RUNTIME_REPO,
@@ -455,12 +476,20 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
   const madeDefault = async (d: MakeDefault): Promise<string | undefined> => {
     const provider = providerFor(d.hostId);
     const kept = `It is kept as ${d.tag}`;
+    // With HATCHABOT_IMAGE pinned, `latest` is not the default and Promote is
+    // off (promoteRefusal): only a default build moves it (HB-1256).
+    const moves = movesFleetDefault(d.latest, DEFAULT_BASE);
+    const then = moves ? 'then promote it' : `then build it again to move ${d.latest}`;
     const built = await provider.currentImageInfo(d.tag).catch(() => ({} as { embedEngine?: string }));
     if (built.embedEngine === 'none' && deps.sharedMemorySearchOn && !deps.sharedMemorySearchOn()) {
-      return `it has no memory search engine of its own and the shared service is off, so no agent could be built on it. ${kept}: turn the service on (Settings → Hosts), then promote it.`;
+      return `it has no memory search engine of its own and the shared service is off, so no agent could be built on it. ${kept}: turn the service on (Settings → Hosts), ${then}.`;
     }
     const stuck = await strandedFollowers(store, d.hostId, provider, d.version, { tag: d.latest, defaultBase: DEFAULT_BASE });
-    if (stuck.length) return `OpenClaw ${d.version} cannot read the data of agents that reached 2026.8 or newer while it built (${someNames(stuck)}). ${kept}: pin those agents to their current image, then promote it.`;
+    if (stuck.length) {
+      return moves
+        ? `OpenClaw ${d.version} cannot read the data of agents that reached 2026.8 or newer while it built (${someNames(stuck)}). ${kept}: pin those agents to their current image, ${then}.`
+        : `OpenClaw ${d.version} cannot read the data of agents pinned to ${d.latest} that reached 2026.8 or newer while it built (${someNames(stuck)}). ${kept}: pin those agents to a version tag, ${then}.`;
+    }
     try { await provider.tagImage(d.tag, d.latest); }
     catch (err) { return `docker could not tag it as ${d.latest} (${String((err as Error)?.message ?? err).slice(0, 200)}). ${kept}.`; }
     return undefined;
@@ -472,29 +501,38 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
     mkdirSync(dirname(logPath), { recursive: true });
     baseBuild = { running: true, version, candidate, startedAt: new Date().toISOString(), ok: undefined, error: undefined };
     const run = deps.buildBase ?? buildBaseImage;
-    const what = `base image ${candidate ? 'candidate' : 'default'} for OpenClaw ${version ?? 'the newest version'}` +
-      (packages ? ` with ${packages.split(' ').join(', ')}` : '') + (engine ? ' without its own memory search engine' : '');
     // Made the default here, as it ends (madeDefault), not by the script:
     // built as a candidate, which leaves the default alone.
     const promote = !candidate ? makeDefault : undefined;
+    // What a build that is no candidate moves: the default's tag, whether this
+    // makes it the default (promote) or the script does, its tag or OpenClaw
+    // unknown here. With HATCHABOT_IMAGE pinned to another tag, the fleet
+    // default is that pin, and stays: only what runs `latest` moves, and the
+    // words say which tag that is (HB-1256).
+    const latest = promote?.latest ?? `${RUNTIME_REPO}:latest`;
+    const isDefault = !candidate && movesFleetDefault(latest, DEFAULT_BASE);
+    // Promote is off under such a pin (promoteRefusal): a candidate is made the default by the setting.
+    const pinned = promoteRefusal(DEFAULT_BASE);
+    const what = `base image${candidate ? ' candidate' : isDefault ? ' default' : ''} for OpenClaw ${version ?? 'the newest version'}` +
+      (packages ? ` with ${packages.split(' ').join(', ')}` : '') + (engine ? ' without its own memory search engine' : '');
     void run({ version, candidate: candidate || !!promote, logPath, packages, engine })
       .then(async (r) => {
         const notMade = r.ok && promote ? await madeDefault(promote) : undefined;
         if (notMade) {
-          baseBuild = { ...baseBuild, running: false, ok: false, error: `Built, but not made the default: ${notMade}` };
-          notify(forOwner, `The ${what} finished building, but was not made the default: ${notMade}`);
+          const notWhat = isDefault ? 'not made the default' : `${latest} was not moved to it`;
+          baseBuild = { ...baseBuild, running: false, ok: false, error: `Built, but ${notWhat}: ${notMade}` };
+          notify(forOwner, `The ${what} finished building, but ${isDefault ? 'was ' : ''}${notWhat}: ${notMade}`);
           return;
         }
         baseBuild = { ...baseBuild, running: false, ok: r.ok, error: r.error };
-        // With HATCHABOT_IMAGE pinned to another tag, the fleet default is that
-        // pin, and stays: only what runs `latest` moves.
-        const isDefault = promote && withTag(DEFAULT_BASE) === withTag(promote.latest);
         notify(forOwner, r.ok
-          ? (promote
+          ? (!candidate
             ? (isDefault
               ? `The ${what} finished building and is now the fleet default. Nothing restarts by itself: agents on this machine without a pin move onto it when they are rebuilt; agents on runners keep their runner's image.`
-              : `The ${what} finished building and is now ${promote.latest}. The fleet default stays ${DEFAULT_BASE}, as HATCHABOT_IMAGE pins it: only agents pinned to ${promote.latest} move onto it when they are rebuilt.`)
-            : `The ${what} finished building. Nothing changes for any agent until it is tried on one and promoted.`)
+              : `The ${what} finished building and is now ${latest}. The fleet default stays ${DEFAULT_BASE}, as HATCHABOT_IMAGE pins it: only agents pinned to ${latest} move onto it when they are rebuilt.`)
+            : pinned
+              ? `The ${what} finished building. Nothing changes for any agent until it is tried on one. Promote is off while HATCHABOT_IMAGE pins the fleet default to ${DEFAULT_BASE}: to make it the default, set HATCHABOT_IMAGE in .env to its tag and restart Hatchabot.`
+              : `The ${what} finished building. Nothing changes for any agent until it is tried on one and promoted.`)
           : `The ${what} FAILED to build. Its last output: "${quoteOutput(r.error)}"`);
       })
       .catch((err) => {

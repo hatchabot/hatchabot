@@ -18,7 +18,7 @@ import net from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodeFrame, FrameReader, GUEST_DRAIN_MS, GUEST_HELD_LIMIT, GuestActivity, GUEST_KEEP_LIMIT, MESSAGE_DEADLINE_MS, WsFrame, GUEST_QUEUE_SLACK, GUEST_REFUSAL_BUDGET, GUEST_REPLY_WAIT_MS, GUEST_STALL_MS, MAX_GUEST_PENDING, MAX_GUEST_ID_LENGTH, MAX_MESSAGE_FRAMES, spliceGuest } from '../src/api/consoleProxy.js';
+import { encodeFrame, FrameReader, GUEST_DRAIN_MS, GUEST_HELD_LIMIT, GuestActivity, GUEST_KEEP_LIMIT, MESSAGE_DEADLINE_MS, WsFrame, GUEST_QUEUE_SLACK, GUEST_REFUSAL_BUDGET, GUEST_REPLY_WAIT_MS, GUEST_STALL_MS, MAX_GUEST_PENDING, MAX_GUEST_ID_LENGTH, MAX_MESSAGE_FRAMES, spliceGuest } from '../src/api/console/consoleProxy.js';
 
 /**
  * An in-memory socket. `stall` stops it taking what it is written (the bytes

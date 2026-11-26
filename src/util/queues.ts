@@ -24,16 +24,74 @@ export async function sixAtATimeWhenReady<T, R>(items: T[], ready: (item: T) => 
   }));
 }
 
+/** One keyed lock (keyedLock): each key's turns, one at a time. */
+export interface KeyedLock {
+  /**
+   * `fn` in `key`'s turn: once every earlier `run` on that key has settled,
+   * failed or not, in the order they were asked for. Its result or its error
+   * is the answer; the next waiter runs either way.
+   *
+   * `waitMs`: the longest it waits for its turn. Then it gives up: it is
+   * refused (the lock's `refusal`), `fn` never runs, and the one behind it
+   * still waits for the ones before it. A turn that is free is taken even
+   * with no time left. With no `waitMs` it waits as long as it takes.
+   *
+   * Not re-entrant: a holder that asks for its own key's turn waits for itself.
+   */
+  run<T>(key: string, fn: () => Promise<T>, waitMs?: number): Promise<T>;
+  /** Every waiter with a wait limit still waiting is refused now, as its limit would refuse it, and never runs. One with none waits on. */
+  stop(): void;
+  /** How many keys have a turn held or waited for: an idle key is forgotten. */
+  readonly size: number;
+}
+
 /**
- * `fn` in the queue `queues` keeps for `key`, after what is already in it:
- * one at a time per key, each started once the one before has settled,
- * failed or not (model applies per agent, changes per class).
+ * Turns per key, one at a time (docs/architecture.md, "In-memory state,
+ * sorted": each lock made is a row there, under the name it is kept as).
+ * FIFO per key; a waiter may have a wait limit, and one that gave up never
+ * runs; a key is forgotten once idle; a failure is its caller's alone, and
+ * nothing is left unhandled. `refusal`: what a waiter that gave up is
+ * refused with.
  */
-export function inQueue<T>(queues: Map<string, Promise<unknown>>, key: string, fn: () => Promise<T>): Promise<T> {
-  const next = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(fn);
-  const settled = next.catch(() => {}).finally(() => { if (queues.get(key) === settled) queues.delete(key); });
-  queues.set(key, settled);
-  return next;
+export function keyedLock(opts: { refusal?: () => Error } = {}): KeyedLock {
+  const refusal = opts.refusal ?? (() => new Error('It waited too long for its turn.'));
+  /** Each key's last turn, settled once it and every turn before it have. Never rejects. */
+  const tails = new Map<string, Promise<void>>();
+  /** The waits with a limit under way: each one's deadline, and its refusal. */
+  const waits = new Set<{ late: NodeJS.Timeout; refuse: () => void }>();
+  const keep = (key: string, tail: Promise<void>): void => {
+    tails.set(key, tail);
+    void tail.then(() => { if (tails.get(key) === tail) tails.delete(key); });
+  };
+  return {
+    run<T>(key: string, fn: () => Promise<T>, waitMs?: number): Promise<T> {
+      const before = tails.get(key) ?? Promise.resolve();
+      if (waitMs === undefined) {
+        const mine = before.then(() => fn());
+        keep(key, mine.then(() => {}, () => {}));
+        return mine;
+      }
+      const turn = new Promise<void>((resolve, reject) => {
+        const refuse = () => reject(refusal());
+        const wait = { late: setTimeout(() => { waits.delete(wait); refuse(); }, waitMs), refuse };
+        waits.add(wait);
+        void before.then(() => { clearTimeout(wait.late); waits.delete(wait); resolve(); }, () => {});
+      });
+      const mine = turn.then(() => fn());
+      // The next waits for the ones before this too: one that gave up does
+      // not let it in while they still run.
+      keep(key, before.then(() => mine).then(() => {}, () => {}));
+      // A refusal comes while those still run, before the line above takes
+      // `mine` up: handled here, as a failure is, it is its caller's alone.
+      void mine.catch(() => {});
+      return mine;
+    },
+    stop(): void {
+      for (const wait of waits) { clearTimeout(wait.late); wait.refuse(); }
+      waits.clear();
+    },
+    get size() { return tails.size; },
+  };
 }
 
 /**

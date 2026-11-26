@@ -24,7 +24,7 @@ import { createRoster, type Roster } from './roster.js';
  * own and no timer, so no `stop()`: the door's windows and the claim's
  * watches are claim.ts's (HB-0838). Nothing here knows about HTTP: signing
  * the person in, the guess limits on a code and the reply's words are the
- * route file's (src/api/memberRoutes.ts).
+ * route file's (src/api/chat/memberRoutes.ts).
  *
  * The invite code itself (invite.ts, beside this), the admission and
  * revocation on an agent's volume (orchestrator/members/members.ts), the door and

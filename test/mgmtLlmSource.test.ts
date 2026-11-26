@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { pickMgmtProfile } from '../src/api/mgmtLlm.js';
+import { pickMgmtProfile } from '../src/api/ops/mgmtLlm.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { AIProfile } from '../src/domain/types.js';
 
@@ -86,7 +86,7 @@ describe('picking the management LLM source', () => {
 
 describe('CLI tool-emission protocol', () => {
   it('parses a bare or fenced JSON tool call; leaves prose alone', async () => {
-    const { parseToolEmission } = await import('../src/api/cliChatModel.js');
+    const { parseToolEmission } = await import('../src/api/ops/cliChatModel.js');
     expect(parseToolEmission('{"tool":"list_agents","input":{}}')).toEqual({ tool: 'list_agents', input: {} });
     expect(parseToolEmission('```json\n{"tool":"get_agent","input":{"agent":"a1"}}\n```'))
       .toEqual({ tool: 'get_agent', input: { agent: 'a1' } });
@@ -98,7 +98,7 @@ describe('CLI tool-emission protocol', () => {
 
 describe('CLI helper: what the model is shown, and what it answers', () => {
   it('a tool call after prose is found however many objects it nests', async () => {
-    const { parseToolAfterProse } = await import('../src/api/cliChatModel.js');
+    const { parseToolAfterProse } = await import('../src/api/ops/cliChatModel.js');
     const rows = Array.from({ length: 25 }, (_, i) => ({ day: i + 1, slot: { from: '09:00', to: '10:00' } }));
     const call = JSON.stringify({ tool: 'set_schedule', input: { agent: 'kitchen', rows, note: 'braces in a string: {"x": }' } });
     const r = parseToolAfterProse(`Sure, here is the new schedule:\n${call}`, new Set(['set_schedule']));
@@ -110,7 +110,7 @@ describe('CLI helper: what the model is shown, and what it answers', () => {
   });
 
   it("an owner's message in content blocks is the owner's, not the assistant's", async () => {
-    const { completeViaCli } = await import('../src/api/cliChatModel.js');
+    const { completeViaCli } = await import('../src/api/ops/cliChatModel.js');
     const dir = mkdtempSync(join(tmpdir(), 'hb-cli-'));
     const prevDb = process.env.HATCHABOT_DB;
     process.env.HATCHABOT_DB = join(dir, 'hatchabot.sqlite');

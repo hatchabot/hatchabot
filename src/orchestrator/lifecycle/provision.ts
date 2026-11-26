@@ -18,7 +18,7 @@ import type { ChannelProvisioner, ProvisionedChannel } from '../../channels/chan
 import { ChannelSetupRequired } from '../../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../../ops/doorman.js';
 import { agentTimeZone } from '../schedules/timezone.js';
-import { AgentBusyError, freedWithin, OWED_BUSY_WAIT_MS, OWED_BUSY_WAITS, whileBusy } from './busy.js';
+import { AgentBusyError, freedWithin, OWED_BUSY_WAIT_MS, OWED_BUSY_WAITS, whileBusy, type Reservation } from './busy.js';
 import { rethrowIfCrash } from './operations.js';
 import { notifyAgentChat } from '../../channels/notify.js';
 import { autoSnapshot, workspacePath, writeFileInAgent } from '../files/snapshots.js';
@@ -82,6 +82,7 @@ import { opsToolsFingerprint } from '../../ops/opsTools.js';
 import { opsSection, OPS_MANAGED_HEADINGS, OPS_RENAMED_HEADINGS } from '../../ops/opsAgent.js';
 import { consoleAllowUsers, consoleIdentityEnabled } from '../console/consoleAccess.js';
 import { consoleIdentity, supportsConsoleIdentity } from '../../openclaw/consoleIdentity.js';
+import { keyedLock } from '../../util/queues.js';
 
 export interface CreateAgentInput {
   ownerId: string;
@@ -276,16 +277,16 @@ async function provisionChannelOrGoWebOnly(
 }
 
 /**
- * `busyHeld`: the caller already holds the agent's busy flag (an owner's
- * "Try again" on a held operation runs under it), so it is not taken again.
+ * `reuse`: the caller's own reservation of the agent (an owner's "Try
+ * again" on a held operation runs under it), which the steps go on under
+ * rather than take the agent again.
  */
 export async function runProvisionSteps(
   deps: ProvisionDeps,
   agentId: string,
-  opts: { busyHeld?: boolean } = {},
+  opts: { reuse?: Reservation } = {},
 ): Promise<ProvisionResult> {
-  if (opts.busyHeld) return runProvisionStepsInner(deps, agentId);
-  return whileBusy(agentId, () => runProvisionStepsInner(deps, agentId));
+  return whileBusy(agentId, 'provision', () => runProvisionStepsInner(deps, agentId), { reuse: opts.reuse });
 }
 
 async function runProvisionStepsInner(
@@ -1188,7 +1189,7 @@ export async function retryPendingSchedules(
 ): Promise<ReturnType<Store['getPendingSchedules']>> {
   const { store } = deps;
   if (!store.getPendingSchedules(agentId).length) return [];
-  return whileBusy(agentId, async () => {
+  return whileBusy(agentId, 'template-tasks', async () => {
     const a = store.getAgent(agentId);
     if (a?.state === 'RUNNING' && a.runtimeRef) await applyPendingSchedules(deps, a, a.runtimeRef, log);
     return store.getPendingSchedules(agentId);
@@ -1239,7 +1240,7 @@ export async function retryPendingSchedulesWhenUp(
 }
 
 export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {
-  return whileBusy(agentId, () => rebuildAgentInner(deps, agentId));
+  return whileBusy(agentId, 'rebuild', () => rebuildAgentInner(deps, agentId));
 }
 
 async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<Agent> {
@@ -1412,9 +1413,9 @@ async function finishRebuild(deps: ProvisionDeps, agent: Agent, runtimeRef: stri
 export async function finishInterruptedRebuild(
   deps: ProvisionDeps,
   agentId: string,
-  opts: { busyHeld?: boolean } = {},
+  opts: { reuse?: Reservation } = {},
 ): Promise<Agent | undefined> {
-  // `busyHeld`: as for runProvisionSteps (an owner's "Try again" already holds it).
+  // `reuse`: as for runProvisionSteps (an owner's "Try again" already holds it).
   const run = async (): Promise<Agent | undefined> => {
     const log = deps.log ?? (() => {});
     const agent = deps.store.getAgent(agentId);
@@ -1431,7 +1432,7 @@ export async function finishInterruptedRebuild(
       return deps.store.getAgent(agentId);
     }
   };
-  return opts.busyHeld ? run() : whileBusy(agentId, run);
+  return whileBusy(agentId, 'rebuild', run, { reuse: opts.reuse });
 }
 
 /** The source and model each spec was rendered with: what recordApplied stamps (audit #094). And whose Brave key it holds (HB-0578 review). */
@@ -1719,14 +1720,9 @@ export function switchableModelsFor(
  * after the removal had scrubbed it and said so, and nothing was left to
  * retry the scrub (HB-0274).
  */
-const gitAccessTurns = new Map<string, Promise<unknown>>();
+const gitAccessTurns = keyedLock();
 function inGitAccessTurn<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = gitAccessTurns.get(agentId) ?? Promise.resolve();
-  const run = prev.then(fn, fn);
-  const settled = run.catch(() => undefined);
-  gitAccessTurns.set(agentId, settled);
-  void settled.then(() => { if (gitAccessTurns.get(agentId) === settled) gitAccessTurns.delete(agentId); });
-  return run;
+  return gitAccessTurns.run(agentId, fn);
 }
 
 /**

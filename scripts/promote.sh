@@ -6,6 +6,7 @@
 #   ./scripts/promote.sh v2.32.0-beta.1 beta
 #   HATCHABOT_PROMOTE_TRAILERS='Co-Authored-By: …' ./scripts/promote.sh v2.31.0
 #   HATCHABOT_PROMOTE_BACK=1 ./scripts/promote.sh v2.30.0   # back, with no one to ask
+#   HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES=1 ./scripts/promote.sh v2.31.0
 #
 # Tagging a release makes it `latest` and nothing more; `stable` only moves
 # when you run this. That is what lets you release several times a day
@@ -21,9 +22,29 @@
 # `public`, read only) has its tag, and its GitHub release is published (not
 # a draft) with release-manifest.json, which installs and promote-images.yml
 # need. The fast lane refuses a channels.json naming any other tag.
+#
+# The publisher's gate holds the fast-lane tag to its own copy of
+# publish.toml, as it does a release tag: a main whose publish.toml is not
+# the newest release tag's (a change landed since, not released yet) stops
+# it (exit 4) until the owner has changed the copy to match and
+# HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES=1 says so (HB-1492,
+# scripts/publisher-copy.sh). Asked before the promote lands, so that stop
+# changes nothing; asked again in fast_lane before the tag, where the
+# channel is on main already (a promote landed before, or a publish.toml
+# change landed meanwhile) and only the fast-lane tag is held.
+#
+# Exit: 0 done; 1 refused; 3 the promote's pull request is still open; 4
+# publish.toml changed since the last release tag.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 die() { echo "✗ $*" >&2; exit 1; }
+. scripts/publisher-copy.sh || die "No scripts/publisher-copy.sh beside promote.sh: run it from a whole checkout."
+PUBLISHER_COPY_MATCHES="${HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES:-0}"
+# copy_check REV NOTE: the publisher's copy of publish.toml, for a fast-lane
+# tag on REV; NOTE says what a stop leaves as it was.
+copy_check() {
+  publisher_copy_check "$1" "the fast-lane tag" "HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES=1 scripts/promote.sh $TAG $CH. Or release first (scripts/release.sh stops the same way) and promote after: its publish.toml is then the last release tag's" "--rev ${1:0:12}" "$2"
+}
 
 TAG="${1:-}"; CH="${2:-stable}"
 [ -n "$TAG" ] || die "Usage: ./scripts/promote.sh <tag> [stable|beta]"
@@ -184,6 +205,7 @@ fast_lane() {
     if [ -n "$from" ] && [ -n "$to" ] && older "$to" "$from"; then msg="$msg
 rollback $ch $from → $to"; fi
   done
+  copy_check "$c" "$CH → $TAG is on the dev repo's main already (the promote has landed): only the fast-lane tag is held. Run this again once the copy matches, and it asks the publisher then."
   name="channels-$(date -u +%Y%m%dT%H%M%SZ)"
   git tag -a "$name" "$c" -m "$msg"
   # One tag, by name — never `git push --tags`; the pre-push hooks check it.
@@ -197,6 +219,9 @@ rollback $ch $from → $to"; fi
 }
 pending_gate
 if [ "$CURRENT" = "$TAG" ]; then echo "$CH already points at $TAG on main."; fast_lane; exit 0; fi
+# The fast-lane tag goes on the promote commit, whose publish.toml is main's:
+# asked before anything lands (fast_lane asks again before it tags).
+copy_check "$(git rev-parse origin/main)" "Nothing landed: channels.json on main still says $CH → ${CURRENT:-nothing}."
 # Going backwards is allowed (a bad release gets rolled back this way) but it
 # should never happen by accident.
 # "~" sorts below everything in sort -V, so a prerelease ranks below its final release.

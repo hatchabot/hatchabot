@@ -7,7 +7,7 @@ import { doctorReport, publicAccessLines, type DoctorFacts } from '../src/doctor
 
 const good = (): SafeguardFacts => ({
   authMode: 'accounts', managed: false,
-  admins: [{ id: 'a1', name: 'chris', totp: 1, passkeyRpIds: [] }],
+  admins: [{ id: 'a1', name: 'robin', totp: 1, passkeyRpIds: [] }],
   invitedOnly: true, ownerHeader: false,
   ports: { main: 8080, public: 8092, ops: 8091, embed: 8093 },
   autoUpgrade: { ok: true }, funnelOnPrivatePort: false, loginFailLimit: 10, publicHost: 'box.example.com',
@@ -26,15 +26,15 @@ describe('safeguards: each one, off, is named', () => {
     expect(failing({ ...good(), authMode: 'identity' })).toEqual([]);
   });
   it('b. an owner without a second factor; nobody owning the machine; a passkey made for another address', () => {
-    expect(failing({ ...good(), admins: [{ id: 'a1', name: 'chris', totp: 0, passkeyRpIds: [] }] })).toEqual(['second-factor']);
+    expect(failing({ ...good(), admins: [{ id: 'a1', name: 'robin', totp: 0, passkeyRpIds: [] }] })).toEqual(['second-factor']);
     expect(failing({ ...good(), admins: [] })).toEqual(['second-factor']);
-    expect(failing({ ...good(), admins: [{ id: 'a1', name: 'chris', totp: 0, passkeyRpIds: ['localhost'] }] })).toEqual(['second-factor']);
-    expect(failing({ ...good(), admins: [{ id: 'a1', name: 'chris', totp: 0, passkeyRpIds: ['box.example.com'] }] })).toEqual([]);
+    expect(failing({ ...good(), admins: [{ id: 'a1', name: 'robin', totp: 0, passkeyRpIds: ['localhost'] }] })).toEqual(['second-factor']);
+    expect(failing({ ...good(), admins: [{ id: 'a1', name: 'robin', totp: 0, passkeyRpIds: ['box.example.com'] }] })).toEqual([]);
     // Two owners: both must have one, and the report says who has not.
     const two = evaluateSafeguards({ ...good(), admins: [...good().admins, { id: 'a2', name: 'sam', totp: 0, passkeyRpIds: [] }] }).find((c) => c.id === 'second-factor')!;
     expect(two.ok).toBe(false);
     expect(two.detail).toContain('sam');
-    expect(two.detail).not.toContain('chris');
+    expect(two.detail).not.toContain('robin');
   });
   it('c. invited-only off', () => { expect(failing({ ...good(), invitedOnly: false })).toEqual(['invited-only']); });
   it('d. the owner-header test switch; a port clash; Funnel pointed at the private port', () => {
@@ -149,16 +149,16 @@ describe('who has owner rights, and their factors, straight from the database', 
   it('accounts mode: host owners, with confirmed factors only', () => {
     const db = new Database(':memory:');
     const store = new Store(db);
-    store.insertLocalAccount({ id: 'a1', username: 'chris', pwHash: 'h', pwSalt: 's', hostOwner: true, disabled: false, createdAt: 'now' });
+    store.insertLocalAccount({ id: 'a1', username: 'robin', pwHash: 'h', pwSalt: 's', hostOwner: true, disabled: false, createdAt: 'now' });
     store.insertLocalAccount({ id: 'a2', username: 'kid', pwHash: 'h', pwSalt: 's', hostOwner: false, disabled: false, createdAt: 'now' });
     store.insertLocalAccount({ id: 'a3', username: 'gone', pwHash: 'h', pwSalt: 's', hostOwner: true, disabled: true, createdAt: 'now' });
-    expect(adminAccounts(db, 'accounts')).toEqual([{ id: 'a1', name: 'chris', totp: 0, passkeyRpIds: [] }]);
+    expect(adminAccounts(db, 'accounts')).toEqual([{ id: 'a1', name: 'robin', totp: 0, passkeyRpIds: [] }]);
     store.insertSecondFactor({ id: 'f1', ownerId: 'a1', kind: 'totp', data: 'x', confirmed: false });
     expect(adminAccounts(db, 'accounts')[0]!.totp).toBe(0); // an enrolment nobody finished counts for nothing
     store.confirmSecondFactor('f1');
     store.insertSecondFactor({ id: 'f2', ownerId: 'a1', kind: 'passkey', credentialId: 'c', rpId: 'Box.Example.com', data: '{}' });
     store.insertSecondFactor({ id: 'f3', ownerId: 'a1', kind: 'backup', data: 'hash' });
-    expect(adminAccounts(db, 'accounts')).toEqual([{ id: 'a1', name: 'chris', totp: 1, passkeyRpIds: ['box.example.com'] }]);
+    expect(adminAccounts(db, 'accounts')).toEqual([{ id: 'a1', name: 'robin', totp: 1, passkeyRpIds: ['box.example.com'] }]);
     expect(adminAccounts(db, 'password')).toEqual([]);
   });
   it('identity mode: the Google account that owns this machine', () => {

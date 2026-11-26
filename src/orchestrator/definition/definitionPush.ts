@@ -97,7 +97,7 @@ export function createDefinitionPush(deps: DefinitionPushDeps): DefinitionPush {
     // (HB-0311).
     let layer: { soul?: string; agents?: string; persona?: string };
     try {
-      layer = master.paramFiles ?? await whileBusy(master.id, async () => {
+      layer = master.paramFiles ?? await whileBusy(master.id, 'definition-read', async () => {
         const soul = await readCapped(master, 'SOUL.md');
         assertMasterCurrent();
         const agents = await readCapped(master, 'AGENTS.md');
@@ -136,7 +136,7 @@ export function createDefinitionPush(deps: DefinitionPushDeps): DefinitionPush {
       const onDisk = operationRefusal(store, child.id);
       if (onDisk) return { id: child.id, name: child.name, ok: false, error: onDisk };
       try {
-        const pushedTo = await inSlot(() => withCoreFilesTurn(child.id, () => whileBusy(child.id, async () => {
+        const pushedTo = await inSlot(() => withCoreFilesTurn(child.id, () => whileBusy(child.id, 'definition-push', async () => {
           // The child as it is at its turn, not as read before the wait: its
           // own values applied meanwhile went back to the old ones.
           const fresh = freshRunning(child.id, (a) => `not running (${a.state})`);

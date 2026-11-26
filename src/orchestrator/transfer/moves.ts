@@ -6,7 +6,7 @@ import type { RuntimeProvider } from '../../providers/provider.js';
 import type { SecretStore } from '../../secrets/secretStore.js';
 import type { Store } from '../../store/store.js';
 import { allowedPeerAddress, pinnedPeerFetch, type PeerFetch } from '../../util/peerAddress.js';
-import { clearBusy, markBusy } from '../lifecycle/busy.js';
+import { markBusy } from '../lifecycle/busy.js';
 import { derivedByTag, ensureImageOn } from '../machines/imageRecipe.js';
 import { migrateAgent, moveState, preflight, type MigrateOptions, type MigrateResult, type MoveState, type Peer, type PreflightAnswer } from './migrate.js';
 import { moveAgentToHost } from './moveHost.js';
@@ -114,13 +114,13 @@ export function createMoves(deps: MovesDeps): Moves {
     },
 
     ensurePinnedImage: async (agent, image, host) => {
-      markBusy(agent.id);
+      const release = markBusy(agent.id, 'move-image');
       try {
         // Derived images are built, and their records kept, on this machine.
         return await ensureImageOn(providerFor(host.id), providerFor(agent.hostId), image,
           derivedByTag((n) => store.getDerivedImage(n)), host.name, host.kind === 'local');
       } finally {
-        clearBusy(agent.id);
+        release();
       }
     },
 

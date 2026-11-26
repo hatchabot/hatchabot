@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { COVERAGE } from '../src/mgmt/coverage.js';
 import { MANIFEST } from '../src/mgmt/tools.js';
 
@@ -9,10 +10,16 @@ import { MANIFEST } from '../src/mgmt/tools.js';
  * the app with a reason (src/mgmt/coverage.ts).
  */
 
+/** Every .ts file under src/api/, its folders included (HB-0874). */
+function apiFiles(dir = 'src/api'): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? apiFiles(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : []);
+}
+
 function mutatingRoutes(): string[] {
   const out = new Set<string>();
-  for (const f of readdirSync('src/api').filter((x) => x.endsWith('.ts'))) {
-    const s = readFileSync(`src/api/${f}`, 'utf8');
+  for (const f of apiFiles()) {
+    const s = readFileSync(f, 'utf8');
     for (const m of s.matchAll(/app\.(post|put|patch|delete)\s*(?:<[\s\S]*?>)?\s*\(\s*'([^']+)'/g)) {
       out.add(`${m[1]!.toUpperCase()} ${m[2]}`);
     }

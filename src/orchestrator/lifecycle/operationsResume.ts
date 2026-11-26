@@ -6,7 +6,7 @@ import type { InstallDeps } from '../apps/apps.js';
 import { recoverAppOperation, resumeAppOperation } from '../apps/appOperations.js';
 import { resumeArchive, type ArchiveDeps } from './archive.js';
 import { recoverBackupRestore, resumeBackupRestore } from '../backups/backupFiles.js';
-import { AgentBusyError, whileBusy } from './busy.js';
+import { AgentBusyError, whileBusy, type Reservation } from './busy.js';
 import { recoverMigrate, resumeMigrate, type MigrateDeps } from '../transfer/migrate.js';
 import { recoverMoveHost, resumeMoveHost } from '../transfer/moveHost.js';
 import { atPointForTests, BACKGROUND_KINDS, currentBootId, FILES_REPLACED_BY, handleFor, isFinished, markInterrupted, noteFilesReplacing, rethrowIfCrash, settleOwedStart, startOwedIn, type Operation, type StartAfter } from './operations.js';
@@ -132,8 +132,12 @@ async function startsStillOwed(ctx: ResumeContext): Promise<void> {
   }));
 }
 
-/** `busyHeld`: the caller holds the agent's busy flag already (the owner's choice runs under it). */
-async function runKind(ctx: ResumeContext, op: Operation, action: string | undefined, askAttempts?: number, busyHeld = false): Promise<ChoiceThen> {
+/**
+ * `held`: the caller's own reservation of the agent (the owner's choice runs
+ * under it), which a setup's or rebuild's restart rule goes on under
+ * (`reuse`) rather than take the agent again.
+ */
+async function runKind(ctx: ResumeContext, op: Operation, action: string | undefined, askAttempts?: number, held?: Reservation): Promise<ChoiceThen> {
   const log = ctx.logFor?.(op.agentId);
   // Started again: a snapshot by hand reading its files meanwhile is not
   // kept, as when it first began. A rebuild or setup counts where it runs
@@ -196,7 +200,7 @@ async function runKind(ctx: ResumeContext, op: Operation, action: string | undef
     }
     case 'rebuild':
     case 'provision':
-      return resumeBackground(ctx, op, busyHeld);
+      return resumeBackground(ctx, op, held);
     case 'install-image':
       handleFor(ctx.store, op.id).fail('The image copy was interrupted by a restart — install it again.', {
         actions: [{ action: 'install-again', label: 'Install again' }], recommended: 'install-again',
@@ -222,7 +226,7 @@ async function runKind(ctx: ResumeContext, op: Operation, action: string | undef
  * (its snapshot, its checkpoint turn) — is queued again. A machine that does
  * not answer leaves it interrupted, asked again by the 10-minute pass.
  */
-async function resumeBackground(ctx: ResumeContext, op: Operation, busyHeld = false): Promise<void> {
+async function resumeBackground(ctx: ResumeContext, op: Operation, held?: Reservation): Promise<void> {
   const h = handleFor(ctx.store, op.id);
   const agent = op.agentId ? ctx.store.getAgent(op.agentId) : undefined;
   const what = op.kind === 'rebuild' ? 'rebuild' : 'setup';
@@ -263,7 +267,7 @@ async function resumeBackground(ctx: ResumeContext, op: Operation, busyHeld = fa
     const r = await runProvisionSteps({
       store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
       ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
-    }, agent.id, { busyHeld });
+    }, agent.id, { reuse: held });
     if (r.agent.state === 'RUNNING') h.done('Interrupted by a restart after it came up; the rest of its setup ran again, and it is running.');
     else if (r.agent.state === 'FAILED') h.fail(r.agent.stateReason ?? 'Setup was interrupted by a restart — tap Retry.');
     else if (r.agent.pendingAction) h.fail('Setup was interrupted by a restart while it waited for a step from you — finish that step on its page.');
@@ -277,7 +281,7 @@ async function resumeBackground(ctx: ResumeContext, op: Operation, busyHeld = fa
     const r = await finishInterruptedRebuild({
       store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
       ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
-    }, agent.id, { busyHeld });
+    }, agent.id, { reuse: held });
     if (r?.state === 'RUNNING') h.done('Interrupted by a restart after it came up; the rest of its rebuild ran again, and it is running.');
     else h.fail(r?.stateReason ?? 'The rebuild was interrupted by a restart — tap Retry.');
     return;
@@ -314,7 +318,7 @@ async function resumeOne(ctx: ResumeContext, op: Operation, askAttempts?: number
   };
   try {
     // A rebuild or setup is guarded in memory by its own task (re-queued here, it takes the busy flag at its turn).
-    const then = op.agentId && !BACKGROUND_KINDS.includes(op.kind) ? await whileBusy(op.agentId, settle) : await settle();
+    const then = op.agentId && !BACKGROUND_KINDS.includes(op.kind) ? await whileBusy(op.agentId, 'resume-operation', settle) : await settle();
     // Started again as Start starts it, now the rule has let go of the agent (a failure is on the record).
     if (then && op.agentId) await startAsStartDoes(ctx, op.id, op.agentId, false, then);
   } catch (err) {
@@ -395,11 +399,12 @@ export async function recoverOperation(ctx: ResumeContext, opId: string, action:
   // "Try again" (offered when putting it right failed) runs the kind's restart
   // rule again; the other choices are the kind's own.
   const own = CHOICES.has(op.kind) && (action !== 'retry' || OWN_RETRY.has(op.kind));
-  // Run under the busy flag taken here: the restart rule must not take it again (HB-0301).
-  const run = () => runKind(ctx, op, own ? action : undefined, undefined, !!op.agentId);
+  // Run under the busy flag taken here, which the restart rule goes on under
+  // rather than take it again (HB-0301): its reservation, handed on.
+  const run = (held?: Reservation) => runKind(ctx, op, own ? action : undefined, undefined, held);
   let then: ChoiceThen;
   try {
-    then = op.agentId ? await whileBusy(op.agentId, run) : await run();
+    then = op.agentId ? await whileBusy(op.agentId, 'recover-operation', run) : await run();
   } catch (err) {
     if (err instanceof AgentBusyError) throw new RecoverError('It is busy with this already — wait a moment.');
     const msg = (err as { userMessage?: string }).userMessage;

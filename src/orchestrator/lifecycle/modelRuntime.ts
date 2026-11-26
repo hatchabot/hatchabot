@@ -3,7 +3,7 @@ import type { AIProfile, Agent } from '../../domain/types.js';
 import { batchConfigCommands, hasModelPolicy, needsPortHeal, seedInvocation } from '../../openclaw/configWriter.js';
 import type { RuntimeProvider } from '../../providers/provider.js';
 import type { Store } from '../../store/store.js';
-import { inQueue, semaphore } from '../../util/queues.js';
+import { keyedLock, semaphore } from '../../util/queues.js';
 import { containerUp, type UpWait } from './afterRestart.js';
 import { freedWithin, isBusy, OWED_BUSY_WAIT_MS, OWED_BUSY_WAITS } from './busy.js';
 import { SUBSCRIPTION_MIN_OPENCLAW, subscriptionModelProblem } from '../sources/modelOptions.js';
@@ -99,12 +99,20 @@ export interface ModelRuntime {
   stop(): void;
   /** A source's model list changed: each of its agents gets the new list, one after another. Never rejects. */
   pushModelList(profileId: string): Promise<void>;
-  /** The checks every image pin makes before it is stored: no way back across the 2026.8 line. */
-  imagePinCheck(agent: Agent, image: string | null): Promise<{ problem?: string; sameImage?: boolean }>;
+  /**
+   * The checks every image pin makes before it is stored: no way back across
+   * the 2026.8 line. `unanswered`: the container or the image gave no
+   * OpenClaw version (its machine did not answer, or no such image yet).
+   */
+  imagePinCheck(agent: Agent, image: string | null): Promise<{ problem?: string; sameImage?: boolean; unanswered?: true }>;
   /** A model Anthropic refuses for the Claude Code version this agent's OpenClaw presents on a subscription. */
   subscriptionRuntimeProblem(agent: Agent, profile: AIProfile, model: string | null | undefined, rebuildOn?: string | null): Promise<string | undefined>;
-  /** The one check of what an agent will run once a change is stored: its source, its model and the OpenClaw that model runs on. */
-  finalModelCheck(a: Agent, target: AIProfile, next: { pin?: string | null; switching?: boolean; rebuildOn?: string | null }): Promise<{ dropPin?: boolean; problem?: string }>;
+  /**
+   * The one check of what an agent will run once a change is stored: its
+   * source, its model and the OpenClaw that model runs on. `unanswered`: a
+   * runtime it asked gave no version, which passes (subscriptionModelProblem).
+   */
+  finalModelCheck(a: Agent, target: AIProfile, next: { pin?: string | null; switching?: boolean; rebuildOn?: string | null }): Promise<{ dropPin?: boolean; problem?: string; unanswered?: true }>;
   /** finalModelCheck for a source switch, which lands with a rebuild on the agent's own image. */
   sourceSwitchRuntime(a: Agent, target: AIProfile, image?: string | null): Promise<{ dropPin?: boolean; problem?: string }>;
   /** Why this agent may not be put on `model` now (null: back to its source's default). */
@@ -123,7 +131,7 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
    * older `models set` still running when a newer choice was applied
    * finished last and left the runtime on the older model (HB-0323).
    */
-  const modelApplies = new Map<string, Promise<unknown>>();
+  const modelApplies = keyedLock();
   /**
    * A model to put on a runtime is asked for in the store before it is
    * queued here (HB-0809): a queue is gone after a restart, and a model
@@ -142,7 +150,7 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
   const applyModelToRuntime = (agentId: string): Promise<ModelApplied> => {
     // A caller that stored the model without asking (Store.setAgentModel's `apply`): asked here, as it is queued.
     if (store.agentHold(agentId, 'model-apply') === undefined && tellable(store.getAgent(agentId))) store.setAgentHold(agentId, 'model-apply', randomUUID());
-    return inQueue(modelApplies, agentId, () => applyAsked(agentId));
+    return modelApplies.run(agentId, () => applyAsked(agentId));
   };
   const askToApply = (agentId: string): void => {
     // A new ask, not one there already: a write under way serves only the ask it began with.
@@ -337,7 +345,7 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
   /** Every agent on a source, one after another, so a long list does not start a crowd of one-shots. Never rejects. */
   const pushModelList = async (profileId: string): Promise<void> => {
     for (const a of store.listAllActiveAgents().filter((x) => x.aiProfileId === profileId)) {
-      await inQueue(modelApplies, a.id, () => applyModelListNow(a.id)).catch((err) => trace(a.id)('model.list_set_failed', { error: String((err as Error)?.message ?? err).slice(0, 200) }));
+      await modelApplies.run(a.id, () => applyModelListNow(a.id)).catch((err) => trace(a.id)('model.list_set_failed', { error: String((err as Error)?.message ?? err).slice(0, 200) }));
     }
   };
 
@@ -353,18 +361,23 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
    * another name, the candidate just promoted), so it needs no rebuild —
    * every pin-and-rebuild path asks this rather than comparing tag names
    * (Chris, 2026-09-24).
+   * `unanswered`: the container or the image gave no OpenClaw version (its
+   * machine did not answer, or the image is not there yet): passed, as
+   * before, but not an answer to keep (a class edit's next try asks again,
+   * HB-0642).
    */
-  const imagePinCheck = async (agent: Agent, image: string | null): Promise<{ problem?: string; sameImage?: boolean }> => {
+  const imagePinCheck = async (agent: Agent, image: string | null): Promise<{ problem?: string; sameImage?: boolean; unanswered?: true }> => {
     if (!agent.runtimeRef) return {};
     try {
       const prov = providerFor(agent.hostId);
       const [running, target] = await Promise.all([prov.info(agent.runtimeRef), prov.currentImageInfo(image ?? undefined)]);
       const sameImage = !!running.imageId && !!target.imageId && running.imageId === target.imageId;
+      const unanswered = !running.openclawVersion || !target.openclawVersion ? { unanswered: true as const } : {};
       if (needsPortHeal(running.openclawVersion) && target.openclawVersion && !needsPortHeal(target.openclawVersion)) {
         return { sameImage, problem: `This agent's data was migrated for OpenClaw ${running.openclawVersion}; ${image ?? 'the fleet default'} runs ${target.openclawVersion}, which cannot read it. To go back, restore the copy downloaded before the move.` };
       }
-      return { sameImage };
-    } catch { return {}; /* no image info: the rebuild will say */ }
+      return { sameImage, ...unanswered };
+    } catch { return { unanswered: true }; /* no image info: the rebuild will say */ }
   };
 
   /**
@@ -378,13 +391,18 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
    */
   const subscriptionRuntimeProblem = async (
     agent: Agent, profile: AIProfile, model: string | null | undefined, rebuildOn?: string | null,
-  ): Promise<string | undefined> => {
-    if (!model || profile.kind !== 'subscription' || !SUBSCRIPTION_MIN_OPENCLAW[model]) return undefined;
+  ): Promise<string | undefined> => (await subscriptionRuntime(agent, profile, model, rebuildOn)).problem;
+  /** subscriptionRuntimeProblem, and whether the runtime it asked gave no version (`unanswered`: passed, as an unknown version is not refused). */
+  const subscriptionRuntime = async (
+    agent: Agent, profile: AIProfile, model: string | null | undefined, rebuildOn?: string | null,
+  ): Promise<{ problem?: string; unanswered?: true }> => {
+    if (!model || profile.kind !== 'subscription' || !SUBSCRIPTION_MIN_OPENCLAW[model]) return {};
     const prov = providerFor(agent.hostId);
     const info = rebuildOn !== undefined
       ? await prov.currentImageInfo(rebuildOn ?? undefined).catch(() => undefined)
       : agent.runtimeRef ? await prov.info(agent.runtimeRef).catch(() => undefined) : undefined;
-    return subscriptionModelProblem(model, info?.openclawVersion);
+    const problem = subscriptionModelProblem(model, info?.openclawVersion);
+    return { ...(problem ? { problem } : {}), ...(info?.openclawVersion ? {} : { unanswered: true as const }) };
   };
 
   /**
@@ -405,27 +423,37 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
    *   image), on this image (null = the fleet default); left out, the
    *   container it runs now.
    * `problem`: what it would run cannot run there, so the change is refused.
+   * `unanswered`: a runtime it asked gave no version (which passes), so
+   * the verdict is not an answer to keep (a class edit's next try asks
+   * again, HB-0642).
    */
   const finalModelCheck = async (
     a: Agent, target: AIProfile, next: { pin?: string | null; switching?: boolean; rebuildOn?: string | null },
-  ): Promise<{ dropPin?: boolean; problem?: string }> => {
+  ): Promise<{ dropPin?: boolean; problem?: string; unanswered?: true }> => {
+    let unanswered = false;
+    const problemOf = async (model: string | null | undefined): Promise<string | undefined> => {
+      const r = await subscriptionRuntime(a, target, model, next.rebuildOn);
+      if (r.unanswered) unanswered = true;
+      return r.problem;
+    };
+    const said = (r: { dropPin?: boolean; problem?: string }) => (unanswered ? { ...r, unanswered: true as const } : r);
     if (next.pin !== undefined || !next.switching) {
       const runs = next.pin !== undefined ? next.pin ?? target.model : effectiveModel(a, target);
-      const problem = await subscriptionRuntimeProblem(a, target, runs, next.rebuildOn);
-      if (!problem) return {};
+      const problem = await problemOf(runs);
+      if (!problem) return said({});
       // No pin: the source's default is what it would run, and said so
       // (HB-0555). A pin its source no longer offers is passed over the same
       // way, and named: the agent does have a model of its own.
       const own = next.pin !== undefined ? next.pin : a.model;
-      if (own && own === runs) return { problem };
-      return { problem: own
+      if (own && own === runs) return said({ problem });
+      return said({ problem: own
         ? `Its model ${own} is no longer on its source's menu, so it would run the source's default, and ${problem}`
-        : `Without a model of its own it would run its source's default, and ${problem}` };
+        : `Without a model of its own it would run its source's default, and ${problem}` });
     }
     const pin = a.model && !modelOverrideProblem(target, a.model) ? a.model : undefined;
-    if (pin && !(await subscriptionRuntimeProblem(a, target, pin, next.rebuildOn))) return {};
-    const problem = await subscriptionRuntimeProblem(a, target, target.model, next.rebuildOn);
-    return { ...(pin ? { dropPin: true } : {}), ...(problem ? { problem } : {}) };
+    if (pin && !(await problemOf(pin))) return said({});
+    const problem = await problemOf(target.model);
+    return said({ ...(pin ? { dropPin: true } : {}), ...(problem ? { problem } : {}) });
   };
   /**
    * A source switch lands with a rebuild, on the agent's own image (`image`:

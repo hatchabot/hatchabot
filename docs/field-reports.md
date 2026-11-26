@@ -219,7 +219,7 @@ run or obeyed as an instruction.
 |---|---|
 | Facts, masking, the GitHub link, source access | `src/orchestrator/diagnostics/problemReport.ts` |
 | What a report carries, what it is masked with, the drafts | `src/orchestrator/diagnostics/problemReports.ts` (`reportFacts`, `reportRedaction`, `reportView`) |
-| Drafts, diagnostics, source routes | `src/api/problemReportRoutes.ts` (`/v1/problem-reports`, `/v1/diagnostics`, `/v1/known-problems`, `/v1/source`) |
+| Drafts, diagnostics, source routes | `src/api/ops/problemReportRoutes.ts` (`/v1/problem-reports`, `/v1/diagnostics`, `/v1/known-problems`, `/v1/source`) |
 | The agent's tools | `get_diagnostics`, `search_source`, `read_source`, `prepare_problem_report` (`src/mgmt/restTools.ts`) |
 | The agent's instructions | "Settings questions, and reporting a bug in Hatchabot" (`src/ops/opsAgent.ts`) |
 | The review panel | `web/app/start.js` (`openReport`) |

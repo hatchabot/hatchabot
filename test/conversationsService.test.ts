@@ -8,7 +8,7 @@ import type { ExecResult } from '../src/providers/provider.js';
 
 /**
  * The conversations service (HB-0808 step 13, HB-0826), driven as the agent
- * list, the sweeps and src/api/conversationRoutes.ts drive it, with no HTTP
+ * list, the sweeps and src/api/chat/conversationRoutes.ts drive it, with no HTTP
  * server: a real store on an in-memory database, and a container that
  * answers its sessions file (and its tasks) as the test says.
  */

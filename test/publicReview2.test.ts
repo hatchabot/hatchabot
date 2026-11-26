@@ -6,10 +6,10 @@ import { join } from 'node:path';
 import { connect, type Socket } from 'node:net';
 import { Jar, PUBLIC_HOST, PUBLIC_URL, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { SoftAuthenticator } from './helpers/softAuthenticator.js';
-import { base32Decode, totp } from '../src/api/totp.js';
+import { base32Decode, totp } from '../src/api/signIn/totp.js';
 import { parseFunnelStatus, targetsPort } from '../src/ops/tailnet.js';
 import { evaluateSafeguards, failingSafeguards } from '../src/api/safeguards.js';
-import { verifyAssertion, verifyRegistration, WebAuthnError } from '../src/api/webauthn.js';
+import { verifyAssertion, verifyRegistration, WebAuthnError } from '../src/api/signIn/webauthn.js';
 import { WS_SAMPLE_KEY } from './support/fixtures.js';
 import { Store } from '../src/store/store.js';
 
@@ -497,7 +497,7 @@ describe('an open console socket ends when what let it in ends', () => {
     const danaCookie = await privLogin('dana', dana.password);
     const start = await h.app.inject({ method: 'POST', url: '/v1/second-factor/totp', headers: { cookie: danaCookie }, payload: { current: dana.password } });
     const { id, secret } = start.json() as { id: string; secret: string };
-    const { base32Decode } = await import('../src/api/totp.js');
+    const { base32Decode } = await import('../src/api/signIn/totp.js');
     expect((await h.app.inject({ method: 'POST', url: '/v1/second-factor/totp/confirm', headers: { cookie: danaCookie }, payload: { id, code: totp(base32Decode(secret)) } })).statusCode).toBe(200);
     const jd2 = await h.signIn('dana', dana.password, { totpSecret: base32Decode(secret) });
     const s2 = await openConsole(h.port, 'd1', jd2.header());
@@ -515,7 +515,7 @@ describe('an open console socket ends when what let it in ends', () => {
     const gw = await fakeGateway();
     const verifier = { verify: async (t: string) => ({ sub: t, email: `${t}@example.com`, emailVerified: true, expMs: Date.now() + 3_600_000 }) };
     h = await publicApp({ fullRoutes: true, mode: 'identity', verifier });
-    const { _sealForTest } = await import('../src/api/secondFactor.js');
+    const { _sealForTest } = await import('../src/api/signIn/secondFactor.js');
     const secrets = { owner: Buffer.alloc(20, 3), gina: Buffer.alloc(20, 5) };
     h.store.insertHost({ id: 'host-local', ownerId: 'user-owner', kind: 'local', provider: 'mock', name: 'm', settings: {}, createdAt: 'now' });
     for (const who of ['owner', 'gina'] as const) {
@@ -649,7 +649,7 @@ describe('a second factor given before a reset or a removal', () => {
     h = await publicApp();
     await h.addAccount('owner', { owner: true });
     const dana = await h.addAccount('dana', { totp: true });
-    const { _sealForTest } = await import('../src/api/secondFactor.js');
+    const { _sealForTest } = await import('../src/api/signIn/secondFactor.js');
     h.store.insertSecondFactor({ id: 'sf-spare', ownerId: dana.id, kind: 'totp', label: 'Spare', data: _sealForTest(h.secret, Buffer.alloc(20, 6)) });
     await h.app.publicAccess!.evaluate();
     const here = await h.signIn('dana', dana.password, { totpSecret: dana.totpSecret });

@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { _resetLoginThrottle } from '../src/api/auth.js';
+import { _resetLoginThrottle } from '../src/api/signIn/auth.js';
 import { installErrorHandler } from '../src/api/errorHandler.js';
 import { InvalidBotTokenError, TelegramUnavailableError } from '../src/channels/telegramManual.js';
 

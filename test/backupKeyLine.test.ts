@@ -18,6 +18,7 @@ import { parseEnv } from 'node:util';
 import Database from 'better-sqlite3';
 import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
 import { Store } from '../src/store/store.js';
+import { scriptEnv, systemPathWithout } from './helpers/scriptEnv.js';
 
 // Real backup/drill subprocesses, tsx startup and passphrase stretching exceeded
 // 5 s on the shared CI runner (PR #122). Match restoreDrill.test.ts's bounded
@@ -25,6 +26,19 @@ import { Store } from '../src/store/store.js';
 vi.setConfig({ testTimeout: 30_000 });
 
 const repo = resolve(import.meta.dirname, '..');
+/**
+ * The six files that keep a copy of the reader of .env by systemd's rules on
+ * Linux (HB-1457), for the seven scripts that read it so: upgrade.sh and
+ * deploy-release.sh read the one in scripts/upgrade-helpers.sh (HB-0636).
+ */
+const READERS = ['backup-volumes.sh', 'restore-drill.sh', 'uninstall.sh', 'setup-host.sh', 'upgrade-helpers.sh', 'restart.sh'];
+/** The reader of systemd's rules in `script`, to call: `ver` is what systemd_major found (the first number of `systemctl --version`). */
+const readerOf = (script: string) => {
+  const src = readFileSync(join(repo, 'scripts', script), 'utf8');
+  const at = src.indexOf('const systemd = (t, ver) => {');
+  expect(at, script).toBeGreaterThan(0);
+  return new Function(`${src.slice(at, src.indexOf('\n    };\n', at) + '\n    };'.length)}\nreturn systemd;`)() as (t: string, ver?: string) => Record<string, string>;
+};
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
@@ -250,17 +264,47 @@ describe('a backup run by hand saves the key the service reads from .env (HB-106
     }
   });
 
-  it('the reader of systemd\'s rules is the same in backup-volumes.sh, uninstall.sh, restore-drill.sh, setup-host.sh and upgrade.sh (HB-1231, and the review of HB-1109 and HB-1210)', () => {
+  it('the reader of systemd\'s rules ends the file as systemd does, a value still quoted or a backslash last kept as far as it went, and takes only spaces and tabs for blanks (review of HB-0840)', () => {
+    const systemd = readerOf('upgrade-helpers.sh');
+    // As parse_env_file_internal (systemd's env-file.c) reads each: WHITESPACE is " \t\n\r", and at the end of
+    // the file a key in a value state is pushed with what it has.
+    const cases: Array<[string, Record<string, string>]> = [
+      ['A="never closed', { A: 'never closed' }],
+      ['A="spans\nB=1', { A: 'spans\nB=1' }],
+      ["A='single", { A: 'single' }],
+      ['A=last\\', { A: 'last' }],
+      ['A="escaped\\', { A: 'escaped' }],
+      ['A=', { A: '' }],
+      ['A=plain', { A: 'plain' }],
+      ['A=  x  ', { A: 'x' }],
+      ['A=\vx\n', { A: '\vx' }],
+      ['A= x\n', { A: ' x' }],
+      ['A\v=1\n', { 'A\v': '1' }],
+      ['\fB=2\n', { '\fB': '2' }],
+      ['K \t=1\n', { K: '1' }],
+      ['NOVALUE', {}],
+    ];
+    for (const [text, want] of cases) expect(systemd(text), JSON.stringify(text)).toEqual(want);
+  });
+
+  it('the reader of systemd\'s rules is the same in backup-volumes.sh, uninstall.sh, restore-drill.sh, setup-host.sh, upgrade.sh, deploy-release.sh and restart.sh, and so is what asks the machine\'s systemd (HB-1231, HB-1457, and the review of HB-1109 and HB-1210)', () => {
     const reader = (script: string) => {
       const src = readFileSync(join(repo, 'scripts', script), 'utf8');
-      const at = src.indexOf('const systemd = (t) => {');
+      const at = src.indexOf('const systemd = (t, ver) => {');
       expect(at, script).toBeGreaterThan(0);
       return src.slice(at, src.indexOf('\n    };\n', at)).split('\n').map((l) => l.trim()).join('\n');
     };
-    expect(reader('backup-volumes.sh')).toBe(reader('uninstall.sh'));
-    expect(reader('restore-drill.sh')).toBe(reader('backup-volumes.sh'));
-    expect(reader('setup-host.sh')).toBe(reader('backup-volumes.sh'));
-    expect(reader('upgrade.sh')).toBe(reader('backup-volumes.sh'));
+    const asks = (script: string) => {
+      const src = readFileSync(join(repo, 'scripts', script), 'utf8');
+      const at = src.indexOf('\nsystemd_major() {\n');
+      expect(at, script).toBeGreaterThan(0);
+      // With what it says of itself above it: the comment is the copy's too.
+      return src.slice(src.lastIndexOf('\n# systemd_major FILE:', at), src.indexOf('\n}\n', at));
+    };
+    for (const script of READERS) {
+      expect(reader(script), script).toBe(reader('backup-volumes.sh'));
+      expect(asks(script), script).toBe(asks('backup-volumes.sh'));
+    }
     // And setup and the upgrade read the image settings with one function, so they never fetch two images (review of HB-1210).
     const envNamed = (script: string) => {
       const src = readFileSync(join(repo, 'scripts', script), 'utf8');
@@ -268,6 +312,115 @@ describe('a backup run by hand saves the key the service reads from .env (HB-106
       expect(at, script).toBeGreaterThan(0);
       return src.slice(at, src.indexOf('\n}\n', at));
     };
-    expect(envNamed('upgrade.sh')).toBe(envNamed('setup-host.sh'));
+    expect(envNamed('upgrade-helpers.sh')).toBe(envNamed('setup-host.sh'));
+    // And the note of a rollback goes beside the database the service opens, read the same way (review of HB-0840).
+    expect(envNamed('restart.sh')).toBe(envNamed('upgrade-helpers.sh'));
+  });
+});
+
+describe('a comment that ends in a backslash is read as the machine\'s own systemd reads it (HB-1457)', () => {
+  // What `systemctl --version` says first on Debian 12 and on Ubuntu 24.04.
+  const OLD = 'systemd 252 (252.30-1~deb12u2)', NEW = 'systemd 255 (255.4-1ubuntu8.4)';
+  /** A systemctl in `bin` that answers --version with `says`, and writes down each time it is asked. */
+  const systemctl = (bin: string, says: string, log: string) => writeFileSync(join(bin, 'systemctl'),
+    `#!/usr/bin/env bash\necho "$*" >> ${JSON.stringify(log)}\n[ "$1" != --version ] || printf '%s\\n' '${says}' '+PAM +AUDIT -SELINUX'\nexit 0\n`, { mode: 0o755 });
+  const asked = (log: string) => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []);
+  /** A PATH of `bin` and the system's commands but systemctl: a machine without one. */
+  const noSystemctl = (bin: string) => `${bin}:${systemPathWithout(join(dirname(bin), 'sys'), ['systemctl'])}`;
+
+  it('the reader: before v254 the line after it goes on the comment; from v254, and with no systemctl to ask, it is read', () => {
+    const systemd = readerOf('upgrade-helpers.sh');
+    const text = '# the old path was C:\\data\\\nHATCHABOT_DB=/srv/hb.sqlite\n';
+    for (const ver of ['249', '252', '253']) expect(systemd(text, ver), ver).toEqual({});
+    for (const ver of ['254', '255', '', undefined]) expect(systemd(text, ver), String(ver)).toEqual({ HATCHABOT_DB: '/srv/hb.sqlite' });
+    // The other cases are read alike by both: only a backslash right before the end of the line differs.
+    for (const ver of ['252', '255']) {
+      const newer = ver === '255';
+      expect(systemd('; a note \\\nB=1\n', ver), ver).toEqual(newer ? { B: '1' } : {});
+      expect(systemd('# a line that ended on a lone CR \\\rB=1\n', ver), ver).toEqual(newer ? { B: '1' } : {});
+      expect(systemd('# an escaped backslash last \\\\\nB=1\n', ver), ver).toEqual({ B: '1' });
+      expect(systemd('# a Windows line \\\r\nB=1\r\n', ver), ver).toEqual({ B: '1' });
+      expect(systemd('# a backslash inside \\ it\nB=1\n', ver), ver).toEqual({ B: '1' });
+      expect(systemd('A=1 # part of the value \\\nB=2\n', ver), ver).toEqual({ A: '1 # part of the value B=2' });
+    }
+  });
+
+  it('a backup by hand takes the key after it as this machine\'s systemd gives it to the service', async () => {
+    const key = 'fixture-key-after-a-comment';
+    for (const [says, read] of [[NEW, true], [OLD, false], [undefined, true]] as const) {
+      const s = sandbox();
+      await s.registry(key);
+      writeFileSync(join(s.install, '.env'), `# the old key lived in C:\\keys\\\nHATCHABOT_SECRET_KEY=${key}\n`);
+      const bin = join(dirname(s.install), 'bin'), log = join(dirname(s.install), 'systemctl.log');
+      if (says) systemctl(bin, says, log);
+      const r = s.byHand(false, says ? {} : { PATH: noSystemctl(bin) });
+      const label = `${says ?? 'no systemctl'}: ${r.stdout}${r.stderr}`;
+      if (read) {
+        expect(r.status, label).toBe(0);
+        expect(parseEnv(readFileSync(join(s.setDir(), 'secret-key.env'), 'utf8')).HATCHABOT_SECRET_KEY, label).toBe(key);
+      } else {
+        // systemd 252 gives the service no key, and the backup reads none.
+        expect(r.status, label).not.toBe(0);
+        expect(existsSync(join(s.setDir(), 'secret-key.env')), label).toBe(false);
+      }
+      expect(asked(log), label).toEqual(says ? ['--version'] : []);
+    }
+  });
+
+  it('a SYSTEMD_MAJOR the caller exported chooses nothing: the machine\'s systemctl is asked all the same', async () => {
+    const key = 'fixture-key-after-a-comment';
+    for (const [says, exported, read] of [[NEW, '252', true], [OLD, '255', false], [OLD, '', false]] as const) {
+      const s = sandbox();
+      await s.registry(key);
+      writeFileSync(join(s.install, '.env'), `# the old key lived in C:\\keys\\\nHATCHABOT_SECRET_KEY=${key}\n`);
+      const bin = join(dirname(s.install), 'bin'), log = join(dirname(s.install), 'systemctl.log');
+      systemctl(bin, says, log);
+      const r = s.byHand(false, { SYSTEMD_MAJOR: exported });
+      const label = `${says}, SYSTEMD_MAJOR=${exported}: ${r.stdout}${r.stderr}`;
+      expect(r.status === 0, label).toBe(read);
+      expect(existsSync(join(s.setDir(), 'secret-key.env')), label).toBe(read);
+      expect(asked(log), label).toEqual(['--version']);
+    }
+    // The drill, the same.
+    const s = sandbox();
+    const folder = join(dirname(s.install), 'named-backups');
+    writeFileSync(join(s.install, '.env'), `# backups were in D:\\old\\\nHATCHABOT_BACKUP_DIR=${folder}\n`);
+    const bin = join(dirname(s.install), 'bin'), home = join(dirname(s.install), 'home');
+    systemctl(bin, NEW, join(dirname(s.install), 'systemctl.log'));
+    const env: Record<string, string> = { HOME: home, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, SYSTEMD_MAJOR: '252', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null' };
+    const r = spawnSync('bash', [join(s.install, 'scripts', 'restore-drill.sh')], { encoding: 'utf8', env, cwd: s.install });
+    expect(r.stderr, r.stdout + r.stderr).toContain(`No backups directory at ${folder}`);
+  });
+
+  it('a restore drill by hand looks in the backups folder named after it as this machine\'s systemd reads it', () => {
+    for (const [says, named] of [[NEW, true], [OLD, false], [undefined, true]] as const) {
+      const s = sandbox();
+      const folder = join(dirname(s.install), 'named-backups');
+      writeFileSync(join(s.install, '.env'), `# backups were in D:\\old\\\nHATCHABOT_BACKUP_DIR=${folder}\n`);
+      const bin = join(dirname(s.install), 'bin'), home = join(dirname(s.install), 'home');
+      if (says) systemctl(bin, says, join(dirname(s.install), 'systemctl.log'));
+      const env: Record<string, string> = { HOME: home, PATH: says ? `${bin}:${dirname(process.execPath)}:/usr/bin:/bin` : noSystemctl(bin), GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null' };
+      const r = spawnSync('bash', [join(s.install, 'scripts', 'restore-drill.sh')], { encoding: 'utf8', env, cwd: s.install });
+      expect(r.stderr, `${says}: ${r.stdout}${r.stderr}`).toContain(`No backups directory at ${named ? folder : join(home, 'hatchabot-backups')}`);
+    }
+  });
+
+  it('env_named, the reading four scripts keep the same, asks systemctl once a run, and only of a .env with a backslash at the end of a line', () => {
+    const src = readFileSync(join(repo, 'scripts', 'restart.sh'), 'utf8');
+    const fns = ['systemd_major', 'env_named'].map((name) => { const at = src.indexOf(`\n${name}() {\n`); return src.slice(at + 1, src.indexOf('\n}\n', at) + 2); }).join('\n');
+    const read = (envText: string, says: string) => {
+      const root = mkdtempSync(join(tmpdir(), 'hb-envnamed-')); dirs.push(root);
+      const bin = join(root, 'bin'), log = join(root, 'systemctl.log'); mkdirSync(bin);
+      systemctl(bin, says, log);
+      writeFileSync(join(root, '.env'), envText);
+      const r = spawnSync('bash', ['-c', `set -euo pipefail\n${fns}\ncd "$1"\nenv_named HATCHABOT_DB; echo "[$ENV_HATCHABOT_DB]"\nenv_named HATCHABOT_DB PORT; echo "[$ENV_HATCHABOT_DB]"`, '_', root],
+        { encoding: 'utf8', env: scriptEnv(join(root, 'home'), `${bin}:/usr/bin:/bin`) });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      return { out: r.stdout.trim().split('\n'), asked: asked(log) };
+    };
+    const after = '# the old path was C:\\data\\\nHATCHABOT_DB=/srv/hb.sqlite\n';
+    expect(read(after, NEW)).toEqual({ out: ['[/srv/hb.sqlite]', '[/srv/hb.sqlite]'], asked: ['--version'] });
+    expect(read(after, OLD)).toEqual({ out: ['[]', '[]'], asked: ['--version'] });
+    expect(read('# a plain comment\nHATCHABOT_DB=/srv/hb.sqlite\n', OLD)).toEqual({ out: ['[/srv/hb.sqlite]', '[/srv/hb.sqlite]'], asked: [] });
   });
 });

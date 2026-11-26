@@ -140,12 +140,37 @@ export function applyReplacements(text: string | undefined, pairs: Array<[string
 // files. PAIRS holds [pathPattern(from), to]. Double-quoted only, so it
 // reads the same inside the single-quoted `-e` wrapper below. Best-effort; a
 // bad file is skipped, not fatal.
+//
+// `put`: a regular file it changes is written to a new file of its own in
+// the same folder (made with O_EXCL, its owner and mode as the file's) and
+// renamed over it, so the agent, which reads its files while this runs, has
+// the old one or the new one and never one cut short (HB-0629). The new
+// file's name is `.hb-` and 12 hex digits, whatever the file's own: one
+// made from it was too long for a name near the 255-byte limit, and that
+// file was passed by. The walk never reads one (no .md, .txt or .json). A
+// file that is read-only is replaced too, its mode kept: the folder
+// decides, as for any rename (written in place, it was refused). Written
+// through or in
+// place, as it always was: a link (to a regular file only: one to a fifo
+// would hang the read), a file with other hard links (a rename would part
+// them), one in a folder it cannot add a file to (EACCES, EPERM, EROFS), and
+// one whose owner the new file cannot take. Any other failure (ENOSPC,
+// EDQUOT, EIO in the write, the sync or the rename) removes the new file and
+// leaves the old one as it was. Only regular files and links to them are read.
 const REWRITE_SCRIPT =
-  'const fs=require("fs"),path=require("path");const pairs=JSON.parse(process.env.PAIRS);const root=process.env.WSDIR;' +
+  'const fs=require("fs"),path=require("path"),crypto=require("crypto");const pairs=JSON.parse(process.env.PAIRS);const root=process.env.WSDIR;' +
+  'function fileAt(p){try{return fs.statSync(p).isFile()}catch(_){return false}}' +
+  'function put(p,o,link){if(link){fs.writeFileSync(p,o);return}' +
+  'const st=fs.lstatSync(p);if(!st.isFile())return;if(st.nlink>1){fs.writeFileSync(p,o);return}' +
+  'const t=path.join(path.dirname(p),".hb-"+crypto.randomBytes(6).toString("hex"));let fd,own=true;' +
+  'try{fd=fs.openSync(t,"wx",st.mode&4095)}catch(e){if(e.code==="EACCES"||e.code==="EPERM"||e.code==="EROFS")fs.writeFileSync(p,o);return}' +
+  'try{try{fs.fchownSync(fd,st.uid,st.gid)}catch(e){if(st.uid!==process.getuid()||st.gid!==process.getgid()){own=false;throw e}}' +
+  'fs.writeFileSync(fd,o);fs.fchmodSync(fd,st.mode&4095);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(t,p)}' +
+  'catch(_){if(fd!==undefined)try{fs.closeSync(fd)}catch(_){}try{fs.unlinkSync(t)}catch(_){}if(!own)fs.writeFileSync(p,o)}}' +
   'function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);' +
-  'if(e.isDirectory())walk(p);else if(/\\.(md|txt|json)$/i.test(e.name)){' +
+  'if(e.isDirectory())walk(p);else if(/\\.(md|txt|json)$/i.test(e.name)&&(e.isFile()||e.isSymbolicLink()&&fileAt(p))){' +
   'let t;try{t=fs.readFileSync(p,"utf8")}catch(_){continue}let o=t;for(const x of pairs){if(!x[0])continue;o=o.replace(new RegExp(x[0],"gu"),function(){return x[1]})}' +
-  'if(o!==t)try{fs.writeFileSync(p,o)}catch(_){}}}}' +
+  'if(o!==t)try{put(p,o,e.isSymbolicLink())}catch(_){}}}}' +
   'try{walk(root)}catch(e){process.exit(2)}';
 
 /**

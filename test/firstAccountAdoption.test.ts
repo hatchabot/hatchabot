@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
-import { ADOPTION_RETRY_MAX_MS, ADOPTION_RETRY_MS, firstAccountAdoption } from '../src/api/firstAccount.js';
+import { ADOPTION_RETRY_MAX_MS, ADOPTION_RETRY_MS, firstAccountAdoption } from '../src/api/signIn/firstAccount.js';
 import { TelegramPoolProvisioner } from '../src/channels/telegramPool.js';
 
 const pins = (db: Database.Database) => (db.prepare(`SELECT owner_id FROM first_account`).all() as Array<{ owner_id: string }>).map((r) => r.owner_id);

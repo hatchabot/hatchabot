@@ -19,7 +19,7 @@ export type FileRefusal = { ok: false; status: number; error: string };
  * An agent's core files (SOUL.md, AGENTS.md, MEMORY.md) read and saved from
  * the app's Personality and Knowledge panes (HB-0808 step 13, part of the
  * agent files service, files.ts). Who may ask, the file's name, the body and
- * the agent's state are the route's checks (src/api/fileRoutes.ts); a save
+ * the agent's state are the route's checks (src/api/data/fileRoutes.ts); a save
  * then takes the agent's core-files turn and the busy flag, snapshots first,
  * and keeps the template layer in step. Nothing here knows HTTP: a refusal
  * is a result with its status and words.
@@ -80,7 +80,7 @@ export function createCoreFiles(deps: CoreFilesDeps): CoreFiles {
       // The files turn first, then the busy flag, as Apply values takes
       // them: a snapshot by hand reading the files meanwhile kept the old
       // file with the layer this save stores, or the reverse (HB-0566).
-      const res = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+      const res = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, 'file-save', async () => {
         const fresh = freshRunning(agent.id, () => 'Start the agent to edit its files.');
         // Version the files BEFORE overwriting — a bad save must be recoverable.
         await autoSnapshot(snapshotDeps(fresh), agent.id, 'pre-edit');

@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { registerAuth } from '../src/api/auth.js';
+import { registerAuth } from '../src/api/signIn/auth.js';
 import { PUBLIC_RULES, publicClassFor, publicClassTable, publicRuleFor, type PublicClass } from '../src/api/publicRoutes.js';
 import { readPage } from '../scripts/page-source.mjs';
 

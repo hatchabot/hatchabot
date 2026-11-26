@@ -118,25 +118,48 @@ for v in $(compgen -A variable HATCHABOT_ 2>/dev/null) $(compgen -A variable AGE
   unset "$v"
 done
 [ -z "$IGNORED" ] || printf 'Note: not using%s from this shell — %s and its defaults decide, as they do for the service.\n' "$IGNORED" "$ENV_DIR/.env"
+# systemd_major FILE: the first number of `systemctl --version`, in
+# SYSTEMD_MAJOR, for the reader of systemd's rules (`systemd`, in node). From
+# v254 a line after a comment that ends in a backslash is a line of its own;
+# before, it went on the comment. Read always the old way, `# C:\data\` and
+# then a HATCHABOT_DB line named the database to systemd 254 and nothing here
+# (HB-1457). Asked once, and only of a FILE with a backslash at the end of a
+# line, the one place the two differ. With no systemctl to ask, empty: read as
+# v254 reads, as no systemd reads .env there (on Linux Hatchabot runs as a
+# systemd unit; a Mac's launchd job sources .env with bash, which reads that
+# line too), and that is the rule of every systemd since 2023 and of
+# Hatchabot's own readers. Never taken from the environment: one a caller
+# exported chose the rule, so it is unset here, before any reading. The same
+# in the seven scripts that read .env so (test/backupKeyLine.test.ts).
+unset SYSTEMD_MAJOR
+systemd_major() {
+  [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
+  LC_ALL=C grep -q -e '\\$' -e $'\\\\\r' "$1" 2>/dev/null || return 0
+  SYSTEMD_MAJOR="$( { systemctl --version 2>/dev/null || true; } | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p')"
+}
 ENV_READ=0; ENV_ALT_KEY=""; ENV_ALT_DB=""; ENV_ALT_BACKUP_DIR=""
 ENV_HOW=systemd; [ "$(uname -s)" = "Darwin" ] && ENV_HOW=shell
 if [ -f "$ENV_DIR/.env" ] && command -v node >/dev/null 2>&1; then
   ENV_KV="$(mktemp)"
+  [ "$ENV_HOW" != systemd ] || systemd_major "$ENV_DIR/.env"
   if ENV_FILE="$ENV_DIR/.env" ENV_HOW="$ENV_HOW" node -e '
     const { parseEnv } = require("node:util");
     const text = require("node:fs").readFileSync(process.env.ENV_FILE, "utf8");
     // EnvironmentFile, state by state as systemd reads it (parse_env_file).
-    const systemd = (t) => {
+    const systemd = (t, ver) => {
+      // ver: the first number of `systemctl --version` (systemd_major). Before v254 a comment ending in a
+      // backslash went on over the next line; from v254, and with no systemctl to ask, that line is read.
+      const joins = Number(ver) > 0 && Number(ver) < 254;
       const out = {}; let st = "prekey", k = "", v = "", lw = -1;
       // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
       // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
       const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
-      for (const c of t + "\n") {
-        const nl = c === "\n" || c === "\r", ws = /\s/.test(c);
+      for (const c of t) {
+        const nl = c === "\n" || c === "\r", ws = c === " " || c === "\t" || nl;
         if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
         else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
-        else if (st === "commentesc") st = "comment";
-        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.trimEnd(); st = "prevalue"; } else k += c; }
+        else if (st === "commentesc") st = nl && !joins ? "prekey" : "comment";
+        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.replace(/[ \t]+$/, ""); st = "prevalue"; } else k += c; }
         else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
         else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
         else if (st === "esc") { st = "value"; if (!nl) v += c; }
@@ -144,16 +167,19 @@ if [ -f "$ENV_DIR/.env" ] && command -v node >/dev/null 2>&1; then
         else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
         else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
       }
+      // The end of the file ends a value as a newline does, quoted or escaped as far as it went, as
+      // systemd keeps it: a quote never closed, or a backslash last, lost its key here.
+      if (["prevalue", "value", "esc", "single", "double", "doubleesc"].includes(st)) done();
       return out;
     };
     const say = (k, v) => { if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) process.stdout.write(k + "=" + v + "\0"); };
-    if (process.env.ENV_HOW === "systemd") for (const [k, v] of Object.entries(systemd(text))) say(k, v);
+    if (process.env.ENV_HOW === "systemd") for (const [k, v] of Object.entries(systemd(text, process.argv[1]))) say(k, v);
     const parsed = parseEnv(text);
     for (const n of ["KEY:SECRET_KEY", "DB:DB", "BACKUP_DIR:BACKUP_DIR"]) {
       const [as, name] = n.split(":");
       const v = parsed["HATCHABOT_" + name] ?? parsed["AGENTCLAW_" + name];
       if (v !== undefined) say("ENV_ALT_" + as, v);
-    }' > "$ENV_KV" 2>/dev/null; then
+    }' "${SYSTEMD_MAJOR:-}" > "$ENV_KV" 2>/dev/null; then
     while IFS= read -r -d '' kv; do export "$kv"; done < "$ENV_KV"
     ENV_READ=1
   fi
@@ -791,7 +817,7 @@ if [ "$PURGE" = 1 ]; then
     for e in "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?*; do
       { [ -e "$e" ] || [ -L "$e" ]; } || continue
       n="${e##*/}"
-      case "$n" in "$DB_NAME"|"$DB_NAME-wal"|"$DB_NAME-shm"|"$DB_NAME-journal"|"$DB_NAME.lock") continue ;; esac
+      case "$n" in "$DB_NAME"|"$DB_NAME-wal"|"$DB_NAME-shm"|"$DB_NAME-journal"|"$DB_NAME.lock"|"$DB_NAME.rolled-back"|"$DB_NAME.rolled-back.prev"|"$DB_NAME.rolled-back.tmp"|"$DB_NAME.uses-this-folder"|"$DB_NAME".uses-this-folder.*.tmp) continue ;; esac
       [ "$n" = "$KEEP_TOP" ] && continue
       case " $BESIDE_DB " in *" $n "*) continue ;; esac
       if [ -L "$e" ]; then continue   # removing the folder takes the link, not what it leads to
@@ -821,16 +847,29 @@ if [ "$PURGE" = 1 ]; then
     done <<<"$1"
     [ "$more" = 0 ] || echo "  …and $more more in $DATA_DIR"
   }
-  # This install's own: its database, what SQLite keeps beside it, and the
-  # server's lock (an empty file: src/store/instanceLock.ts), which is no
-  # database: left alone by a server that ran, it goes unsaid.
+  # This install's own: its database, what SQLite keeps beside it, the
+  # server's lock (an empty file: src/store/instanceLock.ts), a rollback's
+  # note (src/store/rollbackMark.ts) with the one it stood in for (.prev,
+  # mark_rolled_back in upgrade.sh) and one cut off as it was written (.tmp),
+  # and the mark its start leaves on the folder (src/store/folderMark.ts),
+  # with the mark's temporary files that a start ended between their write
+  # and their rename left (<database>.uses-this-folder.<pid>.tmp), which are
+  # no database: left alone by a server that ran or a rollback, they go unsaid.
   rm_db() {
-    local f had=0 left=""
+    local f mid had=0 left=""
     for f in "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" "$DB_PATH-journal"; do
       { [ -e "$f" ] || [ -L "$f" ]; } || continue
       had=1; rm -f "$f" 2>/dev/null || left="$left $f"
     done
-    if [ -e "$DB_PATH.lock" ] || [ -L "$DB_PATH.lock" ]; then rm -f "$DB_PATH.lock" 2>/dev/null || left="$left $DB_PATH.lock"; fi
+    for f in "$DB_PATH.lock" "$DB_PATH.rolled-back" "$DB_PATH.rolled-back.prev" "$DB_PATH.rolled-back.tmp" "$DB_PATH.uses-this-folder" "$DB_PATH".uses-this-folder.*.tmp; do
+      { [ -e "$f" ] || [ -L "$f" ]; } || continue
+      case "$f" in
+        "$DB_PATH".uses-this-folder.*.tmp)
+          mid="${f#"$DB_PATH".uses-this-folder.}"; mid="${mid%.tmp}"
+          case "$mid" in ''|*[!0-9]*) continue ;; esac ;;
+      esac
+      rm -f "$f" 2>/dev/null || left="$left $f"
+    done
     if [ -n "$left" ]; then echo "  could NOT remove$left"
     elif [ "$had" = 1 ]; then echo "  removed the database in $DATA_DIR ($1)"
     else echo "  no database of this install's was left in $DATA_DIR ($1)"; fi

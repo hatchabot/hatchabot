@@ -776,6 +776,23 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
     expect(existsSync(join(data, 'hb.sqlite')), r.stdout + r.stderr).toBe(false);
   });
 
+  it('a database named after a comment that ends in a backslash is the one this machine\'s systemd gives the service (HB-1457)', () => {
+    for (const [says, named] of [['systemd 255 (255.4-1ubuntu8.4)', true], ['systemd 252 (252.30-1~deb12u2)', false]] as const) {
+      const w = purgeWorld();
+      dockerShim(w, VOLS);
+      writeFileSync(join(w.bin, 'systemctl'), `#!/usr/bin/env bash\necho "systemctl $*" >> ${JSON.stringify(w.log)}\n[ "$1" != --version ] || echo '${says}'\nexit 0\n`, { mode: 0o755 });
+      const data = join(dirname(w.repo), 'elsewhere'); mkdirSync(data);
+      copyFileSync(join(w.repo, 'data', 'hatchabot.sqlite'), join(data, 'hb.sqlite'));
+      writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\n# it was on E:\\old\\\nHATCHABOT_DB=${join(data, 'hb.sqlite')}\n`);
+      const r = run(w, ['--purge', '--yes']);
+      const label = `${says}: ${r.stdout}${r.stderr}`;
+      expect(readFileSync(w.log, 'utf8'), label).toContain('systemctl --version');
+      // The one the service opens goes; the other stays.
+      expect(existsSync(join(data, 'hb.sqlite')), label).toBe(!named);
+      expect(existsSync(join(w.repo, 'data', 'hatchabot.sqlite')), label).toBe(named);
+    }
+  });
+
   it('a database only Node\'s reading finds (a server started by hand) is still found', () => {
     const w = purgeWorld();
     dockerShim(w, VOLS);
@@ -971,6 +988,11 @@ describe('scripts/uninstall.sh --purge and a data folder another database shares
     renameSync(join(w.repo, 'data', 'hatchabot.sqlite'), db);
     writeFileSync(`${db}-wal`, 'made-up wal'); writeFileSync(`${db}-shm`, 'made-up shm');
     writeFileSync(`${db}.lock`, ''); // the server's lock (HB-1436): empty
+    writeFileSync(`${db}.rolled-back`, '2026-11-01T10:00:00Z\n'); // a rollback's note (HB-0840)
+    writeFileSync(`${db}.rolled-back.prev`, '2026-10-30T10:00:00Z\n'); // and the one it stood in for (HB-1455)
+    writeFileSync(`${db}.rolled-back.tmp`, '2026-11-0'); // and one cut off as it was written
+    writeFileSync(`${db}.uses-this-folder`, `{"database":${JSON.stringify(db)}}\n`); // the mark its start leaves on the folder (HB-1151)
+    writeFileSync(`${db}.uses-this-folder.4242.tmp`, '{"database":'); // the mark's, of a start that ended before its rename
     mkdirSync(join(dir, 'embed')); writeFileSync(join(dir, 'embed', 'server-key'), 'made-up-embed-key');
     mkdirSync(join(dir, 'derived-builds')); writeFileSync(join(dir, 'derived-builds', 'notes.log'), 'made-up build log');
     writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_DB=${db}\n`);
@@ -984,9 +1006,18 @@ describe('scripts/uninstall.sh --purge and a data folder another database shares
       const two = join(shared, 'two.sqlite');
       otherDb(two);
       writeFileSync(`${two}-wal`, 'the other install\'s made-up wal'); writeFileSync(`${two}-shm`, 'made-up shm');
+      writeFileSync(`${two}.uses-this-folder`, `{"database":${JSON.stringify(two)}}\n`);
+      writeFileSync(`${two}.uses-this-folder.4343.tmp`, '{"database":');
+      writeFileSync(`${db}.uses-this-folder.notes.tmp`, 'not a temporary file of the mark');
       const r = run(w, ['--purge', '--yes']);
       expect(r.status, name + r.stdout + r.stderr).toBe(0);
-      for (const f of [db, `${db}-wal`, `${db}-shm`, `${db}.lock`]) expect(existsSync(f), f).toBe(false);
+      for (const f of [db, `${db}-wal`, `${db}-shm`, `${db}.lock`, `${db}.uses-this-folder`, `${db}.uses-this-folder.4242.tmp`]) expect(existsSync(f), f).toBe(false);
+      // The other install's mark is its own, and no database (HB-1151), and
+      // so are its temporary files, and a file named otherwise.
+      expect(existsSync(`${two}.uses-this-folder`)).toBe(true);
+      expect(existsSync(`${two}.uses-this-folder.4343.tmp`)).toBe(true);
+      expect(existsSync(`${db}.uses-this-folder.notes.tmp`)).toBe(true);
+      expect(r.stdout).not.toContain('uses-this-folder');
       expect(rowOf(two), name).toEqual({ v: 'the other made-up one' });
       expect(readFileSync(`${two}-wal`, 'utf8')).toBe('the other install\'s made-up wal');
       expect(existsSync(`${two}-shm`)).toBe(true);
@@ -1095,6 +1126,11 @@ describe('scripts/uninstall.sh --purge and a data folder another database shares
     expect(r.stdout).toContain(`no database of this install's was left in ${shared}`);
     // The server's lock, left by the last one that ran, is no database: it goes, unsaid (HB-1436).
     expect(existsSync(`${db}.lock`)).toBe(false);
+    expect(existsSync(`${db}.rolled-back`)).toBe(false); // nor is a rollback's note (HB-0840)
+    expect(existsSync(`${db}.rolled-back.prev`)).toBe(false); // nor the one it stood in for (HB-1455)
+    expect(existsSync(`${db}.rolled-back.tmp`)).toBe(false); // nor one cut off as it was written
+    expect(existsSync(`${db}.uses-this-folder`)).toBe(false); // nor the mark its start left on the folder (HB-1151)
+    expect(existsSync(`${db}.uses-this-folder.4242.tmp`)).toBe(false); // nor its temporary file a start left
   });
 
   it('alone in its hatchabot-data, agentclaw-data or the install\'s data/, the folder still goes whole, with what the app keeps there', () => {

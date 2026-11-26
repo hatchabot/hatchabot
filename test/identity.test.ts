@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPairSync, createSign } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { IdentityVerifier, IdentityError, IdentityUnavailableError, principalFor } from '../src/api/identity.js';
+import { IdentityVerifier, IdentityError, IdentityUnavailableError, principalFor } from '../src/api/signIn/identity.js';
 import { installErrorHandler } from '../src/api/errorHandler.js';
-import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
+import { _resetLoginThrottle, registerAuth } from '../src/api/signIn/auth.js';
 import { publicApp } from './helpers/publicApp.js';
 import { principalOf } from '../src/api/principal.js';
 

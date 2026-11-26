@@ -48,18 +48,18 @@ import type { ApiDeps } from './routes.js';
  *   export function registerXRoutes(app: FastifyInstance, ctx: RouteContext): void
  *
  * A feature file is written against this type and its own imports, and never
- * imports routes.ts for a value. `src/api/inspectRoutes.ts` is the first;
- * `src/api/classRoutes.ts` and `src/api/modelRoutes.ts` are the first with a
- * service behind them (HB-0807); `src/api/aiSourceRoutes.ts` and
- * `src/api/channelRoutes.ts`, `src/api/backupRoutes.ts`, `src/api/appRoutes.ts`,
- * `src/api/browserRoutes.ts`, `src/api/consoleRoutes.ts`, `src/api/machineRoutes.ts`,
- * `src/api/imageRoutes.ts`, `src/api/memberRoutes.ts`, `src/api/usageRoutes.ts`,
- * `src/api/scheduleRoutes.ts`, `src/api/googleRoutes.ts`, `src/api/lifecycleRoutes.ts`,
- * `src/api/opsAgentRoutes.ts`, `src/api/problemReportRoutes.ts`, `src/api/healthRoutes.ts`,
- * `src/api/transferRoutes.ts`, `src/api/adoptRoutes.ts`, `src/api/skillRoutes.ts`,
- * `src/api/voiceRoutes.ts`, `src/api/fileRoutes.ts`, `src/api/machineSettingsRoutes.ts`,
- * `src/api/embedderRoutes.ts`, `src/api/conversationRoutes.ts`, `src/api/tailscaleRoutes.ts`,
- * `src/api/configRoutes.ts` and `src/api/accountsRoutes.ts` the next (HB-0808).
+ * imports routes.ts for a value. `src/api/agents/inspectRoutes.ts` is the first;
+ * `src/api/agents/classRoutes.ts` and `src/api/agents/modelRoutes.ts` are the first with a
+ * service behind them (HB-0807); `src/api/usage/aiSourceRoutes.ts` and
+ * `src/api/chat/channelRoutes.ts`, `src/api/data/backupRoutes.ts`, `src/api/data/appRoutes.ts`,
+ * `src/api/console/browserRoutes.ts`, `src/api/console/consoleRoutes.ts`, `src/api/machine/machineRoutes.ts`,
+ * `src/api/machine/imageRoutes.ts`, `src/api/chat/memberRoutes.ts`, `src/api/usage/usageRoutes.ts`,
+ * `src/api/data/scheduleRoutes.ts`, `src/api/data/googleRoutes.ts`, `src/api/agents/lifecycleRoutes.ts`,
+ * `src/api/ops/opsAgentRoutes.ts`, `src/api/ops/problemReportRoutes.ts`, `src/api/machine/healthRoutes.ts`,
+ * `src/api/data/transferRoutes.ts`, `src/api/data/adoptRoutes.ts`, `src/api/data/skillRoutes.ts`,
+ * `src/api/console/voiceRoutes.ts`, `src/api/data/fileRoutes.ts`, `src/api/machine/machineSettingsRoutes.ts`,
+ * `src/api/machine/embedderRoutes.ts`, `src/api/chat/conversationRoutes.ts`, `src/api/machine/tailscaleRoutes.ts`,
+ * `src/api/machine/configRoutes.ts` and `src/api/signIn/accountsRoutes.ts` the next (HB-0808).
  *
  * What is NOT here, on purpose:
  *  - who is asking: `ownerIdOf`, `principalOf` and `internalPrincipal` are

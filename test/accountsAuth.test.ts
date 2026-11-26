@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import { _resetLoginThrottle, authIsEnabled, authModeFromEnv, bindHostFor, noSignInRefusal, registerAuth } from '../src/api/auth.js';
-import { hashPassword, verifyPassword } from '../src/api/accountsAuth.js';
+import { _resetLoginThrottle, authIsEnabled, authModeFromEnv, bindHostFor, noSignInRefusal, registerAuth } from '../src/api/signIn/auth.js';
+import { hashPassword, verifyPassword } from '../src/api/signIn/accountsAuth.js';
 import { principalOf } from '../src/api/principal.js';
 import { Store } from '../src/store/store.js';
 
@@ -20,7 +20,7 @@ const cookieOf = (res: { cookies: Array<{ name: string; value: string }> }) => {
   return c ? `hatchabot_session=${c.value}` : '';
 };
 
-const bootstrap = (f: any, username = 'chris', password = 'correct-horse') =>
+const bootstrap = (f: any, username = 'robin', password = 'correct-horse') =>
   f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username, password } });
 
 const signIn = (f: any, username: string, password: string) =>
@@ -112,7 +112,7 @@ describe('first run', () => {
 
   it('rejects a short password and a malformed username', async () => {
     const { f } = await app();
-    expect((await bootstrap(f, 'chris', 'short')).statusCode).toBe(400);
+    expect((await bootstrap(f, 'robin', 'short')).statusCode).toBe(400);
     expect((await bootstrap(f, 'no spaces allowed', 'password123')).statusCode).toBe(400);
   });
 });
@@ -121,12 +121,12 @@ describe('sign in', () => {
   it('issues a session for the right password and 401s for the wrong one', async () => {
     const { f } = await app();
     await bootstrap(f);
-    const ok = await signIn(f, 'chris', 'correct-horse');
+    const ok = await signIn(f, 'robin', 'correct-horse');
     expect(ok.statusCode).toBe(200);
     const who = await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: cookieOf(ok) } });
     expect(who.json().ownerId).toMatch(/^acct-/);
 
-    const bad = await signIn(f, 'chris', 'wrong-password');
+    const bad = await signIn(f, 'robin', 'wrong-password');
     expect(bad.statusCode).toBe(401);
     // Same answer for an unknown user: no username oracle.
     const unknown = await signIn(f, 'nobody', 'wrong-password');
@@ -137,7 +137,7 @@ describe('sign in', () => {
   it('matches the username case-insensitively', async () => {
     const { f } = await app();
     await bootstrap(f);
-    expect((await signIn(f, 'CHRIS', 'correct-horse')).statusCode).toBe(200);
+    expect((await signIn(f, 'ROBIN', 'correct-horse')).statusCode).toBe(200);
   });
 
   it('refuses an unauthenticated request and a forged cookie', async () => {
@@ -185,7 +185,7 @@ describe('two accounts are two owners', () => {
     const first = await bootstrap(f);
     const dup = await f.inject({
       method: 'POST', url: '/v1/local-accounts', headers: { cookie: cookieOf(first) },
-      payload: { username: 'CHRIS', password: 'another-password' },
+      payload: { username: 'ROBIN', password: 'another-password' },
     });
     expect(dup.statusCode).toBe(409);
   });
@@ -204,7 +204,7 @@ describe('passwords and removal', () => {
     // The caller gets a fresh cookie; the old one is dead everywhere else.
     expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: old } })).statusCode).toBe(401);
     expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: cookieOf(changed) } })).statusCode).toBe(200);
-    expect((await signIn(f, 'chris', 'brand-new-password')).statusCode).toBe(200);
+    expect((await signIn(f, 'robin', 'brand-new-password')).statusCode).toBe(200);
   });
 
   it('needs the current password to change your own', async () => {
@@ -343,7 +343,7 @@ describe('the whole server boots in accounts mode', () => {
 
     // And the two namespaces stay distinct: the roster is the new one.
     const made = await f.inject({
-      method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'correct-horse' },
+      method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'robin', password: 'correct-horse' },
     });
     expect(made.statusCode).toBe(201);
     const cookie = cookieOf(made);
@@ -366,17 +366,17 @@ describe('recovery when nobody can sign in', () => {
     const store = new Store(new Database(':memory:'));
     const { f } = await app(store);
     const made = await f.inject({
-      method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'forgotten-one' },
+      method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'robin', password: 'forgotten-one' },
     });
     expect(made.statusCode).toBe(201);
 
     // What `hatchabot accounts reset-password` does, without the process boundary.
-    const account = store.localAccountByUsername('chris')!;
+    const account = store.localAccountByUsername('robin')!;
     const { hash, salt } = await hashPassword('recovered-password');
     store.setLocalAccountPassword(account.id, hash, salt);
 
-    expect((await signIn(f, 'chris', 'recovered-password')).statusCode).toBe(200);
-    expect((await signIn(f, 'chris', 'forgotten-one')).statusCode).toBe(401);
+    expect((await signIn(f, 'robin', 'recovered-password')).statusCode).toBe(200);
+    expect((await signIn(f, 'robin', 'forgotten-one')).statusCode).toBe(401);
     // And the reset killed the session minted before it.
     expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: cookieOf(made) } })).statusCode).toBe(401);
   });
@@ -384,8 +384,8 @@ describe('recovery when nobody can sign in', () => {
   it('usernames are looked up case-insensitively by the recovery path too', async () => {
     const store = new Store(new Database(':memory:'));
     const { f } = await app(store);
-    await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'Chris', password: 'first-password' } });
-    expect(store.localAccountByUsername('chris')?.username).toBe('Chris');
+    await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'Robin', password: 'first-password' } });
+    expect(store.localAccountByUsername('robin')?.username).toBe('Robin');
   });
 });
 
@@ -411,13 +411,13 @@ describe('first-run bootstrap is not open to the network', () => {
   });
 
   it('accepts a remote bootstrap carrying the code, and loopback without it', async () => {
-    const { setupCode } = await import('../src/api/accountsAuth.js');
+    const { setupCode } = await import('../src/api/signIn/accountsAuth.js');
     const f = Fastify({ trustProxy: true });
     const store = new Store(new Database(':memory:'));
     await registerAuth(f, { secret: SECRET, mode: 'accounts', store });
     const withCode = await f.inject({
       method: 'POST', url: '/v1/local-accounts/bootstrap', headers: remote,
-      payload: { username: 'chris', password: 'correct-horse', setupCode: setupCode() },
+      payload: { username: 'robin', password: 'correct-horse', setupCode: setupCode() },
     });
     expect(withCode.statusCode).toBe(201);
 
@@ -490,9 +490,9 @@ describe('removing an account revokes it everywhere', () => {
 describe('usernames are unique regardless of case', () => {
   it('the database refuses a case-variant duplicate', async () => {
     const store = new Store(new Database(':memory:'));
-    store.insertLocalAccount({ id: 'a1', username: 'Chris', pwHash: 'h', pwSalt: 's', hostOwner: true, disabled: false, createdAt: 'now' });
+    store.insertLocalAccount({ id: 'a1', username: 'Robin', pwHash: 'h', pwSalt: 's', hostOwner: true, disabled: false, createdAt: 'now' });
     expect(() =>
-      store.insertLocalAccount({ id: 'a2', username: 'chris', pwHash: 'h', pwSalt: 's', hostOwner: false, disabled: false, createdAt: 'now' }),
+      store.insertLocalAccount({ id: 'a2', username: 'robin', pwHash: 'h', pwSalt: 's', hostOwner: false, disabled: false, createdAt: 'now' }),
     ).toThrow();
   });
 });
@@ -676,13 +676,13 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
     const made = await bootstrap(f);
     const code: string = made.json().recoveryCode;
     expect(code).toMatch(/^[A-Z2-9]{5}(-[A-Z2-9]{5}){3}$/);
-    expect(store.localAccountByUsername('chris')!.recoveryHash).toBeTruthy();
+    expect(store.localAccountByUsername('robin')!.recoveryHash).toBeTruthy();
     // Only the hash is stored.
-    expect(JSON.stringify(store.localAccountByUsername('chris'))).not.toContain(code);
+    expect(JSON.stringify(store.localAccountByUsername('robin'))).not.toContain(code);
     const oldCookie = cookieOf(made);
 
     // Typed sloppily: lower case, spaces instead of dashes.
-    const ok = await recover(f, { username: 'CHRIS', code: code.toLowerCase().replace(/-/g, ' '), password: 'a-brand-new-one' });
+    const ok = await recover(f, { username: 'ROBIN', code: code.toLowerCase().replace(/-/g, ' '), password: 'a-brand-new-one' });
     expect(ok.statusCode).toBe(200);
     expect(ok.json().ownerId).toBe(made.json().id); // whose the new code is (HB-0500)
     const fresh: string = ok.json().recoveryCode;
@@ -691,13 +691,13 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
     // Signed in by the answer; the old session and the old password are dead.
     expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: cookieOf(ok) } })).statusCode).toBe(200);
     expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: oldCookie } })).statusCode).toBe(401);
-    expect((await signIn(f, 'chris', 'correct-horse')).statusCode).toBe(401);
-    expect((await signIn(f, 'chris', 'a-brand-new-one')).statusCode).toBe(200);
+    expect((await signIn(f, 'robin', 'correct-horse')).statusCode).toBe(401);
+    expect((await signIn(f, 'robin', 'a-brand-new-one')).statusCode).toBe(200);
 
     // One use: the old code no longer works; the new one does.
     _resetLoginThrottle();
-    expect((await recover(f, { username: 'chris', code, password: 'another-password' })).statusCode).toBe(401);
-    expect((await recover(f, { username: 'chris', code: fresh, password: 'another-password' })).statusCode).toBe(200);
+    expect((await recover(f, { username: 'robin', code, password: 'another-password' })).statusCode).toBe(401);
+    expect((await recover(f, { username: 'robin', code: fresh, password: 'another-password' })).statusCode).toBe(200);
   });
 
   it('one code, two resets at once: exactly one succeeds; the other is answered as a used code (#8)', async () => {
@@ -732,7 +732,7 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
     const answers = [];
     for (const body of [
       { username: 'nobody', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'whatever-fake' },
-      { username: 'chris', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'whatever-fake' },
+      { username: 'robin', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'whatever-fake' },
       { username: 'partner', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'whatever-fake' },
     ]) {
       _resetLoginThrottle();
@@ -746,13 +746,13 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
   it('is throttled, and a weak new password is refused before the code is checked', async () => {
     const { f } = await app();
     const code: string = (await bootstrap(f)).json().recoveryCode;
-    expect((await recover(f, { username: 'chris', code, password: 'short' })).statusCode).toBe(400);
+    expect((await recover(f, { username: 'robin', code, password: 'short' })).statusCode).toBe(400);
     const codes: number[] = [];
     // Each wrong guess is padded to ~0.9 s, so stop at the first refusal.
-    for (let i = 0; i < 30 && !codes.includes(429); i++) codes.push((await recover(f, { username: 'chris', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'long-enough-fake' })).statusCode);
+    for (let i = 0; i < 30 && !codes.includes(429); i++) codes.push((await recover(f, { username: 'robin', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'long-enough-fake' })).statusCode);
     expect(codes).toContain(429);
     // Throttled even with the right code — the limit is on the caller, not the guess.
-    expect((await recover(f, { username: 'chris', code, password: 'long-enough-fake' })).statusCode).toBe(429);
+    expect((await recover(f, { username: 'robin', code, password: 'long-enough-fake' })).statusCode).toBe(429);
   }, 60_000);
 
   it('a new code needs the current password, replaces the old one, and shows in /me', async () => {
@@ -770,14 +770,14 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
     // Whose it is (HB-0500), as /v1/account names the person.
     expect(again.json().ownerId).toBe(made.json().id);
     _resetLoginThrottle();
-    expect((await recover(f, { username: 'chris', code: first, password: 'long-enough-fake' })).statusCode).toBe(401);
-    expect((await recover(f, { username: 'chris', code: second, password: 'long-enough-fake' })).statusCode).toBe(200);
+    expect((await recover(f, { username: 'robin', code: first, password: 'long-enough-fake' })).statusCode).toBe(401);
+    expect((await recover(f, { username: 'robin', code: second, password: 'long-enough-fake' })).statusCode).toBe(200);
   });
 
   it('is reachable signed out', async () => {
     const { f } = await app();
     await bootstrap(f);
-    const r = await recover(f, { username: 'chris', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'long-enough-fake' });
+    const r = await recover(f, { username: 'robin', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'long-enough-fake' });
     expect(r.statusCode).toBe(401);
     expect(r.json().error).toMatch(/recovery code do not match/); // the route answered, not the sign-in hook
   });
@@ -798,8 +798,8 @@ describe('the 30th audit: containers on loopback', () => {
     const res = await bootstrap(f);
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toMatch(/setup code/);
-    const { setupCode } = await import('../src/api/accountsAuth.js');
-    const ok = await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'correct-horse', setupCode: setupCode() } });
+    const { setupCode } = await import('../src/api/signIn/accountsAuth.js');
+    const ok = await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'robin', password: 'correct-horse', setupCode: setupCode() } });
     expect(ok.statusCode).toBe(201);
   });
 });

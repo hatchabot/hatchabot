@@ -147,7 +147,7 @@ export function createProposals(deps: ProposalsDeps): Proposals {
       // The files turn first, then the busy flag, as a file save takes
       // them: a snapshot by hand reading the files meanwhile kept the old
       // AGENTS.md with the new layer, or the reverse (HB-0566).
-      await withCoreFilesTurn(master.id, () => whileBusy(master.id, async () => {
+      await withCoreFilesTurn(master.id, () => whileBusy(master.id, 'proposal-merge', async () => {
         const fresh = freshRunning(master.id, () => 'Start the master to merge into its playbook.');
         // Keep the master's own template layer coherent: append the SAME block
         // to the raw placeholder-bearing layer. (Reading the live file back

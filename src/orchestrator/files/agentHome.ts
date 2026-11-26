@@ -21,7 +21,7 @@ export type StreamFrom = NonNullable<RuntimeProvider['streamFromVolume']>;
  * read-only one-shots on the volume: they work stopped or archived. An upload
  * takes the core-files turn and the busy flag. Nothing here knows HTTP: a
  * refusal is a result with its status and words; the download's headers and
- * stream are the route's (src/api/fileRoutes.ts).
+ * stream are the route's (src/api/data/fileRoutes.ts).
  */
 export interface AgentHome {
   /** A one-shot's failure in the words the Files tab shows. */
@@ -99,7 +99,7 @@ export function createAgentHome(deps: AgentHomeDeps): AgentHome {
     try {
       // All uploads take the turn: an ordinary-looking folder can be a link
       // into the workspace. The one-shot reports its resolved destination.
-      res = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+      res = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, 'file-upload', async () => {
         const fresh = opts.owned(agent.id);
         if (!fresh?.runtimeRef || fresh.state === 'DELETED') throw new TurnRefused(404, 'Not found');
         if (fresh.state === 'DELETING' || operationRefusal(store, fresh.id) || isArchiving(fresh.id)) throw new TurnRefused(409, 'Another change is under way — wait for it to finish.');

@@ -49,19 +49,21 @@ export interface AppAddressDeps {
   publicUrl: () => string | undefined;
   /** The port Hatchabot listens on (`PORT`, read at each call). */
   port: () => number;
+  /** The proxy's listener, where `tailscale serve` lands (src/api/proxyListener.ts); unset, the app's own port. */
+  proxyPort?: () => number;
   /** Public access, as the gate says it is now: on, serving and its address (undefined with no gate). */
   publicStatus: () => { on: boolean; serving: boolean; url?: string } | undefined;
   /** Look again at the tailnet 4 s after the start and every 10 minutes (off under tests). */
   refreshOn: boolean;
   /** The tests' stand-in for the Tailscale probe. */
-  tailnetInfo?: (port: number) => Promise<TailnetInfo>;
+  tailnetInfo?: (port: number, mainPort?: number) => Promise<TailnetInfo>;
 }
 
 /**
  * The address `use` wrote for links in this process, for the two readers
  * that judge a request with no AppAddress to hand (HB-1314): the origin
  * check (`foreignRequest`, src/api/requestOrigin.ts) and the session
- * cookie's https fallback (`requestIsHttps`, src/api/sessionCookie.ts),
+ * cookie's https fallback (`requestIsHttps`, src/api/signIn/sessionCookie.ts),
  * which a WebSocket upgrade calls too. Each counts it beside
  * HATCHABOT_PUBLIC_URL as the process started with, which it replaces at
  * the next restart (the .env has it). One a process: the service builds one
@@ -83,7 +85,8 @@ export function createAppAddress(deps: AppAddressDeps): AppAddress {
   const setting = (): string | undefined => writtenUrl ?? deps.publicUrl();
   const refreshDetectedUrl = async (): Promise<void> => {
     if (setting() && !loopbackUrl(setting())) return; // a real setting wins
-    const info = await probe(deps.port()).catch(() => undefined);
+    // Serve at the proxy's listener, or still at the app's own port (HB-1239): the address is the same.
+    const info = await probe(deps.proxyPort?.() ?? deps.port(), deps.port()).catch(() => undefined);
     detectedUrl = info?.url;
   };
   const appUrlFor = (): string | undefined => {

@@ -4,8 +4,8 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { hashPassword } from '../src/api/accountsAuth.js';
-import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
+import { hashPassword } from '../src/api/signIn/accountsAuth.js';
+import { _resetLoginThrottle, registerAuth } from '../src/api/signIn/auth.js';
 
 /**
  * "Forgot password?" over Telegram. A reset link goes only to a Telegram id
@@ -17,17 +17,17 @@ async function world(opts: { withAuth?: boolean } = {}) {
   const store = new Store(new Database(':memory:'));
   const sent: Array<{ chat: string; text: string }> = [];
   const { hash, salt } = await hashPassword('the-old-password');
-  store.insertLocalAccount({ id: 'acct-chris', username: 'chris', pwHash: hash, pwSalt: salt, hostOwner: true, disabled: false, createdAt: 'now' } as never);
+  store.insertLocalAccount({ id: 'acct-robin', username: 'robin', pwHash: hash, pwSalt: salt, hostOwner: true, disabled: false, createdAt: 'now' } as never);
   store.insertLocalAccount({ id: 'acct-nobot', username: 'sam', pwHash: hash, pwSalt: salt, hostOwner: false, disabled: false, createdAt: 'now' } as never);
-  store.insertHost({ id: 'h1', ownerId: 'acct-chris', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
-  store.insertAIProfile({ id: 'p1', ownerId: 'acct-chris', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
+  store.insertHost({ id: 'h1', ownerId: 'acct-robin', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+  store.insertAIProfile({ id: 'p1', ownerId: 'acct-robin', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
   store.insertAgent({
-    id: 'a1', ownerId: 'acct-chris', name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1',
+    id: 'a1', ownerId: 'acct-robin', name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1',
     persona: '', sharedMemory: false, ops: true, createdAt: 'now', updatedAt: 'now',
   } as never);
   store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'managerbot', secretRef: 'chan/a1', deepLink: 'x', createdAt: 'now' } as never);
-  store.insertMembership({ id: 'm0', agentId: 'a1', userId: 'acct-chris', role: 'owner', status: 'active' } as never);
-  store.bindMembershipChannelUser('a1', 'acct-chris', '424242');
+  store.insertMembership({ id: 'm0', agentId: 'a1', userId: 'acct-robin', role: 'owner', status: 'active' } as never);
+  store.bindMembershipChannelUser('a1', 'acct-robin', '424242');
   const f = Fastify();
   // The real server's order: the sign-in layer (claim, login) then the routes.
   if (opts.withAuth) await registerAuth(f, { secret: Buffer.alloc(32, 7), mode: 'accounts', store });
@@ -48,7 +48,7 @@ async function world(opts: { withAuth?: boolean } = {}) {
 describe('forgot password, over Telegram', () => {
   it('sends a one-time link to the proven Telegram id, through a bot that knows them', async () => {
     const w = await world();
-    const r = await w.recover('chris');
+    const r = await w.recover('robin');
     expect(r.json()).toEqual({ ok: true });
     expect(w.sent).toHaveLength(1);
     expect(w.sent[0]!.chat).toBe('424242');
@@ -56,13 +56,13 @@ describe('forgot password, over Telegram', () => {
     expect(w.sent[0]!.text).toMatch(/15 minutes/);
     // A stranger's Host header never becomes the link (use-case audit, 2026-09-27).
     const w2 = await world();
-    const evil = await w2.f.inject({ method: 'POST', url: '/v1/local-accounts/recover', headers: { host: 'evil.example' }, payload: { username: 'chris' } });
+    const evil = await w2.f.inject({ method: 'POST', url: '/v1/local-accounts/recover', headers: { host: 'evil.example' }, payload: { username: 'robin' } });
     expect(evil.statusCode).toBe(200);
     expect(w2.sent).toHaveLength(1);
     expect(w2.sent[0]!.text).not.toContain('evil.example');
     expect(w2.sent[0]!.text).toMatch(/^\/\?claim=[A-Za-z0-9_-]{20,}$/m);
     // The old password is untouched until the link is used.
-    expect(w.store.localAccountByUsername('chris')!.pwHash).not.toBe('');
+    expect(w.store.localAccountByUsername('robin')!.pwHash).not.toBe('');
   }, 10_000);
 
   it('answers identically for a stranger, an account with no Telegram, and a real one — and sends nothing', async () => {
@@ -77,9 +77,9 @@ describe('forgot password, over Telegram', () => {
 
   it('a username can ask at most once every few minutes', async () => {
     const w = await world();
-    await w.recover('chris');
-    await w.recover('chris');
-    await w.recover('CHRIS');
+    await w.recover('robin');
+    await w.recover('robin');
+    await w.recover('ROBIN');
     expect(w.sent).toHaveLength(1);
   }, 15_000);
 });
@@ -89,10 +89,10 @@ describe('forgot password, over Telegram — following the link (2026-09-23)', (
   it('signed out: ask, open the link, choose a password; the old one dies and the link is spent', async () => {
     _resetLoginThrottle();
     const w = await world({ withAuth: true });
-    const signIn = (password: string) => w.f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'chris', password } });
+    const signIn = (password: string) => w.f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'robin', password } });
 
     // Asked with no session at all.
-    expect((await w.recover('chris')).statusCode).toBe(200);
+    expect((await w.recover('robin')).statusCode).toBe(200);
     const code = /\?claim=([A-Za-z0-9_-]+)/.exec(w.sent[0]!.text)![1]!;
 
     // The old password still works until the link is used.
@@ -101,7 +101,7 @@ describe('forgot password, over Telegram — following the link (2026-09-23)', (
     // Opening the link reads as a reset for this person, not an invitation.
     const peek = await w.f.inject({ method: 'GET', url: `/v1/local-accounts/claim?code=${code}` });
     expect(peek.statusCode).toBe(200);
-    expect(peek.json()).toMatchObject({ username: 'chris', reset: true });
+    expect(peek.json()).toMatchObject({ username: 'robin', reset: true });
 
     const claim = await w.f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code, password: 'the-new-password' } });
     expect(claim.statusCode).toBe(200);

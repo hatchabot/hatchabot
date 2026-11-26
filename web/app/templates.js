@@ -1,4 +1,4 @@
-// web/app/templates.js: the importer's setup-value form, agents sent to you, the template gallery, the page's sign-in state across accounts (pageSignedIn, pageSessionEnded, pageHold and the rest), the archived-agent inspector, master and child flows.
+// web/app/templates.js: the importer's setup-value form, importing and sending an agent, agents sent to you, sharing a template and downloading a copy, the template gallery and cloning, archiving an agent, the archived-agent inspector and restoring, master and child flows.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -333,28 +333,6 @@ async function refreshInboxBadge() {
   try { const { shares } = await api('/v1/inbox'); if (current() && read === inboxBadgeRead) updateInboxBadge(shares.length); } catch {}
 }
 
-/**
- * A question with more than OK and Cancel: resolves the key of the button
- * pressed, or null on Cancel, Esc or a click outside. confirm() made Cancel
- * mean "the other choice", so Esc on Share still exported and on Recover
- * context still started the job (review, 2026-10-09).
- */
-let choiceResolve = null;
-function askChoice(title, text, choices) {
-  choicePick(null); // a question still open is answered "no"
-  $('choiceTitle').textContent = title; $('choiceText').textContent = text;
-  $('choiceBtns').innerHTML = `<button ${onAction('click', 'choicePick', [null])}>Cancel</button>` +
-    choices.map(([k, label], i) => `<button${i === choices.length - 1 ? ' class="primary"' : ''} ${onAction('click', 'choicePick', [`${k ?? ''}`])}>${esc(label)}</button>`).join('');
-  return new Promise((res) => { choiceResolve = res; choiceDlg.showModal(); });
-}
-function choicePick(k) {
-  const r = choiceResolve; choiceResolve = null;
-  if (choiceDlg.open) choiceDlg.close();
-  r?.(k);
-}
-// Esc or a click outside: Cancel. A late close event of an earlier question must not answer the next one.
-choiceDlg.addEventListener('close', () => { if (!choiceDlg.open) choicePick(null); });
-
 async function shareTemplate(id, name) {
   // Only MEMORY.md travels: its daily notes (memory/) never do (2026-09-30).
   const pick = await askChoice(`Share a copy${name ? ` of ${name}` : ''}`,
@@ -425,6 +403,25 @@ async function saveFromServer(url, fallbackName, check) {
   } catch (e) { toast(e.message, 8000); }
 }
 
+async function downloadAgent(id, name) {
+  if (!confirm(`Download "${name}"?${channelsLostOnExport(id)}\n\nIt's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't share it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
+  // Fetched, not navigated to: a refusal (busy, not exportable) is a message,
+  // not a page of raw JSON in place of the app.
+  toast('Preparing the copy…', 20000);
+  try {
+    const res = await sfFetch(`/v1/agents/${id}/backup`);
+    if (!res.ok) { const j = await res.json().catch(() => ({})); toast(j.error || `The download failed (${res.status}).`, 10000); return; }
+    const blob = await res.blob();
+    const file = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || 'agent.hatchabot';
+    const url = URL.createObjectURL(blob);
+    const link = Object.assign(document.createElement('a'), { href: url, download: file });
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    toast(`Saved ${file}. "${name}" is stopped here now — keep it stopped once it runs elsewhere.`, 8000);
+  } catch (e) { toast(e.message, 8000); }
+  finally { setTimeout(() => refresh(false), 500); }
+}
+
 // Clone = a faithful local copy (MEMORY.md, its daily notes and USER.md — you own both), with its own
 // name; only you as owner. Without Telegram, as every new agent starts (2026-11-07): a bot is one
 // click on its Telegram tab.
@@ -472,320 +469,6 @@ async function cloneAgent(id, name) {
     toast(`Cloned as "${res.name}" — it runs here in Hatchabot, without a Telegram bot; give it one from its Telegram tab when you want it.${left}`, 30000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
-}
-
-
-async function approve(id, code, asSelf, kind = 'telegram', who = '') {
-  // "That's me" is the one tap that grants an identity rather than a seat: it
-  // binds that chat account to YOUR account, so every agent you make from then
-  // on admits it at birth. A mis-tap on a stranger's card would hand them the
-  // run of the fleet, and the name on that card is theirs to choose — so this
-  // one asks, and says the name back.
-  if (asSelf && !confirm(`Link ${who || 'this account'} to you?\n\nOnly do this if that is YOUR OWN ${V2_CHAN_LABEL[kind] || kind} account. It becomes your identity everywhere: every agent you create will admit it without asking.\n\nIf it is somebody else, press Cancel and use "Let them in" instead.`)) return;
-  try {
-    const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code, kind, ...(asSelf ? { asSelf: true } : {}) } });
-    pairingsDrop(id, code, kind);
-    if (asSelf && kind !== 'telegram') {
-      toast(`Linked — that ${V2_CHAN_LABEL[kind] || kind} account is you on this agent.`, 6000);
-    } else if (asSelf) {
-      toast('Linked — this Telegram is you now. Every agent you make admits you automatically.', 8000);
-      loadMyAccount(); // the card + Settings reflect the link immediately
-    } else {
-      toast(res.member?.alreadyMember
-        ? `${res.member.displayName} is already a member — access restored`
-        : `${res.member?.displayName ?? 'Guest'} is in — now a member`);
-    }
-    pairTick = 0; // refetch members on next poll
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-}
-
-// The caller's own account (email + linked Telegram). Drives the "That's me"
-// button on pairing cards and the Telegram line under Settings → You.
-let myAccount = {};
-/**
- * What only the machine's owner can use, hidden from anyone else: every save
- * there would be refused (HB-0443). Only on a known "no": a failed read of the
- * account leaves them showing, and the server guards them either way.
- */
-function paintMachineOwnerOnly() {
-  for (const id of ['extraKeysHead', 'mediaKeyDrawer', 'searchKeyDrawer', 'addRunnerBlock', 'botInvDrawer']) $(id).hidden = myAccount.hostOwner === false;
-}
-/**
- * Who this page is for. Sign out reloads, but a session that ends by a 401 and a
- * sign-in do not, so the page itself outlives the person (HB-0446). When the session
- * ends the chat leaves the page at once; what it held waits, out of sight, until the
- * next account is read. The same account gets it back. Another finds nothing of the
- * last one's, here or in what the page held for them. Read again on each meta refresh,
- * which also catches another tab having signed in as someone else.
- */
-let pagePerson = null, pagePersonAway = false, pagePersonRead = 0, pageCleared = false, pageSignedOut = false;
-function pageSessionEnded() {
-  sfDrop(); // a request waiting on a prompt for this session is not sent under the next one
-  sharingForget();
-  bpClose(); // pictures and unsent sign-in text must not remain under the sign-in screen
-  v2VoiceForget();
-  v2SkillsForget();
-  if ($('consoleDlg').open) closeConsole(); // voice input and console sessions end with this sign-in
-  pageSignedOut = true;
-  pagePersonAway = true; pageCleared = false;
-  window.__sfEnrolShown = false; // whoever comes next is taken to add a factor if they need one
-  pagePersonRead++; // a read begun in that session does not say who comes next
-  pageSecretsPutAway();
-  webChatPutAway();
-}
-function pagePersonIs(ownerId) {
-  if (!ownerId) return;
-  const another = pagePerson ? pagePerson !== ownerId : pagePersonAway;
-  const changed = !!pagePerson && pagePerson !== ownerId; // this page showed someone else (not: it never knew who)
-  pagePerson = ownerId; pagePersonAway = false; pageSignedOut = false; // a read that works: signed in (here, or in another tab)
-  if (sfPending?.for && sfPending.for !== ownerId) sfDrop(); // raised for someone else
-  const cleared = pageCleared; pageCleared = false;
-  if (another) {
-    webChatForget();
-    if (!cleared) pageClearLast(ownerId);
-  }
-  pageSecretsBack(ownerId);
-  if (changed) { pageReloadWanted = true; pageReloadWhenQuiet(); }
-}
-/**
- * Another account than the one this page showed: the page loads again, so nothing of the last person's is left in
- * it, in a field or in what the page held for them (HB-0491). pageClearLast has already taken off what it knows of,
- * which covers the wait. Not while a second-factor step is under way, which a reload would lose: a sign-in still
- * finishing (and the recovery code it shows), the second-factor prompt (a passkey's included) and the request it was
- * asked for, an authenticator app being added, a passkey being made, a request for new codes, backup codes or a
- * recovery code on the screen or waiting for their person. Each of those asks again when it ends.
- */
-let pageReloadWanted = false, pageReloadTimer = 0, pageSignIns = 0, pageHolds = 0;
-/** location.reload(), on its own: the click-through check cannot follow a reload, so it puts a counter here. */
-function pageReload() { location.reload(); }
-/** A sign-in form at work, from its first request to the end of pageSignedIn (with what it shows); the sign-in screen itself is loginDlg.open. */
-function pageSignInEnded() { pageSignIns--; pageReloadWhenQuiet(); }
-async function pageSigningIn(fn) { pageSignIns++; try { return await fn(); } finally { pageSignInEnded(); } }
-/** A request whose answer must be seen (new codes, a setup, a passkey being made, what a prompt was for): held until it settles. */
-async function pageHold(fn) { pageHolds++; try { return await fn(); } finally { pageHolds--; pageReloadWhenQuiet(); } }
-function pageSecondFactorBusy() {
-  return pageSignIns > 0 || pageHolds > 0 || loginDlg.open || sfDlg.open || (aiDlg.open && !$('sfTotpBox').hidden)
-    || backupDlg.open || recoveryDlg.open || pageSecretsAway.length > 0;
-}
-function pageReloadWhenQuiet() {
-  if (!pageReloadWanted || pageReloadTimer) return;
-  // A task later: what the same task goes on to open (backup codes, once an app is confirmed) is under way by then.
-  pageReloadTimer = setTimeout(() => {
-    pageReloadTimer = 0;
-    if (!pageReloadWanted || pageSecondFactorBusy()) return;
-    pageReloadWanted = false;
-    pageReload();
-  }, 0);
-}
-// Settings closed (an app's setup left open there is let go), or a dialog shut by Escape.
-document.addEventListener('DOMContentLoaded', () => {
-  for (const id of ['sfDlg', 'aiDlg']) $(id)?.addEventListener('close', () => pageReloadWhenQuiet());
-});
-/**
- * A one-time secret on the screen, backup codes or a recovery code, is its person's to read until they say they have
- * saved it (HB-0500). When the session ends it leaves the page, so it is not left under the sign-in for whoever is at the
- * keyboard, and waits with whose it is. A read that names that person shows it again; a read that names anyone else, and
- * it is gone, and what waited on it goes on. Whose: what the server said, and only that. One shown without an owner is
- * nobody's: it is not given back to anyone (a read never claims it for whoever happens to be signed in by then).
- */
-const pageSecretOwner = new Map();
-let pageSecretsAway = [];
-/**
- * A secret that answered after this page was read to be someone else's (a request in flight while another tab signed in
- * as another account): not shown to them. The page is about to load again for them anyway (HB-0491).
- */
-function pageSecretNotHere(ownerId) {
-  if (!ownerId || !pagePerson || pagePersonAway || ownerId === pagePerson) return false;
-  toast('New codes were made for the account signed in before, and are not shown to this one. Sign in as it and make new ones in Settings → You.', 10000);
-  return true;
-}
-/** Answered after the session ended, before a read names who is here now: not shown, but waiting for its person, as one open then does. */
-function pageSecretLater(whose, show) {
-  const waiting = new Promise((res) => { pageSecretsAway.push({ whose: whose || '', back: () => show().then(res), drop: () => res() }); });
-  // Signed in, but not read yet (a first factor added at the public address): read now, so they come back at once.
-  if (!loginDlg.open && !pageSignIns) loadMyAccount().catch(() => {});
-  return waiting;
-}
-function pageSecretShown(dlg, ownerId) {
-  pageSecretOwner.set(dlg, ownerId || '');
-}
-function pageSecretsPutAway() {
-  if (backupDlg.open) {
-    const codes = $('backupCodes').textContent.split('\n'), whose = pageSecretOwner.get(backupDlg), done = backupResolve;
-    backupResolve = null;
-    $('backupCodes').textContent = ''; backupDlg.close();
-    pageSecretsAway.push({ whose, back: () => showBackupCodes(codes, whose).then(done), drop: () => done?.() });
-  }
-  if (recoveryDlg.open) {
-    const code = $('recoveryCode').textContent, lede = $('recoveryLede').innerHTML, whose = pageSecretOwner.get(recoveryDlg), done = recoveryResolve;
-    recoveryResolve = null;
-    $('recoveryCode').textContent = ''; recoveryDlg.close();
-    pageSecretsAway.push({ whose, back: () => showRecoveryCode(code, lede, whose).then(done), drop: () => done?.() });
-  }
-}
-function pageSecretsBack(ownerId) {
-  const away = pageSecretsAway;
-  pageSecretsAway = [];
-  for (const s of away) (s.whose && s.whose === ownerId ? s.back : s.drop)();
-}
-/** `next`: who has just been read, whose own one-time secret on the screen stays. */
-function pageClearLast(next = '') {
-  sharingForget();
-  v2VoiceForget();
-  v2SkillsForget();
-  v2Close();
-  bpClose();
-  if ($('consoleDlg').open) closeConsole();
-  consoleTabs = [];
-  pairingsDrop(); // who knocked on the last person's agents, with their names and the buttons to let them in
-  const theirs = (dlg) => !!next && dlg.open && pageSecretOwner.get(dlg) === next;
-  if (backupDlg.open && !theirs(backupDlg)) closeBackupCodes(); // off the page too, and what waits on them goes on
-  sfCloseTotp(); $('sfCurPw').value = ''; // Access is drawn again for whoever comes next: not a setup or a password of the last person's
-  const keep = [backupDlg, recoveryDlg].filter(theirs).map((d) => `:not(#${d.id})`).join('');
-  document.querySelectorAll(`dialog[open]:not(#loginDlg):not(#sfDlg)${keep}`).forEach((d) => d.close());
-  recoveryCodeClosed(); // its code off the page, and what waits on it goes on, now (unless it is theirs, and open)
-  aiRowsDrawn = {}; moveSourceState = null; applyModelState = null; migrateState = null;
-  reportCur = null; reportGen++; reportLoading = null; // a draft still loading does not paint
-  $('reportDrafts').replaceChildren();
-  for (const id of ['reportTitle', 'reportWhat', 'reportRTitle', 'reportBody']) $(id).value = '';
-  // What the last person typed and did not save: every password box (keys, tokens, client secrets, current passwords),
-  // every free-text box and form, back to what the page drew. Not the sign-in or the prompt, which are this person's (HB-0498, HB-0491).
-  for (const el of document.querySelectorAll('input, textarea')) {
-    if (el.closest('#loginDlg, #sfDlg') || /^(checkbox|radio|hidden|button|submit|reset|file|range|color)$/i.test(el.type)) continue;
-    el.value = el.type === 'password' ? '' : el.defaultValue;
-  }
-}
-/**
- * A sign-in landed. Who it is comes first, so nothing of another account's is drawn for them, and what the path shows next is not closed.
- * `show`: what this sign-in brought to be read once (a recovery code), shown here so a reload for another account waits for it (HB-0491).
- */
-async function pageSignedIn(show) {
-  try {
-    await loadMyAccount();
-    // Not told who: no second factor yet (Access is open for them to add one), or the read failed. What was open for the last person goes now,
-    // because the read that later succeeds must not close what this one has opened by then: their backup codes, a recovery code. Drafts wait for that read.
-    if (pagePersonAway && !pageCleared) {
-      pageClearLast();
-      pageCleared = true;
-      if (window.__sfEnrolShown && !aiDlg.open) void openAiDlg('access'); // drawn for them, not what the last person left
-    }
-    await refresh(true);
-  } finally {
-    show?.(); // before the sign-in ends (pageSignInEnded): a reload waits for it
-  }
-}
-async function loadMyAccount() {
-  const read = ++pagePersonRead;
-  try {
-    const account = await api('/v1/account');
-    if (read !== pagePersonRead) return;
-    myAccount = account;
-    pagePersonIs(myAccount.ownerId);
-  } catch { if (read !== pagePersonRead) return; myAccount = {}; }
-  paintMachineOwnerOnly();
-  loadRebuildPolicy(); // the cards' wording depends on it
-  const el = $('tgLinkStatus');
-  if (el) el.innerHTML = myAccount.telegramUserId
-    ? `✓ Linked (Telegram id <code class="pii">${esc(myAccount.telegramUserId)}</code>) — agents you create admit you automatically.
-       <button class="hbtn" ${onAction('click', 'unlinkTelegram')}>Unlink</button>`
-    : `Not linked — message one of your agents on Telegram and choose <b>That's me — link</b> on the request card.
-       Linked, every agent you create admits your Telegram without pairing again.`;
-  const dc = $('dcLinkStatus');
-  if (dc) dc.innerHTML = myAccount.discordUserId
-    ? `✓ Linked (Discord id <code class="pii">${esc(myAccount.discordUserId)}</code>) — every Discord bot you attach admits you from its first build.
-       <button class="hbtn" ${onAction('click', 'unlinkDiscord')}>Unlink</button>`
-    : `Not linked — send one of your agents a direct message on Discord and choose <b>That's me</b> on the request card.
-       Linked, every Discord bot you attach admits you without pairing again.`;
-}
-
-async function unlinkDiscord() {
-  if (!confirm('Unlink your Discord from this login?\n\nYour agents forget your Discord identity: each asks again ("That\'s me") the next time you message it, and stops admitting it at its next rebuild.')) return;
-  try {
-    await api('/v1/account/discord', { method: 'DELETE' });
-    toast('Unlinked.');
-    loadMyAccount();
-  } catch (e) { toast(e.message); }
-}
-
-async function unlinkTelegram() {
-  if (!confirm('Unlink your Telegram from this login?\n\nExisting agents keep working — only agents created afterwards stop admitting this Telegram automatically.')) return;
-  try {
-    await api('/v1/account/telegram', { method: 'DELETE' });
-    toast('Unlinked.');
-    loadMyAccount();
-  } catch (e) { toast(e.message); }
-}
-
-async function denyPair(id, code, who, kind = 'telegram') {
-  // "Not now", not a ban — say so, so nobody assumes this blocks them for good.
-  if (!confirm(`Turn away ${who}'s request to talk to this agent?\n\nThey are not blocked — they can ask again by messaging the bot.`)) return;
-  try {
-    const r = await api(`/v1/agents/${id}/pairing/deny`, { method: 'POST', body: { code, kind } });
-    pairingsDrop(id, code, kind); // turned away, or no longer there: either way not to be answered again
-    toast(r.denied ? `${who}'s request was turned away` : 'That request is no longer pending');
-    pairTick = 0; // refetch pairing on the next poll so the card/badge clears
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-}
-
-/** Agents this account can rebuild right now (owned, live-or-stopped, not moved away). */
-// Word the update prompt from the two OpenClaw versions, so a same-version
-// image rebuild (e.g. new base tooling) isn't mislabelled as a version upgrade.
-function updateBlurb(a) {
-  const from = a.openclawVersion, to = a.latestOpenclawVersion;
-  if (from && to && from !== to)
-    return `OpenClaw ${esc(from)} → ${esc(to)} is ready. Rebuild applies it — memory is kept.`;
-  return `A newer runtime image is ready${to ? ` (same OpenClaw ${esc(to)})` : ''}. Rebuild applies it — memory is kept.`;
-}
-
-/** Rebuild reasons other than the newer image (which has its own ⬆ Update row). */
-function rebuildOtherReasons(a) {
-  return (a.rebuild?.reasons ?? []).filter(r => !/newer runtime image|^the fleet default (moved to|image was rebuilt)/.test(r));
-}
-
-// The machine's rebuild policy (Runtime tab; machine owner sets it).
-let rebuildPolicyNow = 'required-only';
-const REBUILD_POLICY_TEXT = {
-  'required-only': 'Required rebuilds happen on their own, once an agent is idle. Others wait for you.',
-  auto: 'Required rebuilds happen once an agent is idle; the rest overnight (quiet hours).',
-  manual: 'Nothing happens on its own — the cards say what needs a rebuild.',
-};
-/** Automatic rebuilds, under Settings → Hosts since v2.157.0: the machine owner's. */
-function loadRebuildSection() {
-  $('rbSection').hidden = $('rbHead').hidden = !myAccount.hostOwner;
-  if (myAccount.hostOwner) void loadRebuildPolicy();
-}
-async function loadRebuildPolicy() {
-  void loadRebuildAtOnce();
-  try {
-    const r = await api('/v1/rebuild-policy');
-    rebuildPolicyNow = r.policy;
-    const sel = $('rbPolicy'); if (!sel) return;
-    sel.value = r.policy;
-    $('rbPolicyNote').textContent = REBUILD_POLICY_TEXT[r.policy] + (r.policy === 'auto' ? ` Quiet hours: ${r.quietHours}h.` : '');
-  } catch { /* older server — leave the default */ }
-}
-async function loadRebuildAtOnce() {
-  try {
-    const r = await api('/v1/rebuild-concurrency');
-    const sel = $('rbAtOnce'); if (!sel) return;
-    sel.innerHTML = Array.from({ length: r.max }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('');
-    sel.value = String(r.atOnce);
-    if (appConfig) appConfig.rebuildConcurrency = r.atOnce;
-  } catch { /* older server */ }
-}
-async function setRebuildAtOnce(n) {
-  try { await api('/v1/rebuild-concurrency', { method: 'PUT', body: { atOnce: Number(n) } }); toast(`Rebuilds at once: ${n}`); if (appConfig) appConfig.rebuildConcurrency = Number(n); }
-  catch (e) { toast(e.message, 12000); }
-  loadRebuildAtOnce();
-}
-async function setRebuildPolicy(policy) {
-  try {
-    await api('/v1/rebuild-policy', { method: 'PUT', body: { policy } });
-    toast('Rebuild policy saved');
-  } catch (e) { toast(e.message, 12000); }
-  loadRebuildPolicy();
 }
 
 
@@ -1055,30 +738,4 @@ async function pushDefinition(id, masterName) {
     const bad = r.results.filter(x => !x.ok);
     toast(`Pushed to ${r.pushed}/${r.results.length} children${bad.length ? ` — skipped: ${bad.map(b => `${b.name} (${b.error})`).join(', ')}` : ''}.`, 10000);
   } catch (e) { toast(e.message, 10000); }
-}
-
-async function syncBotName(id, name, kind = 'telegram') {
-  const label = V2_CHAN_LABEL[kind] || kind;
-  try {
-    const r = await api(`/v1/agents/${id}/bot-name/sync`, { method: 'POST', body: { kind } });
-    if (r.ok) toast(`${label} bot renamed to “${r.name}”.`);
-    else if (r.retryAt) {
-      const when = new Date(r.retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      toast(`${label} won't accept another rename for this bot until ${when} — it's queued and will apply then.`);
-    } else toast(`${label} refused the rename: ${r.error || 'unknown reason'}`, 9000);
-    await refresh(false);
-    if (kind !== 'telegram') v2LoadChans(id);
-  } catch (e) { toast(e.message); }
-}
-
-/** Which engine does the agent's semantic memory search. Applies on its next rebuild, which re-indexes. */
-async function saveEmbedMode() {
-  const mode = $('editEmbedMode').value;
-  const forId = editAgentId, f = forAgent(forId), saved = v2SheetSaving('editEmbedMode');
-  try {
-    await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { embedMode: mode } });
-    saved(forId);
-    f.say(mode === 'shared' ? 'Will use the shared service from its next rebuild — memory search re-indexes then (a few minutes).' : 'Back on its own engine from its next rebuild.');
-    await refresh(false);
-  } catch (e) { f.fail(e); }
 }

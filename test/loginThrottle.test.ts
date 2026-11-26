@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { registerAuth, _resetLoginThrottle } from '../src/api/auth.js';
+import { registerAuth, _resetLoginThrottle } from '../src/api/signIn/auth.js';
 
 async function app(password = 'pw') {
   const f = Fastify();

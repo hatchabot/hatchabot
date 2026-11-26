@@ -12,7 +12,7 @@ import type { ExecResult } from '../src/providers/provider.js';
 /**
  * The agent files service (HB-0808 step 13): its core-files turn, its core
  * files read and saved, and its home browsed, checked for a download and
- * uploaded to, driven as src/api/fileRoutes.ts drives them but with no HTTP
+ * uploaded to, driven as src/api/data/fileRoutes.ts drives them but with no HTTP
  * server. A real store on an in-memory database and a provider that answers
  * each one-shot as the test says.
  */

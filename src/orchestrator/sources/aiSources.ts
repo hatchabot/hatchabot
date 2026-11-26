@@ -107,7 +107,7 @@ export type DefaultModelApplied = {
   refused: 'menu-full'; error: string;
 };
 
-/** The most models a source's list holds, its default among them: what create and edit take (src/api/aiSourceRoutes.ts) and the editor sends. */
+/** The most models a source's list holds, its default among them: what create and edit take (src/api/usage/aiSourceRoutes.ts) and the editor sends. */
 export const SOURCE_MODELS_MAX = 16;
 
 /** How many of the caller's agents, and how many of other accounts', stay on a model a new default's list keeps. */

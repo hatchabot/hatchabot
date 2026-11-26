@@ -54,10 +54,10 @@ describe('turning on family accounts', () => {
   it('makes account #1 the host owner, gives it everything, and writes the mode', async () => {
     const w = await world();
     try {
-      const r = await w.post({ username: 'chris', password: 'a-long-password' });
+      const r = await w.post({ username: 'casey', password: 'a-long-password' });
       expect(r.statusCode).toBe(200);
-      expect(r.json()).toMatchObject({ ok: true, username: 'chris' });
-      const acct = w.store.localAccountByUsername('chris')!;
+      expect(r.json()).toMatchObject({ ok: true, username: 'casey' });
+      const acct = w.store.localAccountByUsername('casey')!;
       expect(acct.hostOwner).toBe(true);
       // A recovery code, shown once: nobody can send the host owner a reset link.
       expect(typeof r.json().recoveryCode).toBe('string');
@@ -188,7 +188,7 @@ describe('turning on family accounts', () => {
   it('refuses a weak password and changes nothing', async () => {
     const w = await world();
     try {
-      expect((await w.post({ username: 'chris', password: 'short' })).statusCode).toBe(400);
+      expect((await w.post({ username: 'casey', password: 'short' })).statusCode).toBe(400);
       expect(w.store.countLocalAccounts()).toBe(0);
       expect(w.env()).not.toContain('HATCHABOT_AUTH');
       expect(w.store.getAgent('a1')!.ownerId).toBe('dev-owner');
@@ -218,7 +218,7 @@ describe('turning on family accounts', () => {
   it('is refused once accounts are already on', async () => {
     const w = await world('accounts');
     try {
-      expect((await w.post({ username: 'chris', password: 'a-long-password' })).statusCode).toBe(409);
+      expect((await w.post({ username: 'casey', password: 'a-long-password' })).statusCode).toBe(409);
     } finally { w.restore(); }
   });
 });

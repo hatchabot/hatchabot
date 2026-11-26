@@ -34,18 +34,20 @@ function constant(name: string): string {
 type El = {
   id: string; value: string; textContent: string; innerHTML: string; hidden: boolean; disabled: boolean; checked: boolean;
   style: Record<string, string>; dataset: Record<string, string>; isConnected: boolean; childElementCount: number;
+  options: Array<{ value: string; defaultSelected: boolean }>;
   focus(): void; querySelectorAll(sel: string): unknown[]; closest(sel: string): unknown; contains(el: unknown): boolean;
 };
 function element(id = ''): El {
   let inner = '';
   const el: El = {
     id, value: '', textContent: '', hidden: false, disabled: false, checked: false, style: {}, dataset: {}, isConnected: true,
-    childElementCount: 0, focus() {}, querySelectorAll: () => [], closest: () => null, contains: () => false,
+    childElementCount: 0, options: [], focus() {}, querySelectorAll: () => [], closest: () => null, contains: () => false,
     get innerHTML() { return inner; },
     set innerHTML(v: string) {
       inner = v;
-      // A <select>'s value follows its selected option, as a browser's does.
+      // A <select>'s options are what it holds, and its value follows its selected option, as a browser's does.
       const options = [...v.matchAll(/<option value="([^"]*)"([^>]*)>/g)];
+      el.options = options.map((o) => ({ value: o[1]!, defaultSelected: /selected/.test(o[2]!) }));
       if (options.length) el.value = (options.find((o) => /selected/.test(o[2]!)) ?? options[0]!)[1]!;
     },
   };
@@ -81,17 +83,18 @@ function page(names: string[], extra: Record<string, unknown> = {}, consts: stri
     api: async (url: string, init?: Init) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, toast: (t: string) => { toasts.push(t); }, refresh: async () => {},
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), onAction, fmtBytes: String,
-    v2SheetSaving: () => noop, v2SheetBaseline: noop, V2_SHEET_FORMS: [], onRepoPublic: noop, onParamTypeChange: noop,
-    v2CtlDrawn: (el: { defaultValue?: string }) => el.defaultValue ?? '', editAgentId: 'a1', v2AgentId: null, editParamsFills: 0, searchTests: new Set(),
+    v2SheetSaving: () => noop, v2SheetBaseline: noop, V2_SHEET_FORMS: [], sheetReads: new Map(), onRepoPublic: noop, onParamTypeChange: noop,
+    v2CtlDrawn: (el: { defaultValue?: string }) => el.defaultValue ?? '', editAgentId: 'a1', v2AgentId: null, editParamsFills: 0,
+    editLoaded: null, peersLoadedFor: null, peersCurrent: null, // what the shared buttons' locks ask (SHEET_BUTTONS)
     v2AgentDlg: { open: false }, editDlg: { open: false },
     ...extra,
   });
   // One "Its name: " helper for every answer about an agent (HB-0584, HB-0587, HB-0590), and one
-  // for where an edit form's answer goes (forAgent), as shipped.
-  if (!('agentPrefix' in extra)) vm.runInContext(source('agentPrefix'), c);
-  if (!('forAgent' in extra)) vm.runInContext(source('forAgent'), c);
+  // for where an edit form's answer goes (forAgent), with the saves, reads and fills built on it (HB-0644),
+  // and the forms' shared buttons, held by a press and given back to its own agent's forms (HB-1484), as shipped.
+  for (const n of ['agentPrefix', 'forAgent', 'sheetSave', 'sheetRead', 'sheetFill', 'sheetPress', 'sheetButton', 'sourceAsSaved']) if (!(n in extra)) vm.runInContext(source(n), c);
   if (!('sharingRead' in extra)) vm.runInContext(source('sharingRead'), c);
-  for (const n of ['v2Find', 'v2Mine']) if (!(n in extra)) vm.runInContext(constant(n), c);
+  for (const n of ['v2Find', 'v2Mine', 'sheetPresses', 'MODEL_WAITS_ON_SOURCE', 'SHEET_BUTTONS', 'SHEET_HINTS']) if (!(n in extra)) vm.runInContext(constant(n), c);
   for (const n of names) vm.runInContext(source(n), c);
   for (const n of consts) vm.runInContext(constant(n), c);
   return { c: c as Record<string, any>, $, calls, toasts };
@@ -985,18 +988,19 @@ describe('the Telegram tab: people who use another agent, and a search test, are
     const { c, $, toasts, calls } = page(['testAgentSearch'], { api: (url: string, init: Init) => { calls.push({ url, ...init }); return tested.p; } });
     const pending = c.testAgentSearch();
     // B's forms: renderEnvList empties the line, and prepareEdit sets the button for B's own test (none running).
-    c.editAgentId = 'a2'; $('agentSearchTestOut').textContent = ''; $('agentSearchTestBtn').disabled = c.searchTests.has('a2');
+    c.editAgentId = 'a2'; $('agentSearchTestOut').textContent = ''; c.sheetButton('agentSearchTestBtn', 'a2');
+    expect($('agentSearchTestBtn').disabled).toBe(false);
     tested.open({ ok: true, detail: 'Search works: DuckDuckGo answered.' }); await pending;
     expect(calls.map((x) => x.url)).toEqual(['/v1/agents/a1/search-test']);
     expect($('agentSearchTestOut').textContent).toBe('');
     expect(toasts).toEqual(['Homework Helper: ✓ Search works: DuckDuckGo answered.']);
-    expect([$('agentSearchTestBtn').disabled, c.searchTests.size]).toEqual([false, 0]);
+    expect([$('agentSearchTestBtn').disabled, c.sheetPresses.size]).toEqual([false, 0]);
   });
   it("A's search test ending while B's runs leaves B's button waiting; B's own end frees it", async () => {
     const forA = gate(), forB = gate();
     const { c, $ } = page(['testAgentSearch'], { api: (url: string) => (url.includes('/a1/') ? forA.p : forB.p) });
     const a = c.testAgentSearch();
-    c.editAgentId = 'a2'; $('agentSearchTestBtn').disabled = c.searchTests.has('a2');
+    c.editAgentId = 'a2'; c.sheetButton('agentSearchTestBtn', 'a2');
     const b = c.testAgentSearch();
     forA.open({ ok: true, detail: 'Search works.' }); await a;
     expect($('agentSearchTestBtn').disabled).toBe(true);

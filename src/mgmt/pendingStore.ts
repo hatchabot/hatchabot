@@ -69,6 +69,14 @@ export interface PendingConfirm {
   source?: 'chat' | 'agent' | 'guard';
   note?: string;
   risk?: 'routine' | 'disruptive' | 'careful';
+  /** Confirmed, and a restart cut its change off: never run again (HB-1053; Store.markInterruptedMgmtProposals). */
+  interrupted?: boolean;
+  /** Such a card, filed again by its owner as this card (File it again). */
+  refiledAs?: string;
+  /** The interrupted card this one was filed again from. */
+  refiledFrom?: string;
+  /** Filed again: when the change was first filed. Its words, a model card's evidence and warnings, the guard's Before and After, are from then. */
+  firstFiledAtMs?: number;
 }
 
 /** Where records live when they must outlast the process and be listable

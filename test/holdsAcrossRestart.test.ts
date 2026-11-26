@@ -16,6 +16,10 @@ import { HOUR_FIELDS, type WindowModelStats } from '../src/orchestrator/usage/us
 import type { Agent } from '../src/domain/types.js';
 import { beginOperation, handleFor, oweStart, startOwedIn } from '../src/orchestrator/lifecycle/operations.js';
 import { createAiSources } from '../src/orchestrator/sources/aiSources.js';
+import { rollbackMarkPath, takeRollbackMark } from '../src/store/rollbackMark.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * What a restart may not lose (HB-0809; HB-0820, HB-0830).
@@ -55,6 +59,8 @@ interface House {
   pause: (ms: number) => Promise<void>;
   /** Told of an owed model the runtime refused at a start (modelRuntime.ts, HB-1404): the budgets' hook, where a test wires one. */
   owedRefused?: (agentId: string, ask: string) => void;
+  /** What src/index.ts does with the store before anything else at a start, where a test sets it (takeRollbackMark, HB-0840). */
+  atStart?: (store: Store) => void;
 }
 
 const busyIds: string[] = [];
@@ -72,6 +78,7 @@ function house(): House {
   const events: House['events'] = [];
   const boot = (): Life => {
     const store = new Store(db);
+    h.atStart?.(store);
     const flights = new Map<string, Promise<void>>();
     const settings = createAgentSettings({
       store,
@@ -628,6 +635,50 @@ describe('a class edit', () => {
     expect(() => store.transact(() => { store.setAgentModel(a.id, null); settings.classes.detachClassIfDrifted(a.id); throw new Error('refused at the write'); })).toThrow('refused at the write');
     expect(store.agentHold(a.id, 'class-detach')).toBeUndefined();
     expect(h.restart().store.getAgent(a.id)).toMatchObject({ classId: 'c1', model: OTHER });
+  });
+});
+
+describe('holds kept before a rollback (HB-0840)', () => {
+  it('a model ask and a detach kept before a rollback are let go of at the next start, before anything reads them; a refusal kept before it stays, and a hold kept since is taken up', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-holds-rollback-'));
+    closers.push(async () => rmSync(dir, { recursive: true, force: true }));
+    const dbPath = join(dir, 'hatchabot.sqlite');
+    const h = house(), a = await h.agent('a1'), b = await h.agent('a2', 'Garden'), { store, settings } = h.now;
+    // On the newer release: a1's model is changed while its class is being edited, and the process ends
+    // with the model's ask and the detach both kept (as HB-0820's test in 'a class edit').
+    store.upsertAgentClass({ id: 'c1', ownerId: OWNER, name: 'Fast', model: OTHER });
+    store.setAgentClassIf(a.id, null, 'c1');
+    store.setAgentModel(a.id, OTHER);
+    store.setAgentApplied(a.id, 'p1', OTHER);
+    settings.classes.classEditBegun('c1');
+    store.transact(() => { store.setAgentModel(a.id, null, { apply: true }); return settings.classes.detachClassIfDrifted(a.id); });
+    expect(store.agentHold(a.id, 'class-detach')).toBe('c1');
+    expect(store.agentHold(a.id, 'model-apply')).toBeTruthy();
+    // And one that changes nothing when served: the owner's refusal of a pool bot (HOLDS_AFTER_ROLLBACK keeps it).
+    store.setAgentHold(b.id, 'skip-pool', '1');
+    await tick();
+
+    // Rolled back: the script writes its time beside the database, and the release gone back to runs for a while.
+    writeFileSync(rollbackMarkPath(dbPath), new Date().toISOString() + '\n');
+    await tick();
+    // A hold kept after the rollback (a release gone back to that knows the table): a2's model.
+    store.setAgentModel(b.id, OTHER, { apply: true });
+
+    // The next start, as src/index.ts makes it: the note is taken first.
+    h.atStart = (s) => { takeRollbackMark(s, dbPath); };
+    const next = h.restart();
+    expect(next.store.agentHold(a.id, 'class-detach')).toBeUndefined();
+    expect(next.store.agentHold(a.id, 'model-apply')).toBeUndefined();
+    expect(next.store.agentHold(b.id, 'skip-pool')).toBe('1');
+    // The service, built over it, decided nothing: a1 stays in the class it was left in.
+    expect(next.store.getAgent(a.id)?.classId).toBe('c1');
+    expect(h.events.filter((e) => e.event === 'class.detached')).toEqual([]);
+    await next.settings.resume();
+    // Only a2's model, kept since, went on a runtime.
+    expect(modelsSet(h.provider)).toEqual([`anthropic/${OTHER}`]);
+    expect(next.store.getAgent(b.id)?.appliedModel).toBe(OTHER);
+    expect(next.store.getAgent(a.id)?.appliedModel).toBe(OTHER); // as it was: no write to its runtime
+    expect(next.store.agentHold(b.id, 'model-apply')).toBeUndefined();
   });
 });
 

@@ -1,10 +1,10 @@
-// web/app/core.js: shared state and helpers: the running version, $, the visual viewport, the lists of agents, sources and hosts, the classic map choice, api() and the server clock.
+// web/app/core.js: shared state and helpers: the running version, $, an image's tag, the visual viewport, the lists of agents, sources and hosts, the classic map choice, api() and the server clock, toast(), copying, sizes and times (fmtBytes, ago, clock), the phone width, arrow keys between tabs, and a question with several answers (askChoice).
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
 
 // The running version, which the server writes into the page as a meta tag
-// (versionMarkup in src/api/pageRoutes.ts; an inline script until HB-0812).
+// (versionMarkup in src/api/machine/pageRoutes.ts; an inline script until HB-0812).
 // A page opened without the server (the click-through) may have set it already.
 {
   const v = document.querySelector('meta[name="hatchabot-version"]')?.content;
@@ -57,6 +57,10 @@ if (window.visualViewport) {
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
 /** False until the first agent list arrives — the screen must not guess before then. */
 let agentsLoaded = false;
+
+/** The fleet you're actually running, and the ones parked. */
+function liveAgents() { return agents.filter(a => a.state !== 'ARCHIVED'); }
+function archivedAgents() { return agents.filter(a => a.state === 'ARCHIVED'); }
 /** ?demo in the URL: screenshot mode — personal details (your email, family members'
  *  Telegram names, bot handles, connected accounts, Telegram ids) are blanked or
  *  blurred. Nothing is changed on the server; drop ?demo to see everything again. */
@@ -175,3 +179,103 @@ const api = async (path, opts = {}) => {
   }
   return data;
 };
+
+let toastTimer;
+function toast(msg, ms, cls) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (cls ? ` ${cls}` : '');
+  clearTimeout(toastTimer);
+  // Long messages (errors, mostly) get reading time; a tap dismisses early.
+  toastTimer = setTimeout(() => t.classList.remove('show'), ms ?? Math.max(2600, msg.length * 60));
+  t.onclick = () => { clearTimeout(toastTimer); t.classList.remove('show'); };
+}
+
+// Robust clipboard copy. navigator.clipboard exists ONLY in a secure context
+// (https or localhost); over plain http — e.g. http://<tailscale-host>:8080 —
+// it's undefined, so we fall back to a hidden-textarea execCommand copy that
+// works there too. Returns whether the copy succeeded.
+async function copyText(text) {
+  if (!text) return false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+    // Append INSIDE the open modal, not to <body>. showModal() puts the dialog
+    // in the top layer and makes the rest of the document inert, so a textarea
+    // parented to <body> can't take selection — select() no-ops and the copy
+    // silently fails. That's why the invite dialog's buttons did nothing.
+    const dialogs = [...document.querySelectorAll('dialog[open]')];
+    const host = dialogs[dialogs.length - 1] ?? document.body;
+    host.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    host.removeChild(ta);
+    return ok;
+  } catch { return false; }
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
+// "5m ago" / "3h ago" / "2d ago" — coarse on purpose; it's a health signal,
+// not a log.
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 90) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+const clock = (iso) => new Date(iso).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+
+/** A phone-wide screen: the width the stylesheet's phone rules start at. */
+const phoneQuery = typeof matchMedia === 'function' ? matchMedia('(max-width: 640px)') : null;
+function isPhone() {
+  return !!phoneQuery?.matches;
+}
+
+/** Arrow keys, Home and End between the tabs of a tablist; the tab moved to is chosen (2026-10-09). */
+function v2TabKeys(e, list) {
+  const tabs = [...list.querySelectorAll('[role="tab"]')];
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  if (j === undefined) return;
+  e.preventDefault();
+  const t = tabs[(j + tabs.length) % tabs.length];
+  const id = t.id;
+  t.click(); // redraws the tabs: focus the new one by its id
+  ($(id) || t).focus();
+}
+
+/**
+ * A question with more than OK and Cancel: resolves the key of the button
+ * pressed, or null on Cancel, Esc or a click outside. confirm() made Cancel
+ * mean "the other choice", so Esc on Share still exported and on Recover
+ * context still started the job (review, 2026-10-09).
+ */
+let choiceResolve = null;
+function askChoice(title, text, choices) {
+  choicePick(null); // a question still open is answered "no"
+  $('choiceTitle').textContent = title; $('choiceText').textContent = text;
+  $('choiceBtns').innerHTML = `<button ${onAction('click', 'choicePick', [null])}>Cancel</button>` +
+    choices.map(([k, label], i) => `<button${i === choices.length - 1 ? ' class="primary"' : ''} ${onAction('click', 'choicePick', [`${k ?? ''}`])}>${esc(label)}</button>`).join('');
+  return new Promise((res) => { choiceResolve = res; choiceDlg.showModal(); });
+}
+function choicePick(k) {
+  const r = choiceResolve; choiceResolve = null;
+  if (choiceDlg.open) choiceDlg.close();
+  r?.(k);
+}
+// Esc or a click outside: Cancel. A late close event of an earlier question must not answer the next one.
+choiceDlg.addEventListener('close', () => { if (!choiceDlg.open) choicePick(null); });

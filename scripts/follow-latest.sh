@@ -146,9 +146,10 @@ disk_stop() {
 # every tick while the disk stayed full (fifteenth review). From the disk's
 # last failure (T_DLAST), not the tag's last try (review of HB-0637).
 disk_waiting() { [ "$T_DISK" -gt 0 ] && ( T_COUNT="$T_DISK"; T_LAST="${T_DLAST:-$T_LAST}"; tries_waiting ); }
-# disk_words TEXT: upgrade.sh's, the list its said_kind reads, a copy
-# (test/nightScripts.test.ts holds them equal): this runs from a copy of
-# itself, and reads nothing of the release's before its deploy script.
+# disk_words TEXT: the list said_kind reads, a copy of
+# scripts/upgrade-helpers.sh's (test/nightScripts.test.ts holds them equal):
+# this runs from a copy of itself, and reads nothing of the release's before
+# its deploy script.
 disk_words() {
   case "$1" in
     *[Nn]"o space left on device"*|*[Dd]"isk quota"*|*EDQUOT*) return 0 ;;
@@ -163,31 +164,42 @@ disk_words() {
 # newest tag cannot be deployed now (verify_release, below; refused, every
 # tick failed with no repair), or the release it came from is at or ahead of
 # the newest tag (a hand deploy between two rcs; going on would take it back).
+# A kept record (kept_record, upgrade-helpers.sh's) is of a release put back
+# whose restart did not come up: nothing was cut off, and that release's
+# deploy restarts it again, or past the cap only looks (review of HB-1456).
+kept_record() { grep -qx back "$1" 2>/dev/null || grep -q '^tries ' "$1" 2>/dev/null; }
 repair_cut() {
   local deploy rc=0
   DISK_TRY=2
-  echo "A deploy of $PROD was cut off part-way; putting ${CUT_FROM:-the previous release} back."
+  if kept_record "$CUT"; then echo "${CUT_FROM:-The release put back} is back in $PROD but was not serving; its deploy script looks again."
+  else echo "A deploy of $PROD was cut off part-way; putting ${CUT_FROM:-the previous release} back."; fi
   [ -n "$CUT_FROM" ] || { echo "The interrupted deploy record names no previous release, so no release's code was run. Deploy a release by hand: scripts/deploy-release.sh vX.Y.Z"; return 1; }
   [ "$NO_COPY" = 0 ] || disk_stop "a private copy of $0 in ${TMPDIR:-/tmp}"
   deploy="$(mktemp 2>/dev/null)" || disk_stop "a copy of the deploy script in ${TMPDIR:-/tmp}"
   if ! git -C "$PROD" show "$CUT_FROM:scripts/deploy-release.sh" > "$deploy" 2>/dev/null; then
     rm -f "$deploy"; echo "Could not read that release's deploy script. Deploy a release by hand: scripts/deploy-release.sh vX.Y.Z"; return 1
   fi
-  HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$CUT_FROM" || rc=$?
+  HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_FOLLOW_KNOWS_6=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$CUT_FROM" || rc=$?
   rm -f "$deploy"
   # 4: a deploy or upgrade holds the lock, and repairs it first. Routine, as
   # follow-channel.sh has it (tenth review). 5: the machine's disk, or a
   # folder it cannot write: a try the disk failed, so the next repair waits
   # (disk_waiting), never counted against the tag, nor its clock moved: no
-  # try of the tag (note_try 2).
+  # try of the tag (note_try 2). 6: the release put back is not serving
+  # (said above), and nothing is counted (review of HB-1456).
   DISK_TRY=1
   if [ "$rc" = 4 ]; then echo "Another deploy or upgrade of $PROD is running; it puts ${CUT_FROM:-the previous release} back, or the next tick does."; rc=0; fi
   if [ "$rc" = 5 ]; then
     note_try 2
     echo "Putting ${CUT_FROM:-the previous release} back could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $NEWEST."
   fi
+  [ "$rc" != 6 ] || echo "$CUT_FROM is in $PROD again but not serving (above), and there was nothing more to do. This does not count against $NEWEST."
   return "$rc"
 }
+# not_repaired RC: said after a repair_cut that ended RC, but not after 6,
+# whose deploy said what comes next (back_down, kept_stop): past the cap it
+# is not tried again, and "it will be tried again" was untrue.
+not_repaired() { [ "$1" = 6 ] || echo "The repair did not finish (above); it will be tried again."; }
 if [ "$FETCHED" = 0 ]; then
   ! disk_waiting || exit 0
   repair_cut || { [ ! -f "$CUT" ] || exit 1; }
@@ -216,8 +228,10 @@ elif tries_waiting; then TAG_HELD="is tried again later"; fi
 if [ -f "$CUT" ]; then
   ! disk_waiting || exit 0
   if [ -n "$TAG_HELD" ]; then
-    echo "$NEWEST $TAG_HELD. This tick repairs the deploy that was cut off, and only that."
-    repair_cut || { echo "The repair did not finish (above); it will be tried again."; exit 1; }
+    if kept_record "$CUT"; then echo "$NEWEST $TAG_HELD. This tick sees to the release put back, and only that."
+    else echo "$NEWEST $TAG_HELD. This tick repairs the deploy that was cut off, and only that."; fi
+    rrc=0; repair_cut || rrc=$?
+    [ "$rrc" = 0 ] || { not_repaired "$rrc"; exit 1; }
     exit 0
   fi
 elif [ -n "$TAG_HELD" ]; then exit 0; fi
@@ -301,7 +315,7 @@ JS
   case "$rc" in 0) return 0 ;; 2) return 20 ;; *) return 30 ;; esac
 }
 vrc=0; verify_release "$NEWEST" || vrc=$?
-if [ "$vrc" != 0 ] && [ -f "$CUT" ]; then repair_cut || echo "The repair did not finish (above); it will be tried again."; fi
+if [ "$vrc" != 0 ] && [ -f "$CUT" ]; then rrc=0; repair_cut || rrc=$?; [ "$rrc" = 0 ] || not_repaired "$rrc"; fi
 case "$vrc" in
   0) ;;
   20)
@@ -338,7 +352,7 @@ if ! err="$(git -C "$PROD" show "$NEWEST:scripts/deploy-release.sh" 2>&1 > "$dep
   exit 1
 fi
 echo "Following latest: ${CUR:-untagged} → $NEWEST"
-if HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$NEWEST"; then
+if HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_FOLLOW_KNOWS_6=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$NEWEST"; then
   rm -f "$FAILED" "$deploy"; forget_tries
 else
   rc=$?
@@ -349,9 +363,13 @@ else
   # way, never set aside for it. 2 = refused (a stray file in prod): tried
   # again next time. 4 = a deploy or upgrade was running: routine, the tick
   # ends 0 and counts nothing, as follow-channel.sh's does (tenth review).
+  # 6 = the release an earlier deploy put back is not serving, and it is
+  # $NEWEST: nothing was tried, so nothing is counted (review of HB-1456).
   if [ "$rc" = 4 ]; then
     echo "Another deploy or upgrade of $PROD is running; this tick leaves $NEWEST to it, or to the next tick."
     exit 0
+  elif [ "$rc" = 6 ]; then
+    echo "$NEWEST is in $PROD already but not serving (above), so there was nothing to deploy. This does not count against $NEWEST."
   elif [ "$rc" = 1 ]; then
     set_aside "$NEWEST" "Deploying $NEWEST failed and was rolled back." "It will not be retried; the next tag will be."
   elif [ "$rc" = 3 ] && [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then

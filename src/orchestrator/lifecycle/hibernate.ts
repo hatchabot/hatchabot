@@ -137,7 +137,7 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string,
   // recovers it by this record's time (telegramHasMail, #218).
   let bedtime = 0;
   let sleptAt = '';
-  await whileBusy(a.id, async () => {
+  await whileBusy(a.id, 'sleep', async () => {
     // The sweep read the settings before its awaits: "Never sleep" chosen
     // meanwhile used to lose to it and the agent was stopped anyway (#219).
     const blocker = opts.idle ? settledBlocker(deps, deps.store.getAgent(a.id) ?? now, true) : undefined;
@@ -250,7 +250,7 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
     // archived runtime whose bot had gone back (#10). Busy now = left alone.
     let woken: Agent | undefined;
     try {
-      woken = await whileBusy(a.id, async () => {
+      woken = await whileBusy(a.id, 'wake', async () => {
         const now = deps.store.getAgent(a.id);
         if (!now?.hibernatedAt || now.state !== 'STOPPED' || now.migratedTo) return undefined;
         // Owed since the look above: left for the next wake, which rebuilds it.

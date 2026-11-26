@@ -267,21 +267,56 @@ describe('POST /v1/runtime/images/promote', () => {
     expect(down.json().error).toMatch(/Garage/);
     expect(provider.tagged).toEqual([]);
   });
-  it('with HATCHABOT_IMAGE pinned to a version tag, an agent pinned to that tag is asked too: it runs what Promote moves (HB-1187)', async () => {
+  it('with HATCHABOT_IMAGE pinned to a version tag or a digest, Promote is refused and says to change the setting first; nothing is retagged (HB-1256)', async () => {
     const had = process.env.HATCHABOT_IMAGE;
-    process.env.HATCHABOT_IMAGE = 'hatchabot-runtime:2026.9.4';
     try {
-      const { f, provider, store } = await world();
-      provider.tags.find((t) => t.tag === 'hatchabot-runtime:2026.7.1-2')!.openclawVersion = '2026.7.1-2';
-      store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');
-      provider.infoOverride.set(store.getAgent('a1')!.runtimeRef!, { openclawVersion: '2026.7.1-2' });
-      provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.6' });
-      const down = await f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag: 'hatchabot-runtime:2026.7.1-2' } });
-      expect(down.statusCode).toBe(409);
-      expect(down.json().error).toMatch(/\(Garage\)/);
-      expect(provider.tagged).toEqual([]);
+      for (const [pin, why] of [
+        ['hatchabot-runtime:2026.9.4', 'promoting would retag that pin, so every agent that runs it would move onto another image at its next rebuild'],
+        ['hatchabot-runtime@sha256:' + 'a'.repeat(64), 'a digest cannot be retagged'],
+      ] as const) {
+        process.env.HATCHABOT_IMAGE = pin;
+        const { f, provider, store } = await world();
+        store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');
+        const words = `Promote is off while HATCHABOT_IMAGE pins the fleet default to ${pin}: ${why}. To promote, set HATCHABOT_IMAGE in .env to hatchabot-runtime:latest (which the agents with no pin then run) and restart Hatchabot first.`;
+        for (const tag of ['hatchabot-runtime:2026.7.1-2', 'hatchabot-runtime:latest']) {
+          const res = await f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag } });
+          expect(res.statusCode, `${pin} ${tag}`).toBe(409);
+          expect(res.json().error).toBe(words);
+        }
+        expect(provider.tagged).toEqual([]);
+        // The image list says so too, for the page to say before anyone confirms a promote.
+        expect((await f.inject({ method: 'GET', url: '/v1/runtime/images', headers: as })).json().promoteRefused).toBe(words);
+      }
+      // A default that is a repository's :latest, named or not, is no pin.
+      for (const free of ['hatchabot-runtime:latest', 'hatchabot-runtime', 'registry.example:5000/family/runtime']) {
+        process.env.HATCHABOT_IMAGE = free;
+        const { f } = await world();
+        expect((await f.inject({ method: 'GET', url: '/v1/runtime/images', headers: as })).json().promoteRefused, free).toBeNull();
+      }
     } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = had; }
   });
+  // Review (HB-1256): under the pin these still said to promote, which it refuses.
+  it('with HATCHABOT_IMAGE pinned to a version tag, a candidate with extras and deleting the default say what makes another image the default, not Promote (HB-1256)', async () => {
+    const had = process.env.HATCHABOT_IMAGE;
+    const tryBoth = async (f: any, pin: string) => ({
+      extras: (await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: false, packages: 'jq' } })).json(),
+      gone: (await f.inject({ method: 'DELETE', url: '/v1/runtime/images/' + encodeURIComponent(pin), headers: as })).json(),
+    });
+    try {
+      const pin = 'hatchabot-runtime:2026.9.4';
+      process.env.HATCHABOT_IMAGE = pin;
+      expect(await tryBoth((await world()).f, pin)).toEqual({
+        extras: { error: `An image with extra packages is built as a candidate; try it on one agent. Promote is off while HATCHABOT_IMAGE pins the fleet default to ${pin}: to make it the default, set HATCHABOT_IMAGE in .env to its tag and restart Hatchabot.` },
+        gone: { error: 'That is the fleet default, as HATCHABOT_IMAGE pins it: set HATCHABOT_IMAGE in .env to another image and restart Hatchabot first.' },
+      });
+      delete process.env.HATCHABOT_IMAGE;
+      expect(await tryBoth((await world()).f, 'hatchabot-runtime:latest')).toEqual({
+        extras: { error: 'An image with extra packages is built as a candidate; try it on one agent, then promote it.' },
+        gone: { error: 'That is the fleet default — promote another image first.' },
+      });
+    } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = had; }
+  });
+
   it('refuses the default itself, derived images, unknown tags and bad refs', async () => {
     const { f } = await world();
     const post = (tag: string) => f.inject({ method: 'POST', url: '/v1/runtime/images/promote', headers: as, payload: { tag } });
@@ -447,6 +482,37 @@ describe('POST /v1/runtime/build', () => {
       for (let i = 0; i < 50 && (await now()).running; i++) await new Promise((r) => setTimeout(r, 5));
       expect(await now()).toMatchObject({ running: false, ok: true });
       expect(provider.tagged).toEqual([['hatchabot-runtime:2026.7.1-2', 'hatchabot-runtime:latest']]);
+    } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = had; }
+  });
+
+  it('with HATCHABOT_IMAGE pinned to a version tag, a default build says it moves :latest, not the default, and to pin to a version tag (HB-1256)', async () => {
+    const had = process.env.HATCHABOT_IMAGE;
+    process.env.HATCHABOT_IMAGE = 'hatchabot-runtime:2026.9.4';
+    try {
+      let finish!: (r: { ok: boolean }) => void;
+      const { f, store, provider } = await world(() => new Promise((r) => { finish = r; }));
+      const kitchen = store.getAgent('a1')!.runtimeRef!;
+      // Kitchen follows :latest by its own pin, and is on 2026.9 data; Garage runs the default (the pin).
+      store.setAgentImage('a1', 'hatchabot-runtime:latest');
+      provider.infoOverride.set(kitchen, { openclawVersion: '2026.9.6' });
+      provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+      const build = () => f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', candidate: false } });
+      const refused = await build();
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error).toBe('This build moves hatchabot-runtime:latest, not the fleet default (hatchabot-runtime:2026.9.4), and OpenClaw 2026.7.1-2 cannot read the data of the agents pinned to hatchabot-runtime:latest that are already on 2026.8 or newer (Kitchen). Pin those agents to a version tag first, or build it as a candidate.');
+      // The CLI's check says the same.
+      expect((await f.inject({ method: 'GET', url: '/v1/runtime/build/check?tag=hatchabot-runtime%3A2026.7.1-2&version=2026.7.1-2', headers: as })).json().refused).toBe(refused.json().error);
+      // Kitchen still on 2026.7 when the build starts, on 2026.9 by its end: kept, in words that name the tag that did not move.
+      provider.infoOverride.set(kitchen, { openclawVersion: '2026.7.1-2' });
+      expect((await build()).statusCode).toBe(202);
+      provider.infoOverride.set(kitchen, { openclawVersion: '2026.9.6' });
+      finish({ ok: true });
+      const now = async () => (await f.inject({ method: 'GET', url: '/v1/runtime/build', headers: as })).json();
+      for (let i = 0; i < 50 && (await now()).running; i++) await new Promise((r) => setTimeout(r, 5));
+      const ended = await now();
+      expect(ended).toMatchObject({ running: false, ok: false });
+      expect(ended.error).toBe('Built, but hatchabot-runtime:latest was not moved to it: OpenClaw 2026.7.1-2 cannot read the data of agents pinned to hatchabot-runtime:latest that reached 2026.8 or newer while it built (Kitchen). It is kept as hatchabot-runtime:2026.7.1-2: pin those agents to a version tag, then build it again to move hatchabot-runtime:latest.');
+      expect(provider.tagged).toEqual([]);
     } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = had; }
   });
 

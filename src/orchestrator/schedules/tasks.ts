@@ -92,7 +92,7 @@ export function createScheduledTasks(deps: SchedulesDeps): ScheduledTasks {
     // The missing verb (audit backlog: "no interface creates a cron"): a
     // definition can DESCRIBE a schedule, but only a real gateway cron fires.
     add: async (agent, task) => {
-      const out = await whileBusy(agent.id, () => addCron(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, {
+      const out = await whileBusy(agent.id, 'task-add', () => addCron(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, {
         name: task.name,
         message: task.message,
         cron: task.cron,
@@ -151,7 +151,7 @@ export function createScheduledTasks(deps: SchedulesDeps): ScheduledTasks {
       // the flag is ours: the write went to the retired runtime instead
       // (HB-0906). A rebuild in place keeps its runtime's name, and its tasks
       // are on the volume: the write goes to it as before.
-      const onTheRuntimeRead = <T>(write: () => Promise<T>) => whileBusy(agent.id, async (): Promise<T | typeof REPLACED> => {
+      const onTheRuntimeRead = <T>(write: () => Promise<T>) => whileBusy(agent.id, 'task-edit', async (): Promise<T | typeof REPLACED> => {
         const now = store.getAgent(agent.id);
         return now && now.hostId === agent.hostId && now.runtimeRef === agent.runtimeRef ? write() : REPLACED;
       });
@@ -183,7 +183,7 @@ export function createScheduledTasks(deps: SchedulesDeps): ScheduledTasks {
     },
 
     setEnabled: async (agent, jobId, enabled, notify) => {
-      const ok = await whileBusy(agent.id, () =>
+      const ok = await whileBusy(agent.id, 'task-enable', () =>
         setCronEnabled(providerFor(agent.hostId), agent.runtimeRef!, jobId, enabled),
       );
       if (!ok) return false;
@@ -193,7 +193,7 @@ export function createScheduledTasks(deps: SchedulesDeps): ScheduledTasks {
 
     // Fire a task now ("test fire"). Its output is delivered the task's own way
     // (e.g. a Telegram announce), so this only reports that it was triggered.
-    runNow: (agent, jobId) => whileBusy(agent.id, () =>
+    runNow: (agent, jobId) => whileBusy(agent.id, 'task-run', () =>
       runCronNow(providerFor(agent.hostId), agent.runtimeRef!, jobId),
     ),
 
@@ -202,7 +202,7 @@ export function createScheduledTasks(deps: SchedulesDeps): ScheduledTasks {
     runs: (agent, jobId, limit) => listCronRuns(providerFor(agent.hostId), agent.runtimeRef!, jobId, limit),
 
     remove: async (agent, jobId) => {
-      const ok = await whileBusy(agent.id, () =>
+      const ok = await whileBusy(agent.id, 'task-remove', () =>
         deleteCron(providerFor(agent.hostId), agent.runtimeRef!, jobId),
       );
       if (ok) store.setCronNote(agent.id, jobId, false, 0);

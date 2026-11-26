@@ -1,18 +1,19 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import Database from 'better-sqlite3';
 import { Writable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
-import { hashPassword } from '../src/api/accountsAuth.js';
+import { _resetLoginThrottle, registerAuth } from '../src/api/signIn/auth.js';
+import { hashPassword } from '../src/api/signIn/accountsAuth.js';
 import { principalOf } from '../src/api/principal.js';
 import { requestLogSerializer } from '../src/api/requestLog.js';
-import { readSigninKey, verifySigninToken } from '../src/api/signinLink.js';
+import { readSigninKey, verifySigninToken } from '../src/api/signIn/signinLink.js';
 import { Store } from '../src/store/store.js';
+import { viaServe } from './helpers/viaServe.js';
 
 /**
  * One-time sign-in links (Hatchabot Cloud S5, docs/signin-links.md): the
@@ -24,6 +25,7 @@ const SCRIPT = new URL('../scripts/signin-link.mjs', import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let script: any;
 const dir = mkdtempSync(join(tmpdir(), 'hb-signin-'));
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const URL_HERE = 'https://maria.example.com';
 const SECRET = Buffer.alloc(32, 3);
 // Made-up passwords, assembled at runtime so nothing credential-shaped sits in this file.
@@ -186,14 +188,17 @@ describe('a sign-in link (accounts mode)', () => {
   it('is rate-limited per client: after repeated failures even a good link waits', async () => {
     process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW = '3';
     const { f } = await accountsApp();
+    // Each client through tailscale serve's listener, which names it (HB-1239).
+    const served = await viaServe(f);
+    const viaTailnet = (t: string, headers: Record<string, string>) => served.inject({ url: `/signin/link?t=${encodeURIComponent(t)}`, headers });
     const from = { 'x-forwarded-for': '203.0.113.7' };
-    for (let i = 0; i < 3; i++) expect((await open(f, 'bad.token', from)).statusCode).toBe(400);
+    for (let i = 0; i < 3; i++) expect((await viaTailnet('bad.token', from)).statusCode).toBe(400);
     const good = tok();
-    const held = await open(f, good, from);
+    const held = await viaTailnet(good, from);
     expect(held.statusCode).toBe(429);
     expect(cookieOf(held)).toBe('');
     // Another client is not affected, and the held link was not spent.
-    expect((await open(f, good, { 'x-forwarded-for': '203.0.113.8' })).statusCode).toBe(303);
+    expect((await viaTailnet(good, { 'x-forwarded-for': '203.0.113.8' })).statusCode).toBe(303);
   });
 
   it('writes no token and no key to the log, and records the sign-in there', async () => {

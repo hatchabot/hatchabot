@@ -137,12 +137,18 @@ echo "deb [signed-by=/usr/share/keyrings/caddy.gpg] https://dl.cloudsmith.io/pub
   | sudo tee /etc/apt/sources.list.d/caddy.list
 sudo apt-get update && sudo apt-get install -y caddy
 
-# One line does TLS + reverse-proxy to the app on loopback:
-echo 'hatchabot.example.com { reverse_proxy 127.0.0.1:8080 }' | sudo tee /etc/caddy/Caddyfile
+# One line does TLS + reverse-proxy to the app's listener for a proxy, on loopback:
+echo 'hatchabot.example.com { reverse_proxy 127.0.0.1:8094 }' | sudo tee /etc/caddy/Caddyfile
 sudo systemctl restart caddy
 ```
 
 Caddy obtains and auto-renews the certificate. Keep `HATCHABOT_BIND=127.0.0.1`.
+Port 8094 (`HATCHABOT_PROXY_PORT`) is the one port where Hatchabot reads the
+visitor's address from `X-Forwarded-For` (the last value, which Caddy
+appends), so each visitor has their own sign-in limit; pointed at 8080,
+every visitor shares one. Hatchabot notices a proxy of another user still
+pointed at 8080: the log says so once a start, and Alerts while it was seen
+in the last hour.
 
 **Option B — native TLS (no proxy; you manage the cert).** Put PEM files on the
 data disk and point the app at them; set `HATCHABOT_BIND=0.0.0.0` and open the

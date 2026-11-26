@@ -1234,12 +1234,14 @@ describe('the class fixes, reviewed', () => {
     const { w, id, ref } = await setup();
     w.store.upsertAgentClass({ id: 'c-tier', ownerId: w.owner, name: 'Tier', model: SONNET });
     w.store.setAgentClassIf(id, w.store.getAgent(id)?.classId ?? null, 'c-tier');
-    // An edit: the class renamed under each of its checks.
-    holdChecks(w, ref, 3, (i) => { w.store.upsertAgentClass({ ...w.store.getAgentClass('c-tier')!, name: `Renamed ${i}` }); });
+    // An edit: the class's source changed under each of its checks, so no
+    // check fits the class the next try finds, and each try asks again (a
+    // rename alone does not: the checks still fit, HB-0642).
+    holdChecks(w, ref, 3, (i) => { w.store.upsertAgentClass({ ...w.store.getAgentClass('c-tier')!, aiProfileId: i % 2 ? undefined : 'key' }); });
     const edit = await send(w, 'PUT', '/v1/agent-classes/c-tier', { model: OPUS55, image: NEW_IMAGE });
     expect(edit.statusCode, edit.body).toBe(409);
     expect(edit.json().error).toBe('The class or its members kept changing while this applied. Nothing was changed; try again.');
-    expect(w.store.getAgentClass('c-tier')).toMatchObject({ name: 'Renamed 2', model: SONNET });
+    expect(w.store.getAgentClass('c-tier')).toMatchObject({ name: 'Tier', aiProfileId: 'key', model: SONNET });
     expect(w.store.getAgentClass('c-tier')!.image).toBeUndefined();
     expect(w.store.getAgent(id)!.image).toBeUndefined();
     expect(w.store.getAgent(id)!.model).not.toBe(OPUS55);
@@ -1490,7 +1492,7 @@ describe('the class fixes, reviewed', () => {
     w.store.upsertAgentClass({ id: 'c-tier', ownerId: w.owner, name: 'Tier', model: SONNET });
     w.store.setAgentClassIf(id, null, 'c-tier');
     // An edit refused after three tries: none is under way after it.
-    holdChecks(w, ref, 3, (i) => { w.store.upsertAgentClass({ ...w.store.getAgentClass('c-tier')!, name: `Renamed ${i}` }); });
+    holdChecks(w, ref, 3, (i) => { w.store.upsertAgentClass({ ...w.store.getAgentClass('c-tier')!, aiProfileId: i % 2 ? undefined : 'key' }); });
     expect((await send(w, 'PUT', '/v1/agent-classes/c-tier', { model: OPUS55, image: NEW_IMAGE })).statusCode).toBe(409);
     const own = await send(w, 'POST', `/v1/agents/${id}/model`, { model: HAIKU });
     expect(own.json()).toMatchObject({ model: HAIKU, classDetached: true });

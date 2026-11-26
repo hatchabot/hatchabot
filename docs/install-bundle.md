@@ -128,7 +128,9 @@ it from the address bar.
 Exit codes are the same as a clone's upgrade: `3` means it did not complete
 and nothing changed (no bundle yet, no network, or a bundle the release's
 manifest does not vouch for), `1` means the release did not start and was
-rolled back. Upgrades do not depend on the npm registry.
+rolled back, and `6` means the release an earlier upgrade put back is not up
+and there was nothing more to do: no release was tried, and the message says
+what it waits on. Upgrades do not depend on the npm registry.
 
 ## The driver on a native install
 

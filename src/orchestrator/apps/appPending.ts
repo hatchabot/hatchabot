@@ -1,5 +1,6 @@
 import type { SecretStore } from '../../secrets/secretStore.js';
 import type { Store } from '../../store/store.js';
+import { keyedLock } from '../../util/queues.js';
 import { AppError, fieldsToAsk, type AppManifest } from './apps.js';
 
 /**
@@ -101,13 +102,9 @@ export async function resolvePendingValues(
  * request while a newer one was being saved deleted the newer one's secrets
  * (HB-0256).
  */
-const rowLocks = new Map<string, Promise<unknown>>();
+const rowLocks = keyedLock();
 export function onePendingChange<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  const run = (rowLocks.get(agentId) ?? Promise.resolve()).then(fn, fn);
-  const tail = run.catch(() => {});
-  rowLocks.set(agentId, tail);
-  void tail.then(() => { if (rowLocks.get(agentId) === tail) rowLocks.delete(agentId); });
-  return run;
+  return rowLocks.run(agentId, fn);
 }
 
 /**

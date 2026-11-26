@@ -13,25 +13,71 @@
 # Exit codes (follow-channel.sh reads them): 0 upgraded, or nothing to do;
 # 1 the new release did not come up and the previous one is back — the ONLY
 # code that means "this release is bad, do not retry it"; 2 refused (local
-# changes, no such channel or release); 3 did not complete (no network, an
-# install that failed) with the previous release back as it was — try again;
+# changes, no such channel or release, its helpers not found); 3 did not
+# complete (no network, an install that failed) with the previous release
+# back as it was — try again;
 # 4 another upgrade is running; 5 this machine had no room (a full disk) or no
 # permission to write what the upgrade needs, with the previous release back
-# as it was — try again, but it says nothing about the release (HB-0470).
+# as it was — try again, but it says nothing about the release (HB-0470);
+# 6 the release put back by an earlier run is not up (its restart back did not
+# come up, or was given up after three) and there was nothing more to do: no
+# release was tried, and its record stays (kept_check, HB-1456).
 set -euo pipefail
-[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(cd "$(dirname "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
-cd "$(dirname "$0")/.."
+# Each cd with CDPATH empty: an exported one made cd print the folder it
+# found, and $(cd …; pwd) said two lines.
+[ -x "$(dirname "$0")/../.node/bin/node" ] && PATH="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/.node/bin:$PATH" && export PATH  # a bundle install's own Node (install.sh)
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)" || HERE=""   # this file's folder, before the cd: a relative $0 names it from here only
+CDPATH= cd -- "$(dirname -- "$0")/.."
 DIR="$PWD"
 
 # Checking out a release replaces this file while bash is still reading it.
+# The helpers it shares with deploy-release.sh (scripts/upgrade-helpers.sh)
+# go in that copy, ahead of it, and only the file this one was made with:
+# HELPERS_BLOB is its git blob id (test/upgradeHelpers.test.ts holds it to
+# that file). From this install's git when it has it: an upgrade cut off in
+# its checkout can leave scripts/ part one release and part the other, and
+# the file beside this one another release's. Else from beside it, once git
+# says it is that file; with no git (a bundle install, whose scripts/ moves
+# whole), as it is. Found nowhere, this stops with nothing changed (2).
+# Read from it: machine_short, free_mb, disk_words, said_kind, said_path,
+# own_place, disk_short, step_tee, step_tail, new_step_log, run_step,
+# step_short, put_rec, change_failed (a failed step's words); link_end,
+# put_line, put_dir, put_failed (the records); proc_start, proc_start_utc,
+# started_as, lock_left_over, take_lock, lock_short, lock_in_way (the lock);
+# deps_holder_gone, deps_lock, deps_unlock; kept_tries, kept_record;
+# checkout_recorded; older_release, mark_rolled_back, systemd_major,
+# env_named, rolled_back_note, left_ran, unmark_rolled_back (the rollback's
+# note).
+HELPERS_BLOB=6cc1f1f8c134608439cbec85d58968a381df7195
 if [ -z "${HATCHABOT_UPGRADE_COPY:-}" ]; then
+  # This file by its own folder: "$0" names it from where it was started, and
+  # the cd above moved from there (a relative one not from the install, as
+  # `bash upgrade.sh` in scripts/, read as a full disk, 5).
+  self=""; [ -z "$HERE" ] || self="$HERE/${0##*/}"
+  [ -n "$self" ] && [ -f "$self" ] || { echo "Could not find this script ($0) to run it from a temporary copy, so nothing was changed. Run it by its path, scripts/upgrade.sh in the install, then try again."; exit 2; }
+  NO_HELPERS="This upgrade.sh needs scripts/upgrade-helpers.sh as its own release has it, and found it neither in $DIR's git nor beside it, so nothing was changed. Put this release's scripts/ folder back whole, then try again."
+  from=""
+  if [ -e .git ] && git --no-replace-objects cat-file -e "$HELPERS_BLOB" 2>/dev/null; then from=git
+  elif [ -n "$HERE" ] && [ -f "$HERE/upgrade-helpers.sh" ]; then from="$HERE/upgrade-helpers.sh"; fi
+  [ -n "$from" ] || { echo "$NO_HELPERS"; exit 2; }
+  # The copy is removed however this ends but by its exec (and by an exec that
+  # failed: execfail, so set -e ends it here, through the trap).
+  tmp=""; trap 'rm -f "$tmp"' EXIT
   # Its own message and exit 5: under set -e a full temp folder ended this with
   # exit 1, which the channel timer reads as "this release is bad" (HB-0438),
   # and with 3 a disk that stayed full set the release aside (HB-0470).
-  tmp="$(mktemp)" && cp "$0" "$tmp" || { echo "Could not make a temporary copy of this script (a full disk?): nothing was changed. Free some space, then try again."; exit 5; }
+  COPY_SHORT="Could not make a temporary copy of this script (a full disk?): nothing was changed. Free some space, then try again."
+  tmp="$(mktemp)" && if [ "$from" = git ]; then git --no-replace-objects cat-file blob "$HELPERS_BLOB" > "$tmp"; else cat "$from" > "$tmp"; fi || { echo "$COPY_SHORT"; exit 5; }
+  # The bytes read are judged, not the file before them: with git, they are
+  # the file this was made with, or nothing goes on.
+  if [ -e .git ] && [ "$(git hash-object --stdin < "$tmp" 2>/dev/null)" != "$HELPERS_BLOB" ]; then echo "$NO_HELPERS"; exit 2; fi
+  { echo; cat "$self"; } >> "$tmp" || { echo "$COPY_SHORT"; exit 5; }
+  shopt -s execfail
   HATCHABOT_UPGRADE_COPY="$tmp" HATCHABOT_UPGRADE_DIR="$DIR" exec bash "$tmp" "$@"
 fi
 DIR="$HATCHABOT_UPGRADE_DIR"; cd "$DIR"
+# The copy has them all, or it was not made by the lines above.
+declare -F upgrade_helpers_end >/dev/null || { echo "This run of upgrade.sh has not got the helpers it needs (scripts/upgrade-helpers.sh), so nothing was changed. Run scripts/upgrade.sh itself, with no HATCHABOT_UPGRADE_COPY set."; exit 2; }
 
 # Whatever ends this script ends here. A failure the script did not plan for
 # (set -e after node_modules was moved aside, a failed mv in the bundle swap)
@@ -46,6 +92,9 @@ ASIDE=0         # 1 once a git install's node_modules was moved aside
 DEPS_HELD=0     # 1 while this run holds the dependencies' lock (deps_lock)
 SERVING=0       # 1 once the new release is up: only tidying is left
 DISK=0          # 1 once this run found the machine short of room or permission (machine_short)
+KEPT=0          # 1 once this run ends on a release put back that is not up (stop_or_go)
+KEPT_REC=""     # that release's record, which this run's own upgrade takes the place of (stop_or_go)
+BACK_DOWN=0     # 1 once a rollback's restart back did not come up (back_down said what comes next)
 LOCK=""; STAGE=""; STAGE_FREED=0; STEP_LOG=""; STEP_SAID=""
 PIN_ON=""       # the pin this run answers for, its own or one a killed run left; PRE_*: what it replaced
 PIN_RECORD=""; PRE_CHANNEL=""; PRE_USER_CHANNEL=""
@@ -75,7 +124,7 @@ finish() {
   # 5 only where this run found the disk or a permission (machine_short): under
   # set -e a command that exits 5 for its own reasons (curl 5, a node fatal
   # error) read as "the disk", which the timer retries for ever (review of HB-0470).
-  case "$rc" in 0|2|3|4) ;; 5) [ "$DISK" = 1 ] || rc=3 ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
+  case "$rc" in 0|2|3|4) ;; 5) [ "$DISK" = 1 ] || rc=3 ;; 6) [ "$KEPT" = 1 ] || rc=3 ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
   exit "$rc"
 }
 trap finish EXIT
@@ -84,253 +133,6 @@ trap finish EXIT
 # on the new release with half its dependencies, and the next run said
 # "Already on" it (HB-0043). Ended through exit, finish puts the old one back.
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-
-# The machine, said as the machine: exit 5, which the channel timer never counts
-# against the release (HB-0470). The only way this run exits 5 (finish).
-# deploy-release.sh keeps copies of these (machine_short, free_mb, disk_words,
-# said_kind, said_path, own_place, disk_short, step_tee, step_tail, run_step, step_short, put_rec,
-# change_failed), of the record writers (link_end, put_line, put_dir,
-# put_failed) and of the lock's (take_lock, lock_short, lock_in_way), not a
-# file both source: each runs from
-# a temporary copy while scripts/ changes under it, and a sourced file missing
-# there would stop it before it could put the release back.
-# test/nightScripts.test.ts holds them equal (fifth and eighth reviews).
-machine_short() { DISK=1; exit 5; }
-# MB free on the disk holding a path ('' when df cannot say).
-free_mb() { df -Pk "$1" 2>/dev/null | awk 'END { if (NF >= 4 && $4 ~ /^[0-9]+$/) printf "%d", $4 / 1024 }' || true; }
-# disk_words TEXT: whether TEXT says the disk is full: no room, a quota
-# (EDQUOT), or ENOSPC; not the ENOSPC Linux says when the inotify watcher limit
-# is reached ("System limit for number of file watchers reached"), which is no
-# reason to pass a release over (second review of HB-0470). One list: said_kind
-# reads it, and follow-latest.sh keeps a copy for git's words, where its own
-# list missed EDQUOT and a bare ENOSPC (fifteenth review).
-disk_words() {
-  case "$1" in
-    *[Nn]"o space left on device"*|*[Dd]"isk quota"*|*EDQUOT*) return 0 ;;
-    *"file watchers"*) return 1 ;;
-    *ENOSPC*) return 0 ;;
-  esac
-  return 1
-}
-# What a failed step's words say: "disk" (no room, a quota), "denied" (no
-# permission, a read-only disk: this machine's too, 5, as the header says;
-# tenth review), "own" (words of another failure), or nothing (it said
-# nothing). said_kind TEXT
-# The words, not the code: the disk's as disk_words reads them. A write that came
-# up short ("unable to write", "write error", "short write") is the disk too,
-# unless it says it was a permission, a read-only disk (denied) or a closed
-# pipe (eighth review). An ssh key a server turned away is not a permission here,
-# nor is a file it could not run (dash's "sh: 1: …: Permission denied", npm's
-# "code 126", Node's "spawn … EACCES", bash's "line N: FILE: Permission
-# denied" for a file of the release's without its execute bit, and exit 126
-# in run_step): that is the release's own, 3. Denied is a write: EACCES or EROFS from open, mkdir,
-# rename, write, cp or mv (eleventh review).
-said_kind() {
-  # Line by line: pieces on two lines ("spawn" on one, EACCES on another) made
-  # one match across them (twelfth review). Not a here-string, which bash 3.2
-  # writes to a temporary file, on the disk that may be full.
-  local line p run=0 deny=0 out=0 anon=0 short=0 fail=0 said=0 glob=1 IFS='
-'
-  case "$-" in *f*) glob=0 ;; esac
-  set -f
-  for line in $1; do
-    case "$line" in *[![:space:]]*) said=1 ;; *) continue ;; esac
-    # The disk's words are read in the whole text, below (disk_words).
-    ! disk_words "$line" || continue
-    case "$line" in
-      *"file watchers"*) ;;
-      # A warning decides nothing, a WARN EACCES no more than another: gyp's
-      # for its dev dir ("gyp WARN EACCES current user ("u") does not have
-      # permission to access the dev dir "/root/.cache/node-gyp/…"") is said
-      # on the way to a build that may fail on its own, and called that
-      # failure the machine's (fifteenth review). Its disk words still count
-      # (npm says a full disk as "npm WARN tar ENOSPC").
-      "WARN "*|*" WARN "*|*"npm warn "*|*[Ww]"arning: "*) ;;
-      *"Permission denied (publickey"*) ;;
-      *" code 126"*|*"spawn "*EACCES*|*"sh: "[0-9]*": Permission denied"*|*"cannot execute"*) run=1 ;;
-      # Bash's own words, the same for a file it could not run and a
-      # redirection it could not write: the path decides. A file in this
-      # release's tree, there and not executable, is one it could not run;
-      # unless this user may not write it either (a record of the install's
-      # made read-only), as a redirection's would be.
-      *": line "[0-9]*": "*": Permission denied"*)
-        p="${line%: Permission denied*}"; p="${p##*: }"
-        case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
-        case "$p" in "${DIR:-$PWD}"/*) if [ -f "$p" ] && [ ! -x "$p" ] && [ -w "$p" ]; then run=1; else deny=1; fi ;; *) if own_place "$p"; then deny=1; else out=1; fi ;; esac ;;
-      # A write it was refused, judged by where: in one of this install's own
-      # places the machine's, anywhere else (/usr/local) the release's own
-      # write (fourteenth review). A line that names no place ("npm error
-      # code EACCES") goes by those that do, and by the step's own words of
-      # failure (below): the machine's only when there are neither.
-      *[Pp]"ermission denied"*|*EACCES*|*[Rr]"ead-only file system"*|*EROFS*)
-        p="$(said_path "$line")"
-        if [ -z "$p" ]; then anon=1; elif own_place "$p"; then deny=1; else out=1; fi ;;
-      *"Broken pipe"*) ;;
-      *[Uu]"nable to write"*|*[Ww]"rite error"*|*[Ss]"hort write"*) short=1 ;;
-      # The step's own failure in its own words: gyp's, a compiler's, make's.
-      # They outrank a permission line that names no place (fifteenth review).
-      *"gyp ERR!"*|*": error: "*|*"fatal error: "*|*"make: *** "*|*"make["[0-9]*"]: *** "*) fail=1 ;;
-    esac
-  done
-  [ "$glob" = 0 ] || set +f
-  if disk_words "$1"; then echo disk
-  elif [ "$run" = 1 ]; then echo own
-  elif [ "$deny" = 1 ]; then echo denied
-  elif [ "$out" = 1 ]; then echo own
-  elif [ "$short" = 1 ]; then echo disk
-  elif [ "$fail" = 1 ]; then echo own
-  elif [ "$anon" = 1 ]; then echo denied
-  elif [ "$said" = 1 ]; then echo own
-  fi
-}
-# The path that "denied" words name ('' when they name none): of the lines
-# that say it, the first that names one, the last quoted ('…', as mv, mkdir,
-# git and Node quote them in English; else "…", as gyp and others do:
-# fifteenth review), else the one just before ": Permission
-# denied" that looks like one, with a / or a dot (bash's own redirections,
-# git's "unable to create file"). said_path TEXT
-said_path() {
-  local p t w='[Pp]ermission denied|EACCES|[Rr]ead-only file system|EROFS'
-  # Not a warning's (said_kind): gyp's WARN names its dev dir, though the step
-  # may fail for another reason.
-  t="$(printf '%s\n' "$1" | grep -vE '(^| )WARN |npm warn |[Ww]arning: ' || true)"
-  p="$(printf '%s\n' "$t" | sed -nE -e "/$w/s/.*'([^']+)'.*/\\1/p" -e "/$w/s/.*\"([^\"]+)\".*/\\1/p" | sed -n 1p)"
-  [ -n "$p" ] || p="$(printf '%s\n' "$t" | sed 's/^/ /' | sed -nE 's/.*[[:space:]]([^[:space:]:]*[/.][^[:space:]:]*): ([Pp]ermission denied|[Rr]ead-only file system).*/\1/p' | sed -n 1p)"
-  printf '%s\n' "$p"
-}
-# own_place PATH: in one of this install's own places, where a write it was
-# refused is the machine's (5): the install, its state folder, npm's and
-# node-gyp's caches in HOME, TMPDIR. Anywhere else (/usr/local, another
-# user's folder) it is the release's own write, 3 (fourteenth review). A
-# relative PATH is the step's, from here.
-own_place() {
-  local p="$1" q
-  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
-  for q in "${DIR:-$PWD}" "${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot" "$HOME/.npm" "$HOME/.cache/node-gyp" "$HOME/.node-gyp" "${TMPDIR:-/tmp}"; do
-    q="${q%/}"
-    case "$p" in "$q"|"$q"/*) return 0 ;; esac
-  done
-  return 1
-}
-# Whether a step that failed did so for want of room: its words say the
-# disk, or the disk holding PATH has next to nothing left (under 64 MB),
-# whatever else it said. A full disk does not always say so: git's "unable to
-# write new index file" names no errno (eighth review; the sixth had words of
-# its own win on a nearly full disk). disk_short PATH [OUTPUT]
-# Under 64 MB any failure is the disk's, on purpose (eleventh review): on a
-# disk that nearly full a step's words cannot be trusted (it may have died
-# writing its own error), and freeing space is needed before anything else.
-disk_short() {
-  [ "$(said_kind "${2:-}")" != disk ] || return 0
-  local mb
-  mb="$(free_mb "$1")"
-  [ -n "$mb" ] && [ "$mb" -lt 64 ]
-}
-# A step's errors, shown as before and kept in STEP_LOG (tee, not a bash loop
-# that opened the log for every line: eleventh review). The step is not run
-# inside $(…), which made it a grandchild of this script. The log may not be
-# writable on the full disk it would show, so the step's last lines are kept
-# in memory too (step_tail: 20 lines, 2 KB at most) and judged there
-# (said_kind); what they said comes back as the reader's status, the only way
-# out of a pipeline, into STEP_SAID (sixth review). Only the last lines, which
-# hold the error that ended the step: a warning early on (gyp's "WARN EACCES"
-# for its dev dir) decided a compile error's exit (eleventh review). awk shows
-# each line as it comes, through its own name for stderr: /dev/stderr opened
-# as a path fails on Linux when stderr is the journal's socket.
-step_tee() {
-  local kept
-  kept="$( { if [ -n "$STEP_LOG" ]; then tee -a "$STEP_LOG" 2>/dev/null; else cat; fi; } \
-    | awk '{ print > "/dev/stderr"; fflush("/dev/stderr"); print }' | step_tail )" || true
-  case "$(said_kind "$kept")" in disk) return 20 ;; own) return 21 ;; denied) return 22 ;; esac
-  return 0
-}
-step_tail() { tail -n 20 | tail -c 2048; }
-# The step log, beside the lock (not TMPDIR, which may be the same full disk:
-# fourth review); where that folder takes no new file, in TMPDIR after all,
-# so the path a permission names can still be read back (twelfth review: the
-# memory's verdict leaves its pipeline as a status only, since the step must
-# stay this script's own child). '' when neither can be made.
-new_step_log() { mktemp "${LOCK_PATH%.lock.d}.step.XXXXXX" 2>/dev/null || mktemp "${TMPDIR:-/tmp}/hatchabot-step.XXXXXX" 2>/dev/null || true; }
-run_step() {
-  local st e=0
-  # Judged by its own words only: an earlier step's warning in the log must
-  # not decide this one's failure (seventh review).
-  STEP_SAID=""
-  [ -z "$STEP_LOG" ] || { : > "$STEP_LOG"; } 2>/dev/null || true
-  # Read with errexit off: under set -euo pipefail a step that succeeded and
-  # said something (step_tee's verdict, 20 to 22) failed the pipeline, and a
-  # run_step not in a condition ended the script (fourteenth review).
-  case "$-" in *e*) e=1; set +e ;; esac
-  { "$@" 2>&1 1>&3 | step_tee; st="${PIPESTATUS[0]} ${PIPESTATUS[1]}"; } 3>&1
-  [ "$e" = 0 ] || set -e
-  case "${st#* }" in 20) STEP_SAID=disk ;; 21) STEP_SAID=own ;; 22) STEP_SAID=denied ;; esac
-  # 126: a file it found and could not run, the release's own, 3 (eleventh
-  # review), unless its words named the disk or a permission of the
-  # machine's: bash's own "Permission denied" names a path, and said_kind
-  # judged by it (a noexec mount, a file outside the release: twelfth review).
-  [ "${st%% *}" != 126 ] || [ "$STEP_SAID" = disk ] || [ "$STEP_SAID" = denied ] || STEP_SAID=own
-  return "${st%% *}"
-}
-# The step run last: the machine's (0) when its last words, as kept in memory
-# (STEP_SAID; the log's last lines only when there is nothing there: the log
-# may have stopped taking lines part-way, on the very disk that filled, eighth
-# review) say the disk or a permission on writing (SHORT_WHY=denied,
-# SHORT_PATH the path the log names: tenth review), else as disk_short judges
-# (SHORT_WHY=disk). step_short PATH
-step_short() {
-  local said kind
-  said="$( { step_tail < "$STEP_LOG"; } 2>/dev/null)" || said=""
-  kind="${STEP_SAID:-$(said_kind "$said")}"
-  SHORT_WHY=disk; SHORT_PATH=""
-  [ "$kind" != disk ] || return 0
-  if [ "$kind" = denied ]; then
-    SHORT_WHY=denied; SHORT_PATH="$(said_path "$said")"
-    return 0
-  fi
-  disk_short "$1"
-}
-# put_rec FILE '>'|'>>' LINE…: a record of the change written or added to, in
-# English and as a step (run_step), so a write that fails is judged like a
-# move: a full disk said 3 there, and counted against the release (fifth review).
-put_rec() {
-  local LC_ALL=C f="$1" how="$2"
-  shift 2
-  if [ "$how" = '>' ]; then printf '%s\n' "$@" > "$f"; else printf '%s\n' "$@" >> "$f"; fi
-}
-# change_failed UNDO WHAT [LINE…]: a step of the change failed (a move of the
-# swap, a record, the checkout, the install). Judged first, by its words
-# (STEP_LOG) or the room left, before UNDO frees what it wrote; then UNDO
-# (the install kind's `undo`, or `:` with nothing changed yet), and said. 5
-# for the disk or a permission, the machine's, the path named when the words
-# name one (tenth review); else 3. One for the swap and the checkout,
-# which each had their own (fifth review). An UNDO that did not work is
-# said, with what to run (REDO), and is 3: it said the disk, and that the old
-# release was back (eighth review).
-change_failed() {
-  local undo_with="$1" what="$2" short=0 free
-  shift 2
-  step_short "$DIR" && short=1
-  free="$(free_mb "$DIR")"
-  [ "$#" = 0 ] || printf '%s\n' "$@"
-  CHANGING=0
-  # Not put back: the tree may be part-way between the two, which no wait
-  # mends. Said so, with what to run, never "the disk" alone (eighth review).
-  if ! "$undo_with"; then
-    echo "Putting ${CUR:-the previous release} back did not work either (above), so $DIR may be part-way between ${CUR:-the previous release} and $TARGET."
-    if [ "$short" = 1 ] && [ "$SHORT_WHY" = denied ]; then echo "This user could not write ${SHORT_PATH:-what it needed} (above: no permission there, or a read-only disk): fix that first."
-    elif [ "$short" = 1 ]; then echo "The disk holding $DIR is full${free:+ ($free MB free)}: free about 1 GB first."; fi
-    echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
-    exit 3
-  fi
-  if [ "$short" = 1 ] && [ "$SHORT_WHY" = denied ]; then
-    echo "This user could not write ${SHORT_PATH:-what it needed} (above: no permission there, or a read-only disk), so $TARGET could not be $what. Fix that, then try again."
-    machine_short
-  elif [ "$short" = 1 ]; then
-    echo "The disk holding $DIR is full${free:+ ($free MB free)}, so $TARGET could not be $what. Free about 1 GB, then try again."
-    machine_short
-  fi
-  exit 3
-}
 
 # The channel chosen last is this install's own, in data/channel (HB-0235):
 # the one file in ~/.config/hatchabot was every install's of the user's, so
@@ -353,6 +155,8 @@ BUNDLED=0; { [ -f BUNDLE.json ] || [ -f .swapping ]; } && [ ! -d .git ] && BUNDL
 # The newer of two versions. `sort -V` alone ranks v2.35.0-beta.1 ABOVE v2.35.0,
 # which stranded a beta tester on the prerelease; "~" sorts below everything.
 vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
+NOTED=0   # 1 once this run wrote the rollback's note for an older release (mark_rolled_back)
+PUT_PATH=""; PUT_ERR=""   # what put_line and put_dir say
 
 # A channel asked for by name is remembered, so the next plain upgrade follows it
 # — even when there is nothing to install today. Not when the channel timer
@@ -365,82 +169,6 @@ vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | se
 # called under `||`, set -e is off in here, and a failed write of the user's
 # file was passed over, this install's own deleted, and the pin said made
 # (second review of HB-0470).
-# put_line FILE LINE…: FILE holds the LINEs, written beside it and renamed over it,
-# so a full disk leaves the old value whole, not an empty file (fourth review).
-# A FILE that is a symlink to a file (stow, a dotfiles folder) is written
-# through: the file it names is replaced beside itself, and the link stays
-# (sixth review). 0 written; 2 something not a file is in the way (PUT_PATH:
-# a folder, which a rename would put it inside; a link to no file, dangling or
-# to a folder; a file where a folder above it goes); 1 the write failed, its
-# words in PUT_ERR.
-PUT_PATH=""; PUT_ERR=""
-# The path a symlink comes to, followed link by link (`readlink -f` is not on
-# older macOS). Non-zero for a loop of links.
-link_end() {
-  local p="$1" l n=0
-  while [ -L "$p" ]; do
-    [ "$n" -lt 40 ] || return 1
-    l="$(readlink "$p")" || return 1
-    case "$l" in /*) p="$l" ;; *) p="$(dirname "$p")/$l" ;; esac
-    n=$((n + 1))
-  done
-  printf '%s\n' "$p"
-}
-put_line() {
-  local p f="$1" end
-  shift
-  PUT_PATH=""; PUT_ERR=""
-  if [ -L "$f" ]; then
-    end="$(link_end "$f")" && [ -f "$end" ] || { PUT_PATH="$f"; return 2; }
-    f="$end"
-  fi
-  for p in "$f" "$f.tmp"; do
-    if [ -L "$p" ] || { [ -e "$p" ] && [ ! -f "$p" ]; }; then PUT_PATH="$p"; return 2; fi
-  done
-  # In English, for disk_short (exported: mkdir and mv say it too, sixth
-  # review); kept, not shown, until put_failed says it.
-  PUT_ERR="$( { export LC_ALL=C; mkdir -p "$(dirname "$f")" && printf '%s\n' "$@" > "$f.tmp" && mv -f "$f.tmp" "$f"; } 2>&1 )" && return 0
-  rm -f "$f.tmp" 2>/dev/null || true
-  # A file where a folder above it goes is in the way too, as put_dir finds
-  # it: mkdir's "File exists" read as the disk (tenth review).
-  local err="$PUT_ERR" rc=0
-  put_dir "$(dirname "$f")" || rc=$?
-  [ "$rc" != 2 ] || return 2
-  PUT_ERR="$err"
-  return 1
-}
-# put_dir DIR: makes the folder DIR, with put_line's codes: 2 when something
-# that is not a folder is in the way (PUT_PATH: DIR itself, or a folder above
-# it); 1 mkdir failed, its words in PUT_ERR (seventh review: it was always
-# the disk).
-put_dir() {
-  local p="$1"
-  PUT_PATH=""; PUT_ERR=""
-  PUT_ERR="$(LC_ALL=C mkdir -p "$1" 2>&1)" && return 0
-  while [ -n "$p" ] && [ "$p" != / ] && [ "$p" != . ]; do
-    if [ -L "$p" ] || [ -e "$p" ]; then
-      [ -d "$p" ] || { PUT_PATH="$p"; return 2; }
-      break
-    fi
-    p="$(dirname "$p")"
-  done
-  return 1
-}
-# put_failed RC MESSAGE: after a put_line, put_dir (or remember_channel) that
-# failed with RC. In the way, named and refused (2), as lock_in_way (fifth
-# review: a folder where the file goes read as a full disk). Anything else
-# (no room, no permission, a read-only disk) is the machine's, 5, as the
-# header says: these are this install's own files, never the release's, and
-# 3 counted against it (ninth review).
-put_failed() {
-  if [ "$1" = 2 ]; then
-    echo "$PUT_PATH is in the way, and no deploy or upgrade made it. Move it away, then try again. Nothing was changed."
-    exit 2
-  fi
-  [ -z "$PUT_ERR" ] || printf '%s\n' "$PUT_ERR" >&2
-  echo "$2"
-  machine_short
-}
 remember_channel() {
   if [ -n "${2:-}" ] && [ "$(vernewer "$2" "$PER_INSTALL_FROM")" != "$2" ]; then
     put_line "$USER_CHANNEL_FILE" "$1" && rm -f "$CHANNEL_FILE"
@@ -505,70 +233,8 @@ LOCKS="${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot"
 PRC=0; put_dir "$LOCKS" || PRC=$?
 [ "$PRC" = 0 ] || put_failed "$PRC" "Could not make $LOCKS, where upgrades keep their lock (a full disk, or no permission there?): nothing was changed. Free some space or fix its permissions, then try again."
 LOCK_PATH="$LOCKS/upgrade-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
-# When a process started, as ps tells it in this run's time zone: how the
-# holder line (owner) has always been written, and how a release before this
-# one reads it, so it stays that way. Read in two zones the same start differs:
-# a holder started from a shell with TZ set (or by the timer, with none) was
-# taken for gone by a run in another zone, and its lock taken while it ran. So
-# the holder also writes its start in UTC beside it (owner.utc), and that is
-# what this release judges by when it is there (review of HB-1067).
-proc_start() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
-proc_start_utc() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//'; }
-# Whether $2 is when pid $1 started, in this zone or in UTC.
-started_as() { [ -n "$2" ] && { [ "$2" = "$(proc_start "$1")" ] || [ "$2" = "$(proc_start_utc "$1")" ]; }; }
 ME="$$"; MY_START="$(proc_start $$)"; [ -z "$MY_START" ] || ME="$$ $MY_START"
 ME_UTC="$$ $(proc_start_utc $$)"
-lock_left_over() {
-  local owner pid utc
-  owner="$(cat "$LOCK_PATH/owner" 2>/dev/null)" || owner=""
-  if [ -z "$owner" ]; then [ -n "$(find "$LOCK_PATH" -maxdepth 0 -mmin +60 2>/dev/null)" ]; return; fi
-  pid="${owner%% *}"
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; return; fi
-  utc="$(cat "$LOCK_PATH/owner.utc" 2>/dev/null)" || utc=""
-  case "$utc" in "$pid "?*) [ "$utc" != "$pid $(proc_start_utc "$pid")" ] ;; *) ! started_as "$pid" "${owner#* }" ;; esac
-}
-# take_lock: 0 taken; 1 another run holds it (or a file is in its way); 2 the
-# machine could not make it or write its holder (a full disk, no permission).
-# A holder that could not be written left the lock behind, holderless, and
-# this run and every one for the next hour said "another upgrade" (4) of a disk
-# that was full (second review of HB-0470): the lock is let go here, and the
-# run ends as the machine's (5). A mkdir that failed on a lock let go just
-# after is tried once more, not taken for the disk (third review).
-take_lock() {
-  LOCK_ERR=""
-  if ! LOCK_ERR="$(LC_ALL=C mkdir "$LOCK_PATH" 2>&1)"; then
-    { [ ! -e "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ]; } || return 1
-    LOCK_ERR="$(LC_ALL=C mkdir "$LOCK_PATH" 2>&1)" || { { [ ! -e "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ]; } || return 1; return 2; }
-  fi
-  LOCK="$LOCK_PATH"
-  # owner.utc first: a reader that finds it with no owner yet takes the lock as just made.
-  if LOCK_ERR="$( { export LC_ALL=C; printf '%s\n' "$ME_UTC" > "$LOCK_PATH/owner.utc" && printf '%s\n' "$ME" > "$LOCK_PATH/owner.$$" && mv -f "$LOCK_PATH/owner.$$" "$LOCK_PATH/owner"; } 2>&1 )"; then
-    # A step log beside the lock is a run's of this install that held it, and
-    # one left now is a killed run's (fifth review).
-    rm -f "${LOCK_PATH%.lock.d}".step.* 2>/dev/null || true
-    return 0
-  fi
-  # Holderless and under an hour old, no other run clears it: it is still this one's to remove.
-  rm -rf "$LOCK_PATH" || true; LOCK=""
-  return 2
-}
-# A lock it could not make, or write its holder in (take_lock's 2): what mkdir
-# or the write said (LOCK_ERR) is shown, the folder named. No room or no
-# permission there, it is the machine's, 5, never the release's (ninth review).
-lock_short() {
-  [ -z "$LOCK_ERR" ] || printf '%s\n' "$LOCK_ERR" >&2
-  echo "Could not take the upgrade lock $LOCK_PATH (above), so nothing was changed. Check that $(dirname "$LOCK_PATH") is a folder this user can write in, on a disk with room, then try again."
-  machine_short
-}
-# Something not a folder where the lock goes (a file, a symlink, dangling or
-# not): no run holds it, and none could take it, so every run said "another
-# upgrade", or the disk (third and fourth reviews). Named, refused.
-lock_in_way() {
-  [ "$LOCK_RC" != 0 ] && { [ -L "$LOCK_PATH" ] || { [ -e "$LOCK_PATH" ] && [ ! -d "$LOCK_PATH" ]; }; } || return 0
-  echo "$LOCK_PATH is in the way of the upgrade lock: it is not a folder, and no deploy or upgrade made it. Remove it (rm \"$LOCK_PATH\"), then try again."
-  exit 2
-}
 # release-target.sh: 1 = no such channel or release (it says which), anything
 # else = it could not find out (no network, an answer that is not a channels
 # file). Neither is the release failing: `|| exit 1` here once got releases
@@ -784,7 +450,12 @@ $f
   rm -rf "$PREV"
   # The unpacked bundle goes with it.
   [ -z "$STAGED" ] || rm -rf "$STAGED"
-  rm -f "$SWAPPING" "$SWAPPING.tmp"
+  # With a restart back to follow (restore_prev RELEASE), the record becomes
+  # that restart's (put_back_rec), in one move: removed and written after, a
+  # cut in between left the release put back with no record, and nothing
+  # restarted it (review of HB-1456). Not written, it goes as before.
+  if [ "$#" -gt 0 ] && put_back_rec "$1"; then rm -f "$SWAPPING.tmp"
+  else rm -f "$SWAPPING" "$SWAPPING.tmp"; fi
 }
 
 # The dependencies' own lock, ensure-deps.sh's (its DEPS_LOCK: the same
@@ -793,8 +464,8 @@ $f
 # its swap (the bundle's own node_modules among its files). Moved without
 # it, a restart's npm ci running there meanwhile had its tree moved from
 # under it, and the stamp it wrote then said up to date over a partial tree
-# (HB-1212). deploy-release.sh keeps a copy of these, held the same by
-# test/nightScripts.test.ts.
+# (HB-1212). deps_lock and deps_unlock, scripts/upgrade-helpers.sh's, as
+# deploy-release.sh's.
 # Held for the move alone: the install step runs ensure-deps.sh, which takes
 # it itself. Written out here, not asked of ensure-deps.sh: a repair moves the
 # dependencies back under a release whose ensure-deps.sh may be older than
@@ -805,70 +476,142 @@ DEPS_LOCK="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
 DEPS_ME="$$"; DEPS_START="$(proc_start_utc $$)"; [ -z "$DEPS_START" ] || DEPS_ME="$$ $DEPS_START"
 # How many one-second tries the lock is waited for: half an hour (tests make it a few).
 DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"; case "$DEPS_WAIT" in ''|*[!0-9]*) DEPS_WAIT=1800 ;; esac
-deps_holder_gone() {
-  local owner pid
-  owner="$(cat "$DEPS_LOCK/owner" 2>/dev/null)" || owner=""
-  if [ -z "$owner" ]; then [ -n "$(find "$DEPS_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; return; fi
-  pid="${owner%% *}"
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start_utc "$pid")" ]; fi
-}
-deps_lock() {
-  local waited=0
-  [ "$DEPS_HELD" != 1 ] || return 0
-  until mkdir "$DEPS_LOCK" 2>/dev/null; do
-    [ -d "$DEPS_LOCK" ] || return 0
-    find "$DEPS_LOCK.takeover" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null || true
-    if deps_holder_gone && mkdir "$DEPS_LOCK.takeover" 2>/dev/null; then
-      if deps_holder_gone; then rm -rf "$DEPS_LOCK"; fi
-      rmdir "$DEPS_LOCK.takeover"
-      continue
-    fi
-    [ "$waited" != 0 ] || echo "Waiting for an install of the dependencies in $DIR to finish before moving them…"
-    waited=$((waited + 1))
-    [ "$waited" -lt "$DEPS_WAIT" ] || return 1
-    sleep 1
-  done
-  # A holder it could not write would read as a run just begun: let go, and on without it.
-  if { printf '%s\n' "$DEPS_ME" > "$DEPS_LOCK/owner.$$" && mv -f "$DEPS_LOCK/owner.$$" "$DEPS_LOCK/owner"; } 2>/dev/null; then DEPS_HELD=1
-  else rm -rf "$DEPS_LOCK"; fi
-  return 0
-}
-deps_unlock() {
-  [ "$DEPS_HELD" = 1 ] || return 0
-  DEPS_HELD=0
-  [ "$(cat "$DEPS_LOCK/owner" 2>/dev/null)" != "$DEPS_ME" ] || rm -rf "$DEPS_LOCK"
-  return 0
-}
 DEPS_STUCK="Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so nothing was moved. If no npm is running there, remove it (rm -r \"$DEPS_LOCK\"), then try again."
 
+# A restart back that did not come up keeps its record (HB-1456): the next
+# run asks first whether the release put back is serving now (kept_check),
+# as a slow one came up after the wait and was restarted every run all the
+# same; not serving, it is restarted again, KEPT_MAX times in all (the
+# record's `tries` lines, back_down), then left for a person, said each run.
+# A run going on to another release goes on (stop_or_go): the record kept
+# stopped every upgrade, and the newer release, which may come up where this
+# one does not, was never tried. One with nothing more to do ends 6: no
+# release was tried, so the timers count no try, and a pin stays (finish).
+# (review of HB-1456)
+KEPT_MAX=3
+# Counted are tries: restart.sh may fail before it restarts anything (ensure-deps).
+kept_stop() { echo "$1 is back in $DIR, but it has not come up after $3 tries to restart it, so upgrades stop restarting it (a rollback to it from another release still does). Once what stops it is fixed (hatchabot doctor), remove the record and restart it: rm \"$2\"; $DIR/scripts/restart.sh"; }
+# back_down RELEASE RECORD: a restart back onto RELEASE did not come up: counted, and said.
+back_down() {
+  local n
+  n=$(( $(kept_tries "$2") + 1 ))
+  printf 'tries %s\n' "$n" >> "$2" 2>/dev/null || true
+  if [ "$n" -lt "$KEPT_MAX" ]; then echo "$1 is back in $DIR, but it did not come up (above). $2 stays: the next upgrade restarts it again if it is still not serving ($n of $KEPT_MAX)."
+  else kept_stop "$1" "$2" "$n"; fi
+}
+# kept_check RELEASE RECORD RESTART…: 0 when RELEASE serves now (the record
+# goes, and nothing is restarted), 2 when it was restarted KEPT_MAX times
+# already, 1 to restart it again. Asked once, of restart.sh's own health check
+# (HATCHABOT_RESTART_PROBE), and only once the service manager has restarted
+# it onto RELEASE (`back`): before, what answers may be the release left,
+# still running.
+kept_check() {
+  local rel="$1" rec="$2" n
+  shift 2
+  if grep -qx back "$rec" 2>/dev/null && HATCHABOT_RESTART_PROBE=1 "$@" >/dev/null 2>&1; then echo "$rel is back in $DIR and serving now, so $rec is removed."; rm -f "$rec"; return 0; fi
+  n="$(kept_tries "$rec")"
+  [ "$n" -lt "$KEPT_MAX" ] || { kept_stop "$rel" "$rec" "$n"; return 2; }
+  return 1
+}
+# stop_or_go RELEASE RECORD: RELEASE, put back, is not up. A run going on to
+# another release goes on, and its own record takes the place of RECORD
+# (went_on says so once it has; kept_again, if it goes back before restarting
+# anything); else 6 (kept_end).
+stop_or_go() {
+  if [ "$REPAIR_ONLY" = 0 ] && [ -n "$TARGET" ] && [ "$TARGET" != "$1" ]; then
+    KEPT_REC="$2"; KEPT_FROM="${1:-the release put back}"; KEPT_SAVED="$(cat "$2" 2>/dev/null || true)"
+    return 0
+  fi
+  kept_end named
+}
+# kept_end [named]: 6, any pin and its record left for the next run (finish).
+# But the release put back named by hand (`named`: by its own name, or by
+# another, "Already on") is the one asked for, and in the tree: pinned, as
+# "Already on" pins it, though it is not up. Left unpinned, the next tick of
+# the timer moved the machine to its channel's release (review of HB-1456).
+kept_end() {
+  if [ "${1:-}" = named ]; then
+    case "${HATCHABOT_UPGRADE_BY_TIMER:-}:$ARG" in 1:*) ;; *:v[0-9]*) pin_named; rm -f "$PIN_RECORD" ;; esac
+  fi
+  PIN_ON=""; KEPT=1; exit 6
+}
+# went_on: said once this run's own record has taken the place of the one
+# kept (stop_or_go). Said there, the run could still end (6, 2, 3 or 4) with
+# that record as it was, and the words untrue.
+went_on() { [ -z "$KEPT_REC" ] || echo "Going on to $TARGET, which may come up where $KEPT_FROM does not: this upgrade's own record has taken the place of $KEPT_REC."; }
+# kept_again: this run went back to the release put back without restarting
+# anything, so it is still not up, and its record goes back as it was when
+# this run went on (with this run's tries).
+kept_again() {
+  put_line "$KEPT_REC" "$KEPT_SAVED" || { echo "Could not write $KEPT_REC again (${PUT_ERR:-$PUT_PATH is in the way}), so nothing restarts $KEPT_FROM: once that is fixed, run $DIR/scripts/restart.sh"; return 0; }
+  echo "$KEPT_REC stays for the next run: $KEPT_FROM is still not up."
+}
+# put_back_rec RELEASE: .swapping as the record of a bundle's restart back onto
+# RELEASE, its files back. It names no file to move (no `in`, no `stage`), so
+# the next run's restore_prev, an older release's too, moves nothing; restart.sh
+# adds `back` once the service manager has restarted it, so that run writes no
+# note (left_ran); `pins-recorded`, so a pin is not read as one an upgrade.sh
+# from before the pin's record left; `put-back`, for what that run does.
+put_back_rec() { put_line "$SWAPPING" "from $1" "$PINS_RECORDED" says-started restarted put-back; }
+# restart_back RELEASE: a bundle's restart back onto RELEASE, with its record
+# (put_back_rec): removed once it comes up, kept (back_down) when it does not
+# (restart.sh's health wait). With none, a release put back that did not come
+# up was left down, and nothing tried again (HB-1456). 1 when it did not come up.
+restart_back() {
+  local rec=1
+  [ -f "$SWAPPING" ] || rec=0
+  if HATCHABOT_RESTART_BACK=1 HATCHABOT_RESTART_RECORD="$SWAPPING" PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh"; then
+    rm -f "$SWAPPING"
+    return 0
+  fi
+  if [ "$rec" = 1 ]; then back_down "$1" "$SWAPPING"
+  else echo "$1 is back in $DIR, but it did not come up (above), and $SWAPPING could not be written (a full disk, or something in its way), so nothing restarts it again: once that is fixed, run $DIR/scripts/restart.sh"; fi
+  return 1
+}
 if [ "$BUNDLED" = 1 ] && [ -f "$SWAPPING" ]; then
-  echo "An upgrade of $DIR was cut off part-way — putting $(sed -n 's/^from //p' "$SWAPPING" | sed -n 1p) back first."
-  WAS_RESTARTED=0; ! grep -qx restarted "$SWAPPING" || WAS_RESTARTED=1
-  # Under the dependencies' lock, as every move of node_modules (deps_lock).
-  deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so the previous release's files are still in $PREV, not put back: the next upgrade puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; exit 3; }
-  restore_prev || { echo "Could not put the previous release back (above): $PREV holds its files."; exit 3; }
-  deps_unlock
-  # The service was already restarted onto the new release: back onto this one.
-  if [ "$WAS_RESTARTED" = 1 ]; then PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || true; fi
+  BACK_TO="$(sed -n 's/^from //p' "$SWAPPING" | sed -n 1p)"
+  if grep -qx put-back "$SWAPPING"; then
+    # Its files are back already: only its restart is owed (restart_back).
+    echo "${BACK_TO:-The previous release} was put back in $DIR by an earlier run, whose restart of it did not come up or was cut off."
+    KC=0; kept_check "${BACK_TO:-The previous release}" "$SWAPPING" env "PATH=$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || KC=$?
+    if [ "$KC" = 1 ]; then restart_back "${BACK_TO:-The previous release}" || stop_or_go "$BACK_TO" "$SWAPPING"
+    elif [ "$KC" = 2 ]; then stop_or_go "$BACK_TO" "$SWAPPING"; fi
+  else
+    echo "An upgrade of $DIR was cut off part-way — putting ${BACK_TO:-the previous release} back first."
+    WAS_RESTARTED=0; ! grep -qx restarted "$SWAPPING" || WAS_RESTARTED=1
+    # Read before restore_prev, which replaces the record (left_ran).
+    LEFT_RAN=0; ! left_ran "$SWAPPING" || LEFT_RAN=1
+    NOTED_AT="$(sed -n 's/^noted //p' "$SWAPPING" | tail -n 1)"
+    STARTED=0; ! grep -qx started "$SWAPPING" || STARTED=1
+    # Under the dependencies' lock, as every move of node_modules (deps_lock).
+    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so the previous release's files are still in $PREV, not put back: the next upgrade puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; exit 3; }
+    # The service was already restarted onto the new release: back onto this
+    # one, written down only if the new release really ran and nothing went back since.
+    # A note written for an older release named, which never started, goes as
+    # that run's rollback would have taken it away (unmark_rolled_back, HB-1455);
+    # one that started, the rollback saw to. Before the files go back: from
+    # there the record is the restart back's alone (restore_prev RELEASE), so a
+    # run cut off after it owes only the restart (review of HB-1456).
+    RP=0
+    if [ "$WAS_RESTARTED" = 1 ]; then
+      if [ "$LEFT_RAN" = 1 ]; then mark_rolled_back "$DIR"; elif [ -n "$NOTED_AT" ] && [ "$STARTED" = 0 ]; then unmark_rolled_back "$DIR" "$NOTED_AT"; fi
+      restore_prev "$BACK_TO" || RP=1
+    else
+      restore_prev || RP=1
+    fi
+    [ "$RP" = 0 ] || { echo "Could not put the previous release back (above): $PREV holds its files."; exit 3; }
+    deps_unlock
+    [ "$WAS_RESTARTED" = 0 ] || restart_back "${BACK_TO:-The previous release}" || stop_or_go "$BACK_TO" "$SWAPPING"
+  fi
 fi
 
 RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
 # A git install's upgrade in progress, beside the lock (in the tree it would
 # read as a local change): `from <release>`, then `restarted` once the service
-# was restarted onto the new one. Left behind, the run was killed part-way
+# was restarted onto the new one (and `started`, `back`: left_ran). Left behind, the run was killed part-way
 # (SIGKILL, a power cut): the checkout may be on the new release with half
 # its dependencies installed, and the old ones in node_modules.prev. The next
 # run puts the old release back first, then upgrades as usual (HB-0043).
-# Every checkout under the record writes its holder there first, by the process
-# that becomes git (pid and start time, as the lock's holder): a kill in the
-# checkout leaves .git/index.lock, and every later upgrade failed on it.
-# Not with a lock already there: this checkout cannot take it and makes no lock
-# of its own, and a line written now left the record newer than the lock of the
-# git that was killed alone, so that lock never read as this run's (below).
-checkout_recorded() {
-  sh -c '[ -e .git/index.lock ] || printf "git %s %s\n" "$$" "$(LC_ALL=C ps -o lstart= -p $$ 2>/dev/null | tr -s " " | sed "s/^ //;s/ $//")" >> "$1"; shift; exec git checkout "$@"' _ "$FROM_FILE" "$@"
-}
 # A git running in this checkout, whoever started it: its pid, or "unknown" when
 # this machine has no way to tell. A commit waiting in its editor holds the lock
 # for as long as the person takes, however old the lock looks.
@@ -955,7 +698,8 @@ repair_tree() {
 }
 if [ "$BUNDLED" = 0 ] && [ -f "$FROM_FILE" ]; then
   FROM="$(sed -n 's/^from //p' "$FROM_FILE" | sed -n 1p)"; TO="$(sed -n 's/^to //p' "$FROM_FILE" | sed -n 1p)"
-  echo "An upgrade of $DIR was cut off part-way — putting ${FROM:-the previous release} back first."
+  if kept_record "$FROM_FILE"; then echo "${FROM:-The previous release} was put back in $DIR by an earlier run, whose restart of it did not come up or was cut off."
+  else echo "An upgrade of $DIR was cut off part-way — putting ${FROM:-the previous release} back first."; fi
   clear_own_index_lock || exit 3
   repair_tree || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
   if [ -d node_modules.prev ]; then
@@ -963,8 +707,31 @@ if [ "$BUNDLED" = 0 ] && [ -f "$FROM_FILE" ]; then
     rm -rf node_modules; mv node_modules.prev node_modules
     deps_unlock
   fi
-  if grep -qx restarted "$FROM_FILE"; then $RESTART || true; fi
-  rm -f "$FROM_FILE"
+  # Written down only if the new release really ran and nothing went back
+  # since: a rollback whose restart back did not answer in time kept this
+  # record, and the release it went back to may have served since (left_ran).
+  # A note written for an older release named, which never started, goes as
+  # that run's rollback would have taken it away (unmark_rolled_back, HB-1455);
+  # one that started, the rollback saw to.
+  GOING=0
+  if grep -qx restarted "$FROM_FILE"; then
+    NOTED_AT="$(sed -n 's/^noted //p' "$FROM_FILE" | tail -n 1)"
+    if left_ran "$FROM_FILE"; then mark_rolled_back "$DIR"; elif [ -n "$NOTED_AT" ] && ! grep -qx started "$FROM_FILE"; then unmark_rolled_back "$DIR" "$NOTED_AT"; fi
+    # A restart back that did not come up (restart.sh's health wait) keeps the
+    # record, so a later run restarts it again (back_down, kept_check): removed,
+    # the service was left down and nothing tried again (HB-1456). The restart
+    # tells the record `back` once the service manager has restarted it, so
+    # that next repair writes no note over what the release gone back to has
+    # kept since (left_ran), as a rollback's restart back does.
+    KC=0; kept_check "${FROM:-The previous release}" "$FROM_FILE" $RESTART || KC=$?
+    if [ "$KC" = 1 ]; then
+      if ! HATCHABOT_RESTART_BACK=1 HATCHABOT_RESTART_RECORD="$FROM_FILE" $RESTART; then
+        back_down "${FROM:-The previous release}" "$FROM_FILE"
+        stop_or_go "$FROM" "$FROM_FILE"; GOING=1
+      fi
+    elif [ "$KC" = 2 ]; then stop_or_go "$FROM" "$FROM_FILE"; GOING=1; fi
+  fi
+  [ "$GOING" = 1 ] || rm -f "$FROM_FILE"
 fi
 # The repair alone: which release comes next needs the network. A pin a killed
 # run left stays recorded for the next full run to see through.
@@ -1012,11 +779,17 @@ if [ "$BUNDLED" = 1 ]; then CUR="$(sed -nE 's/.*"tag":"([^"]+)".*/\1/p' BUNDLE.j
 else CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"; fi
 # Killed once that release was up: it is what is installed, so the pin was kept.
 if [ -n "$PIN_ON" ] && [ "$CUR" = "$PIN_ON" ]; then rm -f "$PIN_RECORD"; PIN_ON=""; PRE_CHANNEL=""; PRE_USER_CHANNEL=""; fi
-if [ "$CUR" = "$TARGET" ]; then pin_named; echo "Already on $TARGET ($CHANNEL)."; exit 0; fi
+if [ "$CUR" = "$TARGET" ]; then
+  # The release put back that is not up (stop_or_go, by another of its names).
+  [ -z "$KEPT_REC" ] || kept_end named
+  pin_named; echo "Already on $TARGET ($CHANNEL)."; exit 0
+fi
 case "$CHANNEL" in v[0-9]*) ;; *)
   # A channel never takes a machine backwards (this one may run ahead of it).
   if [[ "$CUR" == v* ]] && [ "$(vernewer "$CUR" "$TARGET")" = "$CUR" ]; then
-    echo "On $CUR, which is newer than $CHANNEL ($TARGET). Nothing to do — name a version to go back."; exit 0
+    echo "On $CUR, which is newer than $CHANNEL ($TARGET). Nothing to do — name a version to go back."
+    [ -z "$KEPT_REC" ] || kept_end
+    exit 0
   fi ;;
 esac
 if [ "$BUNDLED" = 0 ] && [ -n "$(git --no-optional-locks status --porcelain)" ]; then
@@ -1149,11 +922,23 @@ if [ "$BUNDLED" = 1 ]; then
       echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${CUR}'s files were left in $PREV, not put back. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""
       return 1
     fi
-    restore_prev || return 1
-    deps_unlock
     # The old release's restart, on its own Node — only when the service was
-    # restarted onto the new one; otherwise the old release never stopped.
-    if [ "$RESTARTED" = 1 ]; then PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh"; fi
+    # restarted onto the new one; otherwise the old release never stopped, and
+    # a record kept from before this run is as it was (kept_again).
+    # Written down only if the new one really ran (left_ran); a note this run
+    # wrote for an older release named that never started goes (NOTED). Before
+    # the files go back, as the repair's. Not come up, its own record stays for
+    # the next run (restart_back, HB-1456).
+    if [ "$RESTARTED" = 1 ]; then
+      if left_ran "$SWAPPING"; then mark_rolled_back "$DIR"; elif [ "$NOTED" = 1 ]; then unmark_rolled_back "$DIR"; fi
+      NOTED=0
+      restore_prev "$CUR" || return 1
+    else
+      restore_prev || return 1
+    fi
+    deps_unlock
+    [ "$RESTARTED" = 1 ] || [ -z "$KEPT_REC" ] || kept_again
+    [ "$RESTARTED" = 0 ] || restart_back "$CUR" || { BACK_DOWN=1; return 1; }
     return 0
   }
   undo() { rollback_bundle; }
@@ -1161,15 +946,17 @@ if [ "$BUNDLED" = 1 ]; then
   # stays and the next run repairs from it. Said, with what to run, as
   # change_failed says it; it ended with exit 1 and no next step (review of
   # HB-1212). Still 1: the release itself did not come up.
+  # Back, and only its restart did not come up: restart_back said what comes next.
   rollback_or_redo() {
     rollback_bundle && return 0
-    echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
+    [ "$BACK_DOWN" = 1 ] || echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
   }
   # By its words too: a move across file systems that ran out of room removes
   # its part copy, and the space it took is free again (third review).
   swap_failed() { change_failed undo "swapped in" "$1" "The upgrade stopped part-way — putting $CUR back."; }
   CHANGING=1
-  LC_ALL=C run_step put_rec "$SWAPPING" '>' "from $CUR" "to $TARGET" "stage $STAGE" "$PINS_RECORDED" || swap_failed "Could not write $SWAPPING (above)."
+  LC_ALL=C run_step put_rec "$SWAPPING" '>' "from $CUR" "to $TARGET" "stage $STAGE" "$PINS_RECORDED" says-started || swap_failed "Could not write $SWAPPING (above)."
+  went_on
   # One name at a time, the old one aside and the new one straight in, and
   # scripts/ first: cut off, the tree is short at most the one name being
   # swapped, and holds the new upgrade.sh that repairs it. (Every old name
@@ -1195,7 +982,10 @@ if [ "$BUNDLED" = 1 ]; then
   deps_unlock
   LC_ALL=C run_step put_rec "$SWAPPING" '>>' restarted || swap_failed "Could not write $SWAPPING (above)."
   RESTARTED=1
-  PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || { CHANGING=0; ROLLED_BACK=1; rollback_or_redo || true; exit 1; }
+  # Going back by naming an older release is a rollback too (mark_rolled_back).
+  if older_release "$TARGET" "$CUR"; then mark_rolled_back "$DIR" "$SWAPPING"; NOTED=1; fi
+  # The record told when the service manager has restarted it (left_ran).
+  HATCHABOT_RESTART_RECORD="$SWAPPING" PATH="$DIR/.node/bin:$PATH" "$DIR/scripts/restart.sh" || { CHANGING=0; ROLLED_BACK=1; rollback_or_redo || true; exit 1; }
   CHANGING=0; SERVING=1
   rm -f "$SWAPPING"
   echo "Now on $TARGET."
@@ -1250,14 +1040,27 @@ rollback() {
   back_to_cur || back=1
   restore_deps || back=1
   [ "$back" = 0 ] || return 1
-  if [ "$RESTARTED" = 1 ]; then $RESTART; fi
+  # Written down only if the new release really ran (left_ran); a note this
+  # run wrote for an older release named that never started goes (NOTED).
+  # The restart back tells the record once the service is back, so a repair
+  # after one that did not answer in time writes nothing more.
+  if [ "$RESTARTED" = 1 ]; then
+    if left_ran "$FROM_FILE"; then mark_rolled_back "$DIR"; elif [ "$NOTED" = 1 ]; then unmark_rolled_back "$DIR"; fi
+    NOTED=0
+    HATCHABOT_RESTART_BACK=1 HATCHABOT_RESTART_RECORD="$FROM_FILE" $RESTART || { back_down "$CUR" "$FROM_FILE"; BACK_DOWN=1; return 1; }
+  fi
 }
-undo() { rollback && rm -f "$FROM_FILE"; }
+undo() {
+  rollback || return 1
+  if [ "$RESTARTED" = 0 ] && [ -n "$KEPT_REC" ]; then kept_again; else rm -f "$FROM_FILE"; fi
+  return 0
+}
 # As the bundle's (above): a rollback after the restart that did not work
-# keeps the record, and says what to run (review of HB-1212).
+# keeps the record, and says what to run (review of HB-1212); one back whose
+# restart alone did not come up, back_down said it.
 rollback_or_redo() {
   undo && return 0
-  echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
+  [ "$BACK_DOWN" = 1 ] || echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
 }
 # An upgrade killed (or a power cut) right after moving node_modules aside
 # left node_modules.prev as the only working copy. Put back first: deleted as
@@ -1276,8 +1079,9 @@ rm -rf node_modules.prev
 pin_named
 # Written before anything moves, so a disk too full for it changes nothing;
 # judged as any record is (put_failed: it was always the disk, seventh review).
-PRC=0; put_line "$FROM_FILE" "from $CUR" "to $TARGET" "$PINS_RECORDED" || PRC=$?
+PRC=0; put_line "$FROM_FILE" "from $CUR" "to $TARGET" "$PINS_RECORDED" says-started || PRC=$?
 [ "$PRC" = 0 ] || put_failed "$PRC" "Could not write $FROM_FILE (a full disk, or no permission there?), so nothing was changed. Free some space, then try again."
+went_on
 CHANGING=1
 if [ -d node_modules ]; then mv node_modules node_modules.prev; fi; ASIDE=1
 deps_unlock
@@ -1297,7 +1101,10 @@ LC_ALL=C run_step checkout_recorded --quiet "$TARGET" || change_failed undo "che
 LANG="${LC_ALL:-${LANG-}}" LC_ALL= LC_MESSAGES=C run_step $INSTALL || change_failed undo installed
 LC_ALL=C run_step put_rec "$FROM_FILE" '>>' restarted || change_failed undo started "Could not write $FROM_FILE (above)."
 RESTARTED=1
-$RESTART || { CHANGING=0; ROLLED_BACK=1; rollback_or_redo || true; exit 1; }
+# Going back by naming an older release is a rollback too (mark_rolled_back).
+if older_release "$TARGET" "$CUR"; then mark_rolled_back "$DIR" "$FROM_FILE"; NOTED=1; fi
+# The record told when the service manager has restarted it (left_ran).
+HATCHABOT_RESTART_RECORD="$FROM_FILE" $RESTART || { CHANGING=0; ROLLED_BACK=1; rollback_or_redo || true; exit 1; }
 CHANGING=0; SERVING=1
 # The record first: left behind beside a half-removed node_modules.prev, the
 # next run moved that in over the release now serving.
@@ -1329,45 +1136,7 @@ fi
 # sed (NAME= at the start of a line, a comment taken off), a line
 # `HATCHABOT_IMAGE = x` was the service's image and setup's, but not the
 # upgrade's: setup fetched x, the upgrade the default (review of HB-1210).
-env_named() {
-  local kv k
-  for k in "$@"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
-  while IFS= read -r -d '' kv; do
-    k="${kv%%=*}"
-    printf -v "ENV_$k" '%s' "${kv#*=}"; printf -v "ENVSET_$k" '%s' 1
-  done < <(
-    if [ "$(uname -s)" = Darwin ]; then
-      set +eu
-      for k in "$@"; do unset "$k"; done
-      set -a; . ./.env >/dev/null 2>&1; set +a
-      for k in "$@"; do [ -z "${!k+x}" ] || printf '%s=%s\0' "$k" "${!k}"; done
-    else
-      node -e '
-    const systemd = (t) => {
-      const out = {}; let st = "prekey", k = "", v = "", lw = -1;
-      // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
-      // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
-      const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
-      for (const c of t + "\n") {
-        const nl = c === "\n" || c === "\r", ws = /\s/.test(c);
-        if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
-        else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
-        else if (st === "commentesc") st = "comment";
-        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.trimEnd(); st = "prevalue"; } else k += c; }
-        else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
-        else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
-        else if (st === "esc") { st = "value"; if (!nl) v += c; }
-        else if (st === "single") { if (c === "\x27") st = "prevalue"; else v += c; }
-        else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
-        else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
-      }
-      return out;
-    };
-    const out = systemd(require("node:fs").readFileSync(".env", "utf8"));
-    for (const k of process.argv.slice(1)) if (Object.prototype.hasOwnProperty.call(out, k)) process.stdout.write(k + "=" + out[k] + "\0");' "$@" 2>/dev/null || true
-    fi
-  )
-}
+# (env_named is defined above, with rolled_back_note, which reads .env too.)
 if [ "${HATCHABOT_UPGRADE_IMAGE:-1}" = 1 ] && command -v docker >/dev/null 2>&1; then
   if [ -f .env ]; then env_named DOCKER_HOST HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY; fi
   for v in DOCKER_HOST HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY; do

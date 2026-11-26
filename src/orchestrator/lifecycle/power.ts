@@ -15,7 +15,7 @@ import type { AutoRebuilds } from './autoRebuilds.js';
  * and the sleep a person asks for (hibernate.ts, with the process's
  * `HibernateDeps`). Part of the agent lifecycle service (agentLifecycle.ts).
  * Who may ask, the first checks and the words of every answer are the routes'
- * (src/api/lifecycleRoutes.ts).
+ * (src/api/agents/lifecycleRoutes.ts).
  */
 export interface Power {
   /** Why this agent may not be started now, or undefined when it may. `holdingLock`: the caller holds its busy flag. */
@@ -146,7 +146,7 @@ export function createPower(deps: PowerDeps): Power {
     // the token of a bot another agent might lease next (#10).
     let r: { ok: boolean; agent?: Agent; error?: string };
     try {
-      r = await whileBusy(agent.id, async () => {
+      r = await whileBusy(agent.id, 'start', async () => {
         const now = store.getAgent(agent.id);
         const why = startRefusal(now, true);
         if (why) return { ok: false, error: why };
@@ -180,7 +180,7 @@ export function createPower(deps: PowerDeps): Power {
   // Archive or a Start arriving during the docker stop is refused as busy,
   // instead of finishing underneath it (#10).
   const stopRunning = <T,>(agentId: string, answer: (stopped: Agent) => T): Promise<{ ok: true; value: T } | { ok: false; error: string }> =>
-    whileBusy(agentId, async (): Promise<{ ok: true; value: T } | { ok: false; error: string }> => {
+    whileBusy(agentId, 'stop', async (): Promise<{ ok: true; value: T } | { ok: false; error: string }> => {
       const now = store.getAgent(agentId);
       if (!now?.runtimeRef || now.state !== 'RUNNING') {
         return { ok: false, error: `Cannot stop while ${now?.state ?? 'DELETED'}` };

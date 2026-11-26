@@ -580,7 +580,8 @@ export async function recoverSnapshotRestore(deps: SnapshotDeps, opId: string, a
   op.done(`Restored its files from "${label}".`);
 }
 
-function defaultLabel(reason: SnapshotReason): string {
+/** A snapshot's name when it is given none, and the words for why one was taken (eventLabels.ts). */
+export function defaultLabel(reason: SnapshotReason): string {
   switch (reason) {
     case 'pre-edit':
       return 'before an edit';
@@ -590,6 +591,8 @@ function defaultLabel(reason: SnapshotReason): string {
       return 'before a rebuild';
     case 'pre-adopt':
       return 'before adopting a workspace';
+    case 'pre-params':
+      return 'before its setup values or definition changed';
     case 'scheduled':
       return 'automatic';
     default:

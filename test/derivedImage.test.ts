@@ -108,9 +108,10 @@ describe('renderDockerfile', () => {
     // Quoted delimiters and a << after the quotes are still heredocs.
     expect(dockerfileProblem('RUN cat <<"EOF"\nhi')).toMatch(/heredoc <<EOF is never closed/);
     expect(dockerfileProblem('RUN echo "a" <<EOF\nhi')).toMatch(/heredoc <<EOF is never closed/);
-    // A continued line may begin inside a quote: every << on it counts.
+    // Read on the instruction joined as BuildKit joins it: a quote the line
+    // before opened is still open, and one it closed is closed (HB-1032 review).
     expect(dockerfileProblem('RUN echo "a \\\nb" <<EOF\nhi')).toMatch(/heredoc <<EOF is never closed/);
-    expect(dockerfileProblem('RUN echo a \\\n\n"x <<EOF"')).toMatch(/heredoc <<EOF is never closed/);
+    expect(dockerfileProblem('RUN echo a \\\n\n"x <<EOF"')).toBeNull();
   });
 
   it('a build of a saved record with such lines is refused before docker runs (B002)', async () => {
@@ -239,6 +240,274 @@ describe("RUN's --security and --device, which would weaken the build (HB-1291)"
     const r = { tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.8', packages: [], channels: [], lines: 'RUN --security=insecure true' };
     expect(await buildRecipeOn(m, r)).toEqual({ ok: false, problem: 'RUN --security is not allowed in a derived image.', refused: true });
     expect(m.built).toEqual([]);
+  });
+});
+
+describe("a heredoc's text may say USER, never FROM (HB-1032)", () => {
+  // A script or a file a RUN or COPY writes is data: a line USER=… in it
+  // refused the whole image.
+  const SCRIPT = "RUN cat > /usr/local/bin/fixture.sh <<'EOF'\n#!/bin/sh\nUSER=fixture\necho \"$USER\"\nEOF\nRUN chmod +x /usr/local/bin/fixture.sh";
+  const OWN_FROM = 'A derived image cannot contain its own FROM — the base field sets it.';
+  const USER = 'USER is managed for you (root during your lines, node at the end).';
+  const JUDGED = (why: string, n: number) => `${why} Hatchabot judges every line as if an instruction began on it, since its reading of heredocs and of lines that go on may not be docker's. Write line ${n} another way, such as joined to the line before it, or have a RUN write that file's line with printf.`;
+  it.each([
+    SCRIPT,
+    'COPY <<EOF /etc/fixture.conf\nUSER fixture\nEOF',
+    'RUN <<-EOT\n\tUSER=fixture\n\tEOT',
+    'RUN cat <<A >/a && cat <<B >/b\nUSER a\nA\nUSER b\nB',
+    // Opened on a line the instruction continues into, and a line of its text continued.
+    'RUN apt-get update && \\\n  cat <<EOF > /x\nUSER=x \\\nUSER=y\nEOF',
+    'ONBUILD RUN <<EOF\nUSER=fixture\nEOF',
+    // BuildKit 0.22 and later open a heredoc at a << with spaces or tabs after it.
+    'RUN cat << EOF\nUSER root\nEOF',
+    'RUN cat <<\t EOF >/x\nUSER root\nEOF',
+  ])('accepted: %j', (lines) => {
+    expect(dockerfileProblem(lines)).toBeNull();
+  });
+
+  it('the lines are saved and built', async () => {
+    const { store, f, asked } = await world();
+    try {
+      const res = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OWNER), payload: { name: 'media', dockerfile: SCRIPT } });
+      expect(res.statusCode, res.body).toBe(202);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(asked).toMatchObject([{ name: 'media', dockerfile: SCRIPT }]);
+      expect(store.getDerivedImage('media')?.status).toBe('READY');
+    } finally { await f.close(); }
+  });
+
+  // A FROM is judged on every line, a heredoc's text too: where docker reads
+  // as an instruction a line taken here for text, it starts a stage on any
+  // image, whose ONBUILD lines run with RUN flags nothing here reads (a
+  // --mount=type=cache into the daemon's shared cache), before the image
+  // built is looked at (review of HB-1032). Where it is refused for that,
+  // the words say so.
+  const STAGE = 'RUN echo a<<EOF\nFROM registry.example/onbuild-fixture AS stage\nFROM hatchabot-runtime:latest\nCOPY --from=stage / /opt/x\nRUN cat <<"EOF"\nEOF';
+  it.each([
+    ["RUN cat > /usr/local/bin/fixture.sh <<'EOF'\nUSER=fixture\nFROM scratch\nEOF", JUDGED(OWN_FROM, 3)],
+    ['COPY <<EOF /etc/fixture.conf\nfrom scratch\nEOF', JUDGED(OWN_FROM, 2)],
+    ['RUN <<-EOT\n\tFROM scratch\n\tEOT', JUDGED(OWN_FROM, 2)],
+    ['RUN cat << EOF\nFROM registry.example/onbuild-fixture AS stage\nEOF', JUDGED(OWN_FROM, 2)],
+    // A script a RUN writes, whose line begins as an instruction would: refused, saying why.
+    ["RUN cat <<'EOF' >/opt/fixture.py\nfrom os import path\nEOF", JUDGED(OWN_FROM, 2)],
+    // Lines docker reads otherwise than as a heredoc: no heredoc there, its lines instructions.
+    [STAGE, OWN_FROM],
+    ['RUN cat \\<<EOF\nFROM registry.example/onbuild-fixture AS stage\nEOF', OWN_FROM],
+    ['RUN X=<<EOF\nFROM registry.example/onbuild-fixture AS stage\nEOF', OWN_FROM],
+    ['RUN echo "a \\\n<<EOF"\nFROM registry.example/onbuild-fixture AS stage\nEOF', OWN_FROM],
+  ])("a FROM in what is read as a heredoc's text is still refused: %j", (lines, why) => {
+    expect(dockerfileProblem(lines)).toBe(why);
+  });
+
+  it.each([
+    // Before a heredoc, after it closes, or where no RUN, COPY or ADD opens one: an instruction.
+    ['FROM scratch\nRUN <<EOF\necho hi\nEOF', OWN_FROM],
+    ['RUN <<EOF\necho hi\nEOF\nFROM scratch', OWN_FROM],
+    ['RUN <<EOF\necho hi \\\nEOF\nUSER root', USER],
+    ['ENV X=<<EOF\nUSER root\nEOF', USER],
+    ['RUN echo "<<EOF"\nUSER root\nEOF', USER],
+    // A << that does not begin a word opens no heredoc for docker, nor a <<- with a space after it: the USER after it is an instruction.
+    ['RUN echo a<<EOF\nUSER root\nEOF', USER],
+    ['RUN cat<<EOF\nUSER root\nEOF', USER],
+    ['RUN cat <<- EOF\n\tUSER root\n\tEOF', USER],
+    // A heredoc never closed has no text: its lines are judged (and it is refused for that too).
+    ['RUN <<EOF\nUSER=fixture', USER],
+    ['RUN <<EOF\necho USER=fixture', 'The heredoc <<EOF is never closed by a line "EOF".'],
+  ])('a USER outside a heredoc is refused as before: %j', (lines, why) => {
+    expect(dockerfileProblem(lines)).toBe(why);
+  });
+
+  it.each([
+    ['RUN <<EOF\nRUN --security=insecure true\nEOF', JUDGED('RUN --security is not allowed in a derived image.', 2)],
+    ['RUN <<EOF\nUSER=fixture\nRUN --secu\\\nrity=insecure true\nEOF', JUDGED('RUN --security is not allowed in a derived image.', 3)],
+    ['RUN <<EOF\nRUN --device=vendor.example/gpu=all true\nEOF', JUDGED('RUN --device is not allowed in a derived image.', 2)],
+    ['RUN <<EOF\ncurl --network=host http://127.0.0.1/\nEOF', JUDGED('RUN --network is not allowed in a derived image.', 2)],
+    ['COPY <<EOF /x\nRUN --mount=type=bind,source=/,target=/h true\nEOF', JUDGED('RUN --mount is not allowed in a derived image.', 2)],
+    ['RUN <<EOF\nLABEL org.hatchabot.derived=x\nEOF', JUDGED("A derived image cannot set Hatchabot's own labels (org.hatchabot.…, hatchabot.…): they say what its base was built from, and what its agents' containers are.", 2)],
+  ])("every other rule is judged on a heredoc's text too, as before: %j", (lines, why) => {
+    expect(dockerfileProblem(lines)).toBe(why);
+  });
+});
+
+describe("every line is judged as an instruction's start, whatever the lines' reading takes it for (HB-1032 review)", () => {
+  // Docker starts each instruction at a line's start. Four rounds of review
+  // found a line that the lines' reading took for a heredoc's text, or for
+  // part of the line above, and docker read as an instruction: so every line
+  // is judged as one, joined from there as BuildKit joins it.
+  const OWN_FROM = 'A derived image cannot contain its own FROM — the base field sets it.';
+  const DEVICE = 'RUN --device is not allowed in a derived image.';
+  const LABELS = "A derived image cannot set Hatchabot's own labels (org.hatchabot.…, hatchabot.…): they say what its base was built from, and what its agents' containers are.";
+  const JUDGED = (why: string, n: number) => `${why} Hatchabot judges every line as if an instruction began on it, since its reading of heredocs and of lines that go on may not be docker's. Write line ${n} another way, such as joined to the line before it, or have a RUN write that file's line with printf.`;
+  const FROM = 'FROM registry.example/onbuild-fixture AS stage';
+
+  // Each with a closing line `CMD\` that BuildKit (0.22 and later) closes the
+  // heredoc at, and the lines' reading did not: the line after it, for
+  // docker an instruction, was read as part of `CMD\` (the round-4 review).
+  const LAYOUTS: Array<[string, (hidden: string) => string]> = [
+    ['a space after <<', (x) => `RUN cat << 'CMD\\' >/dev/null\nCMD\\\n${x}\nCMD`],
+    ['a tab after <<', (x) => `RUN cat <<\t'CMD\\' >/dev/null\nCMD\\\n${x}\nCMD`],
+    ['digits before <<', (x) => `RUN cat 0<< 'CMD\\' >/dev/null\nCMD\\\n${x}\nCMD`],
+    ['<< then -', (x) => `RUN cat << -'CMD\\' >/dev/null\n-CMD\\\n${x}\n-CMD`],
+    ['in $(…)', (x) => `RUN echo $(cat << 'CMD\\' )\nCMD\\\n${x}\nCMD`],
+    ['an ONBUILD RUN', (x) => `ONBUILD RUN cat << 'CMD\\' >/dev/null\nCMD\\\n${x}\nCMD`],
+    ['<<\\ then the name on the next line', (x) => `RUN cat <<\\\n 'CMD\\' >/dev/null\nCMD\\\n${x}\nCMD`],
+    // Each earlier round's layout: a heredoc's text, a name ending in \, a << split over two lines, a word that begins with $, and a plain continuation.
+    ["a heredoc's text", (x) => `RUN cat <<EOF >/x\n${x}\nEOF`],
+    ["<<'CMD\\'", (x) => `RUN cat <<'CMD\\' >/dev/null\nCMD\\\n${x}\nCMD`],
+    ['a << split over two lines', (x) => `RUN cat <\\\n<'CMD\\' >/dev/null\nCMD\\\n${x}\nCMD`],
+    ['$X<<', (x) => `RUN cat $X<<'CMD\\' >/dev/null\nCMD\\\n${x}\nCMD`],
+    ['a line that goes on', (x) => `RUN echo \\\n${x}`],
+  ];
+  it.each(LAYOUTS)('a FROM, a RUN --device and a LABEL of Hatchabot\'s after %s are refused', (_name, layout) => {
+    for (const [hidden, why] of [[FROM, OWN_FROM], ['RUN --device=vendor.example/gpu=all true', DEVICE], ['LABEL org.hatchabot.derived=x', LABELS]] as const) {
+      expect(dockerfileProblem(layout(hidden))).toMatch(new RegExp(`^${why.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    }
+  });
+
+  it.each([
+    // In backticks, or named # or a space: the reading opens no heredoc, so the FROM is an instruction to it too.
+    ["RUN echo `cat << 'CMD\\'`\nCMD\\`\n" + FROM + '\nCMD', OWN_FROM],
+    [`RUN cat << '#x' >/dev/null\n#x\n${FROM}\n#x`, OWN_FROM],
+    [`RUN cat << ' ' >/dev/null\n \n${FROM}\n `, OWN_FROM],
+    [`RUN cat << 'CMD\\' >/dev/null\nCMD\\\n${FROM}\nCMD`, JUDGED(OWN_FROM, 3)],
+    // A line that goes on into a line that begins as an instruction would: refused, saying why.
+    ['RUN echo a\\\nFROM registry.example/onbuild-fixture AS stage', JUDGED(OWN_FROM, 2)],
+  ])('the round-4 layouts are refused, and the words say why: %j', (lines, why) => {
+    expect(dockerfileProblem(lines)).toBe(why);
+  });
+
+  it.each([
+    "RUN cat <<'EOF' >/opt/fixture.py\nprint(1 << 4)\nEOF",
+    "RUN cat <<'EOF' >/opt/fixture.py\nx <<= 1\nEOF",
+    'RUN cat <<EOF >/opt/fixture.sh\necho $((1<<2))\nEOF',
+    'RUN cat <<EOF >/opt/fixture.sh\necho $((1 << 2))\nEOF',
+  ])("a heredoc's text is not read for heredocs, whose lines docker never reads for one: %j", (lines) => {
+    expect(dockerfileProblem(lines)).toBeNull();
+  });
+});
+
+describe('a line that ends with \\\\ goes on for no one (HB-1032 review)', () => {
+  // BuildKit continues a line only when its last \\ does not follow another;
+  // read as going on, `RUN echo a\\\\` hid the line after it.
+  const DOUBLED = (n: number) => `Line ${n} ends with \\\\: docker reads that as an escaped \\, not as a line that goes on. End it with one \\ to go on to the next line, or with none.`;
+  it.each([
+    ['RUN echo a\\\\\nFROM registry.example/onbuild-fixture AS stage', 1],
+    ['RUN echo a\\\\\nRUN --device=vendor.example/gpu=all true', 1],
+    ['RUN echo a\\\\\nRUN --security=insecure true', 1],
+    ['RUN true\n# a note\nRUN echo a \\\\\\  \nFROM registry.example/onbuild-fixture AS stage', 3],
+    ['RUN apt-get install -y \\\n  ffmpeg \\\\\nRUN true', 2],
+  ])('refused: %j', (lines, n) => {
+    expect(dockerfileProblem(lines)).toBe(DOUBLED(n));
+  });
+  it("a comment line may end with it, and a heredoc's text, and one \\ goes on as before", () => {
+    expect(dockerfileProblem('# a note \\\\\nRUN true')).toBeNull();
+    expect(dockerfileProblem('RUN cat <<EOF >/x\nprintf "%s" a\\\\\nEOF')).toBeNull();
+    expect(dockerfileProblem('RUN apt-get install -y \\\n  ffmpeg')).toBeNull();
+  });
+});
+
+describe("a heredoc's name is a plain word, read as BuildKit reads it (HB-1032 review)", () => {
+  // BuildKit names a heredoc by the whole word after `<<`, its quotes and
+  // escapes out: `<<'CMD\'` is named `CMD\`, so the line `CMD\` closes it
+  // and the next line is an instruction. Read as `CMD`, that line joined the
+  // next. Every line is judged as an instruction now; a name that is not a
+  // plain word is refused on an instruction's line still, so where its
+  // heredoc ends is never in doubt.
+  const NAMED = (written: string) => `The heredoc ${written} is not named with a plain word. A heredoc's name must be a plain word such as EOF (letters, digits and _, quoted or not: <<EOF, <<'EOF').`;
+  const JUDGED = (why: string, n: number) => `${why} Hatchabot judges every line as if an instruction began on it, since its reading of heredocs and of lines that go on may not be docker's. Write line ${n} another way, such as joined to the line before it, or have a RUN write that file's line with printf.`;
+  const OWN_FROM = 'A derived image cannot contain its own FROM — the base field sets it.';
+  const SINGLE = "RUN cat <<'CMD\\' >/dev/null\nCMD\\\nFROM registry.example/onbuild-fixture AS stage\nCMD\nRUN cat <<'CMD\\' >/dev/null\nCMD\\\nFROM hatchabot-runtime:latest\nCMD\nCOPY --from=stage / /opt/x";
+  const DOUBLE = 'RUN cat <<"CMD\\\\" >/dev/null\nCMD\\\nFROM registry.example/onbuild-fixture AS stage\nCMD\nRUN cat <<"CMD\\\\" >/dev/null\nCMD\\\nFROM hatchabot-runtime:latest\nCMD\nCOPY --from=stage / /opt/x';
+  it.each([
+    [SINGLE, JUDGED(OWN_FROM, 3)],
+    [DOUBLE, JUDGED(OWN_FROM, 3)],
+    ['RUN cat <<9\\\\ >/dev/null\n9\\\nFROM registry.example/onbuild-fixture AS stage\n9', JUDGED(OWN_FROM, 3)],
+    ["RUN cat <<'CMD\\' >/dev/null\nCMD\\\necho hi\nCMD", NAMED("<<'CMD\\'")],
+    ['RUN cat <<"CMD\\\\" >/dev/null\nCMD\\\necho hi\nCMD', NAMED('<<"CMD\\\\"')],
+    ['RUN cat <<EOF; echo done\nhi\nEOF', NAMED('<<EOF;')],
+    ['RUN cat <<EOF>/etc/fixture.conf\nhi\nEOF', NAMED('<<EOF>/etc/fixture.conf')],
+    ['RUN cat <<END-OF-TEXT >/x\nhi\nEND-OF-TEXT', NAMED('<<END-OF-TEXT')],
+    // Read on the joined instruction: a word the next line goes on with, or a quote never closed.
+    ['RUN cat <<EOF\\\n>/x\nhi\nEOF', NAMED('<<EOF>/x')],
+    ["RUN cat <<'EOF >/x\nhi\nEOF", NAMED("<<'EOF >/x")],
+    // With spaces or tabs after the << (BuildKit 0.22 and later), the round-4 layouts.
+    ["RUN cat << 'CMD\\' >/dev/null\nCMD\\\necho hi\nCMD", NAMED("<< 'CMD\\'")],
+    ["RUN cat <<\t'CMD\\' >/dev/null\nCMD\\\necho hi\nCMD", NAMED("<<\t'CMD\\'")],
+    ["RUN cat << '#x' >/dev/null\n#x\necho hi\n#x", NAMED("<< '#x'")],
+    ["RUN cat << ' ' >/dev/null\n \necho hi\n ", NAMED("<< ' '")],
+    ["RUN cat << -'CMD\\' >/dev/null\n-CMD\\\necho hi\n-CMD", NAMED("<< -'CMD\\'")],
+    // A shift with a space after it, on an instruction's line: BuildKit opens a heredoc named `2))` there.
+    ['RUN echo $((1 << 2)) && cat <<EOF >/x\nhi\nEOF', NAMED('<< 2))')],
+    ['RUN x <<= 1', NAMED('<<=')],
+    // A line that is its name with a \ after it: one reading closes there, another goes on.
+    ['RUN cat <<EOF\nEOF\\\necho hi\nEOF', 'The heredoc <<EOF has a line "EOF\\" that ends with a \\. A heredoc ends at a line that is its name alone, EOF, with nothing after it.'],
+  ])('refused: %j', (lines, why) => {
+    expect(dockerfileProblem(lines)).toBe(why);
+  });
+
+  // A `<<` split over a continued line is one to BuildKit, which reads the
+  // instruction joined (HB-1032 review): with a blank or a comment line
+  // between the halves, quoted either way, and with <<-.
+  const SPLIT = (opener: string, closer: string) => `RUN cat <\\\n${opener} >/dev/null\n${closer}\\\necho hi\n${closer}`;
+  it.each([
+    [SPLIT("<'CMD\\'", 'CMD'), NAMED("<<'CMD\\'")],
+    [SPLIT("<'CMD\\'", 'CMD').replace('<\\\n<', '<\\\n\n<'), NAMED("<<'CMD\\'")],
+    [SPLIT("<'CMD\\'", 'CMD').replace('<\\\n<', '<\\\n# a note\n<'), NAMED("<<'CMD\\'")],
+    [SPLIT('<"CMD\\\\"', 'CMD'), NAMED('<<"CMD\\\\"')],
+    [SPLIT("<-'CMD\\'", 'CMD'), NAMED("<<-'CMD\\'")],
+  ])('a << split over a continued line is read joined: %j', (lines, why) => {
+    expect(dockerfileProblem(lines)).toBe(why);
+  });
+
+  // BuildKit fills in no variable where it looks for heredocs
+  // (SkipUnsetEnv): a word that begins with $ opens none, whatever its ${…}
+  // holds.
+  it.each([
+    'RUN echo hi\nRUN ${X:-<<}"USER node"',
+    'RUN cat ${X:-<}<EOF <<A\nA\nEOF',
+    "RUN cat $X<<'CMD\\' >/dev/null\nCMD\\\necho hi\nCMD",
+    'RUN cat ${FILE:-a b} <<EOF >/x\nhi\nEOF',
+  ])('a word that begins with $ opens no heredoc: %j', (lines) => {
+    expect(dockerfileProblem(lines)).toBeNull();
+  });
+
+  it.each([
+    'RUN <<EOF\necho hi\nEOF',
+    'RUN <<-EOF\n\techo hi\n\tEOF',
+    "RUN cat <<'EOF' >/x\n$HOME\nEOF",
+    'RUN cat <<"EOF" >/x\nhi\nEOF',
+    'RUN cat <<\\EOF >/x\n$HOME\nEOF',
+    'RUN cat << EOF >/x\nhi\nEOF',
+    'RUN cat <<  EOF >/x\nhi\nEOF',
+    "RUN cat << 'EOF' >/x\n$HOME\nEOF",
+    'RUN cat <<A >/a && cat <<B >/b\nx\nA\ny\nB',
+    'COPY <<EOF1 <<EOF2 /etc/\nx\nEOF1\ny\nEOF2',
+    'RUN cat <<EOF \\\n  >/x\nhi\nEOF',
+    'RUN cat <<EOF_2 >/x\nhi\nEOF_2',
+    'RUN cat <<< "hi"',
+    'RUN echo "example <<EOF;"',
+    // No heredoc where BuildKit opens none: a << inside a word, or in $((…)) with no space after it.
+    'RUN echo $((1<<2))',
+    'RUN cat <\\\n<EOF >/x\nhi\nEOF',
+    'RUN cat 0<<EOF\nhi\nEOF',
+  ])('accepted: %j', (lines) => {
+    expect(dockerfileProblem(lines)).toBeNull();
+  });
+
+  it.each([SINGLE, DOUBLE])('a build of such lines is refused before docker runs: %j', async (dockerfile) => {
+    const res = await buildDerivedImage({ name: 'media', base: 'hatchabot-runtime:latest', dockerfile, docker: '/nonexistent/docker', dataDir: mkdtempSync(join(tmpdir(), 'hb-derive-')) });
+    expect(res).toEqual({ ok: false, error: JUDGED(OWN_FROM, 3) });
+  });
+
+  it.each([SINGLE, DOUBLE])('saving such lines is refused: %j', async (dockerfile) => {
+    const { store, f, asked } = await world();
+    try {
+      const res = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OWNER), payload: { name: 'media', dockerfile } });
+      expect(res.statusCode, res.body).toBe(400);
+      expect(res.json().error).toBe(JUDGED(OWN_FROM, 3));
+      expect(asked).toEqual([]);
+      expect(store.getDerivedImage('media')).toBeUndefined();
+    } finally { await f.close(); }
   });
 });
 
@@ -887,6 +1156,48 @@ esac
   it("the owner's own labels, the base's, and the one Hatchabot sets on the build leave it used (HB-0986 review)", async () => {
     const d = fake({ labels: '{"org.hatchabot.build-inputs":"v1;openclaw=2026.9.8","org.agentclaw.openclaw-version":"2026.9.8","maintainer":"y","org.example.version":"5","org.example.hatchabot.kind":"media","org.hatchabot.derived":"media"}', baseLabels: BASE_LABELS });
     expect(await build(d.bin)).toEqual({ ok: true });
+  });
+
+  // A USER in a heredoc's text passes the lines' check (HB-1032). Whatever
+  // docker makes of it, the image built must still run as node.
+  it("a USER in a heredoc's text passes the lines' check, and an image built that runs as root is not used", async () => {
+    const dockerfile = 'RUN cat <<EOF\nUSER root\nEOF';
+    expect(dockerfileProblem(dockerfile)).toBeNull();
+    const d = fake({ user: '"root"' });
+    expect(await buildDerivedImage({ name: 'media', base: BASE, dockerfile, tag: TAG, docker: d.bin, dataDir: join(dir, 'data') })).toEqual({ ok: false, error: 'The built image would run as root, not node: a line in it hides the USER node Hatchabot adds at the end (a heredoc that runs to the end, for example). Change the lines and Rebuild.' });
+    const calls = await d.calls();
+    expect(calls.filter((c) => c.startsWith('tag ') || c.includes(` ${TAG}`))).toEqual([]);
+    expect(calls.at(-1)).toBe(`rmi ${BUILT}`);
+  });
+
+  // A heredoc a variable might open (`${X:-<<}"USER node"`, named `USER
+  // node` and closed by Hatchabot's own last line, were the default filled
+  // in: HB-1284) passes the lines' check: BuildKit fills in no variable where
+  // it looks for heredocs (SkipUnsetEnv). Were one ever read so, the image
+  // built would run as root, and is not used.
+  it('a heredoc a variable might open passes the lines\' check, and an image built that runs as root is not used', async () => {
+    const dockerfile = 'RUN echo hi\nRUN ${X:-<<}"USER node"';
+    expect(dockerfileProblem(dockerfile)).toBeNull();
+    const d = fake({ user: '"root"' });
+    expect(await buildDerivedImage({ name: 'media', base: BASE, dockerfile, tag: TAG, docker: d.bin, dataDir: join(dir, 'data') })).toEqual({ ok: false, error: 'The built image would run as root, not node: a line in it hides the USER node Hatchabot adds at the end (a heredoc that runs to the end, for example). Change the lines and Rebuild.' });
+    const calls = await d.calls();
+    expect(calls.filter((c) => c.startsWith('tag ') || c.includes(` ${TAG}`))).toEqual([]);
+    expect(calls.at(-1)).toBe(`rmi ${BUILT}`);
+  });
+
+  // A FROM there is refused before anything is built: `FROM … AS stage`
+  // starts a stage on any image, and its ONBUILD lines run in the build,
+  // with flags nothing here reads, before the image built can be looked at
+  // (review of HB-1032).
+  it.each([
+    'RUN echo a<<EOF\nFROM other.example/fixture AS \\\nEOF\nRUN true',
+    'RUN echo a<<EOF\nFROM registry.example/onbuild-fixture AS stage\nFROM hatchabot-runtime:latest\nCOPY --from=stage / /opt/x\nRUN cat <<"EOF"\nEOF',
+  ])("a FROM that the lines' reading would take for a heredoc's text is refused, and nothing is built: %j", async (dockerfile) => {
+    const error = 'A derived image cannot contain its own FROM — the base field sets it.';
+    expect(dockerfileProblem(dockerfile)).toBe(error);
+    const d = fake();
+    expect(await buildDerivedImage({ name: 'media', base: BASE, dockerfile, tag: TAG, docker: d.bin, dataDir: join(dir, 'data') })).toEqual({ ok: false, error });
+    expect(await d.calls()).toEqual([]);
   });
 
   it('the base as it was read before the build is the one it must be built on: a base moved meanwhile is refused, never taken', async () => {

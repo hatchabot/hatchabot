@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONTROL_UI_MATH_PREFIX, CONTROL_UI_MATH_SCRIPT_PATH, CONTROL_UI_MATH_SOURCE_PATH, CONTROL_UI_MATH_STYLES_PATH,
-  KATEX_SCRIPT_PATH, KATEX_STYLES_PATH, readControlUiMathAsset, withControlUiMath } from '../src/api/controlUiMath.js';
+  KATEX_SCRIPT_PATH, KATEX_STYLES_PATH, readControlUiMathAsset, withControlUiMath } from '../src/api/console/controlUiMath.js';
 
 const require = createRequire(import.meta.url);
 

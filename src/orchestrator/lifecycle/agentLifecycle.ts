@@ -32,7 +32,7 @@ import { createRebuildQueue, type RebuildQueue, type RebuildQueueDeps } from './
  * `kickProvision`, `provisionWhenFree`, `kickRebuild`, `oweRebuild` and
  * `rebuildOrOwe` as before. `stop()` ends the sweep's interval and a setup's
  * waits. Nothing here knows HTTP: who may ask and the words of an answer are
- * src/api/lifecycleRoutes.ts's.
+ * src/api/agents/lifecycleRoutes.ts's.
  *
  * Not here: PATCH /v1/agents/:id, which stays in src/api/routes.ts (HB-0825).
  */

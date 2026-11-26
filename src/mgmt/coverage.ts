@@ -262,4 +262,5 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/ops-agent': 'app: browser — setting up the account’s own management agent',
   'POST /v1/ops-agent/suggest': 'app: browser — asking the management agent what agents to add',
   'POST /v1/proposals/:id/:verb': 'app: internal — pressing Confirm or Cancel on a proposal',
+  'POST /v1/proposals/:id/again': 'app: browser — the owner files again a change a restart cut off, after checking it did not happen; the new card waits for Confirm',
 };

@@ -7,7 +7,7 @@ import type { SecretStore } from '../../secrets/secretStore.js';
 import type { Store } from '../../store/store.js';
 import { dropAppPending } from '../apps/appPending.js';
 import { archiveAgent, ArchiveError, copyElsewhere, leaveBotToCopy } from './archive.js';
-import { AgentBusyError, clearBusy, isBusy, markBusy } from './busy.js';
+import { AgentBusyError, isBusy, markBusy } from './busy.js';
 import { parkDiscordBot } from '../channels/discordPool.js';
 import { eventLabel, IN_PROGRESS } from '../health/eventLabels.js';
 import { forgetFilesReplacing, handleFor, holdDeleteEnds } from './operations.js';
@@ -17,7 +17,7 @@ import { machineLoginOnly, modelOverrideProblem } from './modelRuntime.js';
 /** A Claude Max source on this machine's login cannot reach a runner: create's and PATCH's words. */
 export const MACHINE_LOGIN_NO_RUNNER = "This Claude Max profile uses this machine's login, which can't reach a runner. Run `claude setup-token` and add it as a setup-token AI source, or use an API-key profile.";
 
-/** A new agent as the create route's body gives it (`CreateAgent` in src/api/lifecycleRoutes.ts). */
+/** A new agent as the create route's body gives it (`CreateAgent` in src/api/agents/lifecycleRoutes.ts). */
 export interface NewAgent {
   name: string;
   persona?: string;
@@ -39,7 +39,7 @@ export type RecordRefusal = { ok: false; status: number; error: string };
  * and the other features read (`archiving`, `deletesRunning`). Part of the
  * agent lifecycle service (agentLifecycle.ts). Nothing here knows HTTP: who
  * may ask, the first checks (the agent's, `busyNow`, the agent cap's place)
- * and the words of the answer are src/api/lifecycleRoutes.ts's; a refusal is
+ * and the words of the answer are src/api/agents/lifecycleRoutes.ts's; a refusal is
  * a result with its status and words.
  *
  * A restart loses nothing of it (docs/architecture.md, "In-memory state,
@@ -295,7 +295,7 @@ export function createAgentRecords(deps: AgentRecordsDeps): AgentRecords {
     // lifecycle changes out until the channels and state are committed; a
     // deleted agent must never regain credentials after its scrub (HB-0702).
     // busyNow was checked above with no await before this claim.
-    markBusy(agent.id);
+    const release = markBusy(agent.id, 'unarchive');
     try {
     // The bots it left in the pool come back to it, if still there. Their
     // identity is checked with the platform again (a Slack deep link needs the
@@ -325,7 +325,7 @@ export function createAgentRecords(deps: AgentRecordsDeps): AgentRecords {
       }
     }
     store.setAgentState(agent.id, 'PROVISIONING');
-    } finally { clearBusy(agent.id); }
+    } finally { release(); }
     // Nobody was asked about Telegram here: with no pool bot free it comes
     // back web-only and the owner is told (Alerts), rather than sitting in
     // PROVISIONING until someone pastes a token (2026-10-07).

@@ -2,7 +2,7 @@ import { routedPath } from './routedPath.js';
 import { redactUrlForLog } from './requestLog.js';
 import { publicUrlWritten } from '../orchestrator/reach/appAddress.js';
 import type { FastifyInstance } from 'fastify';
-import type { RequestLike } from './sessionCookie.js';
+import type { RequestLike } from './signIn/sessionCookie.js';
 
 /**
  * Refuse what a browser sends to this Hatchabot on another site's behalf.

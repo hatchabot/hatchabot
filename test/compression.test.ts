@@ -7,10 +7,12 @@ import { dirname, join } from 'node:path';
 import { cpSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib';
+import { execFileSync } from 'node:child_process';
+import { Script } from 'node:vm';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { etagMatches, versionMarkup } from '../src/api/pageRoutes.js';
+import { etagMatches, versionMarkup } from '../src/api/machine/pageRoutes.js';
 import { metaVersion, versionMarker } from '../src/doctor.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
@@ -167,16 +169,59 @@ describe("the page's scripts (web/app/, HB-0811)", () => {
     }
   });
 
-  it('by any other address a script is the current file, revalidated each time; nothing else is read', async () => {
+  it('with no digest a script is the current file, revalidated each time; nothing else is read', async () => {
     const { f } = await world();
-    for (const url of ['/app/core.js', '/app/core.js?v=an-old-digest']) {
-      const res = await f.inject({ method: 'GET', url });
-      expect(res.statusCode, url).toBe(200);
-      expect(res.headers['cache-control'], url).toBe('no-cache');
-    }
-    for (const url of ['/app/missing.js', '/app/Core.js', '/app/core.txt', '/app/..%2fsw.js', '/app/%2e%2e%2findex.html', '/app/', '/app/a/b.js']) {
+    const res = await f.inject({ method: 'GET', url: '/app/core.js' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']).toBe('no-cache');
+    expect(res.body).toBe(readFileSync(join(dirname(webIndexPath), 'app', 'core.js'), 'utf8'));
+    for (const url of ['/app/missing.js', '/app/Core.js', '/app/core.txt', '/app/..%2fsw.js', '/app/%2e%2e%2findex.html', '/app/', '/app/a/b.js', '/app/Core.js?v=x', '/app/core.txt?v=x']) {
       expect((await f.inject({ method: 'GET', url })).statusCode, url).toBe(404);
     }
+  });
+
+  it('by another release\'s digest a script is the stand-in that asks for a reload, never kept, the same for every request (HB-0894)', async () => {
+    const { f } = await world();
+    const standIn = readFileSync(join(dirname(webIndexPath), 'upgraded.js'), 'utf8');
+    const current = await f.inject({ method: 'GET', url: '/app/core.js' });
+    // A page from before an upgrade, one asking for a script this release no longer has, and addresses no page names.
+    for (const url of ['/app/core.js?v=an-old-digest', '/app/gone.js?v=an-old-digest', '/app/core.js?v=', '/app/core.js?v', '/app/core.js?v=a&v=b',
+      '/app/core.js?v=%3C%2Fscript%3E%3Cb%3Ehi%3C%2Fb%3E', '/app/core.js?v=x&note=%22%3E%3Cscript%3E']) {
+      // A copy the browser kept of the current file does not make it the current file.
+      const res = await f.inject({ method: 'GET', url, headers: { 'if-none-match': String(current.headers.etag) } });
+      expect(res.statusCode, url).toBe(200);
+      expect(res.headers['content-type'], url).toBe('text/javascript; charset=utf-8');
+      expect(res.headers['cache-control'], url).toBe('no-store');
+      expect(res.headers.etag, url).toBeUndefined();
+      expect(res.body, url).toBe(standIn);
+    }
+    expect(standIn).toContain("'Hatchabot was just upgraded. Reload to finish.'");
+    expect(standIn).toContain("'Reload'");
+    expect(standIn).toContain('location.reload()');
+    // It reloads only from its button.
+    expect(standIn.match(/location\.reload\(\)/g)).toHaveLength(1);
+    expect(standIn).toMatch(/addEventListener\('click', function \(\) \{ location\.reload\(\); \}\)/);
+  });
+
+  // Review of HB-0894: read at the first old digest, a missing web/upgraded.js was a 500 on every one.
+  it('a web folder without the stand-in is refused as the routes are set up, not with a 500 on each old page\'s script', async () => {
+    const web = mkdtempSync(join(tmpdir(), 'hb-page-'));
+    try {
+      cpSync(dirname(webIndexPath), web, { recursive: true });
+      rmSync(join(web, 'upgraded.js'));
+      await expect(world({ web })).rejects.toThrow(`${join(web, 'upgraded.js')} is missing: this release's web folder is incomplete. Install the release again.`);
+    } finally { rmSync(web, { recursive: true, force: true }); }
+  });
+
+  it('the stand-in is valid as a classic script and as a module, and declares nothing a page\'s scripts could clash with (HB-0894)', () => {
+    const standIn = readFileSync(join(dirname(webIndexPath), 'upgraded.js'), 'utf8');
+    expect(() => new Script(standIn)).not.toThrow();
+    expect(() => execFileSync(process.execPath, ['--input-type=module', '--check'], { input: standIn, stdio: ['pipe', 'pipe', 'pipe'] })).not.toThrow();
+    // One expression: a function called at once, so nothing it names is global.
+    const code = standIn.replace(/^\s*\/\/.*$/gm, '').trim();
+    expect(code.startsWith('(function () {') && code.endsWith('})();'), code.slice(0, 40)).toBe(true);
+    // It reads no address, so nothing of the request can reach the page through it.
+    expect(standIn).not.toMatch(/location\.(href|search|hash|pathname)|document\.(URL|currentScript|referrer)|innerHTML|insertAdjacentHTML|document\.write/);
   });
 
   it('is compressed when the browser asks', async () => {

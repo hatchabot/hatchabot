@@ -23,7 +23,7 @@ vi.mock('../src/orchestrator/skills/skillsStatus.js', async (importOriginal) => 
 }));
 
 /**
- * The skills service (HB-0808 step 13), driven as src/api/skillRoutes.ts
+ * The skills service (HB-0808 step 13), driven as src/api/data/skillRoutes.ts
  * drives it but with no HTTP server: a real store on an in-memory database,
  * the real core-files turn, and the runtime's reads and writes stubbed.
  */

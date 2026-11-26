@@ -10,7 +10,7 @@ import { createEnvValues, type EnvValues, type EnvValuesDeps } from './envValues
  * by the route.
  *
  * Built once in `registerRoutes` and on the route context as
- * `ctx.agentSecrets`; its routes are in src/api/agentSecretRoutes.ts. No
+ * `ctx.agentSecrets`; its routes are in src/api/agents/agentSecretRoutes.ts. No
  * state and no timer of its own. Nothing here knows HTTP.
  */
 export interface AgentSecrets {

@@ -63,6 +63,58 @@ const last = (v: string | string[] | undefined): string | undefined => {
 };
 
 /**
+ * The proxy's own listener (proxyListener.ts): the loopback port `tailscale
+ * serve` is pointed at, and the one place a request's X-Forwarded-For is
+ * believed on the private side (HB-1239). As with the public listener, it is
+ * a fact about the connection: every socket that port accepts is recorded
+ * here, and no header adds one. Before, the forwarded address was believed
+ * from any loopback peer, and under a rootless daemon or Docker Desktop an
+ * agent's container is one, so it could name a new address for every
+ * sign-in try. A request here is private, as before, and never "on this
+ * machine" (accountsAuth.ts onThisMachine): it came through the proxy.
+ *
+ * And even here the header is believed only from a process of a user other
+ * than Hatchabot's own (the owner's call, 2026-11-24): a container under
+ * rootless Docker or Docker Desktop reaches this port as easily as the app's
+ * own, through processes of Hatchabot's user. Each connection's answer is
+ * kept with it, decided once when it is accepted (src/ops/peerUser.ts); not
+ * believed, the peer's own address is its bucket, as on the app's own port.
+ */
+const proxySockets = new WeakMap<object, boolean>();
+
+/** Called by the proxy's listener for every connection it accepts; `believed` once its peer's user is known. */
+export function markProxySocket(socket: object, believed = false): void {
+  proxySockets.set(socket, believed);
+}
+
+/** Did this request arrive on the proxy's listener? Takes Fastify's request or a raw one (an upgrade). */
+export function viaProxy(req: Rawish | IncomingMessage | undefined | null): boolean {
+  if (!req) return false;
+  const r = req as Rawish;
+  const socket = r.raw?.socket ?? r.socket;
+  return !!socket && proxySockets.has(socket);
+}
+
+/**
+ * The visitor's address as the proxy reports it, on the proxy's listener
+ * only (undefined anywhere else; 'unknown' there when it gave none). The LAST
+ * X-Forwarded-For value, the one the proxy itself added: tailscaled (1.40 and
+ * later, ipn/ipnlocal/serve.go addProxyForwardedHeaders) SETS the header to
+ * the tailnet address the connection came from, after Go's ReverseProxy has
+ * dropped what the client sent (a Rewrite proxy); 1.38 used Go's Director
+ * proxy, which APPENDS that address to whatever the client sent, and Caddy
+ * and nginx append too. Either way the client's own text comes first, so
+ * the first value was one a device on the tailnet could choose (HB-1435).
+ */
+export function proxiedClientAddress(req: Rawish & { headers: Record<string, string | string[] | undefined> }): string | undefined {
+  if (!viaProxy(req)) return undefined;
+  // Its peer's user is Hatchabot's own, or was not found: the header is not believed.
+  if (proxySockets.get((req as Rawish).raw?.socket ?? (req as Rawish).socket!) !== true) return undefined;
+  const a = last(req.headers['x-forwarded-for']);
+  return a && /^[0-9a-fA-F:.]{2,45}$/.test(a) ? a : 'unknown';
+}
+
+/**
  * The visitor's address, for limits and the sign-in record — on the public
  * listener only. tailscaled SETS X-Forwarded-For to the address the Funnel
  * connection came from (one value; Go's reverse proxy drops what the client
@@ -89,6 +141,19 @@ export function addressBucket(addr: string): string {
   const t = tail !== undefined && tail !== '' ? tail.split(':') : [];
   const groups = tail === undefined ? h : [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
   return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}
+
+/**
+ * The bucket a forwarded address is counted in: per /64, as a direct one is,
+ * except in Tailscale's own range (fd7a:115c:a1e0::/48), where one tailnet's
+ * devices share their first 64 bits and each address is one device the
+ * coordination server gave it. An IPv4-mapped form is its IPv4 address.
+ */
+export function forwardedBucket(addr: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(addr);
+  if (mapped) return mapped[1]!;
+  if (/^fd7a:115c:a1e0:/i.test(addr)) return addr.toLowerCase();
+  return addressBucket(addr);
 }
 
 /** A coarse form of an address for a notice: enough to say "somewhere new", not a precise locator. */

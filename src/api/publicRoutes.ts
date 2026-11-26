@@ -162,6 +162,8 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(['POST'], /^\/v1\/proposals\/:id\/:verb$/, 'step-up', 'Confirming a change the management agent proposed'),
 
   // ---- signed-in -----------------------------------------------------------
+  // It only files a card: confirming that card is the step-up above.
+  r(['POST'], /^\/v1\/proposals\/:id\/again$/, 'signed-in', 'Filing again a change a restart cut off (the new card waits for Confirm)'),
   r(['POST'], /^\/v1\/logout\/everywhere$/, 'signed-in', 'Your own account (who am I, sign out everywhere, security notices)'),
   r('*', /^\/v1\/account(\/(telegram|discord|prefs))?$/, 'signed-in', 'Your own account (who am I, sign out everywhere, security notices)'),
   r(READ, /^\/v1\/(accounts|users|local-accounts|local-accounts\/me)$/, 'signed-in', 'Your own account (who am I, sign out everywhere, security notices)'),

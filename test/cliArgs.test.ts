@@ -20,6 +20,12 @@ describe('CLI flags (audit: unknown flags swallowed the next argument)', () => {
     expect(a.flags.get('draft-only')).toBe('1');
   });
 
+  it('hbt release takes --publisher-copy-matches as an on/off flag, for release.sh (HB-1492)', () => {
+    const a = parseArgs(['release', '--publisher-copy-matches', '2.192.0']);
+    expect(a.positional).toEqual(['release', '2.192.0']);
+    expect(a.flags.get('publisher-copy-matches')).toBe('1');
+  });
+
   it('refuses an unknown option instead of guessing', () => {
     expect(() => parseArgs(['delete', 'x', '--yess'])).toThrow(/unknown option --yess/);
   });

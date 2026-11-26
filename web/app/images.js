@@ -1,4 +1,4 @@
-// web/app/images.js: the Runtime images dialog, moving agents between machines, CLI tokens.
+// web/app/images.js: the Runtime images dialog (building, trying and promoting an image, the Runtime tab), derived runtime images, asking the Hatchabot agent for one, and the image picker in an agent's settings.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -63,7 +63,7 @@ function renderRuntimeList() {
     const acts = [
       t.exists ? `<button ${onAction('click', 'toggleImageDetails', [`${t.tag ?? ''}`, `${key}`])} title="What is baked into this image (its build steps)">🔎</button>` : '',
       t.exists && !t.isDefault ? `<button ${onAction('click', 'tryOnAgent', [`${t.tag ?? ''}`])} title="Try it on one agent: pin that agent to this image and rebuild it (memory kept)">🧪</button>` : '',
-      canPromote ? `<button class="primary" ${onAction('click', 'promoteImage', [`${t.tag ?? ''}`])} title="Point the fleet default at this image; agents without a pin pick it up on their next rebuild">⬆ Promote</button>` : '',
+      canPromote ? `<button class="primary" ${onAction('click', 'promoteImage', [`${t.tag ?? ''}`])} title="${esc(d.promoteRefused || 'Point the fleet default at this image; agents without a pin pick it up on their next rebuild')}">⬆ Promote</button>` : '',
       t.derived ? `<button ${onAction('click', 'rebuildDerivedImageAndList', [`${t.derived.name ?? ''}`])} title="Build it again from its Dockerfile lines">↻</button><button ${onAction('click', 'showDerivedLog', [`${t.derived.name ?? ''}`])}>Log</button><button class="danger" ${onAction('click', 'deleteDerivedImageAndList', [`${t.derived.name ?? ''}`])} title="Delete this derived image">🗑</button>` : '',
       canDelete ? `<button class="danger" ${onAction('click', 'deleteImageTag', [`${t.tag ?? ''}`])} title="Delete this tag (refused while Used by lists anything)">🗑</button>` : '',
     ].join('');
@@ -232,6 +232,9 @@ async function discardTrial(id, name) {
   } finally { await refresh(false); await loadRuntimeImages(); }
 }
 async function promoteImage(tag) {
+  // HATCHABOT_IMAGE pins the fleet default to a version tag or a digest: the
+  // server refuses a promote, so it is said here, before a confirm (HB-1256).
+  if (rtData?.promoteRefused) { $('rtErr').textContent = rtData.promoteRefused; return; }
   if (!confirm(`Make ${tag} the fleet default?\n\nNothing restarts by itself: every agent without a pin shows "newer image available" and moves over when you rebuild it (Bulk actions → Needs rebuild).`)) return;
   try {
     const r = await api('/v1/runtime/images/promote', { method: 'POST', body: { tag } });
@@ -259,719 +262,249 @@ async function pollBaseBuild() {
   } catch { /* not host owner / transient */ }
 }
 
-/** Bulk actions on one View-by section: everything in it ticked, the dialog opened (Chris, 2026-09-24). */
-function v2BulkSection(key, label) {
-  // The same key the sections are built with: under Groups v2ViewKey() is null
-  // and the key is the group name — indexing null threw, and the bolt did
-  // nothing in the default view (Chris, 2026-09-26).
-  const keyOf = (a) => { const k = v2ViewKey(a); return k ? k[0] : 'g:' + (a.group || ''); };
-  const ids = faAgents().filter(a => keyOf(a) === key).map(a => a.id);
-  void openFleetActions({ ids, label });
-}
-// The section's agent names, one per line, in the order shown — for a
-// message, a note, or a list to paste somewhere.
-let v2SectionsNow = [];
-async function v2CopySection(key) {
-  const names = (v2SectionsNow.find(s => s.key === key)?.items ?? []).map(({ a }) => a.name).filter(Boolean);
-  if (!names.length) return toast('Nothing to copy.');
-  try { if (!(await copyText(names.join('\n')))) throw new Error('no clipboard'); toast(`Copied ${names.length} name${names.length === 1 ? '' : 's'}.`); }
-  catch { toast('Could not reach the clipboard — copy them from the list.', 6000); }
-}
-async function openFleetActions(preset) {
-  $('faErr').textContent = ''; $('faResults').innerHTML = '';
-  // Classes power the "Set class" action + the class filter chips. Always
-  // refetched (a class deleted in Settings must not linger), and the dialog
-  // opens before the fetch so the button never looks dead.
-  fleetActionsDlg.showModal();
-  try { agentClasses = (await api('/v1/agent-classes')).classes || []; } catch { /* non-fatal */ }
-  // Filter chips: quick ways to tick a subset. Each sets the tick-list.
-  const list = faAgents();
-  const chips = [['all', `All (${list.length})`]];
-  const bySource = [...new Set(list.map(a => a.aiProfileId))];
-  for (const pid of bySource) {
-    const p = profiles.find(x => x.id === pid);
-    chips.push([`src:${pid}`, `${p ? p.name : 'source'} (${list.filter(a => a.aiProfileId === pid).length})`]);
-  }
-  const groups = [...new Set(list.map(a => a.group).filter(Boolean))];
-  for (const g of groups) chips.push([`grp:${g}`, `${g} (${list.filter(a => a.group === g).length})`]);
-  for (const c of (agentClasses || [])) {
-    const n = list.filter(a => a.classId === c.id).length;
-    if (n) chips.push([`cls:${c.id}`, `class: ${c.name} (${n})`]);
-  }
-  const hostIds = [...new Set(list.map(a => a.hostId))];
-  if (hostIds.length > 1) for (const h of hostIds) {
-    const host = hosts.find(x => x.id === h);
-    chips.push([`host:${h}`, `${host ? host.name : 'host'} (${list.filter(a => a.hostId === h).length})`]);
-  }
-  chips.push(['running', `Running (${list.filter(a => a.state === 'RUNNING').length})`]);
-  chips.push(['stopped', `Stopped (${list.filter(a => a.state === 'STOPPED' && !a.hibernatedAt).length})`]);
-  if (list.some(a => a.hibernatedAt)) chips.push(['asleep', `Asleep (${list.filter(a => a.state === 'STOPPED' && !!a.hibernatedAt).length})`]);
-  const needs = list.filter(rebuildChangesIt).length;
-  if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
-  // The same rule as the home screen's Alerts: an agent the owner cleared is not counted.
-  const attn = list.filter(a => agentAttention(a).length && !attentionCleared(a)).length;
-  if (attn) chips.push(['attention', `Alerts (${attn})`]);
-  // The home screen's current View by, as chips: one per section it shows
-  // (image, status, needs-you, activity…), so a set you can see is a set you
-  // can act on. Groups, sources, classes and machines already have theirs.
-  if (v2View && !['group', 'source', 'class', 'host'].includes(v2View)) {
-    const viewLabel = (V2_VIEWS.find(([k]) => k === v2View) || [])[1] || v2View;
-    const bins = new Map();
-    for (const a of list) { const [k, l] = v2ViewKey(a); if (!bins.has(k)) bins.set(k, { l, n: 0 }); bins.get(k).n++; }
-    for (const [k, { l, n }] of [...bins].sort((x, y) => x[0].localeCompare(y[0]))) chips.push([`view:${k}`, `${viewLabel}: ${l} (${n})`]);
-  }
-  if (preset?.ids?.length) {
-    const label = `${preset.label || 'This section'} (${preset.ids.length})`;
-    // The section's own chip (a group, a source…) says the same thing: one chip, ticked.
-    const dup = chips.findIndex(([, l]) => l === label); if (dup >= 0) chips.splice(dup, 1);
-    chips.unshift(['preset', label]);
-  }
-  faPreset = preset?.ids ? new Set(preset.ids) : null;
-  $('faFilters').innerHTML = chips.map(([key, label]) =>
-    `<button class="hbtn" data-key="${esc(key)}" ${onAction('click', 'faSelect', [`${key ?? ''}`])}>${esc(label)}</button>`).join('');
-  // The agent list (owner-set, live ordering).
-  $('faList').innerHTML = list.map(a => {
-    const p = profiles.find(x => x.id === a.aiProfileId);
-    return `<label class="pair" style="padding:4px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
-      <input type="checkbox" class="faCb" data-id="${esc(a.id)}" data-src="${esc(a.aiProfileId)}" data-state="${esc(a.state)}" data-asleep="${a.hibernatedAt && a.state === 'STOPPED' ? 1 : 0}" ${onAction('change', 'faManual')} style="width:auto;flex:none">
-      <span class="grow"><b>${esc(a.name)}</b>
-        <span class="sub">· ${esc(p ? p.name : 'source')} · ${esc((a.model || '').replace(/^.*\//, '') || '—')} · ${esc(a.state.toLowerCase())}</span></span>
-    </label>`;
-  }).join('') || '<div class="sub">No agents.</div>';
-  $('faAction').value = 'model';
-  faRenderAction();
-  faCount();
-  if (preset?.ids?.length) faSelect('preset');
-  // The machine's "rebuild at once", right where a rebuild is about to be asked for (owner only; others see nothing).
-  void api('/v1/rebuild-concurrency').then(r => {
-    const sel = $('faAtOnce'); if (!sel) return;
-    sel.innerHTML = Array.from({ length: r.max }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('');
-    sel.value = String(r.atOnce);
-    $('faAtOnceRow').style.display = myAccount?.hostOwner ? 'flex' : 'none';
-  }).catch(() => {});
-}
-let faPreset = null;
-function faSelect(key) {
-  // Highlight the chip that produced the current selection; hand-edits clear it.
-  document.querySelectorAll('#faFilters .hbtn').forEach(b => b.classList.toggle('fa-on', b.dataset.key === key));
-  const test = key === 'all' ? () => true
-    : key === 'running' ? (cb) => cb.dataset.state === 'RUNNING'
-    : key === 'stopped' ? (cb) => cb.dataset.state === 'STOPPED' && cb.dataset.asleep !== '1'
-    : key === 'asleep' ? (cb) => cb.dataset.asleep === '1'
-    : key === 'needs-rebuild' ? (cb) => rebuildChangesIt(agents.find(x => x.id === cb.dataset.id))
-    : key === 'attention' ? (cb) => { const a = agents.find(x => x.id === cb.dataset.id); return !!a && agentAttention(a).length > 0 && !attentionCleared(a); }
-    : key.startsWith('src:') ? (cb) => cb.dataset.src === key.slice(4)
-    : key.startsWith('grp:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.group || '') === key.slice(4)
-    : key.startsWith('host:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.hostId) === key.slice(5)
-    : key.startsWith('cls:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.classId) === key.slice(4)
-    : key.startsWith('view:') ? (cb) => { const a = agents.find(x => x.id === cb.dataset.id); return !!a && v2ViewKey(a)[0] === key.slice(5); }
-    : key === 'preset' ? (cb) => !!faPreset && faPreset.has(cb.dataset.id)
-    : () => false;
-  // A filter REPLACES the selection (so chips are predictable); Select-all is additive via its own control.
-  document.querySelectorAll('.faCb').forEach(cb => { cb.checked = test(cb); });
-  faCount();
-  // Show the first agent the filter picked, so the effect is visible without
-  // scrolling (Chris, 2026-09-24).
-  const first = document.querySelector('.faCb:checked');
-  if (first) first.closest('label, div')?.scrollIntoView({ block: 'nearest' });
-}
-function faManual() { document.querySelectorAll('#faFilters .hbtn').forEach(b => b.classList.remove('fa-on')); faCount(); }
-function faToggleAll(on) { document.querySelectorAll('.faCb').forEach(cb => { cb.checked = on; }); faCount(); }
-function faSelected() { return [...document.querySelectorAll('.faCb:checked')]; }
-function faCount() {
-  const cbs = [...document.querySelectorAll('.faCb')];
-  const sel = faSelected();
-  $('faCount').textContent = `${sel.length} of ${cbs.length} selected`;
-  $('faAll').checked = sel.length > 0 && sel.length === cbs.length;
-  faRenderAction(); // model menu depends on which agents are selected
-}
-function faRenderAction() {
-  const action = $('faAction').value;
-  const isModel = action === 'model';
-  // Re-rendering the option lists on every tick must not lose the user's pick —
-  // a reset "Set class" select silently became "clear class" for the whole selection.
-  const prevClass = $('faClass').value, prevModel = $('faModel').value;
-  const keep = (el, prev) => { if (prev && [...el.options].some(o => o.value === prev)) el.value = prev; };
-  $('faModel').style.display = isModel ? '' : 'none';
-  $('faClass').style.display = action === 'class' ? '' : 'none';
-  $('faSource').style.display = action === 'source' ? '' : 'none';
-  $('faImage').style.display = action === 'image' ? '' : 'none';
-  if (action === 'image' && !$('faImage').childElementCount) void imageOptionsHtml('').then(h => { $('faImage').innerHTML = h; });
-  $('faSourceOpts').style.display = action === 'source' ? '' : 'none';
-  $('faPeersOpts').style.display = action.startsWith('peers-') ? '' : 'none';
-  const sel = faSelected().map(cb => agents.find(a => a.id === cb.dataset.id)).filter(Boolean);
-  let note = '';
-  if (action === 'source') {
-    const prevSrc = $('faSource').value;
-    $('faSource').innerHTML = profiles.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
-    keep($('faSource'), prevSrc);
-    $('faApplyBtn').disabled = !sel.length;
-    $('faActionNote').textContent = 'Moves the selected agents onto the chosen source and rebuilds the running ones (memory kept, brief downtime). Stopped and sleeping agents stay as they are, and take the new source when they next start. Agents already on it are skipped. A class that pins a different source is detached.';
-    return;
-  }
-  if (action === 'class') {
-    $('faClass').innerHTML = '<option value="">— none (clear class) —</option>' +
-      (agentClasses || []).map(c => `<option value="${esc(c.id)}">${esc(c.name)}${c.model ? ' · ' + esc(c.model) : ''}${c.aiProfileId ? ' · ' + esc((profiles.find(p => p.id === c.aiProfileId) || {}).name || 'source') : ''}</option>`).join('');
-    keep($('faClass'), prevClass);
-    $('faApplyBtn').disabled = !sel.length;
-    note = !agentClasses.length ? 'No classes defined yet — add them in ⚙ Settings → Classes.'
-      : 'Assigns the class and applies its model/source: model live on running agents; a source change needs a rebuild (those get the 🔄 flag). Local-source agents skip an incompatible model.';
-    $('faActionNote').textContent = note;
-    return;
-  }
-  if (isModel) {
-    // Offer only models EVERY selected agent's source supports (intersection),
-    // so we never set a model an agent can't run. Local-source agents have no
-    // switchable menu — flag them as skipped.
-    const nonLocal = sel.filter(a => (a.profileModels || []).length);
-    const localCount = sel.length - nonLocal.length;
-    let common = nonLocal.length ? (nonLocal[0].profileModels || []) : [];
-    for (const a of nonLocal.slice(1)) common = common.filter(m => (a.profileModels || []).includes(m));
-    $('faModel').innerHTML = common.length
-      ? common.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')
-      : '<option value="">— no model they all share —</option>';
-    $('faModel').disabled = !common.length;
-    keep($('faModel'), prevModel);
-    if (!sel.length) note = 'Select agents to see the models their sources share.';
-    else if (!common.length) note = 'The selected agents are on sources with no model in common — filter by one source first.';
-    else note = `Applies live to running agents (next message); stopped ones apply when they next start.${localCount ? ` ${localCount} local-model agent(s) will be skipped.` : ''}`;
-    $('faApplyBtn').disabled = !sel.length || !common.length;
-  } else {
-    $('faApplyBtn').disabled = !sel.length;
-    const atOnce = Number(appConfig?.rebuildConcurrency) || 6;
-    note = action === 'rebuild' ? `Rebuilds each selected running agent (memory kept, brief downtime), ${atOnce} at a time — the rest wait their turn (Settings → Hosts → Rebuild at once). Stopped and sleeping ones stay down: one on an older image, or with a change a rebuild brings, is rebuilt when it next starts; the others are skipped.`
-      : action === 'image' ? `Pins each selected agent to the chosen image (Fleet default = unpin) and rebuilds the running ones onto it, ${atOnce} at a time, memory kept; stopped ones move when they start. A pinned agent stops following fleet promotes.`
-      : action === 'stop' ? 'Stops each selected running agent. It keeps its bot.'
-      : action === 'start' ? 'Starts each selected stopped agent.'
-      : action === 'wake' ? 'Wakes each selected sleeping agent (💤). Others are left as they are.'
-      : action === 'sleep' ? 'Stops each selected running agent with its volume kept, to be woken by a Telegram message, its console or an ask. Agents on Discord or Slack are skipped: nothing queues their messages.'
-      : action === 'checkpoint' ? 'Each running agent writes its current conversation into memory (~20s and some tokens per agent — runs one at a time). Stopped agents are skipped; an agent whose AI source is out of credits will report "not saved".'
+/** The Runtime tab's capability list: probed tool versions from the image,
+ *  paired with what each one means for agents — plus the honest "not
+ *  included" line and the server-side capabilities that ride config. */
+async function loadRuntimeCaps() {
+  const el = $('runtimeCaps');
+  try {
+    const [c, mk] = await Promise.all([
+      api('/v1/runtime/capabilities'),
+      api('/v1/media-key').catch(() => null),
+    ]);
+    const t = c.tools || {};
+    const row = (name, detail, version, dot = 'var(--ok)') => `<tr><td><span style="color:${dot}">●</span> <b>${esc(name)}</b></td>
+      <td class="sub">${detail}</td><td class="sub cap-ver">${version ? esc(version) : ''}</td></tr>`;
+    const rows = [];
+    if (t.openclaw) rows.push(row('Agent runtime', 'conversations, memory, Telegram gateway, scheduled tasks', t.openclaw));
+    if (t['claude-code']) rows.push(row('Claude Code', 'the Anthropic model runtime agents think with', t['claude-code']));
+    rows.push(row('Web search', 'DuckDuckGo, enabled per agent (keyless)'));
+    rows.push(row('Memory search', 'semantic recall over MEMORY.md — local embeddings (or the machine\'s shared service, per agent)'));
+    rows.push(row('Telegram voice notes', (mk ? mk.set ? 'Shared Gemini key saved, not tested; changes apply on Rebuild.' : 'No shared Gemini key saved; an agent may still hold a previous key until Rebuild.' : 'Shared Gemini key status unavailable.') + ' An agent may use its Gemini AI source\'s own key. Settings → Connections. Browser Talk uses separate voice settings.', '', 'var(--dim)'));
+    if (t.gog) rows.push(row('Google Workspace', 'Gmail / Drive / Calendar / Sheets / Docs via <code>gog</code> — each agent connects its own account in chat', t.gog));
+    if (t.python) rows.push(row('Python', 'agents run scripts; libraries install per agent (<code>pip install --target ~/.openclaw/pylibs</code>)', t.python));
+    if (t.git) rows.push(row('Git + SSH', 'repo data sources with generated deploy keys', t.git));
+    if (t.node) rows.push(row('Node.js', 'the runtime base', t.node));
+    const missing = (c.missing || []).length
+      ? `<div class="sub" style="margin-top:8px">Not included (by design, to keep the image lean): ${c.missing.map(esc).join(', ')} — so no local audio/video processing. Agents can still fetch web pages and read PDFs/images via the model; a browser of its own is an option per agent (its page → Advanced → Browser).</div>`
       : '';
-  }
-  if (action === 'peers-connect') {
-    const n = sel.filter(a => a.state !== 'ARCHIVED').length;
-    note = n < 2 ? 'Pick at least two agents.' : `Each of the ${n} may consult every other one — ${n * (n - 1)} one-way grants. Grants to agents outside the selection are kept.`;
-  } else if (action === 'peers-disconnect') {
-    note = 'Removes the grants between the selected agents only; their other peers are kept.';
-  }
-  $('faActionNote').textContent = note;
+    el.innerHTML = `<div class="cap-wrap"><table class="cap-table"><thead><tr><th>Capability</th><th>What it's for</th><th>Version</th></tr></thead>
+      <tbody>${rows.join('')}</tbody></table></div>` + missing;
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
-async function faApply() {
-  const action = $('faAction').value;
-  const ids = faSelected().map(cb => cb.dataset.id);
-  if (!ids.length) { toast('Tick at least one agent first.'); return; }
-  const model = $('faModel').value;
-  // Read once, as the model and image are: the class menu stays live while Apply
-  // works down the list, and a later agent got whatever it said then (audit #049).
-  const classId = $('faClass').value || null;
-  const cls = classId ? agentClasses.find(c => c.id === classId) : null;
-  if (action === 'source') {
-    const profileId = $('faSource').value;
-    if (!profileId) return;
-    const p = profiles.find(x => x.id === profileId);
-    if (!confirm(`Move ${ids.length} agent${ids.length > 1 ? 's' : ''} to "${p ? p.name : 'that source'}" and rebuild the running ones?\n\nStopped and sleeping agents are not started: they take the new source when they next start.`)) return;
-    $('faApplyBtn').disabled = true; $('faResults').innerHTML = 'Switching…';
-    try {
-      const r = await api(`/v1/ai-profiles/${profileId}/adopt-agents`, { method: 'POST', body: {
-        apply: ids, rebuild: true, checkpoint: $('faSourceCheckpoint').checked, recoverAfter: $('faSourceRecover').checked } });
-      const bits = [`${r.switched} switched`, `rebuilding ${r.rebuilding}`];
-      if (r.atNextStart) bits.push(`${r.atNextStart} not running, so ${r.atNextStart === 1 ? 'it takes' : 'they take'} it at the next start`);
-      if (r.notRecovered) bits.push(notRecoveredNote(r.notRecovered));
-      if (r.classDetached) bits.push(`${r.classDetached} detached from a class`);
-      if (r.classDetachPending) bits.push(`${r.classDetachPending} may leave a class once the class change under way is done`);
-      if ((r.skipped || []).length) bits.push(`${r.skipped.length} skipped`);
-      const kept = keptLimitsList(r);
-      $('faResults').innerHTML = `✓ ${esc(bits.join(' · '))}.${kept.length ? `<br>${kept.map(esc).join('<br>')}` : ''}`;
-      $('faErr').textContent = (r.skipped || []).slice(0, 3).map(s => `${s.name}: ${s.reason}`).join(' · ');
-      if ($('faSourceRecover').checked && r.rebuilding) toast('Each agent will recover its pre-switch conversation once it is back up, and confirm in its chat.', 9000);
-    } catch (e) { $('faErr').textContent = e.message; }
-    finally { $('faApplyBtn').disabled = false; await refresh(false); }
-    return;
-  }
-  if (action === 'peers-connect' || action === 'peers-disconnect') {
-    const connect = action === 'peers-connect';
-    if (ids.length < 2) { $('faErr').textContent = 'Pick at least two agents.'; return; }
-    $('faApplyBtn').disabled = true; $('faErr').textContent = ''; $('faResults').innerHTML = connect ? 'Connecting…' : 'Disconnecting…';
-    try {
-      const r = await api('/v1/agent-peers/mesh', { method: 'POST', body: { agentIds: ids, connect } });
-      const bits = [connect ? `${r.agents} agents can now consult each other (${r.grants} grants)` : `grants between ${r.agents} agents removed`];
-      if (r.skipped?.length) bits.push(`skipped ${r.skipped.map(x => `${x.name} (${x.reason})`).join(', ')}`);
-      let rebuilt = 0;
-      // Only running agents are rebuilt now; a stopped or sleeping one picks
-      // the change up when it next starts (a rebuild would start it).
-      const todo = (r.needRebuild || []).filter(a => a.state === 'RUNNING');
-      if ($('faPeersRebuild').checked) {
-        for (const a of todo) {
-          try { const r2 = await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } }); if (!r2?.atNextStart) rebuilt++; }
-          catch (e) { $('faErr').textContent = `${a.name}: ${e.message}`; }
-        }
-        if (rebuilt) bits.push(`rebuilding ${rebuilt} (a few at a time)`);
-      } else if (todo.length) bits.push(`${todo.length} need a rebuild — their icons say so`);
-      if (!r.changed) bits.push('nothing to change — already set');
-      // Sleeping agents named: one wakes for a message as it was, and takes this at its next Start or Rebuild.
-      $('faResults').innerHTML = `✓ ${esc(bits.join(' · '))}.${r.note ? ' ' + esc(r.note) : ''}`;
-    } catch (e) { $('faErr').textContent = e.message; $('faResults').innerHTML = ''; }
-    finally { $('faApplyBtn').disabled = false; await refresh(false); }
-    return;
-  }
-  if (action === 'rebuild' && !confirm(`Rebuild ${ids.length} agent${ids.length > 1 ? 's' : ''}? Each running one briefly goes offline (memory kept). Stopped and sleeping ones stay down, and are rebuilt when they next start if a rebuild would change them.`)) return;
-  const image = $('faImage').value || null;
-  if (action === 'image' && !confirm(`${image ? `Pin ${ids.length} agent${ids.length > 1 ? 's' : ''} to ${imageTagOf(image)}` : `Put ${ids.length} agent${ids.length > 1 ? 's' : ''} back on the fleet default`} and rebuild the running ones now? Each briefly goes offline (memory kept).`)) return;
-  if (action === 'checkpoint' && !confirm(`Save the conversation to memory for ${ids.length} agent${ids.length > 1 ? 's' : ''}? Runs a ~20s turn per running agent, one at a time (uses tokens).`)) return;
-  $('faApplyBtn').disabled = true;
-  $('faResults').innerHTML = `Working on ${ids.length}…`;
-  let ok = 0, skipped = 0, busy = 0, failed = 0, notSaved = 0, nothingNew = 0, nextStart = 0, notRebuilt = 0, atRebuild = 0, memoryLater = 0, marked = 0; const reasons = [];
-  // Saved is not applied: each answer read as the agent's own AI tab and Class menu read it,
-  // so one whose runtime refused the change is not counted done (HB-0595). Each is named, all
-  // of them, with its own reason: not among the failures' first three, which are others'.
-  const notApplied = [];
-  const refused = (a, id, why) => { notApplied.push({ name: a?.name || id, why }); };
-  for (const id of ids) {
-    const a = agents.find(x => x.id === id);
-    try {
-      if (action === 'model') {
-        if (!(a?.profileModels || []).length) { skipped++; continue; } // local: no menu
-        const r = await api(`/v1/agents/${id}/model`, { method: 'POST', body: { model } });
-        if (r?.failed) { refused(a, id, 'saved, but its runtime refused it: it answers on the old model until you try again or Rebuild'); continue; }
-        if (!r?.live && !r?.staged) { atRebuild++; continue; } // a source switch waits for its rebuild, or it was busy: the model comes with the rebuild
-      } else if (action === 'class') {
-        if (cls?.model && !(a?.profileModels || []).length && !cls.aiProfileId) { skipped++; continue; } // local source: no switchable model
-        const r = await api(`/v1/agents/${id}/class`, { method: 'POST', body: { classId } });
-        if (r?.modelPending) { refused(a, id, r.modelPending); continue; } // its runtime refused the model
-        if (r?.rebuild) { atRebuild++; continue; } // a source or an image: applied by a Rebuild, its memory limits with it
-        // The class and its model applied; only the container's memory limits wait for its next rebuild.
-        if (r?.memoryPending) memoryLater++;
-      } else if (action === 'checkpoint') {
-        if (a?.state !== 'RUNNING') { skipped++; continue; } // needs a live turn
-        const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST', body: {} });
-        if (!r.saved && r.ok) { nothingNew++; continue; } // the turn ran; its memory files did not change
-        if (!r.saved) { notSaved++; continue; } // soft fail (e.g. AI source out of credits)
-      } else if (action === 'rebuild') {
-        // As Rebuild all: a rebuild ends RUNNING, so a stopped or sleeping agent is not
-        // started behind its owner's back; it is marked for its next start, when one would change it.
-        const r = await rebuildOrMark(a);
-        if (r === 'busy') { busy++; continue; } // as Rebuild all counts it: skipped, busy or already changing
-        if (r === 'not needed') { skipped++; continue; }
-        if (r === 'next start') { marked++; continue; }
-      } else if (action === 'image') {
-        if ((a?.image ?? null) === image) { skipped++; continue; } // already there
-        const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image } });
-        // The server decides, not the last poll (review of HB-0469): one shown asleep may be up since.
-        // One with no container yet (failed or still being made) takes the pin when it is made.
-        if (!r.sameImage && a?.runtimeRef) {
-          try {
-            const r2 = await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
-            if (r2?.atNextStart) { nextStart++; continue; }
-          } catch (e) {
-            // The pin is saved: not a failure of the pin.
-            notRebuilt++; if (reasons.length < 3) reasons.push(reasonFor(a?.name || id, `pinned, but not rebuilt yet: ${e?.message ?? e}`));
-            continue;
-          }
-        }
-      } else if (action === 'stop') {
-        if (a?.state !== 'RUNNING') { skipped++; continue; }
-        await api(`/v1/agents/${id}/stop`, { method: 'POST', body: {} });
-      } else if (action === 'start') {
-        if (a?.state !== 'STOPPED') { skipped++; continue; }
-        await api(`/v1/agents/${id}/start`, { method: 'POST', body: {} });
-      } else if (action === 'wake') {
-        if (!a?.hibernatedAt || a.state !== 'STOPPED') { skipped++; continue; }
-        await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} });
-      } else if (action === 'sleep') {
-        if (a?.state !== 'RUNNING') { skipped++; continue; }
-        try { await api(`/v1/agents/${id}/hibernate`, { method: 'POST', body: {} }); }
-        // The rules that keep an agent awake are not failures: they are "not applicable".
-        catch (e) { if (/Discord or Slack|scheduled tasks|management agent|busy|Cannot put it to sleep/i.test(e.message)) { skipped++; continue; } throw e; }
-      }
-      ok++;
-    } catch (e) { failed++; if (reasons.length < 3) reasons.push(reasonFor(a?.name || id, e)); }
-  }
-  $('faErr').textContent = reasonsSaid(reasons, failed + notRebuilt);
-  $('faApplyBtn').disabled = false;
-  $('faResults').innerHTML = faResultLine({ ok, memoryLater, skipped, busy, atRebuild, notApplied, nothingNew, nextStart, marked, notRebuilt, notSaved, failed });
-  await refresh(false);
-  if ($('classList').childElementCount) renderClassList(); // Settings may still be open: keep its counts honest
+
+async function loadRuntime() {
+  loadRuntimeCaps();
+  loadDerivedImages();
+  $('rtPanel').hidden = !myAccount.hostOwner;
+  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); }
+  const el = $('runtimeStatus');
+  try {
+    const r = await api('/v1/runtime');
+    const cur = r.imageVersion ? esc(r.imageVersion) : 'unknown (image not built yet?)';
+    let latestLine;
+    if (!r.npmLatest) latestLine = `<div class="sub">Couldn't reach npm to check the latest stable.</div>`;
+    else if (r.upgradeAvailable && appConfig?.managed) latestLine = '';
+    else if (r.upgradeAvailable) latestLine = `<div style="color:var(--warn)">⬆ OpenClaw <b>${esc(r.npmLatest)}</b> is the latest stable — you're on ${cur}.</div>`;
+    else latestLine = `<div style="color:var(--ok)">✓ up to date with the latest stable (${esc(r.npmLatest)}).</div>`;
+    const lagging = (agents ?? []).filter(a => a.rebuild).length;
+    // The machine owner gets buttons below (candidate → try → promote), so
+    // the command-line hints and the repeated "newer version" line only
+    // confuse there; everyone else still needs them.
+    const owner = !!myAccount.hostOwner;
+    el.innerHTML =
+      `<div style="font-size:15px"><b>Runtime image:</b> OpenClaw ${cur}</div>
+       ${owner && r.upgradeAvailable ? '' : `<div style="margin-top:4px">${latestLine}</div>`}
+       ${r.npmExtendedStable ? `<div class="sub" style="margin-top:2px">extended-stable track: <code>${esc(r.npmExtendedStable)}</code></div>` : ''}
+       ${lagging ? `<div class="sub" style="margin-top:8px">${lagging} agent${lagging > 1 ? 's need' : ' needs'} a <b>Rebuild</b> (each card says why).</div>` : ''}
+       ${owner ? '' : `<div class="sub" style="margin-top:12px">Upgrading is done by whoever runs this machine.</div>`}`;
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
+
+// --- Derived runtime images (host owner only) ---------------------------------
+
+let derivedBuilding = new Set(); // names currently polling, so we don't double-poll
+
 /**
- * Bulk actions' result line, from what each agent's answer said (faApply): one part per kind,
- * in this order, each left out at nought. `notApplied`: every agent saved but not applied,
- * with its own reason. `busy`: a rebuild turned away as busy or already changing (409).
+ * The per-agent image picker: every image this machine has, said in words.
+ * It used to be a text box with a datalist — the options were truncated, and
+ * picking one typed the tag into the box (2026-09-19). Candidates were missing
+ * entirely, since the list only ever held derived images.
  */
-function faResultLine(n) {
-  const each = (k, one, many) => k === 1 ? one : many;
-  const warn = (s) => `<span style="color:var(--warn)">${s}</span>`;
-  const memory = n.memoryLater ? ` (${n.memoryLater === n.ok ? each(n.ok, 'its', 'their') : `${n.memoryLater} of them:`} memory limits at ${each(n.memoryLater, 'its', 'each one’s')} next rebuild)` : '';
-  const done = `✓ ${n.ok} done${memory}`;
-  const skipped = n.skipped && `${n.skipped} skipped (not applicable)`;
-  const busy = n.busy && `${n.busy} skipped (busy or already changing)`;
-  const atRebuild = n.atRebuild && `${n.atRebuild} saved, applied at ${each(n.atRebuild, 'its', 'each one’s')} next rebuild`;
-  const notApplied = n.notApplied.length && warn(`${n.notApplied.length} saved, but not applied: ${esc(n.notApplied.map(x => reasonFor(x.name, x.why)).join('; '))}`);
-  const nothingNew = n.nothingNew && `${n.nothingNew} found nothing new to save`;
-  const nextStart = n.nextStart && `${n.nextStart} not running, so ${each(n.nextStart, 'it moves', 'they move')} when ${each(n.nextStart, 'it next starts', 'each next starts')}`;
-  const marked = n.marked && `${n.marked} not running: rebuilt when ${each(n.marked, 'it next starts', 'each next starts')}`;
-  const notRebuilt = n.notRebuilt && warn(`${n.notRebuilt} pinned, but not rebuilt yet`);
-  const notSaved = n.notSaved && warn(`${n.notSaved} not saved (AI source didn't respond)`);
-  const failed = n.failed && `<span style="color:var(--bad)">${n.failed} failed</span>`;
-  return [done, skipped, busy, atRebuild, notApplied, nothingNew, nextStart, marked, notRebuilt, notSaved, failed].filter(Boolean).join(' · ') + '.';
+// Each fill numbered: the list asked for the agent opened before, answered
+// late, put that agent's pin in the next one's picker, and Pin & rebuild then
+// pinned it there (HB-0583). The picker says whose options it holds.
+let imagePickGen = 0;
+async function populateImagePicker(current) {
+  const sel = $('editImage');
+  if (!sel) return;
+  const pin = current ?? sel.value ?? '';
+  const gen = ++imagePickGen, r = sheetRead(() => gen === imagePickGen);
+  // While the list loads only the pin is offered, and Pin waits (saveImagePin): not another
+  // agent's options, and not this one's old list either, where a choice made would be put back
+  // to the pin by the answer (a pin changed elsewhere, refilled on a tab drawn again). The
+  // picker is this agent's from then on, loading: back to the one before while it loads, it is
+  // drawn again for that one (it held this one's pin, and Pin & rebuild sent it there).
+  sheetFill([sel], () => {
+    sel.innerHTML = `<option value="${esc(pin)}">Loading images…</option>`; sel.value = pin;
+    sel.dataset.agent = String(r.id); sel.dataset.loading = '1';
+  });
+  const html = await imageOptionsHtml(pin);
+  r.fill([sel], () => {
+    sel.innerHTML = html;
+    sel.value = pin;
+    sel.dataset.agent = String(r.id); delete sel.dataset.loading;
+  });
 }
-/** A move behind a dialog reopened meanwhile has changed who can move: its list follows, and what is ticked stays ticked. */
-function moveSourceRedraw() {
-  if (!moveSourceDlg.open || !moveSourceState) return;
-  const ticked = [...document.querySelectorAll('.moveSourceCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
-  moveAgentsToSource(moveSourceState.profileId, $('moveSourceName').textContent, true);
-  document.querySelectorAll('.moveSourceCb').forEach(cb => { cb.checked = ticked.includes(cb.dataset.id); });
-  refreshMoveCount();
-}
-async function moveAgentsApply(rebuild) {
-  const state = moveSourceState;
-  if (!state) { toast('Reopen this dialog and try again.'); return; }
-  const apply = [...document.querySelectorAll('.moveSourceCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
-  if (!apply.length) { toast('Tick at least one agent to move.'); return; }
-  $('moveSourceBtn').disabled = true;
+/** The <option>s of every runtime image on this machine, the fleet default first; `pin` is pre-selected. */
+async function imageOptionsHtml(pin) {
+  const opt = (value, label) => `<option value="${esc(value)}"${value === pin ? ' selected' : ''}>${esc(label)}</option>`;
+  let html = '';
   try {
-    const r = await api(`/v1/ai-profiles/${state.profileId}/adopt-agents`, {
-      method: 'POST', body: { apply, rebuild, checkpoint: rebuild && $('moveSourceCheckpoint').checked, recoverAfter: rebuild && $('moveSourceRecover').checked },
-    });
-    const bits = [`${r.switched} switched`];
-    if (r.rebuilding) bits.push(`rebuilding ${r.rebuilding} now`);
-    if (r.atNextStart) bits.push(`${r.atNextStart} not running, so ${r.atNextStart === 1 ? 'it takes' : 'they take'} it at the next start`);
-    if (r.notRecovered) bits.push(notRecoveredNote(r.notRecovered));
-    if (!r.rebuilding && !r.atNextStart && r.switched) bits.push('rebuild to apply');
-    bits.push(...keptLimitsList(r));
-    const skipped = r.skipped ?? [];
-    if (!skipped.length) {
-      toast(bits.join(' — '), 12000);
-      if (moveSourceState === state) moveSourceDlg.close();
-      await refresh(true); renderAiList();
-      moveSourceRedraw();
-      return;
+    const d = await api('/v1/runtime/images');
+    html += opt('', `Fleet default${d.default ? ` — ${d.default}` : ''}${d.defaultInfo?.openclawVersion ? ` (OpenClaw ${d.defaultInfo.openclawVersion})` : ''}`);
+    const base = (d.tags ?? []).filter(t => t.exists && !t.isDefault && !t.derived);
+    const derived = (d.tags ?? []).filter(t => t.exists && t.derived);
+    const say = (t) => {
+      const what = t.relation === 'newer' ? 'candidate' : t.relation === 'older' ? 'older build' : t.relation === 'same' ? 'same as the default' : 'candidate';
+      const extras = [(t.extraPackages ?? []).length ? `plus ${(t.extraPackages ?? []).join(', ')}` : '', t.openclawVersion ? `OpenClaw ${t.openclawVersion}` : ''].filter(Boolean).join(' · ');
+      return `${imageTagOf(t.tag)} — ${what}${extras ? ` · ${extras}` : ''}`;
+    };
+    if (base.length) html += `<optgroup label="Base images">${base.map(t => opt(t.tag, say(t))).join('')}</optgroup>`;
+    if (derived.length) {
+      html += `<optgroup label="Derived images">${derived.map(t =>
+        opt(t.tag, `${imageTagOf(t.tag)} — ${t.derived.status.toLowerCase()}${t.derived.summary ? ` · ${t.derived.summary.slice(0, 40)}` : ''}`)).join('')}</optgroup>`;
     }
-    // Stays open, listing what is left, with every skip and its reason: toasts
-    // overwrite each other, so only the last skip could ever be read (HB-0445).
-    const said = `${bits.join(' — ')}. Skipped ${skipped.length}:\n${skipped.map(sk => `${sk.name}: ${sk.reason}`).join('\n')}`;
-    await refresh(true); renderAiList();
-    // Cancel pressed meanwhile stands (or it is open for another source now): told, not reopened.
-    if (!moveSourceDlg.open || moveSourceState !== state) { toast(said); moveSourceRedraw(); return; }
-    moveAgentsToSource(state.profileId, $('moveSourceName').textContent, true);
-    $('moveSourceErr').textContent = said;
-  } catch (e) {
-    if (moveSourceDlg.open && moveSourceState === state) $('moveSourceErr').textContent = e.message; else toast(e.message); // open for another source now: not that one's error
-  } finally { refreshMoveCount(); } // as the ticks say: none left after a reopen means off
+  } catch {
+    // Not the host owner, or the daemon hiccuped: at least offer the default.
+    html += opt('', 'Fleet default');
+  }
+  // A pin to something no longer listed stays selectable, so opening this
+  // panel can never silently move the agent off it.
+  if (pin && !html.includes(`value="${esc(pin)}"`)) html += opt(pin, `${pin} — not on this machine`);
+  return html;
 }
 
-async function delAiProfile(id, name) {
-  const p = profiles.find(x => x.id === id);
-  const rowErr = $(`aiRowErr-${id}`);
-  const explain = (msg) => { if (rowErr) rowErr.textContent = msg; toast(msg, 12000); };
-  // Refuse locally with the reason AT the button — the server would refuse too,
-  // but its message used to land in #aiErr below the whole list (invisible).
-  const mine = p?.inUse?.mine || 0, others = p?.inUse?.others || 0;
-  if (mine + others) {
-    const msg = `Can't delete "${name}" — still in use by ${mine ? mine + ' of your agent' + (mine === 1 ? '' : 's') : ''}${mine && others ? ' and ' : ''}${others ? others + ' agent' + (others === 1 ? '' : 's') + ' on other accounts' : ''}. Move them to another source first.`;
-    explain(msg);
-    if (others && myAccount.hostOwner && confirm(`${msg}\n\nAs the host owner you can move every agent on it (other accounts' included) to a shared source, then delete it. Open that now?`)) openMigrate(id, name);
-    else if (mine && !others && confirm(`${msg}\n\nOpen "Move agents" to pick where they go?`)) { const t = profiles.find(x => x.id !== id && (x.mine !== false || x.shared)); if (t) moveAgentsToSource(t.id, t.name); }
+async function loadDerivedImages() {
+  const sec = $('derivedSection'), el = $('derivedList');
+  if (!sec || !el) return;
+  let r;
+  try {
+    r = await api('/v1/images');
+  } catch {
+    sec.hidden = true; // not the host owner — hide the whole thing
     return;
   }
-  if (!confirm(`Remove AI source "${name}"?`)) return;
-  try {
-    await api(`/v1/ai-profiles/${id}`, { method: 'DELETE' });
-    toast('Removed');
-    await refresh(true); renderAiList();
-  } catch (e) {
-    explain(e.message);
-    if (myAccount.hostOwner && /other accounts/.test(e.message) && confirm(`${e.message}\n\nAs the host owner you can move every agent on "${name}" (other accounts' included) to a shared source, then delete it. Open that now?`)) openMigrate(id, name);
+  sec.hidden = false;
+  const images = Array.isArray(r?.images) ? r.images : [];
+  if (!images.length) {
+    el.innerHTML = `<div class="sub">None yet — ask the management agent for one, e.g. “build an image with ffmpeg for the media agent”.</div>`;
+    return;
   }
-}
-let migrateState = null;
-function openMigrate(id, name) {
-  migrateState = { id, name };
-  $('migrateFrom').textContent = name;
-  const targets = profiles.filter(p => p.id !== id && p.shared);
-  $('migrateTo').innerHTML = targets.length
-    ? targets.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')
-    : '<option value="">— no shared source to move them to; share one first —</option>';
-  $('migrateBtn').disabled = !targets.length;
-  $('migrateCheckpoint').checked = true; $('migrateRecover').checked = false;
-  $('migrateErr').textContent = '';
-  $('migrateAgents').textContent = 'Loading agents…';
-  migrateDlg.showModal();
-  // Show exactly who moves: every agent on this source, across accounts.
-  api('/v1/agents?all=1').then(all => {
-    const on = all.filter(a => a.aiProfileId === id);
-    // Nothing to move: the button would fail on press, so it stays out.
-    $('migrateBtn').disabled = !on.length || !$('migrateTo').options.length;
-    $('migrateBtn').title = on.length ? '' : 'No agents are on this source.';
-    $('migrateAgents').innerHTML = on.length
-      ? `<b>${on.length} agent${on.length === 1 ? '' : 's'}</b> will move:<br>` + on.map(a => `• ${esc(a.name)} <span style="color:var(--dim)">(${esc(a.state.toLowerCase())}${a.ownerId && a.ownerId !== myAccount.ownerId ? ', other account' : ''})</span>`).join('<br>')
-      : 'No agents are on this source — nothing to migrate.';
-  }).catch(() => { $('migrateAgents').textContent = ''; });
-}
-async function runMigrate() {
-  const to = $('migrateTo').value;
-  if (!to) { toast('Pick the AI source to move them to.'); return; }
-  if (!migrateState) { toast('Reopen this dialog and try again.'); return; }
-  const toName = (profiles.find(p => p.id === to) || {}).name || 'that source';
-  if (!confirm(`Move EVERY agent on "${migrateState.name}" to "${toName}" and rebuild the running ones?\n\nThis includes other accounts' agents; their chats restart on the new source (memory kept). Stopped and sleeping agents are not started: they take the new source when they next start.`)) return;
-  $('migrateBtn').disabled = true;
-  try {
-    const r = await api(`/v1/ai-profiles/${migrateState.id}/migrate-agents`, { method: 'POST', body: {
-      toProfileId: to, rebuild: true, checkpoint: $('migrateCheckpoint').checked, recoverAfter: $('migrateRecover').checked } });
-    migrateDlg.close();
-    toast(`Moved ${r.switched} of ${r.agents} agent${r.agents === 1 ? '' : 's'} (${r.otherAccounts} other account${r.otherAccounts === 1 ? '' : 's'}) — rebuilding ${r.rebuilding}${r.atNextStart ? `; ${r.atNextStart} not running take it at their next start` : ''}${r.notRecovered > (r.notRecoveredOthers || 0) ? `; ${notRecoveredNote(r.notRecovered - (r.notRecoveredOthers || 0))}` : ''}${r.notRecoveredOthers ? `; ${notRecoveredOthersNote(r.notRecoveredOthers)}` : ''}. Delete "${migrateState.name}" once they're done.${(r.skipped || []).length ? ' Skipped: ' + r.skipped.map(s => s.name).join(', ') : ''}${keptLimitsList(r).map(k => ' ' + k).join('')}`, 12000);
-    await refresh(true); renderAiList();
-  } catch (e) { $('migrateErr').textContent = e.message; }
-  finally { $('migrateBtn').disabled = false; }
+  el.innerHTML = `<div class="rt-wrap"><table class="rt-tbl">
+    <thead><tr><th>Image</th><th>State</th><th>Contents</th><th>Used by</th><th></th></tr></thead>
+    <tbody>${images.map(img => {
+      const busy = img.status === 'BUILDING';
+      const kind = img.status === 'READY' ? '<span style="color:var(--ok)">✓</span> <b>ready</b>'
+        : img.status === 'FAILED' ? '<span style="color:var(--bad)">✗</span> <b>failed</b>'
+        : '<span style="color:var(--dim)">⏳</span> <b>building…</b>';
+      // The Dockerfile lines, as one readable summary; the full text sits under the row.
+      const steps = String(img.dockerfile || '').split('\n').map(s => s.trim()).filter(Boolean);
+      const contents = steps.length ? `${esc(steps[0].slice(0, 54))}${steps[0].length > 54 ? '…' : ''}${steps.length > 1 ? `<div class="sub">+ ${steps.length - 1} more line${steps.length > 2 ? 's' : ''}</div>` : ''}` : '<span class="sub">—</span>';
+      const who = img.pinnedBy ? `<b>${img.pinnedBy}</b> agent${img.pinnedBy > 1 ? 's' : ''} <span class="sub">pinned</span>` : '<span class="sub">nothing</span>';
+      const err = img.status === 'FAILED' && img.error
+        ? `<div style="color:var(--bad)">${esc(String(img.error).split('\n').filter(Boolean).pop() ?? '')}</div>` : '';
+      const key = img.name.replace(/[^a-z0-9]/gi, '_');
+      return `<tr>
+        <td><b>${esc(img.name)}</b><div class="sub"><code title="${esc(img.tag)}">${esc(imageTagOf(img.tag))}</code></div></td>
+        <td>${kind}<div class="sub">${img.builtAt ? `built ${esc(img.builtAt.slice(0, 10))}` : 'never built'}</div></td>
+        <td>${contents}<div class="sub">FROM ${esc(imageTagOf(img.base))}</div></td>
+        <td>${who}</td>
+        <td><div class="rt-acts">
+          <button ${onAction('click', 'toggleDerivedLines', [`${img.name ?? ''}`, `${key}`])} title="The Dockerfile lines in this image">🔎</button>
+          <button ${busy ? 'disabled' : ''} ${onAction('click', 'rebuildDerivedImage', [`${img.name ?? ''}`])} title="Build it again from its Dockerfile lines">↻ Rebuild</button>
+          <button ${onAction('click', 'showDerivedLog', [`${img.name ?? ''}`])}>Log</button>
+          <button class="danger" ${busy ? 'disabled' : ''} ${onAction('click', 'deleteDerivedImage', [`${img.name ?? ''}`])} title="Delete this derived image">🗑</button>
+        </div></td>
+      </tr><tr class="rt-under"><td colspan="5">${err}<pre id="dvLines_${key}" hidden style="margin:6px 0 0;max-height:220px;overflow:auto;font-size:11px;white-space:pre-wrap;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px">${esc(img.dockerfile || '')}</pre></td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  // Resume following any build still in progress (e.g. after a page reload).
+  for (const img of images) if (img.status === 'BUILDING') pollDerivedBuild(img.name);
 }
 
-async function renderPeers() {
-  try {
-    const peers = await api('/v1/peers');
-    $('peerList').innerHTML = peers.length
-      ? peers.map(p => `<div class="pair"><span class="grow">🖥 <b>${esc(p.name)}</b> <span style="color:var(--dim)">${esc(p.url)}</span></span>
-          <button class="danger" ${onAction('click', 'delPeer', [`${p.id}`, `${p.name ?? ''}`])}>×</button></div>`).join('')
-      : '<div class="sub">None yet.</div>';
-  } catch { /* listing is best-effort */ }
+function toggleDerivedLines(name, key) {
+  const pre = $('dvLines_' + key);
+  if (pre) pre.hidden = !pre.hidden;
 }
 
-async function addPeer() {
-  const name = $('peerName').value.trim(), url = $('peerUrl').value.trim(), token = $('peerToken').value.trim();
-  // Its own error line: aiErr sits in the AI tab, so these errors were never seen (v2.157.0).
-  $('peerErr').textContent = '';
-  if (!name || !url || !token) { $('peerErr').textContent = 'Name, URL and token are all needed.'; return; }
-  $('peerAddBtn').disabled = true;
-  try {
-    await api('/v1/peers', { method: 'POST', body: { name, url, token } });
-    $('peerName').value = ''; $('peerUrl').value = ''; $('peerToken').value = '';
-    toast('Server added');
-    await renderPeers();
-  } catch (e) { $('peerErr').textContent = e.message; }
-  finally { $('peerAddBtn').disabled = false; }
+/** Hand the job to the management agent: it writes the Dockerfile, you Confirm. */
+function askMgmtForImage() {
+  if (pageSecondFactorBusy()) { toast('Finish signing in or saving your codes before asking for an image.', 8000); return; }
+  const ops = (agents ?? []).find(a => a.ops && v2Mine(a) && a.state === 'RUNNING');
+  if (!ops) { toast('Set up your Hatchabot agent first — it writes the Dockerfile for you.', 8000); return; }
+  if (aiDlg.open) aiDlg.close(); // leave any other pending form to its own completion path
+  openGateway(ops.id, ops.slug);
+  toast('Ask it for the image — e.g. “build a derived image called media-tools with ffmpeg”.', 9000);
 }
-
-async function delPeer(id, name) {
-  if (!confirm(`Forget "${name}"? Agents already moved there are unaffected.`)) return;
-  try { await api(`/v1/peers/${id}`, { method: 'DELETE' }); await renderPeers(); }
-  catch (e) { toast(e.message); }
-}
-
-async function runsHere(id, name) {
-  if (!confirm(`Mark "${name}" as running here again?\n\nOnly do this if it is NOT running on the other server — two copies polling one Telegram bot will fight over every message.`)) return;
+async function rebuildDerivedImage(name) {
   try {
-    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { runsHere: true } });
-    toast('Cleared — you can start it here now');
-    await refresh(false);
+    await api(`/v1/images/${encodeURIComponent(name)}/rebuild`, { method: 'POST', body: {} });
+    toast(`Rebuilding ${name}…`);
+    await loadDerivedImages();
+    pollDerivedBuild(name);
   } catch (e) { toast(e.message); }
 }
 
-/** Move within THIS server: local ⇄ runner. Same agent, same bot, same
- *  members — only the Docker daemon changes. (Rehost, below, is the Mesh
- *  move: to a whole other Hatchabot server.) */
-async function moveHostAgent(id, name) {
-  const a = agents.find(x => x.id === id);
-  const others = hosts.filter(h => h.id !== a?.hostId);
-  if (!others.length) return toast('There is no other runner to move to — add one in ⚙ Settings → Hosts.', 8000);
-  const list = others.map((h, i) => `${i + 1}. ${h.name}${h.kind === 'local' ? ' (this machine)' : ''}`).join('\n');
-  const pick = prompt(`Move "${name}" to which runner?\n\n${list}\n\nEnter a number:`);
-  if (pick === null) return;
-  const host = others[Number(pick) - 1];
-  if (!host) return toast('No such host');
-  if (!confirm(`Move "${name}" to ${host.name}?\n\nIt stops, its memory is copied over, and it starts there. Same bot, same members — nothing else changes. If anything fails it stays where it is.`)) return;
+async function deleteDerivedImage(name) {
+  if (!confirm(`Delete derived image "${name}"? This removes it from docker.`)) return;
   try {
-    const r = await moveHostPost(id, host, name);
-    // Since v2.156.0 the move goes on on the server (202): its tile shows the step, a toast the end.
-    if (r?.operation?.id) {
-      v2FollowOp(r.operation);
-      toast(`Moving ${name} to ${host.name} — its tile shows each step; this page can close.`, 8000);
-    } else toast(`✅ ${name} now runs on ${host.kind === 'local' ? 'this machine' : host.name}.`, 10000);
-  } catch (e) { toast(`Move failed: ${e.message}`, 20000); }
-  await refresh(false);
+    await api(`/v1/images/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    toast(`Removed "${name}".`);
+    loadDerivedImages();
+  } catch (e) { toast(e.message); } // 409 = still pinned; the message names who
 }
 
-// A pinned image the runner lacks, or has another image of that name: the
-// server refuses first (nothing has stopped yet) and the owner decides
-// whether to go on the runner's default. The server's words say which, and
-// why (HB-1325 review: this said "does not have" of one it has, built
-// another way).
-async function moveHostPost(id, host, name) {
+async function showDerivedLog(name) {
+  const pre = $('derivedBuildOut');
   try {
-    return await api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId: host.id } });
-  } catch (e) {
-    if (e.code !== 'pinned_image_missing') throw e;
-    if (!confirm(`${e.message}\n\nMove "${name}" on ${host.name}'s default image now?`)) throw new Error('kept where it is');
-    return api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId: host.id, dropPin: true } });
-  }
+    const r = await api(`/v1/images/${encodeURIComponent(name)}/log`);
+    pre.hidden = false;
+    pre.textContent = r.log || '(no build output yet)';
+    pre.scrollTop = pre.scrollHeight;
+  } catch (e) { toast(e.message); }
 }
 
+/** How long a build's log is waited for between two reads, and at most after reads that failed. */
+const DERIVED_POLL_MS = 1500, DERIVED_RETRY_MAX_MS = 30_000;
 /**
- * An export carries the agent's Telegram bot, never its Slack or Discord app —
- * those belong to apps the owner made on those platforms. Say so before the
- * agent leaves, instead of letting the channels vanish quietly.
+ * Follow a running build: stream the log into the output box until it ends.
+ * A log that will not read is not the build ending: it is read again, each
+ * wait twice the last, and said once. The failure went back to the list,
+ * which followed the build again at once: a loop of reads with no wait and a
+ * toast each time (HB-0996). Only an end (built, failed, the image gone or
+ * not this person's) shows the list again.
  */
-function channelsLostOnExport(id) {
-  const a = v2Find ? v2Find(id) : (agents || []).find(x => x.id === id);
-  const kinds = (a?.otherChannels ?? []).map(c => V2_CHAN_LABEL[c.kind] || c.kind);
-  return kinds.length ? `\n\n${kinds.join(' and ')} ${kinds.length > 1 ? 'do' : 'does'} not travel with it: the app belongs to your ${kinds.join('/')} account. Set it up again on the other side (Messaging → Set up).` : '';
-}
-
-async function rehostAgent(id, name) {
-  let peers;
-  try { peers = await api('/v1/peers'); } catch (e) { return toast(e.message); }
-  if (!peers.length) return (openAiDlg('servers'), toast('Register the destination cluster server first', 6000));
-  const list = peers.map((p, i) => `${i + 1}. ${p.name} (${p.url})`).join('\n');
-  const pick = prompt(`Move "${name}" to which cluster server?\n\n${list}\n\nEnter a number:`);
-  if (pick === null) return;
-  const peer = peers[Number(pick) - 1];
-  if (!peer) return toast('No such server');
-  if (!confirm(`Move "${name}" to the cluster at ${peer.name}?${channelsLostOnExport(id)}\n\nIt stops here, transfers with its memory and members, and starts there — managed from that server's dashboard from now on. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
-  // Waits only for the other server's yes (its preflight); the move then goes on on the server (202).
-  toast(`Asking ${peer.name} whether it can take ${name}…`, 60000, 'progress');
-  const body = { peerId: peer.id };
+async function pollDerivedBuild(name) {
+  if (derivedBuilding.has(name)) return;
+  derivedBuilding.add(name);
+  const pre = $('derivedBuildOut');
+  pre.hidden = false;
+  let ended = false;
   try {
-    let res;
-    try { res = await api(`/v1/agents/${id}/rehost`, { method: 'POST', body }); }
-    catch (e) {
-      // It would land on a source of another vendor while that server has one
-      // of its own vendor: offered as the source to move onto instead.
-      const c = e.code === 'source_choice' && e.data?.sourceChoice;
-      if (!c) throw e;
-      if (!confirm(`${e.message}\n\nMove "${name}" onto ${c.name} (${c.vendor}/${c.model}) on ${peer.name} instead?`)) return toast('Not moved.');
-      toast(`Asking ${peer.name} whether it can take ${name} onto ${c.name}…`, 60000, 'progress');
-      res = await api(`/v1/agents/${id}/rehost`, { method: 'POST', body: { ...body, aiProfileId: c.id } });
+    for (let fails = 0, wait = DERIVED_POLL_MS; ; await new Promise(res => setTimeout(res, wait))) {
+      let r;
+      try { r = await api(`/v1/images/${encodeURIComponent(name)}/log`); }
+      catch (e) {
+        if (e.status === 401 || e.status === 403 || e.status === 404) { ended = true; break; }
+        if (!fails++) toast(e.message);
+        wait = Math.min(DERIVED_POLL_MS * 2 ** fails, DERIVED_RETRY_MAX_MS);
+        continue;
+      }
+      fails = 0; wait = DERIVED_POLL_MS;
+      pre.textContent = r.log || '';
+      pre.scrollTop = pre.scrollHeight;
+      if (r.status === 'READY') { toast(`✓ Built ${name}.`); ended = true; break; }
+      if (r.status === 'FAILED') { toast(`✗ ${name} failed to build — see the log.`); ended = true; break; }
     }
-    if (res?.operation?.id) {
-      v2FollowOp(res.operation);
-      toast(`Moving ${name} to ${peer.name} — its tile shows each step; this page can close. This copy stays stopped once it has gone.`, 10000);
-    } else toast(`✅ Moved to ${res.movedTo}. This copy is ${res.sourceState} — leave it that way.`, 30000);
-    await refresh(false);
-  } catch (e) { toast(e.message, 30000); }
-}
-
-// The Claude model ids the app offers when it can't ask a live runtime. Newest
-// first — the dropdown's top entry is the sensible default. Keep in step with
-// CURATED_ANTHROPIC_MODELS in src/api/routes.ts. NO claude-opus-5: the
-// claude-cli (Max) runtime has no catalog entry for it — it once became a fleet
-// default and every conversation broke on compaction (see runtimeModels.ts).
-/** Model lists read alphabetically, numbers as numbers (opus-4-8 before opus-4-10) (Chris, 2026-10-07). */
-function byModelName(a, b) { return String(a).localeCompare(String(b), 'en', { numeric: true }); }
-/** A model's own id, as the server's modelKey has it: no `anthropic/`, no date (claude-haiku-4-5-20251001 is claude-haiku-4-5). */
-function modelKeyOf(m) { return String(m).replace(/^[a-z-]+\//, '').replace(/-\d{8}$/, ''); }
-/** The most models a source lists, its default among them (the server's limit on PATCH /v1/ai-profiles/:id). */
-const MAX_SOURCE_MODELS = 16;
-// The fallback for a new source: covers the server's CURATED_ANTHROPIC_MODELS and never
-// claude-opus-5 (test/driftGuards.test.ts). A saved source lists what its runtime really serves.
-const CLAUDE_MODELS = ['claude-fable-5', 'claude-haiku-4-5', 'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8',
-  'claude-sonnet-4-6', 'claude-sonnet-5'].sort(byModelName);
-/** Flip a password field to plaintext so the user can verify a pasted key,
- *  and back. Purely local — the value never leaves the field either way. */
-function toggleReveal(btn, inputId) {
-  const el = $(inputId);
-  const show = el.type === 'password';
-  el.type = show ? 'text' : 'password';
-  btn.textContent = show ? 'Hide' : 'Show';
-}
-function aiKindChanged() {
-  const k = $('aiKind').value;
-  $('aiKeyRow').style.display = k === 'api_key' ? '' : 'none';
-  $('aiTokenRow').style.display = k === 'subscription' ? '' : 'none';
-  $('aiLocalRow').style.display = k === 'local' ? '' : 'none';
-  // Anthropic (subscription, or an api_key with vendor=Anthropic) → a real
-  // dropdown of the Claude models so the default can be PICKED, with an
-  // "Other…" escape for a newer id. Gemini and local keep the plain text field.
-  const anthropic = k === 'subscription' || (k === 'api_key' && $('aiVendor').value === 'anthropic');
-  const sel = $('aiModelSelect');
-  if (anthropic) {
-    sel.innerHTML = CLAUDE_MODELS.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')
-      + '<option value="__other">Other (type an id)…</option>';
-    if (![...CLAUDE_MODELS, '__other'].includes(sel.value)) sel.value = 'claude-opus-4-8';
-    sel.style.display = '';
-    aiModelSelectChanged();  // show/hide the text box to match the selection
-    $('aiModelHint').textContent = 'Pick the default this source starts with — agents on it can switch to any of the others later.';
-  } else {
-    sel.style.display = 'none';
-    $('aiModel').style.display = '';
-    $('aiModel').placeholder = k === 'local' ? 'Default model (e.g. qwen3.6:27b-q8_0)'
-      : k === 'api_key' && $('aiVendor').value === 'google' ? 'Default model (e.g. gemini-2.5-pro)'
-      : k === 'api_key' && $('aiVendor').value === 'openai' ? 'Default model (e.g. gpt-5)'
-      : 'Default model';
-    $('aiModelHint').textContent = k === 'local' ? 'Use the exact model tag your Ollama server serves.'
-      : k === 'api_key' && $('aiVendor').value === 'openai' ? "Any chat model your key can call — the picker lists them once the source is saved."
-      : '';
-  }
-}
-/** Show the free-text box only when "Other…" is chosen. */
-function aiModelSelectChanged() {
-  const other = $('aiModelSelect').value === '__other';
-  $('aiModel').style.display = other ? '' : 'none';
-  $('aiModel').placeholder = 'Type a model id (e.g. a newer claude-…)';
-  if (other) { $('aiModel').value = ''; $('aiModel').focus(); }
-}
-
-async function newCliToken(scope) {
-  $('cliTokenErr').textContent = '';
-  try {
-    // scope 'rehost': for another server that will move agents here — that,
-    // and nothing else. The old advice pasted a full token there.
-    const t = await api('/v1/cli-tokens', { method: 'POST', body: scope ? { label: 'Moving agents from another Hatchabot', scope } : { label: 'CLI' } });
-    const out = $('cliTokenOut');
-    out.style.display = '';
-    out.textContent = t.token;
-    toast('Copy it now — it is not shown again', 20000);
-    if (await copyText(t.token)) toast(scope ? 'Token copied — paste it on the other server, under Settings → Advanced → Other Hatchabot servers' : 'Token copied — run: hatchabot login', 20000);
-    void loadCliTokens();
-  } catch (e) { $('cliTokenErr').textContent = e.message; } // its own line: #aiErr is in another tab (HB-0442)
-}
-
-/** The tokens this account has minted, so one can be taken back — a retired
- *  management bot leaves its own behind, and the app could only ever add. */
-async function loadCliTokens() {
-  const el = $('cliTokenList');
-  if (!el) return;
-  try {
-    const rows = await api('/v1/cli-tokens');
-    el.innerHTML = rows.length
-      ? rows.map(t => `<div class="pair" style="align-items:baseline;padding:4px 0;border-top:1px solid var(--line)">
-          <span class="grow"><b>${esc(t.label || 'CLI')}</b>${t.scope === 'rehost' ? ' <span class="sub">(moving agents here only)</span>' : ''} <span class="sub">· made ${ago(t.createdAt)}${t.lastUsedAt ? ` · last used ${ago(t.lastUsedAt)}` : ' · never used'}</span></span>
-          <button class="danger" ${onAction('click', 'revokeCliToken', [`${t.id ?? ''}`, `${(t.label || 'CLI') ?? ''}`])}>Revoke</button>
-        </div>`).join('')
-      : 'No tokens.';
-  } catch (e) { el.textContent = e.message; }
-}
-
-async function revokeCliToken(id, label) {
-  if (!confirm(`Revoke the "${label}" token?\n\nAnything signed in with it — a terminal, a cluster server — stops working immediately.`)) return;
-  try { await api(`/v1/cli-tokens/${id}`, { method: 'DELETE' }); toast('Revoked.'); loadCliTokens(); }
-  catch (e) { toast(e.message); }
-}
-
-async function addAiProfile() {
-  const kind = $('aiKind').value;
-  const name = $('aiName').value.trim();
-  const sel = $('aiModelSelect');
-  const model = (sel.style.display !== 'none' && sel.value && sel.value !== '__other')
-    ? sel.value
-    : $('aiModel').value.trim();
-  if (!name || !model) { $('aiErr').textContent = 'Name and default model are required.'; return; }
-  const extra = $('aiModelsAdd').value.split(/[\s,]+/).filter(Boolean); // commas or spaces between them
-  const body = { kind, name, model, models: extra.length ? [model, ...extra] : undefined };
-  if (kind === 'local') {
-    body.baseUrl = $('aiBaseUrl').value.trim() || undefined;
-  }
-  else if (kind === 'subscription') {
-    body.vendor = 'anthropic';
-    body.oauthToken = $('aiToken').value.trim() || undefined;
-  }
-  else {
-    body.vendor = $('aiVendor').value;
-    body.apiKey = $('aiKey').value.trim();
-    if (!body.apiKey) { $('aiErr').textContent = 'API key is required.'; return; }
-  }
-  $('aiAddBtn').disabled = true;
-  try {
-    await api('/v1/ai-profiles', { method: 'POST', body });
-    $('aiName').value = ''; $('aiModel').value = ''; $('aiModelsAdd').value = ''; $('aiKey').value = ''; $('aiToken').value = '';
-    toast('AI source added');
-    await refresh(true); renderAiList();
-  } catch (e) { $('aiErr').textContent = e.message; }
-  finally { $('aiAddBtn').disabled = false; }
+  } finally { derivedBuilding.delete(name); if (ended) loadDerivedImages(); }
 }

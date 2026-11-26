@@ -1,4 +1,4 @@
-// web/app/settings.js: Settings: AI sources, Advanced, what each agent can reach (and the web search key), spare Discord bots and Slack apps, hosts and the memory search service, recovery readiness.
+// web/app/settings.js: Settings: its tabs, Advanced, what every agent is told about you, what each agent can reach, the security posture and access tokens, the media and web search keys, Telegram bots and the bot pool, spare Discord bots and Slack apps, hosts and the machine's defaults, the memory search service, the rebuild policy, backups, recovery readiness.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -117,7 +117,8 @@ function loadSettingsPane(name) {
 // remembered per browser. A folded part does not load.
 const SETTINGS_ADV = [
   ['servers', 'Other Hatchabot servers', 'separate servers, each with its own dashboard: move an agent to one'],
-  ['runtime', 'Runtime images', 'the OpenClaw your agents run: try a newer one on one agent, then promote it'],
+  // Not "promote": a pin of HATCHABOT_IMAGE turns Promote off, and the setting makes one the default then (HB-1256).
+  ['runtime', 'Runtime images', 'the OpenClaw your agents run: try a newer one on one agent, then make it the default'],
   ['derived', 'Derived images', 'the base image plus extra packages, for an agent that needs them'],
 ];
 const SETTINGS_ADV_KEY = 'hb-settings-adv';
@@ -242,7 +243,7 @@ function sharingRead(el, id = null) {
   sharingReads.set(el, read);
   return () => epoch === sharingEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut
     && (!id || view === sharingView) && sharingReads.get(el) === read && el.isConnected
-    && (!id || (editAgentId === id && !!v2Find(id) && v2Mine(v2Find(id))));
+    && (!id || (forAgent(id).mine() && !!v2Find(id) && v2Mine(v2Find(id)))); // the sheet's forms still its agent's (HB-0644)
 }
 function sharingForget() {
   sharingEpoch++; sharePeopleFor = null; v2AccessCache = null; members = {};
@@ -371,6 +372,43 @@ async function loadPosture() {
   } finally {
     $('postureRunBtn').disabled = false;
   }
+}
+
+async function newCliToken(scope) {
+  $('cliTokenErr').textContent = '';
+  try {
+    // scope 'rehost': for another server that will move agents here — that,
+    // and nothing else. The old advice pasted a full token there.
+    const t = await api('/v1/cli-tokens', { method: 'POST', body: scope ? { label: 'Moving agents from another Hatchabot', scope } : { label: 'CLI' } });
+    const out = $('cliTokenOut');
+    out.style.display = '';
+    out.textContent = t.token;
+    toast('Copy it now — it is not shown again', 20000);
+    if (await copyText(t.token)) toast(scope ? 'Token copied — paste it on the other server, under Settings → Advanced → Other Hatchabot servers' : 'Token copied — run: hatchabot login', 20000);
+    void loadCliTokens();
+  } catch (e) { $('cliTokenErr').textContent = e.message; } // its own line: #aiErr is in another tab (HB-0442)
+}
+
+/** The tokens this account has minted, so one can be taken back — a retired
+ *  management bot leaves its own behind, and the app could only ever add. */
+async function loadCliTokens() {
+  const el = $('cliTokenList');
+  if (!el) return;
+  try {
+    const rows = await api('/v1/cli-tokens');
+    el.innerHTML = rows.length
+      ? rows.map(t => `<div class="pair" style="align-items:baseline;padding:4px 0;border-top:1px solid var(--line)">
+          <span class="grow"><b>${esc(t.label || 'CLI')}</b>${t.scope === 'rehost' ? ' <span class="sub">(moving agents here only)</span>' : ''} <span class="sub">· made ${ago(t.createdAt)}${t.lastUsedAt ? ` · last used ${ago(t.lastUsedAt)}` : ' · never used'}</span></span>
+          <button class="danger" ${onAction('click', 'revokeCliToken', [`${t.id ?? ''}`, `${(t.label || 'CLI') ?? ''}`])}>Revoke</button>
+        </div>`).join('')
+      : 'No tokens.';
+  } catch (e) { el.textContent = e.message; }
+}
+
+async function revokeCliToken(id, label) {
+  if (!confirm(`Revoke the "${label}" token?\n\nAnything signed in with it — a terminal, a cluster server — stops working immediately.`)) return;
+  try { await api(`/v1/cli-tokens/${id}`, { method: 'DELETE' }); toast('Revoked.'); loadCliTokens(); }
+  catch (e) { toast(e.message); }
 }
 
 async function loadMediaKey() {
@@ -560,23 +598,20 @@ async function setSearchMode(mode) {
   try { renderSearchHealth(await api('/v1/web-search', { method: 'PUT', body: { mode } })); }
   catch (e) { toast(e.message, 10000); loadSearchHealth(); }
 }
-/** Agents whose Test web search is running: their forms' button waits for it (testAgentSearch, prepareEdit). */
-const searchTests = new Set();
 /** A real search in this agent, through its own settings and keys. */
 async function testAgentSearch() {
-  const btn = $('agentSearchTestBtn'), out = $('agentSearchTestOut');
+  const out = $('agentSearchTestOut');
   // Whose test it is: another agent's forms opened while it ran (they empty this line) do not
-  // get its answer under their button; it is said in a toast with its agent's name.
-  const forId = editAgentId, f = forAgent(forId);
-  btn.disabled = true; searchTests.add(forId);
+  // get its answer under their button; it is said in a toast with its agent's name. The button
+  // waits for its own agent's test only: another's may be running under it now (sheetPress).
+  const f = sheetSave().hold('agentSearchTestBtn');
   out.textContent = 'Searching…';
   let said;
   try {
-    const r = await api(`/v1/agents/${forId}/search-test`, { method: 'POST' });
+    const r = await api(`/v1/agents/${f.id}/search-test`, { method: 'POST' });
     said = `${r.ok ? '✓' : '⚠'} ${r.detail}`;
   } catch (e) { said = `⚠ ${e.message}`; }
-  // The button is the forms' agent's: another's test may be running under it now (prepareEdit).
-  finally { searchTests.delete(forId); if (f.mine()) btn.disabled = false; }
+  finally { f.done(); }
   f.draw(() => { out.textContent = said; });
   if (!f.shown()) f.say(said, 9000);
 }
@@ -962,6 +997,38 @@ async function embedderAction(action, hostId) {
   if (hostId) loadHostEmbedder(hostId); else loadEmbedder();
 }
 
+// Memory search across the fleet (Settings → Hosts, under the service): what new agents get, and moving the rest.
+async function loadEmbedFleet() {
+  const row = $('embedFleetRow'), el = $('embedFleetBody');
+  if (!row || !myAccount.hostOwner) return;
+  try {
+    const r = await api('/v1/embed-default');
+    row.hidden = false;
+    const rest = r.total - r.shared;
+    el.innerHTML = `<span>${r.shared} of ${r.total} agent${r.total === 1 ? '' : 's'} on the shared service${r.pending ? ` <span class="sub">· ${r.pending} waiting for a rebuild</span>` : ''}</span>
+      <label style="margin:0;display:inline-flex;align-items:center;gap:6px">New agents use
+        <select style="width:auto" ${onAction('change', 'setEmbedDefault', [{ $: 'value' }])}><option value="baked"${r.default === 'baked' ? ' selected' : ''}>their own engine</option><option value="shared"${r.default === 'shared' ? ' selected' : ''}>the shared service</option></select></label>
+      ${rest ? `<button ${onAction('click', 'embedMoveAll', ["shared", "now"])}>Move the rest now (idle ones)</button><button ${onAction('click', 'embedMoveAll', ["shared", "quiet"])}>Move the rest overnight</button>` : ''}
+      ${r.shared ? `<button ${onAction('click', 'embedMoveAll', ["baked", "quiet"])}>Move all back to their own engine</button>` : ''}
+      <span class="sub">A move applies as a rebuild — memory kept, the index rebuilt — never while an agent is mid-conversation. Overnight means the quiet hours of the rebuild policy.</span>`;
+  } catch (e) { row.hidden = true; }
+}
+async function setEmbedDefault(mode) {
+  try { await api('/v1/embed-default', { method: 'PUT', body: { default: mode } }); toast(mode === 'shared' ? 'New agents will use the shared service' : 'New agents will use their own engine'); }
+  catch (e) { toast(e.message, 12000); }
+  loadEmbedFleet();
+}
+async function embedMoveAll(mode, when) {
+  const what = mode === 'shared' ? 'the shared memory search service' : 'their own engine';
+  if (!confirm(`Move every agent on this machine to ${what}?\n\n${when === 'now' ? 'Idle ones rebuild now, as many at once as Rebuild-at-once allows; any mid-conversation wait for the quiet hours.' : 'They rebuild in the quiet hours, never mid-conversation.'} Memory is kept; each re-indexes its memory search afterwards.`)) return;
+  try {
+    const r = await api('/v1/embed/move-all', { method: 'POST', body: { mode, when } });
+    toast(`${r.switched} switched — ${r.queued} rebuilding now, ${r.deferred} in the quiet hours.`
+      + (r.engineFree > 0 ? ` ${r.engineFree} left on the shared service: their image has no engine of its own.` : ''), 12000);
+  } catch (e) { toast(e.message, 12000); }
+  loadEmbedFleet();
+}
+
 async function pingHost(id) {
   const el = $(`hostping-${id}`);
   if (el) { el.textContent = 'checking…'; el.style.color = 'var(--dim)'; }
@@ -1079,11 +1146,48 @@ async function deleteHost(id, name) {
   } catch (e) { toast(e.message, 20000); }
 }
 
-function fmtBytes(n) {
-  if (!n) return '0 B';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+// The machine's rebuild policy (Runtime tab; machine owner sets it).
+let rebuildPolicyNow = 'required-only';
+const REBUILD_POLICY_TEXT = {
+  'required-only': 'Required rebuilds happen on their own, once an agent is idle. Others wait for you.',
+  auto: 'Required rebuilds happen once an agent is idle; the rest overnight (quiet hours).',
+  manual: 'Nothing happens on its own — the cards say what needs a rebuild.',
+};
+/** Automatic rebuilds, under Settings → Hosts since v2.157.0: the machine owner's. */
+function loadRebuildSection() {
+  $('rbSection').hidden = $('rbHead').hidden = !myAccount.hostOwner;
+  if (myAccount.hostOwner) void loadRebuildPolicy();
+}
+async function loadRebuildPolicy() {
+  void loadRebuildAtOnce();
+  try {
+    const r = await api('/v1/rebuild-policy');
+    rebuildPolicyNow = r.policy;
+    const sel = $('rbPolicy'); if (!sel) return;
+    sel.value = r.policy;
+    $('rbPolicyNote').textContent = REBUILD_POLICY_TEXT[r.policy] + (r.policy === 'auto' ? ` Quiet hours: ${r.quietHours}h.` : '');
+  } catch { /* older server — leave the default */ }
+}
+async function loadRebuildAtOnce() {
+  try {
+    const r = await api('/v1/rebuild-concurrency');
+    const sel = $('rbAtOnce'); if (!sel) return;
+    sel.innerHTML = Array.from({ length: r.max }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('');
+    sel.value = String(r.atOnce);
+    if (appConfig) appConfig.rebuildConcurrency = r.atOnce;
+  } catch { /* older server */ }
+}
+async function setRebuildAtOnce(n) {
+  try { await api('/v1/rebuild-concurrency', { method: 'PUT', body: { atOnce: Number(n) } }); toast(`Rebuilds at once: ${n}`); if (appConfig) appConfig.rebuildConcurrency = Number(n); }
+  catch (e) { toast(e.message, 12000); }
+  loadRebuildAtOnce();
+}
+async function setRebuildPolicy(policy) {
+  try {
+    await api('/v1/rebuild-policy', { method: 'PUT', body: { policy } });
+    toast('Rebuild policy saved');
+  } catch (e) { toast(e.message, 12000); }
+  loadRebuildPolicy();
 }
 
 let bkPollTimer = null;
@@ -1398,63 +1502,4 @@ async function setDrillEvery(every) {
     toast(every === 'off' ? 'Automatic restore drills are off.' : `A restore drill will run ${every}, early in the morning after that night's backup.`);
     await loadReadiness();
   } catch (e) { toast(e.message, 12000); $('bkDrillEvery').value = v2Readiness?.drill?.every || 'off'; }
-}
-
-/** The Runtime tab's capability list: probed tool versions from the image,
- *  paired with what each one means for agents — plus the honest "not
- *  included" line and the server-side capabilities that ride config. */
-async function loadRuntimeCaps() {
-  const el = $('runtimeCaps');
-  try {
-    const [c, mk] = await Promise.all([
-      api('/v1/runtime/capabilities'),
-      api('/v1/media-key').catch(() => null),
-    ]);
-    const t = c.tools || {};
-    const row = (name, detail, version, dot = 'var(--ok)') => `<tr><td><span style="color:${dot}">●</span> <b>${esc(name)}</b></td>
-      <td class="sub">${detail}</td><td class="sub cap-ver">${version ? esc(version) : ''}</td></tr>`;
-    const rows = [];
-    if (t.openclaw) rows.push(row('Agent runtime', 'conversations, memory, Telegram gateway, scheduled tasks', t.openclaw));
-    if (t['claude-code']) rows.push(row('Claude Code', 'the Anthropic model runtime agents think with', t['claude-code']));
-    rows.push(row('Web search', 'DuckDuckGo, enabled per agent (keyless)'));
-    rows.push(row('Memory search', 'semantic recall over MEMORY.md — local embeddings (or the machine\'s shared service, per agent)'));
-    rows.push(row('Telegram voice notes', (mk ? mk.set ? 'Shared Gemini key saved, not tested; changes apply on Rebuild.' : 'No shared Gemini key saved; an agent may still hold a previous key until Rebuild.' : 'Shared Gemini key status unavailable.') + ' An agent may use its Gemini AI source\'s own key. Settings → Connections. Browser Talk uses separate voice settings.', '', 'var(--dim)'));
-    if (t.gog) rows.push(row('Google Workspace', 'Gmail / Drive / Calendar / Sheets / Docs via <code>gog</code> — each agent connects its own account in chat', t.gog));
-    if (t.python) rows.push(row('Python', 'agents run scripts; libraries install per agent (<code>pip install --target ~/.openclaw/pylibs</code>)', t.python));
-    if (t.git) rows.push(row('Git + SSH', 'repo data sources with generated deploy keys', t.git));
-    if (t.node) rows.push(row('Node.js', 'the runtime base', t.node));
-    const missing = (c.missing || []).length
-      ? `<div class="sub" style="margin-top:8px">Not included (by design, to keep the image lean): ${c.missing.map(esc).join(', ')} — so no local audio/video processing. Agents can still fetch web pages and read PDFs/images via the model; a browser of its own is an option per agent (its page → Advanced → Browser).</div>`
-      : '';
-    el.innerHTML = `<div class="cap-wrap"><table class="cap-table"><thead><tr><th>Capability</th><th>What it's for</th><th>Version</th></tr></thead>
-      <tbody>${rows.join('')}</tbody></table></div>` + missing;
-  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
-}
-
-async function loadRuntime() {
-  loadRuntimeCaps();
-  loadDerivedImages();
-  $('rtPanel').hidden = !myAccount.hostOwner;
-  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); }
-  const el = $('runtimeStatus');
-  try {
-    const r = await api('/v1/runtime');
-    const cur = r.imageVersion ? esc(r.imageVersion) : 'unknown (image not built yet?)';
-    let latestLine;
-    if (!r.npmLatest) latestLine = `<div class="sub">Couldn't reach npm to check the latest stable.</div>`;
-    else if (r.upgradeAvailable && appConfig?.managed) latestLine = '';
-    else if (r.upgradeAvailable) latestLine = `<div style="color:var(--warn)">⬆ OpenClaw <b>${esc(r.npmLatest)}</b> is the latest stable — you're on ${cur}.</div>`;
-    else latestLine = `<div style="color:var(--ok)">✓ up to date with the latest stable (${esc(r.npmLatest)}).</div>`;
-    const lagging = (agents ?? []).filter(a => a.rebuild).length;
-    // The machine owner gets buttons below (candidate → try → promote), so
-    // the command-line hints and the repeated "newer version" line only
-    // confuse there; everyone else still needs them.
-    const owner = !!myAccount.hostOwner;
-    el.innerHTML =
-      `<div style="font-size:15px"><b>Runtime image:</b> OpenClaw ${cur}</div>
-       ${owner && r.upgradeAvailable ? '' : `<div style="margin-top:4px">${latestLine}</div>`}
-       ${r.npmExtendedStable ? `<div class="sub" style="margin-top:2px">extended-stable track: <code>${esc(r.npmExtendedStable)}</code></div>` : ''}
-       ${lagging ? `<div class="sub" style="margin-top:8px">${lagging} agent${lagging > 1 ? 's need' : ' needs'} a <b>Rebuild</b> (each card says why).</div>` : ''}
-       ${owner ? '' : `<div class="sub" style="margin-top:12px">Upgrading is done by whoever runs this machine.</div>`}`;
-  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }

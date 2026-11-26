@@ -3,9 +3,9 @@ import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { registerAuth, _resetLoginThrottle } from '../src/api/auth.js';
+import { registerAuth, _resetLoginThrottle } from '../src/api/signIn/auth.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { IdentityVerifier } from '../src/api/identity.js';
+import { IdentityVerifier } from '../src/api/signIn/identity.js';
 import { createInvite, checkInvite } from '../src/orchestrator/members/invite.js';
 import { MemSecrets } from './support/world.js';
 

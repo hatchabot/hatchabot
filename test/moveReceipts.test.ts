@@ -10,7 +10,7 @@ import Database from 'better-sqlite3';
 import { gzipSync } from 'node:zlib';
 import { destinationHasAgent, moveState, preflight, receiveMove } from '../src/orchestrator/transfer/migrate.js';
 import { importAgent, importProfile } from '../src/orchestrator/transfer/transfer.js';
-import { registerAuth } from '../src/api/auth.js';
+import { registerAuth } from '../src/api/signIn/auth.js';
 import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';

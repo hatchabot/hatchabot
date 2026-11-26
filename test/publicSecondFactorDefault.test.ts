@@ -8,7 +8,7 @@ import { publicConfig } from '../src/api/safeguards.js';
 import { guestMay } from '../src/api/publicRoutes.js';
 import { createInvite } from '../src/orchestrator/members/invite.js';
 import { publicAccessFacts, publicAccessLines } from '../src/doctor.js';
-import { base32Decode, totp } from '../src/api/totp.js';
+import { base32Decode, totp } from '../src/api/signIn/totp.js';
 
 /**
  * The owner's decision after the second review (2026-10-01): at the public

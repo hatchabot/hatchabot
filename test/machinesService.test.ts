@@ -9,7 +9,7 @@ import { markBusy, clearBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import { createMachines, type Machines } from '../src/orchestrator/machines/machines.js';
 import { createImageInstalls } from '../src/orchestrator/machines/imageInstalls.js';
-import { registerMachineRoutes } from '../src/api/machineRoutes.js';
+import { registerMachineRoutes } from '../src/api/machine/machineRoutes.js';
 import { blockedMessage, cleanPackages } from '../src/orchestrator/machines/runtimeImages.js';
 import { sameEndpoint } from '../src/orchestrator/machines/hosts.js';
 import { dockerNames } from '../src/providers/dockerNames.js';
@@ -646,6 +646,13 @@ describe('the images', () => {
     w.base[3]!.finish({ ok: true });
     for (let i = 0; i < 20 && w.svc.images.baseBuildNow().running; i++) await settle();
     expect(w.machines.h1!.tagged).toHaveLength(1);
+    expect(w.told.at(-1)!.body).toBe('The base image candidate for OpenClaw 2026.7.1-2 finished building. Nothing changes for any agent until it is tried on one and promoted.');
+    // Its tag or OpenClaw unknown here (no makeDefault), the script makes it the default itself: said so, not "until it is promoted" (review, L3).
+    w.svc.images.startBaseBuild({ version: '2026.7.1-2', candidate: false, forOwner: OWNER });
+    expect(w.base[4]!.opts).toMatchObject({ candidate: false });
+    w.base[4]!.finish({ ok: true });
+    for (let i = 0; i < 20 && w.svc.images.baseBuildNow().running; i++) await settle();
+    expect(w.told.at(-1)!.body).toBe("The base image default for OpenClaw 2026.7.1-2 finished building and is now the fleet default. Nothing restarts by itself: agents on this machine without a pin move onto it when they are rebuilt; agents on runners keep their runner's image.");
     w.svc.stop();
   });
 
@@ -661,13 +668,33 @@ describe('the images', () => {
     await finish();
     expect(w.machines.h1!.tagged).toEqual([['hatchabot-runtime:2026.7.1-2', BASE]]);
     expect(w.svc.images.baseBuildNow()).toMatchObject({ ok: true });
-    expect(w.told.at(-1)!.body).toBe(`The base image default for OpenClaw 2026.7.1-2 finished building and is now ${BASE}. The fleet default stays ${pin}, as HATCHABOT_IMAGE pins it: only agents pinned to ${BASE} move onto it when they are rebuilt.`);
-    // One pinned to :latest runs what moves: it is asked.
+    // Not "default": the default is the pin (HB-1256).
+    expect(w.told.at(-1)!.body).toBe(`The base image for OpenClaw 2026.7.1-2 finished building and is now ${BASE}. The fleet default stays ${pin}, as HATCHABOT_IMAGE pins it: only agents pinned to ${BASE} move onto it when they are rebuilt.`);
+    // One pinned to :latest runs what moves: it is asked, and told of as one pinned to :latest, with no Promote (it would retag the pin).
     agent(w, 'l1', { hostId: 'h1', image: BASE });
     w.machines.h1!.runs = { ...w.machines.h1!.runs, 'mock://l1': '2026.9.8' };
     w.svc.images.startBaseBuild({ version: '2026.7.1-2', candidate: false, forOwner: OWNER, makeDefault });
     await finish();
-    expect(w.svc.images.baseBuildNow()).toMatchObject({ ok: false, error: expect.stringContaining('(Agent l1)') });
+    const stranded = `OpenClaw 2026.7.1-2 cannot read the data of agents pinned to ${BASE} that reached 2026.8 or newer while it built (Agent l1). It is kept as hatchabot-runtime:2026.7.1-2: pin those agents to a version tag, then build it again to move ${BASE}.`;
+    expect(w.svc.images.baseBuildNow()).toMatchObject({ ok: false, error: `Built, but ${BASE} was not moved to it: ${stranded}` });
+    expect(w.told.at(-1)!.body).toBe(`The base image for OpenClaw 2026.7.1-2 finished building, but ${BASE} was not moved to it: ${stranded}`);
+    expect(w.machines.h1!.tagged).toHaveLength(1);
+    // An image with no memory search engine while the shared service is off: the same tag named, no Promote.
+    w.machines.h1!.imageEngine = 'none';
+    w.searchOn = false;
+    w.svc.images.startBaseBuild({ version: '2026.7.1-2', candidate: false, engine: 'none', forOwner: OWNER, makeDefault: { ...makeDefault, tag: 'hatchabot-runtime:2026.7.1-2-lite' } });
+    await finish();
+    expect(w.svc.images.baseBuildNow().error).toBe(`Built, but ${BASE} was not moved to it: it has no memory search engine of its own and the shared service is off, so no agent could be built on it. It is kept as hatchabot-runtime:2026.7.1-2-lite: turn the service on (Settings → Hosts), then build it again to move ${BASE}.`);
+    // Review (L3): a candidate under the pin cannot be promoted, and the words say what makes it the default.
+    w.machines.h1!.imageEngine = undefined;
+    w.svc.images.startBaseBuild({ version: '2026.9.9', candidate: true, forOwner: OWNER });
+    await finish();
+    expect(w.told.at(-1)!.body).toBe(`The base image candidate for OpenClaw 2026.9.9 finished building. Nothing changes for any agent until it is tried on one. Promote is off while HATCHABOT_IMAGE pins the fleet default to ${pin}: to make it the default, set HATCHABOT_IMAGE in .env to its tag and restart Hatchabot.`);
+    // A build that is no candidate, its tag unknown here (no makeDefault): the script moves :latest itself, and the words say so.
+    w.svc.images.startBaseBuild({ version: '2026.9.9', candidate: false, forOwner: OWNER });
+    await finish();
+    expect(w.base.at(-1)!.opts).toMatchObject({ candidate: false });
+    expect(w.told.at(-1)!.body).toBe(`The base image for OpenClaw 2026.9.9 finished building and is now ${BASE}. The fleet default stays ${pin}, as HATCHABOT_IMAGE pins it: only agents pinned to ${BASE} move onto it when they are rebuilt.`);
     expect(w.machines.h1!.tagged).toHaveLength(1);
     w.svc.stop();
   });

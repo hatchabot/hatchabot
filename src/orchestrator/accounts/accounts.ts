@@ -6,7 +6,7 @@ import { createTelegramRecovery, type TelegramRecovery, type TelegramRecoveryDep
 /**
  * Accounts (HB-0808 step 15 part B):
  * what the routes registry did for accounts, beside the sign-in itself
- * (src/api/auth.ts, src/api/accountsAuth.ts), which stays where it is. Four
+ * (src/api/signIn/auth.ts, src/api/signIn/accountsAuth.ts), which stays where it is. Four
  * parts:
  *
  *  - `family` (familyAccounts.ts): one shared password switched to an

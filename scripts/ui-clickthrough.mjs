@@ -17,11 +17,12 @@
  * <html>, read from Chrome's --dump-dom.
  */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPage } from './page-source.mjs';
+import { sheetFormIds, sheetStarters } from './sheet-state.mjs';
 import { STUB } from '../docs/deck/shot-data.mjs';
 
 // Headless Chrome, pinned to a digest so CI runs the image it was reviewed with
@@ -41,11 +42,18 @@ const icon = `data:image/png;base64,${readFileSync(join(root, 'web', 'icons', 'i
 const page = readPage(join(root, 'web', 'index.html')).replaceAll('src="/icons/icon-192.png"', `src="${icon}"`);
 // The invite page, for the scenarios that open it in a frame; as JSON with no "<" so it cannot end the <script> it sits in.
 const joinPage = JSON.stringify(readPage(join(root, 'web', 'join.html'))).replaceAll('<', '\\u003c');
+// What a page from before an upgrade gets for each of its scripts (web/upgraded.js, HB-0894), the same way.
+const upgradedScript = JSON.stringify(readFileSync(join(root, 'web', 'upgraded.js'), 'utf8')).replaceAll('<', '\\u003c');
+// What the agent sheet's race tables must cover (HB-0644), from the page's scripts: worked out here, since a top-level const
+// is not the window's to list. The same way, as JSON.
+const sheetStartersJson = JSON.stringify(sheetStarters(
+  readdirSync(join(root, 'web', 'app')).filter((f) => f.endsWith('.js')).map((f) => ({ name: `web/app/${f}`, code: readFileSync(join(root, 'web', 'app', f), 'utf8') })),
+  { formIds: sheetFormIds(readFileSync(join(root, 'web', 'index.html'), 'utf8')) })).replaceAll('<', '\\u003c');
 
 /** Wraps the stub's fetch: records every call, lets a scenario override any GET, answers mutations. */
 const RECORDER = `(() => {
   // The page's own forever loops, started as its scripts load: the console's read mark every 20 s and the
-  // manager's proposals every 4 s (web/app/console.js, start.js). Under virtual time Chrome runs on through
+  // manager's proposals every 4 s (web/app/console.js, cards.js). Under virtual time Chrome runs on through
   // them whenever a scenario waits on real work (a body read, a frame load) with no shorter timer due, 4 s a
   // firing as fast as they fire, so one scenario or another took tens to over a thousand virtual seconds
   // from run to run (HB-1306). Noted here; the scenarios stop them, as they stop the poll, and tick by hand.
@@ -1204,9 +1212,13 @@ const SCENARIOS = String.raw`(() => {
         await until(() => cronAgentId === 'a2' && cronCache.some((c) => c.id === 'c2'));
         editCronJob('c2');
         document.getElementById('cronName').value = 'Practice reminder, Thursdays';
+        // B's form is its own: its Save is on while A's waits, and A's answer leaves it so (HB-1484).
+        ok("the second agent's Save is on while the first one's save waits", !document.getElementById('cronAddBtn').disabled);
+        $('toast').textContent = '';
         release();
-        await until(() => !document.getElementById('cronAddBtn').disabled);
+        await until(() => window.__calls.slice(mark).some((c) => c.method === 'PATCH') && $('toast').textContent === 'Task saved');
         await sleep(100);
+        ok("and still on once the first one's save ended", !document.getElementById('cronAddBtn').disabled);
         const after = window.__calls.slice(mark);
         eq('the save went to the first agent', after.filter((c) => c.method === 'PATCH').map((c) => c.path), ['/v1/agents/a1/crons/c1']);
         ok('nothing is deleted or added on the second agent', !after.some((c) => c.method === 'DELETE' || c.method === 'POST'));
@@ -1789,6 +1801,63 @@ const SCENARIOS = String.raw`(() => {
       [...cards[1].querySelectorAll('button')].find((b) => b.textContent.includes('Cancel')).click();
       await until(() => cards[1].textContent.includes('Cancelled.'));
       eq('confirm and cancel sent', [calls('POST', /\/c1\/confirm$/).length, calls('POST', /\/c2\/cancel$/).length], [1, 1]);
+      window.__answer = {}; delete window.__override['/v1/proposals'];
+    },
+    interruptedCards: async () => {
+      // HB-1053: a confirmed change a restart cut off says so, with File it
+      // again (a new card with the same change, for you to confirm) beside
+      // Dismiss; a change that failed has Dismiss only. Nothing is confirmed by itself.
+      const at = Date.now() - 60_000;
+      const cut = { confirmId: 'i1', summary: '📸 Snapshot "Piano Practice"', status: 'confirmed', resolvedAtMs: at, interrupted: true, refiled: false,
+        outcome: '⚠ Interrupted — 📸 Snapshot "Piano Practice": Hatchabot restarted while it was carrying this out, so it may not have happened, or only in part. Check, and if it is not done, File it again.' };
+      const failed = { confirmId: 'f1', summary: '💾 Back up every agent', status: 'confirmed', resolvedAtMs: at, outcome: '⚠ Failed — 💾 Back up every agent: the backups folder is full' };
+      const first = at - 5 * 60_000;
+      const after = { pending: [{ confirmId: 'c9', summary: '📸 Snapshot "Piano Practice"', risk: 'routine', source: 'agent', firstFiledAtMs: first }], recent: [{ ...cut, refiled: true }, failed] };
+      window.__override['/v1/proposals'] = { pending: [], recent: [cut, failed] };
+      window.__answer = { 'POST /v1/proposals/i1/again': [{ status: 200, body: { confirmId: 'c9', summary: '📸 Snapshot "Piano Practice"', where: 'alerts' } }] };
+      v2PropSig = '';
+      await loadProposals();
+      const cards = await until(() => { const l = [...document.querySelectorAll('#v2PropList > div')]; return l.length === 2 ? l : null; });
+      ok('the section shows', !document.getElementById('v2Proposals').hidden);
+      ok('the interrupted card says so', cards[0].textContent.startsWith('⚠ Interrupted — 📸 Snapshot "Piano Practice"'));
+      const buttons = (c) => [...c.querySelectorAll('button')].map((b) => b.textContent);
+      eq('it offers File it again beside Dismiss', buttons(cards[0]), ['File it again', 'Dismiss']);
+      eq('a change that failed offers Dismiss only', buttons(cards[1]), ['Dismiss']);
+      [...cards[0].querySelectorAll('button')].find((b) => b.textContent === 'File it again').click();
+      await until(() => calls('POST', /\/v1\/proposals\/i1\/again$/)[0]);
+      await until(() => document.getElementById('toast').textContent.includes('Filed again: its card is under Alerts. Confirm it there once you are sure it did not happen.'));
+      // The list is read again at once: the interrupted card is put away (the server's answer is the stub's here).
+      await until(() => document.querySelectorAll('#v2PropList > div').length === 1);
+      ok('the interrupted one is put away', !document.getElementById('v2PropList').textContent.includes('⚠ Interrupted'));
+      // As the server lists it now: the new card, waiting for Confirm.
+      window.__override['/v1/proposals'] = after;
+      await loadProposals();
+      const now = await until(() => { const l = [...document.querySelectorAll('#v2PropList > div')]; return l.length === 2 && buttons(l[0]).some((b) => b.includes('Confirm')) ? l : null; });
+      ok('the new card waits for Confirm', now[0].textContent.includes('📸 Snapshot "Piano Practice"'));
+      // What it says is its first filing's (review of HB-1053).
+      eq('it says it was filed again, and as of when', now[0].querySelector('.prop-refiled')?.textContent,
+        'Filed again after a restart: first filed ' + new Date(first).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ', so what it says is as of then.');
+      ok('and the interrupted one stays put away', !document.getElementById('v2PropList').textContent.includes('⚠ Interrupted'));
+      eq('filed once, and nothing confirmed by itself', [calls('POST', /\/i1\/again$/).length, calls('POST', /\/(i1|c9)\/confirm$/).length], [1, 0]);
+      // A model card filed again is a Usage → Recommended item, not a card under Alerts, and the toast says so.
+      const model = { ...cut, confirmId: 'i2', summary: '🧠 Switch "Piano Practice" to claude-haiku-4-5', outcome: '⚠ Interrupted — 🧠 Switch "Piano Practice" to claude-haiku-4-5: Hatchabot restarted while it was carrying this out, so it may not have happened, or only in part. Check, and if it is not done, File it again.' };
+      window.__override['/v1/proposals'] = { pending: [], recent: [model] };
+      window.__answer = { 'POST /v1/proposals/i2/again': [{ status: 200, body: { confirmId: 'c10', summary: model.summary, where: 'recommended' } }] };
+      v2PropSig = '';
+      await loadProposals();
+      const m = await until(() => [...document.querySelectorAll('#v2PropList > div')].find((c) => c.textContent.includes('claude-haiku-4-5')));
+      [...m.querySelectorAll('button')].find((b) => b.textContent === 'File it again').click();
+      await until(() => document.getElementById('toast').textContent.includes('Filed again: its card is under Usage → Recommended. Confirm it there once you are sure it did not happen.'));
+      // Filed again elsewhere (another tab, the phone): the next read takes File it again away, though no card came or went.
+      const elsewhere = { ...cut, confirmId: 'i3' };
+      window.__override['/v1/proposals'] = { pending: [], recent: [elsewhere] };
+      v2PropSig = '';
+      await loadProposals();
+      await until(() => [...document.querySelectorAll('#v2PropList > div')].find((c) => buttons(c).includes('File it again')));
+      window.__override['/v1/proposals'] = { pending: [], recent: [{ ...elsewhere, refiled: true }] };
+      await loadProposals();
+      const gone = await until(() => { const l = [...document.querySelectorAll('#v2PropList > div')]; return l.length === 1 && !buttons(l[0]).includes('File it again') ? l : null; });
+      eq('filed again elsewhere: Dismiss only', buttons(gone[0]), ['Dismiss']);
       window.__answer = {}; delete window.__override['/v1/proposals'];
     },
     modelCards: async () => {
@@ -2422,6 +2491,20 @@ const SCENARIOS = String.raw`(() => {
       await refresh(false);
       eq('no new channels read on a poll', calls('GET', /\/v1\/agents\/a2\/channels$/).length, chans);
       eq('the choice stays', document.getElementById('chanRoomMode-discord')?.value, 'room');
+      // A chat app its image cannot run: the way onto one that can, which Promote is not while HATCHABOT_IMAGE pins the default (HB-1256 review).
+      v2Close();
+      window.__override['/v1/agents/a2/channels'] = { channels: [], imageSupports: [] };
+      openV2Agent('a2', 'channels');
+      const cannot = await until(() => [...document.querySelectorAll('#v2Chans .v2chan .sub')].find((x) => x.textContent.startsWith("Its base image can't do")));
+      eq('a chat app its image cannot run says how to get one that can', cannot.textContent, "Its base image can't do Discord yet. Rebuild it onto one that can: pick that Image in its Advanced tab, under Runtime, and press Pin & rebuild; or, unless HATCHABOT_IMAGE pins the fleet default, promote one (Settings → Advanced → Runtime images) and Rebuild.");
+      // Someone who does not own the machine is sent to its owner: the Image picker and Promote are theirs (review, N2).
+      v2Close();
+      const owner = myAccount.hostOwner; myAccount.hostOwner = false;
+      try {
+        openV2Agent('a2', 'channels');
+        const theirs = await until(() => [...document.querySelectorAll('#v2Chans .v2chan .sub')].find((x) => x.textContent.startsWith("Its base image can't do")));
+        eq('to someone who does not own the machine, it says to ask its owner', theirs.textContent, "Its base image can't do Discord yet. Ask the machine's owner to rebuild it onto an image that can (or to promote one).");
+      } finally { myAccount.hostOwner = owner; }
   }
   // 2026-10-23 (Chris's list): the Data tab says what each button does and where a repo lands; Test checks a source; Files sort and open in place; the console opens at once; own bots only; Context now.
   Object.assign(T, {
@@ -5824,7 +5907,7 @@ const SCENARIOS = String.raw`(() => {
         // The record, with a sign-out for whoever signed in.
         window.__override['/v1/security/log'] = { entries: [
           { id: 2, at: new Date().toISOString(), kind: 'public.signin', ownerId: 'acct-9', who: 'sam', detail: { from: '203.0.113.7', device: 'Chrome on Android', newDevice: true } },
-          { id: 1, at: new Date().toISOString(), kind: 'public.on', who: 'chris', detail: { url: 'https://box.example.com:8443' } } ] };
+          { id: 1, at: new Date().toISOString(), kind: 'public.on', who: 'casey', detail: { url: 'https://box.example.com:8443' } } ] };
         document.getElementById('reachLogBtn').click();
         const out = await until(() => byText('#reachLog button', 'Sign out everywhere'));
         ok('the record reads in plain words: ' + document.getElementById('reachLog').textContent, document.getElementById('reachLog').textContent.includes('Signed in') && document.getElementById('reachLog').textContent.includes('Chrome on Android') && document.getElementById('reachLog').textContent.includes('Public access turned on'));
@@ -6126,7 +6209,7 @@ const SCENARIOS = String.raw`(() => {
         await until(() => calls('POST', /\/v1\/security\/notices\/sn-1\/seen$/)[0]);
         await until(() => el.hidden);
         // About yourself: the action is your own "sign out on every device".
-        window.__override['/v1/security/notices'] = { notices: [{ id: 'sn-2', at: new Date().toISOString(), kind: 'new-device', aboutOwner: 'me', text: 'New sign-in to Hatchabot as chris: Safari on iOS. If this was not you: change your password and choose "Sign out on every device".' }], canSignOutOthers: false };
+        window.__override['/v1/security/notices'] = { notices: [{ id: 'sn-2', at: new Date().toISOString(), kind: 'new-device', aboutOwner: 'me', text: 'New sign-in to Hatchabot as casey: Safari on iOS. If this was not you: change your password and choose "Sign out on every device".' }], canSignOutOthers: false };
         await loadSecurityNotices();
         ok('your own notice offers your own sign-out', !!byText('#secNotice button', 'Sign out on every device') && !byText('#secNotice button', 'Sign them out'));
       } finally {
@@ -9898,6 +9981,90 @@ const SCENARIOS = String.raw`(() => {
         delete window.__answer['PUT /v1/agents/a1/params'];
       }
     },
+    // HB-1256: with HATCHABOT_IMAGE pinned to a version tag, Promote would retag the pin; the server refuses it,
+    // and the page says why when Promote is pressed, with no confirm and no request.
+    promoteOffWhileImagePinned: async () => {
+      const PIN = 'hatchabot-runtime:2026.9.8';
+      const WHY = 'Promote is off while HATCHABOT_IMAGE pins the fleet default to ' + PIN + ': promoting would retag that pin, so every agent that runs it would move onto another image at its next rebuild. To promote, set HATCHABOT_IMAGE in .env to hatchabot-runtime:latest (which the agents with no pin then run) and restart Hatchabot first.';
+      const had = window.__override['/v1/runtime/images'];
+      window.__override['/v1/runtime/images'] = { default: PIN, promoteRefused: WHY, unpinned: [], defaultInfo: { openclawVersion: '2026.9.8' }, tags: [
+        { tag: PIN, exists: true, isDefault: true, openclawVersion: '2026.9.8', pinned: [], classes: [] },
+        { tag: 'hatchabot-runtime:2026.9.9', exists: true, relation: 'newer', openclawVersion: '2026.9.9', pinned: [], classes: [] } ] };
+      try {
+        await openAiDlg('images');
+        // Its drawer's line is true under the pin too, where Promote is off (review).
+        eq('the Runtime images drawer says to make it the default, not to promote it', document.querySelector('#advPart-runtime summary .sub')?.textContent, '— the OpenClaw your agents run: try a newer one on one agent, then make it the default');
+        const promote = await until(() => [...document.querySelectorAll('#rtList button')].find((b) => b.textContent.includes('Promote')));
+        eq('its tooltip says why', promote.title, WHY);
+        const confirms = window.__confirms.length, posts = calls('POST', /\/v1\/runtime\/images\/promote$/).length;
+        document.getElementById('rtErr').textContent = '';
+        promote.click();
+        await until(() => document.getElementById('rtErr').textContent);
+        eq('pressed, it says why', document.getElementById('rtErr').textContent, WHY);
+        eq('no confirm first', window.__confirms.length, confirms);
+        await sleep(200);
+        eq('and no promote is sent', calls('POST', /\/v1\/runtime\/images\/promote$/).length, posts);
+        // Without the pin, Promote asks and sends as before.
+        window.__override['/v1/runtime/images'] = { ...window.__override['/v1/runtime/images'], default: 'hatchabot-runtime:latest', promoteRefused: null,
+          tags: [{ tag: 'hatchabot-runtime:latest', exists: true, isDefault: true, openclawVersion: '2026.9.8', pinned: [], classes: [] },
+            { tag: 'hatchabot-runtime:2026.9.9', exists: true, relation: 'newer', openclawVersion: '2026.9.9', pinned: [], classes: [] }] };
+        window.__answer = { 'POST /v1/runtime/images/promote': [{ status: 200, body: { promoted: 'hatchabot-runtime:2026.9.9', followers: [] } }] };
+        await loadRuntimeImages();
+        const again = await until(() => [...document.querySelectorAll('#rtList button')].find((b) => b.textContent.includes('Promote')));
+        ok('its tooltip is the usual one: ' + again.title, again.title.startsWith('Point the fleet default at this image'));
+        again.click();
+        await until(() => calls('POST', /\/v1\/runtime\/images\/promote$/).length === posts + 1);
+        eq('asked first', window.__confirms.length, confirms + 1);
+      } finally {
+        if (had === undefined) delete window.__override['/v1/runtime/images']; else window.__override['/v1/runtime/images'] = had;
+        window.__answer = {};
+        if (aiDlg.open) aiDlg.close();
+      }
+    },
+    // HB-0894: a page from before an upgrade asks for its scripts by digests this release no longer has,
+    // and the server answers each with web/upgraded.js. The real file, in a frame, run as the head's script and
+    // the body's, classic and module: one banner, never a reload by itself, and its Reload reloads.
+    upgradedScriptAsksForReload: async () => {
+      const code = window.__upgradedScript;
+      ok('the stand-in is in the page', typeof code === 'string' && code.includes('Reload to finish'));
+      const classic = '<script>' + code + '<\/script>', module = '<script type="module">' + code + '<\/script>';
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:400px;background:#fff;z-index:99999;border:0';
+      let loads = 0;
+      frame.addEventListener('load', () => { loads++; });
+      frame.srcdoc = '<!doctype html><html><head>' + classic + '</head><body><p>A page from before the upgrade.</p>' + classic + module + classic + '</body></html>';
+      document.body.appendChild(frame);
+      try {
+        const shown = () => {
+          const d = frame.contentDocument, bars = d.querySelectorAll('#hatchabot-upgraded');
+          eq('one banner for the four scripts it stood in for', bars.length, 1);
+          const bar = bars[0], btn = bar.querySelector('button');
+          eq('it says why', bar.querySelector('span').textContent, 'Hatchabot was just upgraded. Reload to finish.');
+          eq('it is told to a screen reader', bar.getAttribute('role'), 'alert');
+          eq('with a Reload button', btn.textContent, 'Reload');
+          return { d, bar, btn };
+        };
+        await until(() => loads === 1 && frame.contentDocument.readyState === 'complete');
+        const { bar, btn } = shown();
+        const r = bar.getBoundingClientRect();
+        ok('across the top of the page: ' + JSON.stringify(r), r.top === 0 && r.left === 0 && r.width === 500);
+        ok('over the page, not under it', frame.contentDocument.elementFromPoint(250, r.top + r.height / 2)?.closest('#hatchabot-upgraded') === bar);
+        // On a narrow screen the button goes under the words rather than past the edge.
+        frame.style.width = '320px';
+        await sleep(50);
+        const d = frame.contentDocument;
+        ok('it fits 320 px: ' + d.documentElement.scrollWidth, d.documentElement.scrollWidth <= 320 && btn.getBoundingClientRect().right <= 320);
+        frame.style.width = '500px';
+        await sleep(30000);
+        eq('it never reloads by itself', loads, 1);
+        btn.click();
+        await until(() => loads === 2 && frame.contentDocument.readyState === 'complete');
+        shown();
+        eq('one reload for one press', loads, 2);
+      } finally {
+        frame.remove();
+      }
+    },
     joinPageSecondFactor: async () => {
       // HB-0400: the real web/join.html in a frame. A right password that the public address refuses
       // for want of a second factor must say so, not bring the same form back with no message.
@@ -10025,6 +10192,199 @@ const SCENARIOS = String.raw`(() => {
         frame = await open({ authMode: 'identity', signedInAs: 'owner@example.com', own: true });
         d = frame.contentDocument;
         ok('your own agent', d.getElementById('card').textContent.includes('This is your own agent') && !d.getElementById('joinBtn'));
+      } finally {
+        if (frame) frame.remove();
+        window.__answer = {};
+      }
+    },
+    // HB-1239: an install whose tailscale serve still lands on the app's own port is told so in the setup guide,
+    // why it matters and the command, with a button that moves it (no question: nothing new is reachable); then done.
+    setupGuideMovesServe: async () => {
+      const DNS = 'box.example-tailnet.ts.net';
+      const seen = { installed: true, up: true, dns: DNS, serving: true, reachable: true, url: 'https://' + DNS };
+      window.__override['/v1/tailscale'] = { ...seen, oldPort: true, port: 8080, proxyPort: 8094, serveCommand: 'tailscale serve --bg http://127.0.0.1:8094' };
+      window.__answer = { 'POST /v1/tailscale/serve': [{ body: { ...seen, turnedOn: true, moved: [DNS + ':443'] } }] };
+      const setup = () => document.getElementById('setup').textContent.replace(/\s+/g, ' ');
+      try {
+        tailnet = null;
+        openSetupGuide();
+        await until(() => setup().includes('Point Tailscale serve at its own port'));
+        ok('says why: ' + setup().slice(0, 600), setup().includes('Tailscale serves this machine at https://' + DNS + ", but to port 8080, not to port 8094, the one for it. Until it is moved, every device on your tailnet shares one sign-in limit: one person's wrong passwords lock the others out."));
+        ok('and the command', setup().includes('Or run it yourself: tailscale serve --bg http://127.0.0.1:8094'));
+        // On a Mac moving it does not yet give each device its own sign-in limit: the guide does not promise it (the review of HB-1239).
+        const seenHere = tailnet;
+        tailnet = { ...seenHere, mac: true }; setupRedraw();
+        await until(() => setup().includes('On a Mac'));
+        ok('on a Mac, what is true there: ' + setup().slice(0, 600), setup().includes('Tailscale serves this machine at https://' + DNS + ', but to port 8080, not to port 8094, the one for it. On a Mac every device on your tailnet shares one sign-in limit at either port for now, unless Tailscale runs as your own user and your uid is in HATCHABOT_PROXY_TRUST_UIDS (docs/tailscale.md).'));
+        ok('no promise there', !setup().includes('Until it is moved'));
+        tailnet = seenHere; setupRedraw();
+        await until(() => setup().includes('Until it is moved'));
+        const btn = document.getElementById('tsServeBtn');
+        eq('the button', btn.textContent, 'Move it to port 8094');
+        const asked = window.__confirms.length, posted = calls('POST', /^\/v1\/tailscale\/serve$/).length;
+        btn.click();
+        await until(() => !setup().includes('Point Tailscale serve at its own port'));
+        eq('no question asked', window.__confirms.length, asked);
+        eq('moved once', calls('POST', /^\/v1\/tailscale\/serve$/).length, posted + 1);
+        ok('done: reachable at its address: ' + setup().slice(0, 300), setup().includes('Reachable at ' + DNS));
+        ok('said: ' + document.getElementById('toast').textContent, document.getElementById('toast').textContent.includes('Moved: your tailnet reaches Hatchabot on port 8094 now.'));
+      } finally {
+        delete window.__override['/v1/tailscale'];
+        window.__answer = {};
+        tailnet = null; setupOpen = false; renderSetup();
+      }
+    },
+    // HB-1239, the owner's call (2026-11-24): serve is never moved or turned on onto a listener that did not open.
+    // The guide says so, with why and what to do, and offers neither the button nor the command; a refusal for
+    // that reason (the listener closed since the guide looked) offers no command either.
+    setupGuideServeWaitsForItsListener: async () => {
+      const DNS = 'box.example-tailnet.ts.net';
+      const why = 'The listener for tailscale serve could not open 127.0.0.1:8094: listen EADDRINUSE: address already in use 127.0.0.1:8094';
+      const seen = { installed: true, up: true, dns: DNS, serving: true, reachable: true, url: 'https://' + DNS, oldPort: true, port: 8080, proxyPort: 8094, serveCommand: 'tailscale serve --bg http://127.0.0.1:8094' };
+      const setup = () => document.getElementById('setup').textContent.replace(/\s+/g, ' ');
+      try {
+        // A reason with its own full stop gets one, not two.
+        window.__override['/v1/tailscale'] = { ...seen, proxyListening: false, proxyError: "HATCHABOT_PROXY_PORT=8080 is the app's own port (PORT=8080): choose another port for it." };
+        tailnet = null;
+        openSetupGuide();
+        await until(() => setup().includes('Not yet.'));
+        ok('one full stop: ' + setup().slice(0, 400), setup().includes("is not open — HATCHABOT_PROXY_PORT=8080 is the app's own port (PORT=8080): choose another port for it. Until it opens,"));
+        tailnet = null; setupOpen = false; renderSetup();
+        window.__override['/v1/tailscale'] = { ...seen, proxyListening: false, proxyError: why };
+        tailnet = null;
+        openSetupGuide();
+        await until(() => setup().includes('Not yet.'));
+        ok('says why: ' + setup().slice(0, 700), setup().includes("Not yet. Hatchabot's listener for Tailscale serve, 127.0.0.1:8094, is not open — " + why + '. Until it opens, Hatchabot leaves Tailscale serve as it is, still on port 8080.'));
+        ok('and what to do', setup().includes('If another program has port 8094, set HATCHABOT_PROXY_PORT to a free port in .env, then restart Hatchabot. hatchabot doctor checks it.'));
+        ok('no button to move it, and no command', !document.getElementById('tsServeBtn') && !setup().includes('Or run it yourself'));
+        // Open when the guide looked, closed by the time the button is pressed.
+        window.__override['/v1/tailscale'] = { ...seen, proxyListening: true };
+        const said = "Tailscale serve was left as it is: Hatchabot's listener for it, 127.0.0.1:8094, is not open. " + why;
+        window.__answer = { 'POST /v1/tailscale/serve': [{ status: 409, body: { error: said, noListener: true } }] };
+        tailnet = null; setupOpen = false; renderSetup();
+        openSetupGuide();
+        await until(() => document.getElementById('tsServeBtn'));
+        document.getElementById('tsServeBtn').click();
+        await until(() => document.getElementById('tsServeErr').textContent.includes('could not move it'));
+        const err = document.getElementById('tsServeErr').textContent.replace(/\s+/g, ' ');
+        eq('the refusal, and no command offered', err, 'Hatchabot could not move it: ' + said);
+        eq('the guide now knows it is closed', tailnet.proxyListening, false);
+      } finally {
+        delete window.__override['/v1/tailscale'];
+        window.__answer = {};
+        tailnet = null; setupOpen = false; renderSetup();
+      }
+    },
+    // HB-1239 (review L1): "Moved" only when something moved; a refusal shows its own command (each entry's, its
+    // path kept), and an answer that still lands on the app's own port is said as that.
+    setupGuideMoveSaysWhatWasLeft: async () => {
+      const DNS = 'box.example-tailnet.ts.net';
+      const seen = { installed: true, up: true, dns: DNS, serving: true, reachable: true, url: 'https://' + DNS, oldPort: true, port: 8080, proxyPort: 8094, serveCommand: 'tailscale serve --bg http://127.0.0.1:8094', proxyListening: true };
+      const left = 'tailscale serve --bg --https=443 --set-path=/app http://127.0.0.1:8094';
+      const press = async () => {
+        tailnet = null; setupOpen = false; renderSetup();
+        openSetupGuide();
+        await until(() => document.getElementById('tsServeBtn'));
+        document.getElementById('toast').textContent = '';
+        document.getElementById('tsServeBtn').click();
+        await until(() => document.getElementById('tsServeErr').textContent.includes('could not move it'));
+        // A line break as the reader sees it: a space between the reason and the command.
+        const el = document.getElementById('tsServeErr').cloneNode(true);
+        el.querySelectorAll('br').forEach((b) => b.replaceWith(' '));
+        return el.textContent.replace(/\s+/g, ' ');
+      };
+      try {
+        window.__override['/v1/tailscale'] = seen;
+        window.__answer = { 'POST /v1/tailscale/serve': [{ status: 409, body: { error: 'Access denied: serve config denied', command: left } }] };
+        eq('the refusal, with its own command', await press(), 'Hatchabot could not move it: Access denied: serve config denied Run this in a terminal instead: ' + left);
+        window.__answer = { 'POST /v1/tailscale/serve': [{ status: 409, body: { error: "Tailscale's serve configuration could not be read." } }] };
+        eq('no command, no hint to run one', await press(), "Hatchabot could not move it: Tailscale's serve configuration could not be read.");
+        window.__answer = { 'POST /v1/tailscale/serve': [{ body: { ...seen, turnedOn: true, moved: [] } }] };
+        eq('answered, but nothing moved', await press(), 'Hatchabot could not move it: Tailscale still sends your tailnet to port 8080.');
+        ok('and no "Moved": ' + document.getElementById('toast').textContent, !document.getElementById('toast').textContent.includes('Moved'));
+      } finally {
+        delete window.__override['/v1/tailscale'];
+        window.__answer = {};
+        tailnet = null; setupOpen = false; renderSetup();
+      }
+    },
+    // HB-1149: a chat-app invite opened by someone signed in here offers "Join as <name>" beside "Join with <app>
+    // only", and only "Join as" binds the seat to the account (never silently: a shared computer). Not their own
+    // agent's; no password form (they sign in first); a missing second factor is said.
+    joinPageChatAppAsAccount: async () => {
+      const TG = [{ kind: 'telegram' }];
+      const open = async (invite, answers = {}) => {
+        window.__answer = { 'GET /v1/invites/srcdoc': [{ body: { valid: true, agentName: 'Homework Helper', channels: TG, authMode: 'accounts', localAccounts: true, ...invite } }], ...answers };
+        const frame = document.createElement('iframe');
+        frame.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:800px;background:#fff;z-index:99999';
+        frame.srcdoc = window.__joinPage.replace('<head>', () => '<head><script>window.fetch = (...a) => parent.fetch(...a);<\/script>');
+        document.body.appendChild(frame);
+        await until(() => frame.contentDocument && frame.contentDocument.getElementById('joinBtn'));
+        return frame;
+      };
+      const joined = { 'POST /v1/join': [{ status: 201, body: { agentName: 'Homework Helper', channel: 'telegram', botUsername: 'homework_helper_bot', channels: TG } }] };
+      let frame;
+      try {
+        frame = await open({ signedInAs: 'Robin' }, joined);
+        let d = frame.contentDocument;
+        eq('both ways in', [d.getElementById('joinAsBtn')?.textContent, d.getElementById('joinBtn').textContent], ['Join as Robin', 'Join with Telegram only']);
+        ok('the app only is the quieter one', d.getElementById('joinBtn').classList.contains('alt') && !d.getElementById('joinAsBtn').classList.contains('alt'));
+        ok('says what each does: ' + d.getElementById('card').textContent.replace(/\s+/g, ' ').slice(0, 400),
+          d.getElementById('card').textContent.includes('Join as Robin and the agent is also on your home screen here. Not you? Join with the app only.'));
+        ok('no password form', !d.getElementById('acct') && !d.getElementById('pass'));
+        d.getElementById('name').value = 'Robin';
+        d.getElementById('joinBtn').click();
+        await until(() => d.getElementById('card').textContent.includes("You're in"));
+        let posted = calls('POST', /^\/v1\/join$/).pop().body;
+        eq('the app only: the session is not asked for', [posted.name, posted.channel, 'asAccount' in posted], ['Robin', 'telegram', false]);
+        frame.remove();
+
+        frame = await open({ signedInAs: 'Robin' }, joined);
+        d = frame.contentDocument;
+        d.getElementById('joinAsBtn').click();
+        await until(() => d.getElementById('card').textContent.includes("You're in"));
+        posted = calls('POST', /^\/v1\/join$/).pop().body;
+        eq('"Join as" says so, in so many words', [posted.asAccount, posted.channel], [true, 'telegram']);
+        frame.remove();
+
+        // The session ended before the press: said as the server words it, and both ways stay.
+        frame = await open({ signedInAs: 'Robin' }, { 'POST /v1/join': [{ status: 401, body: { error: 'Sign in to this Hatchabot first.', signIn: true } }] });
+        d = frame.contentDocument;
+        d.getElementById('joinAsBtn').click();
+        await until(() => d.getElementById('err').textContent);
+        eq('refused: said', d.getElementById('err').textContent, 'Sign in to this Hatchabot first.');
+        ok('and both can be pressed again', !d.getElementById('joinAsBtn').disabled && !d.getElementById('joinBtn').disabled);
+        frame.remove();
+
+        // Their own agent: no "Join as".
+        frame = await open({ signedInAs: 'owner', own: true });
+        d = frame.contentDocument;
+        ok('not offered to its owner', !d.getElementById('joinAsBtn') && !d.getElementById('joinBtn').classList.contains('alt'));
+        frame.remove();
+
+        // On the agent already (HB-1149 review): no "Join as", which only said the invite was used; said instead.
+        frame = await open({ signedInAs: 'Robin', alreadyMember: true });
+        d = frame.contentDocument;
+        ok('already on it: ' + d.getElementById('card').textContent.replace(/\s+/g, ' ').slice(0, 400), !d.getElementById('joinAsBtn')
+          && d.getElementById('card').textContent.includes('You are already on Homework Helper as Robin: nothing to join. Not you? Join with the app only.'));
+        frame.remove();
+
+        // Not signed in, where password accounts are: told to sign in first; no form, no "Join as".
+        frame = await open({});
+        d = frame.contentDocument;
+        ok('sign in first: ' + d.getElementById('card').textContent.replace(/\s+/g, ' ').slice(0, 400), !d.getElementById('joinAsBtn')
+          && d.getElementById('card').textContent.includes('Have an account on this Hatchabot? Sign in to it first, then open this link again to join as yourself.'));
+        frame.remove();
+        // A one-password install has no accounts to join as: nothing said of them.
+        frame = await open({ authMode: 'password', localAccounts: false });
+        ok('nothing of accounts', !frame.contentDocument.getElementById('card').textContent.includes('Sign in to it first'));
+        frame.remove();
+
+        // Signed in at the public address, short of a second factor: the reason, and the app only.
+        frame = await open({ factor: { error: 'This address also asks for your second factor, and you have not given it in this browser yet.', secondFactor: 'required' } });
+        d = frame.contentDocument;
+        ok('the factor said: ' + d.getElementById('factorNote').textContent, !d.getElementById('factorNote').hidden && d.getElementById('factorNote').textContent.includes('second factor'));
+        ok('no "Join as", no sign-in hint', !d.getElementById('joinAsBtn') && !d.getElementById('card').textContent.includes('Sign in to it first'));
       } finally {
         if (frame) frame.remove();
         window.__answer = {};
@@ -11389,6 +11749,415 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = {}; delete window.__override[chat];
         webChatUnsure.clear(); box.value = ''; $('wchatErr').textContent = '';
         if (webChatDlg.open) webChatDlg.close();
+      }
+    },
+  });
+  // HB-0644 (made-up data): the agent sheet's forms belong to one agent at a time. Every save and every read in them,
+  // raced: for A, in flight; the sheet switched to B, its forms filled for B; then A's answer. B's forms, lists and
+  // error box are as they were, and what A's save did is said with A's name (or, where nothing is said today, nothing).
+  // An older read of A's, answered after a newer one, leaves the newer. Each table is held to the page (covered, below), so
+  // a new save or read gets raced too.
+  const sheetRace = (() => {
+    const shut = () => { v2Close(); v2AgentId = null; v2EditFor = null; v2SheetNotes.clear(); if (typeof v2NotesFor !== 'undefined') v2NotesFor = null; };
+    const forms = () => V2_SHEET_FORMS.map((id) => $(id)).filter((el) => el && $('v2Pane').contains(el) && !el.hidden);
+    // A read under way says so in its forms; settled, none does.
+    const BUSY = /Loading…|Loading members…|Checking the agent…|Loading your accounts…|Loading images…/;
+    const settled = () => !forms().some((el) => BUSY.test(el.textContent)) && $('editContent').value !== 'Loading…' && !$('editImage').dataset.loading;
+    // Settled, and a moment more for what a read starts once it is answered (the known people after the members).
+    const calm = async () => { await until(settled); await sleep(100); await until(settled); };
+    // What the sheet shows of its forms: every control's value (and a menu's options), their text, the error box, whether
+    // anything is unsaved, and each of the forms' own buttons (a list's rows have none of their own): on or off, and the lock
+    // said on it (HB-1484).
+    const view = () => ({
+      agent: editAgentId, header: $('editAgent').textContent,
+      controls: forms().flatMap((f) => [...f.querySelectorAll('input, select, textarea')]).map((el) => [el.id || el.className + ':' + (el.dataset.id || ''),
+        el.type === 'checkbox' || el.type === 'radio' ? el.checked : el.value, el.tagName === 'SELECT' ? el.textContent : '']),
+      text: Object.fromEntries(forms().map((f) => [f.id, f.textContent.replace(/\s+/g, ' ').trim()])),
+      err: $('editErr').textContent, errHere: $('v2Pane').contains($('editErr')), unsaved: v2SheetUnsaved(),
+      buttons: forms().flatMap((f) => [...f.querySelectorAll('button[id]')]).map((b) => [b.id, b.disabled, b.title]),
+    });
+    // Two views the same, or what differs, said short: each control's value, and where a form's text starts to differ.
+    const same = (what, got, want) => {
+      const out = [], show = (v) => JSON.stringify(v === undefined ? 'none' : v);
+      for (const k of ['agent', 'header', 'err', 'errHere', 'unsaved']) if (got[k] !== want[k]) out.push(k + ' ' + show(want[k]) + ' became ' + show(got[k]));
+      const g = new Map(got.controls.map((c) => [c[0], c])), w = new Map(want.controls.map((c) => [c[0], c]));
+      for (const id of new Set([...w.keys(), ...g.keys()])) {
+        if (JSON.stringify(g.get(id)) !== JSON.stringify(w.get(id))) out.push(id + ' ' + show(w.get(id) && w.get(id)[1]) + ' became ' + show(g.get(id) && g.get(id)[1]) + (w.get(id) && g.get(id) && w.get(id)[1] === g.get(id)[1] ? ' (its options)' : ''));
+      }
+      const button = (b) => !b ? 'none' : (b[1] ? 'off' : 'on') + (b[2] ? ' ("' + b[2] + '")' : '');
+      const gb = new Map(got.buttons.map((b) => [b[0], b])), wb = new Map(want.buttons.map((b) => [b[0], b]));
+      for (const id of new Set([...wb.keys(), ...gb.keys()])) {
+        if (JSON.stringify(gb.get(id)) !== JSON.stringify(wb.get(id))) out.push(id + ' ' + button(wb.get(id)) + ' became ' + button(gb.get(id)));
+      }
+      for (const id of new Set([...Object.keys(want.text), ...Object.keys(got.text)])) {
+        const a = want.text[id] || '', b = got.text[id] || '';
+        if (a === b) continue;
+        let at = 0; while (a[at] === b[at]) at++;
+        out.push(id + ' text "…' + a.slice(Math.max(0, at - 20), at + 40) + '…" became "…' + b.slice(Math.max(0, at - 20), at + 40) + '…"');
+      }
+      if (out.length) throw new Error(what + ': ' + out.join('; '));
+    };
+    const opened = async (id, tab) => {
+      openV2Agent(id, tab);
+      await until(() => v2AgentId === id && editAgentId === id && (tab === 'overview' || $('v2Pane').contains($('editErr'))) && settled());
+      await calm();
+    };
+    const type = (id, v) => { const el = $(id); el.focus(); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.blur(); };
+    const pick = (id, v) => { const el = $(id); el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); };
+    // A box typed in, or a tick changed.
+    const draft = (id) => { const el = $(id); if (el.type !== 'checkbox') return type(id, 'Made-up draft for B'); el.checked = !el.checked; el.dispatchEvent(new Event('change', { bubbles: true })); };
+    const exact = (path) => new RegExp('^' + path.replace(/\./g, '\\.') + '$');
+    const folder = (id, more) => Object.assign({ id, kind: 'folder', hostPath: '/srv/made-up/' + id, mountName: id, access: 'ro' }, more || {});
+    const conn = { id: 'c-made-up', kind: 'google', email: 'calendar@example.org', services: ['gmail'], createdAt: '2026-10-01T00:00:00Z', attachedTo: [] };
+    const A = 'Homework Helper: ';
+    // A second AI source, so B's source menu can be changed and not applied: its model button's lock (audit #050, HB-1484).
+    const SECOND_SOURCE = { id: 'p-two', name: 'Second source', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-5-5', models: [] };
+    // tab: where it is pressed (and B is opened); prep: A's forms made ready, what it returns handed to press; req: the request
+    // held; answer: what it answers when it works (else the stub's); said / failed: the toast once it works / is refused
+    // (failed by default A's name and the refusal; null: nothing is said today); forB: B's own rows; draft: a box typed in (or a tick changed) on B;
+    // btn: the forms' button its press turns off, which is on in B's forms (HB-1484: nothing of B's is out); onB: B's own lock on it, set before A's answer.
+    const SAVES = [
+      { fn: 'renameAgent', tab: 'personality', prep: () => type('editName', 'Homework Helper, renamed'), req: ['PATCH', '/v1/agents/a1'], press: () => renameAgent(), said: A + 'Renamed', draft: 'editName', btn: 'renameBtn' },
+      { fn: 'saveDescription', tab: 'personality', prep: () => type('editDesc', 'Made-up description'), req: ['PATCH', '/v1/agents/a1'], press: () => saveDescription(), said: A + 'Description saved', draft: 'editDesc', btn: 'descBtn' },
+      { fn: 'saveEditFile', tab: 'personality', prep: async () => { await until(() => editLoaded && editLoaded.agentId === 'a1'); type('editContent', 'A made-up soul'); },
+        req: ['PUT', '/v1/agents/a1/files/SOUL.md'], press: () => saveEditFile(), said: A + 'SOUL.md saved', failed: A + 'SOUL.md was not saved: Made-up refusal', draft: 'editContent', btn: 'editSaveBtn' },
+      { fn: 'saveSetupFields', tab: 'personality', req: ['PATCH', '/v1/agents/a1'], press: () => saveSetupFields(), said: A + 'Saved 1 setup field — shared copies now ask for them', draft: 'spv-team', btn: 'paramSaveBtn' },
+      { fn: 'saveSetupValues', tab: 'personality', prep: () => type('spv-city', 'Made-up town'), req: ['PUT', '/v1/agents/a1/params'], sent: { values: { city: 'Made-up town' } }, press: () => saveSetupValues(),
+        said: A + 'Values applied — SOUL/AGENTS re-rendered (snapshot taken first).', draft: 'spv-team' },
+      { fn: 'resetSetupValues', tab: 'personality', req: ['PUT', '/v1/agents/a1/params'], press: () => resetSetupValues(), said: A + 'Reset to defaults.', draft: 'spv-team' },
+      { fn: 'takeSnapshot', tab: 'personality', prep: () => { window.__promptAnswer = 'Made-up point'; }, req: ['POST', '/v1/agents/a1/snapshots'], press: () => takeSnapshot(), said: A + 'Snapshot saved', draft: 'editContent', btn: 'snapBtn' },
+      { fn: 'deleteSnapshot', tab: 'personality', req: ['DELETE', '/v1/agents/a1/snapshots/snap-a'], press: () => deleteSnapshot('snap-a', 'Made-up point'), said: A + 'Snapshot deleted', draft: 'editContent' },
+      { fn: 'revertSnapshot', tab: 'personality', req: ['POST', '/v1/agents/a1/snapshots/snap-a/restore'], answer: { restored: ['SOUL.md'] },
+        press: () => revertSnapshot('snap-a', 'Made-up point'), said: A + 'Reverted SOUL.md', draft: 'editContent' },
+      // B's own source menu changed, not applied: its Use this for a model waits on it (audit #050), whatever A's answer.
+      { fn: 'switchModel', tab: 'ai', req: ['POST', '/v1/agents/a1/model'], answer: { live: true, model: 'claude-opus-5-5' }, press: () => switchModel(),
+        said: A + 'Now running claude-opus-5-5 — effective on the next message, no rebuild.', btn: 'modelBtn', onB: () => pick('editProfile', SECOND_SOURCE.id) },
+      { fn: 'switchProfile', tab: 'ai', req: ['PATCH', '/v1/agents/a1'], press: () => switchProfile(), said: A + 'Saving conversation to memory, then rebuilding…', btn: 'profileBtn' },
+      { fn: 'assignClass', tab: 'ai', prep: async () => { openV2Agent('a1', 'overview'); await until(() => v2Tab === 'overview' && $('v2Pane').querySelector('#editClass')); },
+        req: ['POST', '/v1/agents/a1/class'], press: () => assignClass(), said: A + 'Class cleared.' },
+      { fn: 'addDataSource', tab: 'knowledge', prep: () => type('pathNew', '/srv/made-up/a-notes'), req: ['POST', '/v1/agents/a1/data-sources'], answer: { dataSources: [folder('a-notes')] },
+        press: () => addDataSource(), said: A + 'Folder added — Rebuild to apply it.', forB: () => renderDataList([folder('b-notes')]), draft: 'pathNew', btn: 'pathAddBtn' },
+      { fn: 'setDataAccess', tab: 'knowledge', prep: () => renderDataList([folder('a-notes')]), req: ['PATCH', '/v1/agents/a1/data-sources/a-notes'], answer: { dataSources: [folder('a-notes')] },
+        press: () => setDataAccess('a-notes', 'ro'), said: A + 'a-notes is now read-only — Rebuild to apply it.', forB: () => renderDataList([folder('b-notes')]), draft: 'pathNew' },
+      { fn: 'removeDataSource', tab: 'knowledge', prep: () => renderDataList([folder('a-notes')]), req: ['DELETE', '/v1/agents/a1/data-sources/a-notes'], answer: { dataSources: [] },
+        press: () => removeDataSource('a-notes'), said: A + 'Removed — Rebuild to apply it', forB: () => renderDataList([folder('b-notes')]), draft: 'pathNew' },
+      // HB-0584's own: a legacy folder, whose removal sends the agent's remaining legacy folders.
+      { fn: 'removeDataSource', as: 'legacy', tab: 'knowledge', prep: () => renderDataList([folder('old', { legacy: true }), folder('kept', { legacy: true })]), req: ['PATCH', '/v1/agents/a1'],
+        answer: { dataSources: [folder('kept', { legacy: true })] }, sent: { sharedPaths: ['/srv/made-up/kept'] }, press: () => removeDataSource('old'),
+        said: A + 'Removed — Rebuild to apply it', forB: () => renderDataList([folder('b-old', { legacy: true })]), draft: 'pathNew' },
+      { fn: 'checkDataSource', tab: 'knowledge', prep: () => { renderDataList([folder('a-notes')]); return $('dataList').querySelector('[data-ds="a-notes"] button[data-on-click="checkDataSource"]'); },
+        req: ['POST', '/v1/agents/a1/data-sources/a-notes/check'], answer: { ok: true, message: 'The folder is there and readable.' }, press: (btn) => checkDataSource('a-notes', btn),
+        said: A + '✅ The folder is there and readable.', failed: A + '⚠️ Made-up refusal', forB: () => renderDataList([folder('a-notes')]) },
+      { fn: 'addGitSource', tab: 'knowledge', prep: () => type('repoUrl', 'git@example.com:made-up/notes.git'), req: ['POST', '/v1/agents/a1/data-sources'],
+        answer: { state: 'RUNNING', dataSources: [{ id: 'r-notes', kind: 'git', repoUrl: 'git@example.com:made-up/notes.git', mountName: 'notes', access: 'ro', pubKey: 'made-up-public-key' }] },
+        press: () => addGitSource(), said: A + 'Repo added — add its deploy key (on its Data tab) to the repo, then Rebuild: it is cloned then.', draft: 'repoUrl', btn: 'repoAddBtn' },
+      { fn: 'attachConnection', tab: 'knowledge', prep: async () => { await until(() => $('connAttachPick').querySelector('option[value="c-made-up"]')); pick('connAttachPick', 'c-made-up'); },
+        req: ['POST', '/v1/agents/a1/connections/attach'], answer: { live: true }, press: () => attachConnection(), said: A + 'Attached — the agent can use it now.', draft: 'connNoSend', btn: 'connAttachBtn' },
+      { fn: 'disconnectAccount', tab: 'knowledge', req: ['DELETE', '/v1/agents/a1/connections/calendar%40example.org'], press: () => disconnectAccount('calendar@example.org'),
+        said: A + 'calendar@example.org disconnected.', draft: 'connNoSend' },
+      // Today a Gmail test answered after another agent's forms were drawn says nothing: its line went with A's list.
+      { fn: 'testAgentGmail', tab: 'knowledge', prep: () => $('connList').querySelector('button[data-on-click="testAgentGmail"]'), req: ['POST', '/v1/agents/a1/connections/calendar%40example.org/test'],
+        answer: { ok: true, detail: 'Inbox reachable.' }, press: (btn) => testAgentGmail(btn, 'calendar@example.org', 0), said: null, failed: null },
+      // Today peers saved after another agent's list was read say nothing, and the rebuild is not offered: the list is not A's any more.
+      { fn: 'savePeers', tab: 'sharing', prep: async () => { await until(() => peersLoadedFor === 'a1' && $('agentPeerList').querySelector('.peerCb')); $('agentPeerList').querySelector('.peerCb[data-id="a4"]').checked = true; },
+        req: ['PUT', '/v1/agents/a1/peers'], sent: { peerIds: ['a4'], allowActions: [] }, press: () => savePeers(), said: null, failed: null, btn: 'peerSaveBtn' },
+      { fn: 'setWebChat', tab: 'sharing', req: ['PUT', '/v1/agents/a1/members/u-made-up/web-chat'], press: () => setWebChat('a1', 'u-made-up', 'Sam Example', false), said: A + 'Web chat is off for Sam Example.' },
+      { fn: 'addKnownPerson', tab: 'sharing', req: ['POST', '/v1/agents/a1/members/known'], press: () => addKnownPerson('a1', 'u-known', 'Sam Example'), said: A + 'Sam Example can now message this agent.' },
+      // Today a share, or a door opened again, answered after another agent's sheet opened says nothing: its sharing read is not current (sharingRead).
+      { fn: 'shareWebChatWith', tab: 'sharing', prep: async () => { await until(() => sharePeopleFor?.id === 'a1' && !$('tgShareRow').hidden); $('tgSharePerson').value = 'u-share'; },
+        req: ['POST', '/v1/agents/a1/web-chat/people'], sent: { userId: 'u-share' }, press: () => shareWebChatWith(), said: null, failed: null },
+      { fn: 'reopenDoor', tab: 'sharing', req: ['POST', '/v1/agents/a1/members/u-made-up/reopen'], answer: { minutes: 30 }, press: () => reopenDoor('a1', 'u-made-up', 'Sam Example'),
+        said: null, failed: null },
+      { fn: 'addEnvVar', tab: 'advanced', prep: () => { type('envName', 'MADE_UP_A'); type('envValue', 'made-up-value'); }, req: ['POST', '/v1/agents/a1/env'], answer: { envVars: [{ id: 'env-a', name: 'MADE_UP_A' }] },
+        press: () => addEnvVar(), said: A + 'MADE_UP_A added — Rebuild to apply it.', forB: () => renderEnvList([{ id: 'env-b', name: 'MADE_UP_B' }]), draft: 'envName', btn: 'envAddBtn' },
+      { fn: 'removeEnvVar', tab: 'advanced', prep: () => renderEnvList([{ id: 'env-a', name: 'MADE_UP_A' }]), req: ['DELETE', '/v1/agents/a1/env/env-a'], answer: { envVars: [] },
+        press: () => removeEnvVar('env-a', 'MADE_UP_A'), said: A + 'MADE_UP_A removed — Rebuild to apply it.', forB: () => renderEnvList([{ id: 'env-b', name: 'MADE_UP_B' }]), draft: 'envName' },
+      { fn: 'testAgentSearch', tab: 'advanced', req: ['POST', '/v1/agents/a1/search-test'], answer: { ok: true, detail: 'Search works: DuckDuckGo answered.' }, press: () => testAgentSearch(),
+        said: A + '✓ Search works: DuckDuckGo answered.', failed: A + '⚠ Made-up refusal', draft: 'envName', btn: 'agentSearchTestBtn' },
+      { fn: 'saveEmbedMode', tab: 'advanced', prep: () => pick('editEmbedMode', 'shared'), req: ['PATCH', '/v1/agents/a1'], press: () => saveEmbedMode(),
+        said: A + 'Will use the shared service from its next rebuild — memory search re-indexes then (a few minutes).', draft: 'envName' },
+      { fn: 'saveMemoryCap', tab: 'advanced', prep: () => pick('editMemoryCap', '2g'), req: ['PATCH', '/v1/agents/a1'], press: () => saveMemoryCap(), said: A + 'Memory cap 2 GB.', draft: 'envName' },
+      { fn: 'saveSwapAllowance', tab: 'advanced', prep: () => pick('editSwapAllowance', 'off'), req: ['PATCH', '/v1/agents/a1'], press: () => saveSwapAllowance(), said: A + 'Swap off for this agent.', draft: 'envName' },
+      { fn: 'saveImagePin', tab: 'advanced', prep: () => until(() => $('editImage').dataset.agent === 'a1'), req: ['PATCH', '/v1/agents/a1'], press: () => saveImagePin(),
+        said: A + 'Back on the fleet default — rebuilding, memory kept.', draft: 'envName' },
+    ];
+    // key: the read held; late: its answer, let through last; lateText: what that answer would show; press: what asks for
+    // it on A's tab (else opening the tab does); again: the same read asked again on A's forms.
+    const READS = [
+      { fn: 'loadPeers', tab: 'sharing', key: 'GET /v1/agents/a1/peers', late: { peers: [], candidates: [{ id: 'a9', name: 'Late Example' }] }, again: () => loadPeers() },
+      { fn: 'renderConnections', as: 'its accounts', tab: 'knowledge', key: 'GET /v1/agents/a1/connections', late: { accounts: [{ email: 'late@example.org', auth: 'oauth', services: ['gmail'] }] },
+        lateText: 'late@example.org', again: () => renderConnections() },
+      { fn: 'renderConnections', as: 'the picker', tab: 'knowledge', key: 'GET /v1/connections',
+        late: { connections: [{ id: 'c-late', kind: 'google', email: 'late@example.org', services: ['gmail'], createdAt: '2026-10-01T00:00:00Z', attachedTo: [] }] }, lateText: 'late@example.org', again: () => renderConnections() },
+      { fn: 'loadSnapshots', tab: 'personality', key: 'GET /v1/agents/a1/snapshots', late: [{ id: 'snap-late', label: 'Late Example', createdAt: '2026-11-01T00:00:00Z', files: ['SOUL.md'], reason: 'manual' }],
+        again: () => loadSnapshots() },
+      { fn: 'renderEditMembers', tab: 'sharing', key: 'GET /v1/agents/a1/members', late: [{ userId: 'u-late', role: 'member', displayName: 'Late Example', status: 'active' }], again: () => renderEditMembers() },
+      { fn: 'renderKnownPeople', tab: 'sharing', key: 'GET /v1/agents/a1/known-people', late: [{ userId: 'u-late', name: 'Late Example' }], again: () => renderKnownPeople() },
+      { fn: 'loadWebChatPeople', tab: 'sharing', key: 'GET /v1/agents/a1/web-chat/people', late: { people: [{ userId: 'u-late', kind: 'password', label: 'Late Example', shared: false }] },
+        again: () => loadWebChatPeople('a1') },
+      { fn: 'showBotToken', tab: 'messaging', key: 'GET /v1/agents/a1/bot-token', late: { botToken: 'Late Example' }, press: () => showBotToken(), again: () => showBotToken() },
+      { fn: 'loadEditFile', tab: 'personality', key: 'GET /v1/agents/a1/files/SOUL.md', late: { content: 'Late Example' }, again: () => loadEditFile() },
+      { fn: 'populateImagePicker', tab: 'advanced', key: 'GET /v1/runtime/images', late: { default: 'hatchabot/runtime:2026.9.8', tags: [{ tag: 'hatchabot/runtime:late-example', exists: true, relation: 'newer' }] },
+        lateText: 'late-example', again: () => populateImagePicker('') },
+    ];
+    // Each table is held to the page (sheetStarters, scripts/sheet-state.mjs, worked out from its scripts): a function that
+    // starts a save (sheetSave, forAgent) or a read (sheetRead) in the forms has a row, and so does each async one (or plain one
+    // that hands a callback to then, a timer…) that touches them another way, or it is named here with why it has none; and no
+    // row is for a function that does neither.
+    const NOT_RACED = {
+      addCronJob: 'the Schedule form: its agent is cronAgentId, asked after the answer (scheduleSaveThenSwitch, scheduleFormAndTestsStayWithTheirAgent)',
+      editCronJob: 'the Schedule form, filled at the press from the task listed; its timer only puts the cursor in it',
+      goSetupValues: "a notice's button: opens the agent's sheet and, once its setup values show, scrolls to them; it sends and draws nothing",
+    };
+    const covered = () => {
+      const { saves, reads, touchers } = window.__sheetStarters;
+      const saved = new Set(SAVES.map((s) => s.fn)), read = new Set(READS.map((r) => r.fn)), all = new Set([...saved, ...read, ...Object.keys(NOT_RACED)]);
+      eq('every save in the forms has a row', saves.filter((n) => !saved.has(n)), []);
+      eq('every read into the forms has a row', reads.filter((n) => !read.has(n)), []);
+      eq('every async function that touches the forms has a row, or a reason it has none', touchers.filter((n) => !all.has(n)), []);
+      eq('no row or reason for a function that does none of that', [...all].filter((n) => !saves.includes(n) && !reads.includes(n) && !touchers.includes(n)), []);
+    };
+    const tidy = async () => {
+      window.__answer = {}; window.__confirmAnswer = true; window.__promptAnswer = undefined;
+      for (const k of Object.keys(window.__override)) if (/^\/v1\/(agents$|agents\/a[12]\/|connections$|runtime\/images$)/.test(k)) delete window.__override[k];
+      shut(); renderDataList([]); renderEnvList([]);
+      for (const id of ['envName', 'envValue', 'pathNew', 'repoUrl', 'editBotToken']) $(id).value = '';
+      $('editErr').textContent = ''; $('toast').textContent = '';
+      await refresh(false);
+    };
+    return { shut, settled, calm, view, same, opened, type, pick, draft, exact, tidy, SAVES, READS, A, conn, covered, SECOND_SOURCE };
+  })();
+  Object.assign(T, {
+    sheetSavesStayWithTheirAgent: async () => {
+      const { calm, view, same, opened, draft, exact, tidy, SAVES, A, conn, covered, SECOND_SOURCE } = sheetRace;
+      const h = auditHold();
+      covered();
+      profiles.push(SECOND_SOURCE);
+      Object.assign(window.__override, {
+        '/v1/connections': { connections: [conn] },
+        '/v1/agents/a1/connections': { accounts: [{ email: 'calendar@example.org', auth: 'oauth', services: ['gmail'] }] },
+        '/v1/agents/a2/connections': { accounts: [{ email: 'soccer@example.org', auth: 'oauth', services: ['gmail'] }] },
+        '/v1/agents/a1/peers': { peers: [], candidates: [{ id: 'a4', name: 'Meal Planner', granted: false }] },
+        '/v1/agents/a2/peers': { peers: [], candidates: [{ id: 'a8', name: 'Budget Tracker', granted: true }] },
+        '/v1/agents/a1/members': [{ userId: 'u-made-up', role: 'member', displayName: 'Sam Example', webChat: true, status: 'active' }],
+        '/v1/agents/a1/web-chat/people': { people: [{ userId: 'u-share', kind: 'password', label: 'Jordan Example', shared: false }] },
+        '/v1/agents/a1/snapshots': [{ id: 'snap-a', label: 'Made-up point', createdAt: '2026-11-01T00:00:00Z', files: ['SOUL.md'], reason: 'manual' }],
+        '/v1/agents/a1/files/SOUL.md': { content: 'A made-up soul, as saved' },
+        '/v1/agents/a2/files/SOUL.md': { content: 'B made-up soul, as saved' },
+      });
+      try {
+        // Setup fields on both, so each one's values are drawn (only an agent with fields has the row); and A's own model menu
+        // and memory limits, not B's: drawn into B's forms, each would show.
+        const field = (key, label, value) => ({ parameters: [{ key, label, type: 'text', target: 'soul', default: '' }], paramValues: { [key]: value } });
+        const own = { profileModels: ['claude-sonnet-5', 'claude-opus-5-5'], profileDefaultModel: 'claude-sonnet-5', modelOverride: 'claude-opus-5-5',
+          memoryCap: '2g', memoryCapEffective: '2g', swapAllowance: 'off' };
+        const list = await (await fetch('/v1/agents')).json();
+        window.__override['/v1/agents'] = list.map((x) => x.id === 'a1' ? Object.assign({}, x, field('city', 'Town', 'Rivergate'), own)
+          : x.id === 'a2' ? Object.assign({}, x, field('team', 'Team', 'Rivergate FC'), { profileModels: ['claude-haiku-4-5'], profileDefaultModel: 'claude-haiku-4-5' }) : x);
+        await refresh(false);
+        const failed = [];
+        for (const row of SAVES) for (const outcome of ['answered', 'refused']) {
+          const what = row.fn + (row.as ? ' (' + row.as + ')' : '') + ', ' + outcome;
+          try {
+            sheetRace.shut();
+            await opened('a1', row.tab);
+            const arg = await (row.prep ? row.prep() : undefined);
+            window.__confirmAnswer = true; window.__answer = {};
+            const [method, path] = row.req;
+            h.once(exact(path), method);
+            const mark = window.__calls.length;
+            const saving = row.press(arg);
+            await until(() => h.held.length === 1).catch(() => { throw new Error(what + ': its request was not sent'); });
+            await opened('a2', row.tab);
+            // B's forms are B's own: the button A's press turned off is on in them, as nothing of B's is out (HB-1484).
+            if (row.btn) ok(what + ': ' + row.btn + " is on in B's forms, not held off by A's press", !$(row.btn).disabled);
+            if (row.forB) row.forB();
+            if (row.draft) draft(row.draft);
+            if (row.onB) row.onB();
+            const before = view();
+            $('toast').textContent = '';
+            if (outcome === 'refused') window.__answer = { [method + ' ' + path]: [{ status: 500, body: { error: 'Made-up refusal' } }] };
+            else if (row.answer) window.__answer = { [method + ' ' + path]: [{ body: row.answer }] };
+            await h.free(); await saving;
+            await calm();
+            same(what + ": B's forms, lists and error box are B's", view(), before);
+            const said = outcome === 'answered' ? row.said : row.failed === undefined ? A + 'Made-up refusal' : row.failed;
+            eq(what + ': what is said', $('toast').textContent, said === null ? '' : said);
+            const sent = window.__calls.slice(mark).filter((c) => c.method !== 'GET');
+            ok(what + ': sent for A, nothing for B: ' + JSON.stringify(sent.map((c) => c.method + ' ' + c.path)),
+              sent.some((c) => c.method === method && c.path === path) && !sent.some((c) => /\/agents\/a2(\/|$)/.test(c.path)));
+            if (row.sent) eq(what + ': what was sent', sent.find((c) => c.method === method && c.path === path).body, row.sent);
+          } catch (e) { failed.push(e.message); await h.free(); }
+          window.__promptAnswer = undefined;
+        }
+        if (failed.length) throw Object.assign(new Error(failed.length + ' of ' + SAVES.length * 2 + ' races: ' + failed[0]), { detail: failed.join('\n') });
+      } finally {
+        await h.free(); if (profiles.includes(SECOND_SOURCE)) profiles.splice(profiles.indexOf(SECOND_SOURCE), 1);
+        await tidy();
+      }
+    },
+    sheetReadsStayWithTheirAgent: async () => {
+      const { calm, view, same, opened, exact, tidy, READS, covered } = sheetRace;
+      const h = auditHold();
+      covered();
+      Object.assign(window.__override, {
+        '/v1/connections': { connections: [{ id: 'c-made-up', kind: 'google', email: 'calendar@example.org', services: ['gmail'], createdAt: '2026-10-01T00:00:00Z', attachedTo: [] }] },
+        '/v1/runtime/images': { default: 'hatchabot/runtime:2026.9.8', tags: [{ tag: 'hatchabot/runtime:made-up-one', exists: true, relation: 'newer' }] },
+        '/v1/agents/a1/peers': { peers: [], candidates: [{ id: 'a4', name: 'Meal Planner', granted: false }] },
+        '/v1/agents/a2/peers': { peers: [], candidates: [{ id: 'a8', name: 'Budget Tracker', granted: true }] },
+        '/v1/agents/a1/connections': { accounts: [{ email: 'calendar@example.org', auth: 'oauth', services: ['gmail'] }] },
+        '/v1/agents/a2/connections': { accounts: [{ email: 'soccer@example.org', auth: 'oauth', services: ['gmail'] }] },
+        '/v1/agents/a1/snapshots': [{ id: 'snap-a', label: 'Made-up point A', createdAt: '2026-11-01T00:00:00Z', files: ['SOUL.md'], reason: 'manual' }],
+        '/v1/agents/a2/snapshots': [{ id: 'snap-b', label: 'Made-up point B', createdAt: '2026-11-01T00:00:00Z', files: ['SOUL.md'], reason: 'manual' }],
+        '/v1/agents/a1/members': [{ userId: 'u-made-up', role: 'member', displayName: 'Sam Example', status: 'active' }],
+        '/v1/agents/a2/members': [{ userId: 'u-b', role: 'member', displayName: 'Riley Example', status: 'active' }],
+        '/v1/agents/a1/web-chat/people': { people: [{ userId: 'u-share', kind: 'password', label: 'Jordan Example', shared: false }] },
+        '/v1/agents/a2/web-chat/people': { people: [{ userId: 'u-share-b', kind: 'password', label: 'Casey Example', shared: false }] },
+        '/v1/agents/a1/known-people': [{ userId: 'u-known', name: 'Jordan Example' }],
+        '/v1/agents/a2/known-people': [{ userId: 'u-known-b', name: 'Casey Example' }],
+        '/v1/agents/a1/bot-token': { botToken: 'made-up-bot-token-a' },
+        '/v1/agents/a1/files/SOUL.md': { content: 'A made-up soul, as saved' },
+        '/v1/agents/a2/files/SOUL.md': { content: 'B made-up soul, as saved' },
+      });
+      try {
+        const failed = [];
+        for (const row of READS) for (const race of ['another agent', 'an older read']) {
+          const what = row.fn + (row.as ? ' (' + row.as + ')' : '') + ', ' + race;
+          const lateText = row.lateText || 'Late Example';
+          try {
+            window.__answer = {};
+            sheetRace.shut();
+            if (race === 'another agent') {
+              // A's read held (opening its tab asks, or its press), B's sheet opened and its forms filled and read.
+              h.once(exact(row.key.slice(row.key.indexOf(' ') + 1)));
+              if (row.press) { await opened('a1', row.tab); void row.press(); } else openV2Agent('a1', row.tab);
+              await until(() => h.held.length === 1);
+              await opened('a2', row.tab);
+            } else {
+              // Asked twice on A's forms: the first held, the second answered.
+              await opened('a1', row.tab);
+              h.once(exact(row.key.slice(row.key.indexOf(' ') + 1)));
+              void row.again();
+              await until(() => h.held.length === 1);
+              await row.again();
+              await calm();
+            }
+            const before = view();
+            ok(what + ': nothing of the late answer yet', !JSON.stringify(before).includes(lateText));
+            window.__answer = { [row.key]: [{ body: row.late }] };
+            await h.free();
+            await calm();
+            same(what + ': the forms are as they were', view(), before);
+          } catch (e) { failed.push(e.message); await h.free(); }
+        }
+        if (failed.length) throw Object.assign(new Error(failed.length + ' of ' + READS.length * 2 + ' races: ' + failed[0]), { detail: failed.join('\n') });
+      } finally {
+        await h.free(); await tidy();
+      }
+    },
+    sheetButtonsStayWithTheirAgent: async () => {
+      // HB-1484 (made-up data): one set of the forms' buttons serves every agent, and a press turns its button off while its
+      // request is out. A's press out, B's sheet opened: B's button is on (nothing of B's is out); B presses its own, and A's
+      // answer comes first: B's stays off, for B's own press; B's answer gives it back. A's sheet opened again while A's press
+      // is out: off, for A's; A's answer gives it back. The Schedule form's Add is its own form's (cronAgentId), the same way.
+      const { opened, calm, type, pick, tidy, conn } = sheetRace;
+      const real = window.fetch, gates = [];
+      // Each request held is the next one with its method and path (each names its agent), until it is let go.
+      window.fetch = (input, init = {}) => {
+        const path = String(typeof input === 'string' ? input : input.url).split('?')[0], method = (init.method || 'GET').toUpperCase();
+        const g = gates.find((x) => !x.free && x.method === method && x.path === path);
+        if (!g) return real(input, init);
+        return new Promise((res) => { g.free = () => { gates.splice(gates.indexOf(g), 1); res(real(input, init)); }; });
+      };
+      const hold = ([method, path]) => { const g = { method, path, free: null }; gates.push(g); return g; };
+      const sent = (g, what) => until(() => g.free).catch(() => { throw new Error(what + ': its request was not sent'); });
+      const answer = async (g, pressing) => { g.free(); await pressing; await calm(); };
+      const loose = async () => { for (const g of [...gates]) { if (g.free) g.free(); else gates.splice(gates.indexOf(g), 1); } await sleep(150); };
+      const open = async (id, tab) => {
+        if (tab !== 'schedule') return opened(id, tab);
+        openV2Agent(id, tab);
+        await until(() => v2AgentId === id && cronAgentId === id && $('v2Pane').contains($('cronBody')) && $('cronList').textContent !== 'Loading…');
+      };
+      const agent = (id) => '/v1/agents/' + id;
+      // btn: the button; tab: where it is; prep: the agent's forms made ready for its press; req: its request; answer: what that answers (else the stub's).
+      const BUTTONS = [
+        { btn: 'renameBtn', tab: 'personality', prep: (id) => type('editName', 'Made-up name ' + id), req: (id) => ['PATCH', agent(id)], press: () => renameAgent() },
+        { btn: 'descBtn', tab: 'personality', prep: (id) => type('editDesc', 'Made-up description ' + id), req: (id) => ['PATCH', agent(id)], press: () => saveDescription() },
+        { btn: 'paramSaveBtn', tab: 'personality', req: (id) => ['PATCH', agent(id)], press: () => saveSetupFields() },
+        { btn: 'editSaveBtn', tab: 'personality', prep: async (id) => { await until(() => editLoaded && editLoaded.agentId === id); type('editContent', 'A made-up soul for ' + id); },
+          req: (id) => ['PUT', agent(id) + '/files/SOUL.md'], press: () => saveEditFile() },
+        { btn: 'snapBtn', tab: 'personality', prep: () => { window.__promptAnswer = 'Made-up point'; }, req: (id) => ['POST', agent(id) + '/snapshots'], press: () => takeSnapshot() },
+        { btn: 'profileBtn', tab: 'ai', req: (id) => ['PATCH', agent(id)], press: () => switchProfile() },
+        { btn: 'modelBtn', tab: 'ai', req: (id) => ['POST', agent(id) + '/model'], press: () => switchModel() },
+        { btn: 'pathAddBtn', tab: 'knowledge', prep: (id) => type('pathNew', '/srv/made-up/notes-' + id), req: (id) => ['POST', agent(id) + '/data-sources'], press: () => addDataSource() },
+        { btn: 'repoAddBtn', tab: 'knowledge', prep: (id) => type('repoUrl', 'git@example.com:made-up/notes-' + id + '.git'), req: (id) => ['POST', agent(id) + '/data-sources'],
+          answer: { state: 'STOPPED', dataSources: [] }, press: () => addGitSource() },
+        { btn: 'connAttachBtn', tab: 'knowledge', prep: async () => { await until(() => $('connAttachPick').querySelector('option[value="c-made-up"]')); pick('connAttachPick', 'c-made-up'); },
+          req: (id) => ['POST', agent(id) + '/connections/attach'], press: () => attachConnection() },
+        { btn: 'peerSaveBtn', tab: 'sharing', prep: async (id) => { await until(() => peersLoadedFor === id && $('agentPeerList').querySelector('.peerCb')); $('agentPeerList').querySelector('.peerCb').checked = true; },
+          req: (id) => ['PUT', agent(id) + '/peers'], press: () => savePeers() },
+        { btn: 'envAddBtn', tab: 'advanced', prep: (id) => { type('envName', 'MADE_UP_' + id.toUpperCase()); type('envValue', 'made-up-value'); }, req: (id) => ['POST', agent(id) + '/env'], press: () => addEnvVar() },
+        { btn: 'agentSearchTestBtn', tab: 'advanced', req: (id) => ['POST', agent(id) + '/search-test'], press: () => testAgentSearch() },
+        // A new task, from an empty form: an edit, or an interval, left by another scenario on the same agent's form is not this one's.
+        { btn: 'cronAddBtn', tab: 'schedule', prep: () => { cancelCronEdit(); clearCronForm(); $('cronName').value = 'Made-up task'; $('cronMsg').value = 'Made-up message'; $('cronExpr').value = '0 8 * * *'; },
+          req: (id) => ['POST', agent(id) + '/crons'], press: () => addCronJob() },
+      ];
+      // Held to the page: a row for each button its list names (SHEET_BUTTONS), and the Schedule form's Add, and no other.
+      eq('a row for every shared button of the forms, and the Schedule form\'s Add', BUTTONS.map((r) => r.btn).sort(), [...Object.keys(SHEET_BUTTONS), 'cronAddBtn'].sort());
+      Object.assign(window.__override, {
+        '/v1/connections': { connections: [conn] },
+        '/v1/agents/a1/connections': { accounts: [{ email: 'calendar@example.org', auth: 'oauth', services: ['gmail'] }] },
+        '/v1/agents/a2/connections': { accounts: [{ email: 'soccer@example.org', auth: 'oauth', services: ['gmail'] }] },
+        '/v1/agents/a1/peers': { peers: [], candidates: [{ id: 'a4', name: 'Meal Planner', granted: false }] },
+        '/v1/agents/a2/peers': { peers: [], candidates: [{ id: 'a8', name: 'Budget Tracker', granted: false }] },
+        '/v1/agents/a1/files/SOUL.md': { content: 'A made-up soul, as saved' },
+        '/v1/agents/a2/files/SOUL.md': { content: 'B made-up soul, as saved' },
+      });
+      window.__crons = [];
+      try {
+        const failed = [];
+        for (const row of BUTTONS) {
+          const { btn } = row, on = () => !$(btn).disabled;
+          try {
+            window.__confirmAnswer = true;
+            window.__answer = row.answer ? Object.fromEntries(['a1', 'a2'].map((id) => [row.req(id).join(' '), Array.from({ length: 4 }, () => ({ body: row.answer }))])) : {};
+            sheetRace.shut();
+            await open('a1', row.tab);
+            await row.prep?.('a1');
+            const a = hold(row.req('a1')), forA = row.press();
+            await sent(a, btn + ", A's press");
+            ok(btn + " is off on A's sheet while A's press is out", !on());
+            await open('a2', row.tab);
+            ok(btn + " is on in B's sheet, opened while A's press is out: nothing of B's is out", on());
+            await row.prep?.('a2');
+            const b = hold(row.req('a2')), forB = row.press();
+            await sent(b, btn + ", B's press");
+            ok(btn + " is off for B's own press", !on());
+            await answer(a, forA);
+            ok(btn + " stays off once A's answer came: B's own press is still out", !on());
+            await answer(b, forB);
+            ok(btn + " is on once B's own answer came", on());
+            // Back to A's sheet while A's press is out: it waits for A's.
+            await open('a1', row.tab);
+            await row.prep?.('a1');
+            const again = hold(row.req('a1')), forAgain = row.press();
+            await sent(again, btn + ", A's second press");
+            await open('a2', row.tab);
+            await open('a1', row.tab);
+            ok(btn + " is off on A's sheet, opened again while A's press is out", !on());
+            await answer(again, forAgain);
+            ok(btn + " is on once A's answer came, on A's sheet", on());
+          } catch (e) { failed.push(e.message); await loose(); }
+          window.__promptAnswer = undefined;
+        }
+        if (failed.length) throw Object.assign(new Error(failed.length + ' of ' + BUTTONS.length + ' buttons: ' + failed[0]), { detail: failed.join('\n') });
+        // Every press answered: none is left noted, to keep its button off for its agent.
+        eq('no press is left out once every answer came', [...sheetPresses.keys()], []);
+      } finally {
+        await loose(); window.fetch = real;
+        for (const id of ['cronName', 'cronMsg', 'cronExpr', 'editName', 'editDesc']) $(id).value = '';
+        $('cronErr').textContent = ''; window.__crons = [];
+        await tidy();
       }
     },
   });
@@ -14308,6 +15077,27 @@ const SCENARIOS = String.raw`(() => {
         v2Machine = was; v2PaintMachine();
       }
     },
+    machineAlertsSayProxyOnAppPort: async () => {
+      // HB-1239 review: a reverse proxy still pointed at the app's own port puts everyone behind it in one
+      // sign-in limit. The account says so for the machine's owner, and Alerts carry it with what to change.
+      const owner = myAccount.hostOwner, was = v2Machine, pa = myAccount.proxyOnAppPort;
+      window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', kind: 'local', hostname: 'home-box', agentCount: 3 }];
+      window.__override['/v1/backups'] = { backups: [{ date: new Date().toISOString().slice(0, 10), hasKey: true, complete: true }], keepDays: 14, missing: [] };
+      window.__override['/v1/runtime'] = { imageVersion: '2026.9.6', upgradeAvailable: false };
+      myAccount.hostOwner = true;
+      try {
+        await v2LoadMachine(true);
+        eq('none without it', v2MachineAlerts().filter((x) => x.key.startsWith('proxy-on-app-port')).length, 0);
+        myAccount.proxyOnAppPort = { at: '2026-11-24T10:00:00.000Z', lastSeen: '2026-11-24T10:20:00.000Z', port: 8080, proxyPort: 8094 };
+        const it = v2MachineAlerts().find((x) => x.key.startsWith('proxy-on-app-port'));
+        eq('said, with what to change', it && it.why, "a proxy on this machine sends visitors to port 8080, where they all share one sign-in limit: one person's wrong passwords lock out everyone. Point it at 127.0.0.1:8094 instead (in a Caddyfile: reverse_proxy 127.0.0.1:8094)");
+      } finally {
+        myAccount.hostOwner = owner;
+        if (pa === undefined) delete myAccount.proxyOnAppPort; else myAccount.proxyOnAppPort = pa;
+        for (const k of ['/v1/hosts', '/v1/backups', '/v1/runtime']) delete window.__override[k];
+        v2Machine = was; v2PaintMachine();
+      }
+    },
     membersLinkedOnAnyApp: async () => {
       // HB-1045: a member linked on Discord or Slack only is linked, with the app named: no "hasn't messaged yet", no door to open again.
       try {
@@ -15682,9 +16472,9 @@ try {
   }
   // hb-ui=classic and ?ui=classic (below): opened as a browser that had chosen the classic look (scenario classicMap).
   // The version as the server writes it into the page: a meta tag web/app/core.js reads (versionMarkup in
-  // src/api/pageRoutes.ts, HB-0812), not the stub's global, so the page's own reading of it is what is checked.
+  // src/api/machine/pageRoutes.ts, HB-0812), not the stub's global, so the page's own reading of it is what is checked.
   if (!STUB.includes(STUB_SETS_VERSION)) throw new Error('ui-clickthrough: the stub no longer sets the version with ' + STUB_SETS_VERSION);
-  const head = `<head><meta name="hatchabot-version" content="${version}"><script>localStorage.setItem('theme','light'); localStorage.setItem('hb-ui','classic')</script><script>${STUB.replace(STUB_SETS_VERSION, '')}</script><script>${RECORDER}</script><script>window.__joinPage = ${joinPage}</script>`;
+  const head = `<head><meta name="hatchabot-version" content="${version}"><script>localStorage.setItem('theme','light'); localStorage.setItem('hb-ui','classic')</script><script>${STUB.replace(STUB_SETS_VERSION, '')}</script><script>${RECORDER}</script><script>window.__joinPage = ${joinPage}</script><script>window.__upgradedScript = ${upgradedScript}</script><script>window.__sheetStarters = ${sheetStartersJson}</script>`;
   const tail = `<script>setTimeout(() => { ${SCENARIOS} }, 2500)</script></body>`;
   // Replacer functions: a bare string is a pattern to replace(), and `$'` inside the scenarios meant "the rest of the page".
   writeFileSync(join(work, 'page.html'), page.replace('<head>', () => head).replace('</body>', () => tail));

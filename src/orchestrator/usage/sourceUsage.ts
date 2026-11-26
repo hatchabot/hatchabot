@@ -7,6 +7,7 @@ import { parseLoopLines } from '../../domain/loopLines.js';
 import { CALL_RE, logKey, stampKey } from '../../domain/modelCallLines.js';
 import { hourOfMs, OWN_BRAVE } from '../settings/searchUsage.js';
 import type { SecretStore } from '../../secrets/secretStore.js';
+import { keyedLock, type KeyedLock } from '../../util/queues.js';
 
 /**
  * AI-source usage visibility. Anthropic won't tell a setup-token how much of a
@@ -179,14 +180,11 @@ export interface SampleDeps {
 export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.now()): Promise<{ calls: number; limited: number }> {
   // One sample of an agent at a time: the timer's and a rebuild's checkpoint
   // both read the same cursor and both counted the same failed calls (#109).
-  const inFlight = sampling.get(deps.store) ?? new Map<string, Promise<unknown>>();
-  sampling.set(deps.store, inFlight);
-  const before = inFlight.get(a.id);
-  const mine = (before ? before.catch(() => {}) : Promise.resolve()).then(() => sampleOnce(deps, a, now));
-  inFlight.set(a.id, mine);
-  try { return await mine; } finally { if (inFlight.get(a.id) === mine) inFlight.delete(a.id); }
+  let turns = sampling.get(deps.store);
+  if (!turns) sampling.set(deps.store, (turns = keyedLock()));
+  return turns.run(a.id, () => sampleOnce(deps, a, now));
 }
-const sampling = new WeakMap<Store, Map<string, Promise<unknown>>>();
+const sampling = new WeakMap<Store, KeyedLock>();
 
 async function sampleOnce(deps: SampleDeps, a: Agent, now: number): Promise<{ calls: number; limited: number }> {
   const { store } = deps;

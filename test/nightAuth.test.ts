@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import { _loginStrikeKeys, _loginThrottleKeys, _resetLoginThrottle, noteFailure, throttled, registerAuth } from '../src/api/auth.js';
+import { _loginStrikeKeys, _loginThrottleKeys, _resetLoginThrottle, noteFailure, throttled, registerAuth } from '../src/api/signIn/auth.js';
 import { principalOf } from '../src/api/principal.js';
 import { markPublicSocket } from '../src/api/trust.js';
 import { Store } from '../src/store/store.js';
+import { servedRequest } from './helpers/viaServe.js';
 
 // Night review, 2026-09-27: sign-in and accounts.
 
@@ -18,7 +19,7 @@ async function accounts() {
   const f = Fastify();
   await registerAuth(f, { secret: SECRET, mode: 'accounts', store, cliTokenOwner: (t) => store.ownerForCliToken(t), cliTokenScope: (t) => store.cliTokenScope(t) });
   f.get('/v1/whoami', async (req) => principalOf(req));
-  const boot = await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'correct-horse' } });
+  const boot = await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'robin', password: 'correct-horse' } });
   return { f, store, owner: boot.json().id as string, recoveryCode: boot.json().recoveryCode as string, cookie: cookieOf(boot) };
 }
 const bearer = (t: string) => ({ authorization: `Bearer ${t}` });
@@ -32,7 +33,7 @@ describe('command-line tokens die with a reset', () => {
     const full = store.createCliToken(owner, 'stolen').token;
     const rehost = store.createCliToken(owner, 'peer', 90, 'rehost').token;
     expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: bearer(full) })).statusCode).toBe(200);
-    const r = await f.inject({ method: 'POST', url: '/v1/local-accounts/recover-with-code', payload: { username: 'chris', code: recoveryCode, password: 'new-horse-battery' } });
+    const r = await f.inject({ method: 'POST', url: '/v1/local-accounts/recover-with-code', payload: { username: 'robin', code: recoveryCode, password: 'new-horse-battery' } });
     expect(r.statusCode).toBe(200);
     expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: bearer(full) })).statusCode).toBe(401);
     expect(store.ownerForCliToken(rehost)).toBe(owner);
@@ -50,11 +51,11 @@ describe('command-line tokens die with a reset', () => {
 describe('recovery beats a lock-out', () => {
   it('ten bad passwords for the owner lock sign-in, but the recovery code still works and ends the lock', async () => {
     const { f, recoveryCode } = await accounts();
-    for (let i = 0; i < 12; i++) await f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'chris', password: 'wrong' }, remoteAddress: `10.0.0.${i + 1}` });
-    expect((await f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'chris', password: 'correct-horse' }, remoteAddress: '10.0.1.1' })).statusCode).toBe(429);
-    const r = await f.inject({ method: 'POST', url: '/v1/local-accounts/recover-with-code', payload: { username: 'chris', code: recoveryCode, password: 'new-horse-battery' }, remoteAddress: '10.0.1.1' });
+    for (let i = 0; i < 12; i++) await f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'robin', password: 'wrong' }, remoteAddress: `10.0.0.${i + 1}` });
+    expect((await f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'robin', password: 'correct-horse' }, remoteAddress: '10.0.1.1' })).statusCode).toBe(429);
+    const r = await f.inject({ method: 'POST', url: '/v1/local-accounts/recover-with-code', payload: { username: 'robin', code: recoveryCode, password: 'new-horse-battery' }, remoteAddress: '10.0.1.1' });
     expect(r.statusCode).toBe(200);
-    expect((await f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'chris', password: 'new-horse-battery' }, remoteAddress: '10.0.1.2' })).statusCode).toBe(200);
+    expect((await f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'robin', password: 'new-horse-battery' }, remoteAddress: '10.0.1.2' })).statusCode).toBe(200);
   }, 30_000);
 });
 
@@ -93,24 +94,25 @@ describe('the throttle map keeps the account being guessed at', () => {
   it('a locked-out account keeps its count however many made-up names are tried, each to the limit (HB-1389)', async () => {
     process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW = '1';
     try {
-      await accounts(); // the account "chris", and the store the names are looked up in
+      await accounts(); // the account "robin", and the store the names are looked up in
       const req = (ip: string) => ({ ip, headers: {}, server: {}, log: { warn() {} } }) as never;
-      noteFailure(req('10.9.9.9'), 'chris', undefined, { typed: true });
-      expect(throttled(req('10.200.0.1'), 'chris')).toBe(true);
+      noteFailure(req('10.9.9.9'), 'robin', undefined, { typed: true });
+      expect(throttled(req('10.200.0.1'), 'robin')).toBe(true);
       // Twelve thousand names typed at the sign-in, each missed as often as the account was.
       for (let i = 0; i < 12_000; i++) noteFailure(req(`10.${(i >> 8) & 255}.${i & 255}.1`), `made-up-${i}`, undefined, { typed: true });
-      expect(throttled(req('10.200.0.2'), 'chris')).toBe(true);
+      expect(throttled(req('10.200.0.2'), 'robin')).toBe(true);
       // The memory stays bounded: made-up names are what goes.
       const keys = _loginThrottleKeys();
       expect(keys.length).toBeLessThanOrEqual(10_000);
-      expect(keys).toContain('user:chris');
+      expect(keys).toContain('user:robin');
       expect(keys).toContain('user:made-up-11999');
       expect(keys).not.toContain('user:made-up-0');
     } finally { delete process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW; }
   }, 60_000);
 
   // A peer on this machine (an agent's container under a rootless daemon) that forges forwarded-for addresses.
-  const here = (fwd: string) => ({ ip: '127.0.0.1', headers: { 'x-forwarded-for': fwd }, server: {}, log: { warn() {} } }) as never;
+  /** A request through tailscale serve's listener, naming `fwd` as the client (HB-1239: only there is it believed). */
+  const here = (fwd: string) => servedRequest(fwd);
   const fwd = (i: number) => `10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`;
   /** A request at the public address, from `addr`. */
   const pub = (addr: string) => {
@@ -159,21 +161,26 @@ describe('the throttle map keeps the account being guessed at', () => {
     } finally { delete process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW; }
   }, 120_000);
 
-  it('a forwarded-for address that reads like a public count is not kept as one (HB-1389 review)', async () => {
+  it('a forwarded-for address is this side\'s, not a public count: past the bound it goes with the made-up names (HB-1389 review)', async () => {
     await accounts();
-    for (let i = 0; i < 9_000; i++) noteFailure(here(`pub:all-${i}`), undefined);
-    for (let i = 0; i < 2_000; i++) noteFailure(here(fwd(i)), `flood-${i}`, undefined, { typed: true });
+    // A miss each from 2,000 visitors at the public address, first: the oldest, kept all the same.
+    for (let i = 0; i < 2_000; i++) noteFailure(pub(`203.0.${(i >> 8) & 255}.${i & 255}`), undefined);
+    // Real addresses, each its own bucket behind the listener for tailscale serve (an address that reads like
+    // "pub:all" is no address at all since HB-1435, so all of them were one bucket and the bound never ran).
+    for (let i = 0; i < 9_000; i++) noteFailure(here(fwd(i)), undefined);
+    for (let i = 0; i < 2_000; i++) noteFailure(here(fwd(10_000 + i)), `flood-${i}`, undefined, { typed: true });
     const keys = _loginThrottleKeys();
     expect(keys.length).toBeLessThanOrEqual(10_000);
-    // Those addresses' counts are this side's, below their limit: they went with the names.
-    expect(keys.filter((k) => k.startsWith('ip:fwd:pub:')).length).toBeLessThan(9_000);
+    // Those addresses' counts are this side's, below their limit: they went with the names, and every public count stayed.
+    expect(keys.filter((k) => k.startsWith('ip:fwd:')).length).toBeLessThan(9_000);
+    expect(keys.filter((k) => k.startsWith('pub:ip:'))).toHaveLength(2_000);
   }, 120_000);
 
   it('a forwarded-for address that reads like a public count, the public ceiling or a shared bucket is an address on this side: its limit, and no lockout, strike or record of the public address (HB-1389 review)', async () => {
     const { store } = await accounts();
     const bursts: string[] = [];
     const server = { publicAccess: { failureBurst: (_req: unknown, key: string) => { bursts.push(key); } } };
-    const forged = (addr: string) => ({ ip: '127.0.0.1', headers: { 'x-forwarded-for': addr }, server, log: { warn() {} } }) as never;
+    const forged = (addr: string) => servedRequest(addr, { server });
     const triesBeforeRefused = (addr: string) => {
       let n = 0;
       while (!throttled(forged(addr)) && n < 500) { noteFailure(forged(addr)); n++; }
@@ -181,9 +188,13 @@ describe('the throttle map keeps the account being guessed at', () => {
     };
     const plain = triesBeforeRefused('198.51.100.1');
     // Was: 100 for the ceiling's and the shared buckets' look-alikes, and two of them on the record as the public address's.
-    expect(['user:*', 'x-pub:all', 'pub:all', 'pub:user:chris'].map(triesBeforeRefused)).toEqual([plain, plain, plain, plain]);
+    // Now not addresses at all (HB-1435): one count for every one of them, at this side's limit, so the first takes the tries and the rest none.
+    expect(['user:*', 'x-pub:all', 'pub:all', 'pub:user:robin'].map(triesBeforeRefused)).toEqual([plain, 0, 0, 0]);
+    expect(_loginThrottleKeys()).toContain('ip:fwd:unknown');
     // Was: for each address made up, a strike kept a day in the store, and a burst on the record.
-    for (let i = 0; i < 300; i++) for (let j = 0; j < 10; j++) noteFailure(forged(`pub:${i}`), undefined, 'link');
+    // 300 real addresses, each its own bucket at its limit (a look-alike is no address since HB-1435: one bucket).
+    for (let i = 0; i < 300; i++) for (let j = 0; j < 10; j++) noteFailure(forged(fwd(i)), undefined, 'link');
+    expect(_loginThrottleKeys().filter((k) => k.startsWith('link:ip:fwd:10.'))).toHaveLength(300);
     expect(store.rateCounts('signin:strike:', Date.now())).toEqual([]);
     expect(_loginStrikeKeys()).toEqual([]);
     expect(bursts).toEqual([]);
@@ -243,7 +254,7 @@ describe('a name typed at the sign-in is never a shared bucket (HB-1434)', () =>
     for (let i = 0; i < 99; i++) expect((await wrongCode(f, i)).statusCode).toBe(403);
     expect((await typedLogin(f, '*first-run-setup*', 0)).statusCode).toBe(401);
     // 10,500 forged forwarded-for addresses on this machine, each to its limit (worth more than a made-up name).
-    const here = (fwd: string) => ({ ip: '127.0.0.1', headers: { 'x-forwarded-for': fwd }, server: {}, log: { warn() {} } }) as never;
+    const here = (fwd: string) => servedRequest(fwd);
     for (let i = 0; i < 10_500; i++) for (let j = 0; j < 10; j++) noteFailure(here(`10.6.${(i >> 8) & 255}.${i & 255}`));
     // Was 403 twice and on: the typed miss had made the bucket a made-up name's, and the flood evicted it.
     expect((await wrongCode(f, 200)).statusCode).toBe(403);

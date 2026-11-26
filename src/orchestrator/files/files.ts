@@ -10,11 +10,12 @@ import { createCoreFileTurns, type CoreFileTurns } from './coreFileTurns.js';
  * (`turns`), its core files read and saved from the app (`core`), and its
  * home browsed, downloaded and uploaded to (`home`). Built once in
  * `registerRoutes`, before the services that take the turn are, and on the
- * route context as `ctx.files`; its routes are in src/api/fileRoutes.ts.
+ * route context as `ctx.files`; its routes are in src/api/data/fileRoutes.ts.
  *
- * It owns the turn's queue (`agentsMdTurns`) and the deadlines of the
- * changes waiting for it (`turnWaits`); `stop()` refuses those waiting, as
- * their deadline would. It has no timer of its own beyond those deadlines.
+ * It owns the turn's queue (`agentsMdTurns`, a keyed lock, which holds the
+ * deadlines of the changes waiting for it too); `stop()` refuses those
+ * waiting, as their deadline would. It has no timer of its own beyond those
+ * deadlines.
  */
 export interface Files {
   turns: CoreFileTurns;

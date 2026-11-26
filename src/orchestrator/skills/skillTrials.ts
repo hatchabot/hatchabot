@@ -52,7 +52,9 @@ const MESSAGES: Record<SkillTrialStatus, string> = {
 /**
  * The one OpenClaw release Practice runs on: where its `agent exec --state-dir`
  * keeps the run's transcript was read in it, and what the run spent is counted
- * from there (HB-0933). Another release is let in only once that is read again.
+ * from there (HB-0933). Another release is let in only once that is read again:
+ * the candidate gate runs one practice on each candidate's release and checks
+ * it (scripts/practice-check.ts, HB-1418), and a release moves this by hand.
  */
 export const PRACTICE_OPENCLAW = '2026.9.8';
 /** A release as `openclaw --version` names it, the only shape its words may carry. */
@@ -89,11 +91,18 @@ const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
  * commands/agent-exec-result.ts, agents/agent-tools.read.ts. Only the copied
  * skill and fixture are readable. Runtime-managed auth refresh may still occur.
  * No original workspace/config/session file is written by this helper.
+ * It runs on PRACTICE_OPENCLAW alone, but for the candidate gate's `check` of
+ * another release (scripts/practice-check.ts, HB-1418), which lets in that one
+ * and has the event ids of the run's calls reported too (`spentIds`), to look
+ * for them among the agent's own.
  */
-export function skillTrialScript(target: { slug: string }, skill: { id: string; content: string }, expiresAt = Date.now() + 75_000): string {
+export function skillTrialScript(target: { slug: string }, skill: { id: string; content: string }, expiresAt = Date.now() + 75_000, check?: { release: string }): string {
+  const release = check ? check.release : PRACTICE_OPENCLAW;
   const sample = describeSkillTrial(skill.id);
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(target.slug) || typeof skill.content !== 'string' || !skill.content.trim() || Buffer.byteLength(skill.content) > 64 * 1024 || !Number.isSafeInteger(expiresAt)) throw new Error('The skill cannot be used for practice.');
-  const payload = Buffer.from(JSON.stringify({ slug: target.slug, id: skill.id, content: skill.content, sample, facts: SAMPLES[skill.id]!.facts, expiresAt })).toString('base64');
+  if (!OPENCLAW_RELEASE.test(release)) throw new Error('Practice runs only on an OpenClaw release named as openclaw --version names one.');
+  const letIn = release.replace(/\./g, '\\.');
+  const payload = Buffer.from(JSON.stringify({ slug: target.slug, id: skill.id, content: skill.content, sample, facts: SAMPLES[skill.id]!.facts, expiresAt, ...(check ? { ids: true } : {}) })).toString('base64');
   const code = String.raw`
 const fs=require('node:fs'), path=require('node:path'), os=require('node:os'), crypto=require('node:crypto'), cp=require('node:child_process');
 const input=JSON.parse(Buffer.from(process.argv[1],'base64').toString('utf8'));
@@ -109,14 +118,15 @@ const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 // goes, and the usage sampler, which reads the agent's own transcripts, never
 // sees it: counted once, by Practice. A runtime that wrote it into the agent's
 // own would be counted by the sampler too, so a new version is let in only
-// once where it writes is checked again.
+// once where it writes is checked again (the candidate gate's practice turn,
+// which lets in the candidate's release alone, HB-1418).
 const zlib=require('node:zlib');
 let sqlite=null;try{sqlite=require('node:sqlite');}catch{}
 const n=x=>typeof x==='number'&&isFinite(x)&&x>0?x:0;
 const MODEL=/^[A-Za-z0-9._:@\/-]{1,240}$/;
 function tally(fallback){
   const models={},seen=new Set();
-  const t={found:false,
+  const t={found:false,ids:[],
     add(e){
       const msg=object(e)?e.message:null;
       if(!object(msg)||!object(msg.usage))return;
@@ -126,6 +136,7 @@ function tally(fallback){
       const k=typeof msg.model==='string'&&MODEL.test(msg.model)?msg.model:fallback;
       const m=models[k]||(models[k]={model:k,calls:0,input:0,output:0,cacheRead:0,cacheWrite:0});
       m.calls++;m.input+=n(u.input);m.output+=n(u.output);m.cacheRead+=n(u.cacheRead);m.cacheWrite+=n(u.cacheWrite);t.found=true;
+      if(e.id&&t.ids.length<200)t.ids.push(String(e.id));
     },
     line(j){if(typeof j!=='string'||j.indexOf('"usage"')<0)return;try{t.add(JSON.parse(j));}catch{}},
     list(){return Object.values(models).slice(0,20);}};
@@ -174,7 +185,7 @@ function stateSpent(dir,fallback){
     }
   };
   walk(dir,0);
-  return {found:t.found,models:t.list()};
+  return {found:t.found,models:t.list(),ids:t.ids};
 }
 // What the run reported, only when its folder holds no call: its four parts, as
 // the usage reader counts a call's (a total beyond them is not booked as any).
@@ -205,9 +216,10 @@ async function main() {
   if(Date.now()>=input.expiresAt) return result('timeout');
   root=fs.mkdtempSync(path.join(os.tmpdir(),'hb-skill-practice-'));fs.chmodSync(root,0o700);
   const version=await child(['--version'],process.env,Math.min(5000,input.expiresAt-Date.now()));
-  // Only 2026.9.8: where it keeps the run's transcript (above) was read in that release.
-  // Another is named, so Practice says which it runs (HB-1253).
-  if(version.code!==0||!/^OpenClaw\s+${PRACTICE_OPENCLAW.replace(/\./g, '\\.')}(?:\s|$)|^${PRACTICE_OPENCLAW.replace(/\./g, '\\.')}(?:\s|$)/m.test(version.out)){
+  // Only 2026.9.8 (PRACTICE_OPENCLAW): where it keeps the run's transcript (above) was
+  // read in that release. Another is named, so Practice says which it runs (HB-1253).
+  // The candidate gate lets in its candidate's release instead, to check it (HB-1418).
+  if(version.code!==0||!/^OpenClaw\s+${letIn}(?:\s|$)|^${letIn}(?:\s|$)/m.test(version.out)){
     const seen=version.code===0?/^(?:OpenClaw\s+)?(\d{4}\.\d{1,2}\.\d{1,3}(?:-[A-Za-z0-9.]{1,24})?)(?:\s|$)/m.exec(version.out):null;
     return result('unsupported',seen?{openclaw:seen[1]}:{});
   }
@@ -276,6 +288,8 @@ main().catch(()=>result('unavailable')).then(value=>{
     try{mine=stateSpent(ran.dir,ran.model);}catch{}
     const [spent,from]=mine&&mine.found?[mine.models,'state']:[reportedSpent(reported,ran.model),'reported'];
     if(spent.length)extra={spent,spentFrom:from};
+    // The candidate gate's check (HB-1418): which calls they were, to look for them among the agent's own.
+    if(input.ids&&mine&&mine.found)extra.spentIds=mine.ids;
   }
   const out=v=>({...v,...extra});
   try{if(root)fs.rmSync(root,{recursive:true,force:true});}catch{return process.stdout.write(JSON.stringify(out(result('unavailable'))));}

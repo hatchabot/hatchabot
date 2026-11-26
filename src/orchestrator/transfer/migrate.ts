@@ -465,7 +465,7 @@ export async function migrateAgent(
   // bot is about to belong elsewhere. (Routes check isBusy; this also stops
   // reconcile from judging the stopped source mid-move.) The operation's row
   // (operations.ts) keeps that true across a restart.
-  return whileBusy(agentId, () => migrateAgentInner(deps, agentId, peer, opts));
+  return whileBusy(agentId, 'migrate', () => migrateAgentInner(deps, agentId, peer, opts));
 }
 
 /** What a move to another Hatchabot records, and what a restart needs. Never a secret. */

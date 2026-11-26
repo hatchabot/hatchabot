@@ -32,7 +32,7 @@ export type FeedRow = Record<string, unknown> & { at: string };
  * to the route file on the shared context (`ctx.health`). The registry calls
  * it too: a start or wake checks that agent's limits. Nothing here knows
  * about HTTP: who is asking and the reply's words are the route file's
- * (src/api/healthRoutes.ts). `stop()` ends the limits check's two timers.
+ * (src/api/machine/healthRoutes.ts). `stop()` ends the limits check's two timers.
  */
 export interface HealthChecks {
   /** The live health of a RUNNING agent, and its config lint when `doctor`. */

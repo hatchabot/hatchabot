@@ -10,7 +10,7 @@ import type { Agent } from '../src/domain/types.js';
 
 /**
  * The memory search service (HB-0808 step 13), driven as
- * src/api/embedderRoutes.ts drives it but with no HTTP server: a real store
+ * src/api/machine/embedderRoutes.ts drives it but with no HTTP server: a real store
  * on an in-memory database, a data folder of its own, and a provider that
  * answers the image reads the test sets. No container is started.
  */

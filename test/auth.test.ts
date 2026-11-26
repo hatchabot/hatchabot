@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import { _resetLoginThrottle, authModeFromEnv, registerAuth } from '../src/api/auth.js';
+import { _resetLoginThrottle, authModeFromEnv, registerAuth } from '../src/api/signIn/auth.js';
 import { LOCAL_OWNER, ownerIdOf, principalOf } from '../src/api/principal.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { Store } from '../src/store/store.js';

@@ -9,13 +9,14 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { defaultBackupsDir, defaultDbPath } from '../../envCompat.js';
 import { fileURLToPath } from 'node:url';
 import { isDiskFull, OneShotNotGoneError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, type RuntimeProvider } from '../../providers/provider.js';
 import { DEFAULT_PREFIX, dockerNames } from '../../providers/dockerNames.js';
 import type { Store } from '../../store/store.js';
+import { moveCopyFolder } from '../../store/folderMark.js';
 import { forgetDmPolicy } from '../channels/dmPolicyMemo.js';
 import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from '../members/members.js';
 import { beginOperation, handleFor, rethrowIfCrash, type OpHandle } from '../lifecycle/operations.js';
@@ -652,11 +653,10 @@ function dropSafetyCopy(file: string | undefined): void {
  * the copy crossed the network twice (HB-0388).
  */
 function moveCopyDir(): string {
-  const db = resolve(process.env.HATCHABOT_DB ?? defaultDbPath());
   // Separate databases may share their parent folder. The basename is
   // stable when a release's data/ symlink changes its absolute spelling.
-  const identity = createHash('sha256').update(basename(db)).digest('hex').slice(0, 16);
-  return join(dirname(db), `move-copies-${identity}`);
+  // Named in one place, so the words for a shared folder name it too (HB-1151).
+  return moveCopyFolder(process.env.HATCHABOT_DB ?? defaultDbPath());
 }
 
 /** A new path for one move's copy (made by exportStateToFile), in a private folder. */

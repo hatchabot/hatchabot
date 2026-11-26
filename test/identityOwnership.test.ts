@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
-import { firstAccountAdoption } from '../src/api/firstAccount.js';
-import { registerAuth } from '../src/api/auth.js';
-import type { IdentityVerifier } from '../src/api/identity.js';
+import { firstAccountAdoption } from '../src/api/signIn/firstAccount.js';
+import { registerAuth } from '../src/api/signIn/auth.js';
+import type { IdentityVerifier } from '../src/api/signIn/identity.js';
 
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });

@@ -22,7 +22,7 @@ import {
   sharePathProblem,
   hostPathTargetProblem,
 } from '../lifecycle/provision.js';
-import { clearBusy, markBusy } from '../lifecycle/busy.js';
+import { markBusy } from '../lifecycle/busy.js';
 import { clearStaleRuntimePins } from '../sources/runtimePins.js';
 import { beginOperation, forgetFilesReplacing, handleFor, rethrowIfCrash } from '../lifecycle/operations.js';
 import { ENV_NAME_RE, envValueProblem, MAX_IMPORTED_ENV_VARS, reservedEnvProblem } from '../../domain/envPolicy.js';
@@ -1142,7 +1142,7 @@ async function importAgentInner(
     throw err;
   }
   // From here the agent exists but is mid-build: reconcile must not judge it.
-  markBusy(agent.id);
+  const release = markBusy(agent.id, 'import');
 
   const secretRef = importSecretRef(agent.id);
   // Every secret this import makes (env values, deploy keys): rollback deletes them.
@@ -1352,7 +1352,7 @@ async function importAgentInner(
   } finally {
     // However this ends, the busy flag must not outlive it: a stuck flag makes
     // reconcile skip this agent forever.
-    clearBusy(agent.id);
+    release();
   }
 }
 

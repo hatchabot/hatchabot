@@ -21,7 +21,7 @@ import { ConsoleSockets, type ConsoleSocket } from './consoleSockets.js';
  *    something and every 30 seconds (`revalidateConsoleSockets`).
  *
  * The proxy itself (the HTTP forward, the WebSocket splice, the guest's
- * filter) is HTTP through and through: src/api/consoleRoutes.ts. This holds
+ * filter) is HTTP through and through: src/api/console/consoleRoutes.ts. This holds
  * the rules it asks, and their state.
  */
 export interface ConsoleGate {

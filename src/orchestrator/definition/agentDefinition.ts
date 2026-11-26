@@ -9,7 +9,7 @@ import { createSetupValues, type SetupValues, type SetupValuesDeps } from './set
  * service's) and under its busy flag.
  *
  * Built once in `registerRoutes` and on the route context as
- * `ctx.definition`; its routes are in src/api/definitionRoutes.ts. A merged
+ * `ctx.definition`; its routes are in src/api/agents/definitionRoutes.ts. A merged
  * proposal's push to the children goes through the push route
  * (memoryRoutes.ts). No state and no timer of its own. Nothing here knows
  * HTTP.

@@ -395,7 +395,8 @@ const MAINTAINER_USAGE = `
 Release (this is the development machine):
   release X.Y.Z                Tag a release in the dev repo: the publisher publishes it, then
                                GitHub's release workflow builds it (land the version commit first;
-                               docs/releasing.md)
+                               docs/releasing.md). --publisher-copy-matches: publish.toml changed
+                               since the last release, and the publisher's copy now matches it
   deploy [vX.Y.Z]              Put a release on this machine now (default: the newest published tag)
   promote [vX.Y.Z] [channel]   New installs get it (default: what this machine runs → stable)
   channels [all]               Where stable, beta and latest point, and every release`;
@@ -834,7 +835,7 @@ export function pairingTargets<T extends { state?: string; role?: string; botUse
   return list.filter((a) => a.state === 'RUNNING' && (!a.role || a.role === 'owner') && (!!a.botUsername || !!a.otherChannels?.length));
 }
 
-const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only', 'invited-only', 'other-key', 'no-recycle']);
+const BOOL_FLAGS = new Set(['private', 'no-wait', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet', 'draft-only', 'invited-only', 'other-key', 'no-recycle', 'publisher-copy-matches']);
 const VALUE_FLAGS = new Set(['ref', 'kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -1491,9 +1492,10 @@ async function main() {
     let argv: string[];
     if (cmd === 'release') {
       // Tagged in the dev repo; the publisher publishes it and GitHub's release workflow builds it
-      // (scripts/release.sh, docs/releasing.md). --draft-only is passed on for release.sh to say it is gone.
+      // (scripts/release.sh, docs/releasing.md). --draft-only is passed on for release.sh to say it is gone;
+      // --publisher-copy-matches goes on past a publish.toml changed since the last release (HB-1492).
       const version = rest[0] ?? fail('say which version: hatchabot release X.Y.Z');
-      argv = [join(devDir, 'scripts', 'release.sh'), version, ...(flags.has('draft-only') ? ['--draft-only'] : [])];
+      argv = [join(devDir, 'scripts', 'release.sh'), version, ...(['draft-only', 'publisher-copy-matches'] as const).filter((f) => flags.has(f)).map((f) => `--${f}`)];
     } else if (cmd === 'deploy') {
       // The newest release the public repo has (a dev tag may still be waiting for the publisher).
       const remotes = git(devDir, 'remote').split('\n');
@@ -1578,7 +1580,7 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      const { hashPassword, passwordProblem } = await import('./api/accountsAuth.js');
+      const { hashPassword, passwordProblem } = await import('./api/signIn/accountsAuth.js');
       const problem = passwordProblem(newPassword);
       if (problem) { console.error(problem); process.exitCode = 1; return; }
       const { hash, salt } = await hashPassword(newPassword);
@@ -1601,7 +1603,7 @@ async function main() {
       // password is set here: the person chooses their own on a one-time link.
       const username = (rest[1] ?? '').trim();
       const owner = flags.has('host-owner');
-      const { usernameProblem } = await import('./api/accountsAuth.js');
+      const { usernameProblem } = await import('./api/signIn/accountsAuth.js');
       const problem = username ? usernameProblem(username) : 'Usage: hatchabot accounts create <username> [--host-owner] [--cli-token [--token-days N]] [--json]';
       if (problem) { console.error(problem); process.exitCode = 1; return; }
       if (store.localAccountByUsername(username)) { console.error(`There is already an account "${username}".`); process.exitCode = 1; return; }
@@ -2490,7 +2492,7 @@ async function main() {
       // whatever HATCHABOT_IMAGE the .env named, and `image try` of the
       // candidate then named an image never built (review of HB-1182).
       const { envMap } = await import('./doctor.js');
-      const { baseBuildRepo, baseBuildTag } = await import('./orchestrator/machines/runtimeImages.js');
+      const { baseBuildRepo, baseBuildTag, movesFleetDefault } = await import('./orchestrator/machines/runtimeImages.js');
       const dotenv = envMap(join(repoDir(), '.env'));
       const env: NodeJS.ProcessEnv = { ...process.env, OPENCLAW_VERSION: version, NO_LATEST: candidate ? '1' : '', ...(flags.has('no-engine') ? { EMBED_ENGINE: 'none' } : {}) };
       for (const k of ['DOCKER_HOST', 'HATCHABOT_IMAGE', 'HATCHABOT_IMAGE_REGISTRY']) {
@@ -2498,8 +2500,13 @@ async function main() {
       }
       // The name the script writes (baseBuildTag, held to its dry run): -lite, -plus-… and -custom-… included.
       const dockerfileVersion = (() => { try { return /^ARG OPENCLAW_VERSION=(\S+)/m.exec(readFileSync(join(repoDir(), 'docker', 'Dockerfile.runtime'), 'utf8'))?.[1]; } catch { return undefined; } })();
-      const repo = baseBuildRepo(env.HATCHABOT_IMAGE || 'hatchabot-runtime:latest', env);
+      const fleetDefault = env.HATCHABOT_IMAGE || 'hatchabot-runtime:latest';
+      const repo = baseBuildRepo(fleetDefault, env);
       const built = `${repo}:${baseBuildTag(env, dockerfileVersion) ?? version}`;
+      // With HATCHABOT_IMAGE pinned to a version tag or a digest (or the
+      // repository HATCHABOT_IMAGE_REPO names another), the build moves that
+      // repository's :latest, and the fleet default stays (HB-1256).
+      const movesDefault = movesFleetDefault(`${repo}:latest`, fleetDefault);
       // A build onto a tag agents or classes are pinned to replaces what they
       // run, and one made the default may strand agents already past it:
       // refused, as the app's own build is (POST /v1/runtime/build), by the
@@ -2518,19 +2525,27 @@ async function main() {
         unasked = `⚠ Could not ask Hatchabot whether ${built} may be built (${asked.message}): if agents are pinned to it, or would run it as the new default, this build changes what they run.`;
         console.log(unasked);
       } else if (asked.refused) fail(asked.refused);
-      console.log(`Building ${built} for OpenClaw ${version}${candidate ? ' (candidate — :latest untouched)' : ` (promotes to ${repo}:latest)`}…\n`);
+      console.log(`Building ${built} for OpenClaw ${version}${candidate ? ' (candidate — :latest untouched)' : movesDefault ? ` (promotes to ${repo}:latest)` : ` (moves ${repo}:latest; the fleet default stays ${fleetDefault})`}…\n`);
       try {
         execFileSync('bash', [script], { stdio: 'inherit', env });
       } catch {
         fail('Image build failed — see the output above.');
       }
-      if (candidate) {
+      if (candidate && movesDefault) {
         console.log(`\nCandidate built as ${built} (:latest untouched). Smoke-test it, then promote:`);
         console.log(`  HATCHABOT_IMAGE=${built} npm run e2e:docker   (from ${repoDir()})`);
         console.log(`  docker tag ${built} ${repo}:latest`);
-      } else {
+      } else if (candidate) {
+        // Under the pin, retagging :latest moves no default (HB-1256): the setting does.
+        console.log(`\nCandidate built as ${built} (:latest untouched). Smoke-test it:`);
+        console.log(`  HATCHABOT_IMAGE=${built} npm run e2e:docker   (from ${repoDir()})`);
+        console.log(`The fleet default stays ${fleetDefault} (HATCHABOT_IMAGE): to make ${built} the default, set HATCHABOT_IMAGE in .env to it and restart Hatchabot.`);
+      } else if (movesDefault) {
         console.log(`\nDone — ${repo}:latest is now OpenClaw ${version}. Each agent shows "update available";`);
         console.log(`Rebuild it to adopt the new version, memory kept:  hatchabot rebuild "<agent>"`);
+      } else {
+        console.log(`\nDone — ${repo}:latest is now OpenClaw ${version}. The fleet default stays ${fleetDefault}:`);
+        console.log(`only agents pinned to ${repo}:latest show "update available". Rebuild one to adopt it, memory kept:  hatchabot rebuild "<agent>"`);
       }
       if (unasked) console.log(`\n${unasked}`);
       return;

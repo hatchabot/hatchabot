@@ -22,6 +22,8 @@ export interface Shim {
   failFunnel(message: string | null): void;
   /** Make `funnel … off` fail. */
   failOff(on: boolean): void;
+  /** Make `serve --bg …` fail with this output (a Linux user who is not Tailscale's operator: access denied). */
+  failServe(message: string | null): void;
   cleanup(): void;
 }
 
@@ -45,7 +47,8 @@ log() { j=; for a in "$@"; do j="$j\${j:+,}\\"$a\\""; done; printf '[%s]\\n' "$j
 case "$1" in
   --version) [ "$#" = 1 ] && { log "$@"; echo 1.80.0; exit 0; } ;;
   status) log "$@"; cat "$d/status.json" 2>/dev/null || echo '{}'; exit 0 ;;
-  serve) [ "$2" = status ] && { log "$@"; echo 'No serve config'; exit 0; } ;;
+  serve) [ "$2" = status ] && [ "$3" = --json ] && { log "$@"; cat "$d/serve.json" 2>/dev/null || echo '{}'; exit 0; }
+         [ "$2" = status ] && ! grep -q '"Web"' "$d/serve.json" 2>/dev/null && { log "$@"; echo 'No serve config'; exit 0; } ;;
   funnel) [ "$2" = status ] && { log "$@"; cat "$d/serve.json" 2>/dev/null || echo '{}'; exit 0; } ;;
 esac
 exec '${node}' "$d/tailscale.cjs" "$@"
@@ -59,7 +62,37 @@ const read = (f, d) => { try { return JSON.parse(fs.readFileSync(path.join(dir, 
 const write = (f, v) => fs.writeFileSync(path.join(dir, f), JSON.stringify(v));
 if (args[0] === '--version') { console.log('1.80.0'); process.exit(0); }
 if (args[0] === 'status') { console.log(JSON.stringify(read('status.json', {}))); process.exit(0); }
-if (args[0] === 'serve' && args[1] === 'status') { console.log('No serve config'); process.exit(0); }
+if (args[0] === 'serve' && args[1] === 'status' && args[2] === '--json') { console.log(JSON.stringify(read('serve.json', {}))); process.exit(0); }
+// The text form, as Tailscale prints it: each address, then each path and where it goes.
+if (args[0] === 'serve' && args[1] === 'status') {
+  const cfg = read('serve.json', {});
+  const lines = [];
+  for (const [hp, web] of Object.entries(cfg.Web || {})) {
+    const port = hp.split(':').pop();
+    const tls = !(cfg.TCP && cfg.TCP[port] && cfg.TCP[port].HTTP);
+    lines.push((tls ? 'https://' : 'http://') + hp.replace(/:443$/, '') + ((cfg.AllowFunnel || {})[hp] ? ' (Funnel on)' : ' (tailnet only)'));
+    for (const [mount, h] of Object.entries((web || {}).Handlers || {})) lines.push('|-- ' + mount + ' proxy ' + h.Proxy);
+    lines.push('');
+  }
+  console.log(lines.length ? lines.join('\n') : 'No serve config'); process.exit(0);
+}
+// serve --bg [--https=N | --http=N] [--set-path=P] <target>: one handler set, Funnel off on that port (as the CLI's applyFunnel(false)).
+if (args[0] === 'serve' && args.includes('--bg')) {
+  if (fs.existsSync(path.join(dir, 'fail-serve'))) { console.error(fs.readFileSync(path.join(dir, 'fail-serve'), 'utf8')); process.exit(1); }
+  const flag = (n) => (args.find((a) => a.startsWith('--' + n + '=')) || '').split('=')[1];
+  const http = flag('http'), port = flag('https') || http || '443';
+  const mount = flag('set-path') || '/';
+  const dns = (read('status.json', {}).Self || {}).DNSName.replace(/\.$/, '');
+  const hp = dns + ':' + port;
+  const target = args[args.length - 1];
+  const cfg = read('serve.json', {});
+  cfg.TCP = { ...(cfg.TCP || {}), [port]: http ? { HTTP: true } : { HTTPS: true } };
+  cfg.Web = { ...(cfg.Web || {}), [hp]: { Handlers: { ...(((cfg.Web || {})[hp] || {}).Handlers || {}), [mount]: { Proxy: /^\d+$/.test(target) ? 'http://127.0.0.1:' + target : target } } } };
+  if (cfg.AllowFunnel) delete cfg.AllowFunnel[hp];
+  write('serve.json', cfg);
+  console.log('Available within your tailnet:\nhttps://' + hp + mount);
+  process.exit(0);
+}
 if (args[0] === 'funnel' && args[1] === 'status') { console.log(JSON.stringify(read('serve.json', {}))); process.exit(0); }
 if (args[0] === 'funnel') {
   const https = (args.find((a) => a.startsWith('--https=')) || '--https=443').split('=')[1];
@@ -108,6 +141,7 @@ export function tailscaleShim(): Shim {
     setStatus: (patch) => writeFileSync(join(dir, 'status.json'), JSON.stringify({ ...read('status.json', {}), ...patch })),
     failFunnel: (message) => { if (message === null) rmSync(join(dir, 'fail-funnel'), { force: true }); else writeFileSync(join(dir, 'fail-funnel'), message); },
     failOff: (on) => { if (on) writeFileSync(join(dir, 'fail-off'), '1'); else rmSync(join(dir, 'fail-off'), { force: true }); },
+    failServe: (message) => { if (message === null) rmSync(join(dir, 'fail-serve'), { force: true }); else writeFileSync(join(dir, 'fail-serve'), message); },
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
 }

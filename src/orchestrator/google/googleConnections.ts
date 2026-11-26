@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { Store } from '../../store/store.js';
 import type { RuntimeProvider } from '../../providers/provider.js';
 import type { SecretStore } from '../../secrets/secretStore.js';
+import { keyedLock } from '../../util/queues.js';
 
 /**
  * Platform-managed Google connections (docs/connections-design.md, Phase 2 —
@@ -681,17 +682,13 @@ export async function removeQueuedNow(
  * attachments, then await a docker exec: interleaved, a detach could take the
  * account off and clear its record while an attach's import was still in
  * flight, and the import then put it back with nothing left to undo it. A
- * promise chain, not the lifecycle lock: these wait their turn (seconds)
+ * keyed lock (keyedLock), not the lifecycle lock: these wait their turn (seconds)
  * rather than refuse, and a start or rebuild must not be blocked by them.
  * Process-wide, keyed by agent id, so the routes and provisioning share it.
  */
-const connectionChains = new Map<string, Promise<void>>();
+const connectionChains = keyedLock();
 export function withConnectionLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  const run = (connectionChains.get(agentId) ?? Promise.resolve()).then(fn);
-  const tail = run.then(() => {}, () => {});
-  connectionChains.set(agentId, tail);
-  void tail.then(() => { if (connectionChains.get(agentId) === tail) connectionChains.delete(agentId); });
-  return run;
+  return connectionChains.run(agentId, fn);
 }
 
 /**
@@ -700,16 +697,12 @@ export function withConnectionLock<T>(agentId: string, fn: () => Promise<T>): Pr
  * saved) and a delete's last part (checked again, revoked, its token and row
  * deleted). Interleaved, a delete that began first deleted the token and
  * row a reconnect had just saved, after the reconnect said it was
- * connected. A promise chain keyed by owner, as withConnectionLock is by
- * agent: these wait their turn (a Google call or two) rather than refuse.
+ * connected. A keyed lock (keyedLock) keyed by owner, as withConnectionLock
+ * is by agent: these wait their turn (a Google call or two) rather than refuse.
  */
-const vaultChains = new Map<string, Promise<void>>();
+const vaultChains = keyedLock();
 export function withVaultTurn<T>(ownerId: string, fn: () => Promise<T>): Promise<T> {
-  const run = (vaultChains.get(ownerId) ?? Promise.resolve()).then(fn);
-  const tail = run.then(() => {}, () => {});
-  vaultChains.set(ownerId, tail);
-  void tail.then(() => { if (vaultChains.get(ownerId) === tail) vaultChains.delete(ownerId); });
-  return run;
+  return vaultChains.run(ownerId, fn);
 }
 
 /**
@@ -722,14 +715,12 @@ export function withVaultTurn<T>(ownerId: string, fn: () => Promise<T>): Promise
  * "connected"; one saved between the judging and the revoke was not seen.
  * The address is known only once the code is exchanged, and the exchange
  * is what may not overlap the revoke, so this is the installation's turn,
- * not the address's. A plain chain, not a Map: these are a Google call or
- * two each, and people's consents.
+ * not the address's: one key, not one per address. These are a Google call
+ * or two each, and people's consents.
  */
-let grantChain: Promise<void> = Promise.resolve();
+const grantChain = keyedLock();
 export function withGoogleGrantTurn<T>(fn: () => Promise<T>): Promise<T> {
-  const run = grantChain.then(fn);
-  grantChain = run.then(() => {}, () => {});
-  return run;
+  return grantChain.run('installation', fn);
 }
 
 /**

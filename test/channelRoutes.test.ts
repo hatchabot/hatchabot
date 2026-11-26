@@ -117,6 +117,13 @@ describe('adding Slack or Discord', () => {
     const r = await inject('POST', `/v1/agents/${add()}/channels/slack`, { token: 'ok-good' });
     expect(r.statusCode).toBe(409);
     expect(r.json().needsImage).toBe(true);
+    // The way onto an image that can, which Promote is not while HATCHABOT_IMAGE pins the default (HB-1256 review).
+    expect(r.json().error).toBe("This agent's base image can't do Slack yet. Rebuild it onto one that can: pick that Image in its Advanced tab, under Runtime, and press Pin & rebuild; or, unless HATCHABOT_IMAGE pins the fleet default, promote one (Settings → Advanced → Runtime images) and Rebuild. Then try again.");
+    // Review (N2): those controls are the machine owner's; someone else is sent to them.
+    const member = add({ ownerId: 'member-1' });
+    const m = await inject('POST', `/v1/agents/${member}/channels/slack`, { token: 'ok-good' }, { 'x-hatchabot-owner': 'member-1' });
+    expect(m.statusCode).toBe(409);
+    expect(m.json()).toMatchObject({ needsImage: true, error: "This agent's base image can't do Slack yet. Ask the machine's owner to rebuild it onto an image that can (or to promote one), then try again." });
   });
 
   it('refuses a second of the same kind, and one app on two agents', async () => {

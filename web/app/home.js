@@ -1,4 +1,4 @@
-// web/app/home.js: the home screen: groups, the Activity view, cost badges, the tooltip, dragging, the icon menu, opening an agent.
+// web/app/home.js: the home screen (renderV2): its views and sort, the chat apps' links, the Activity view, cost badges, the Planned group, icons for agents with none, the tooltip, dragging and groups, the icon menu, opening an agent, the hub.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -570,18 +570,56 @@ function v2PlannedHTML() {
       </div>
     </section>`;
 }
-/** Arrow keys, Home and End between the tabs of a tablist; the tab moved to is chosen (2026-10-09). */
-function v2TabKeys(e, list) {
-  const tabs = [...list.querySelectorAll('[role="tab"]')];
-  const i = tabs.indexOf(document.activeElement);
-  if (i < 0) return;
-  const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
-  if (j === undefined) return;
-  e.preventDefault();
-  const t = tabs[(j + tabs.length) % tabs.length];
-  const id = t.id;
-  t.click(); // redraws the tabs: focus the new one by its id
-  ($(id) || t).focus();
+
+let agentTodos = null, pendingTodoName = null, todosBusy = false;
+/**
+ * A plan is done when one of your own agents with its name was made after it. An
+ * older agent, or one shared with you, says nothing about the plan: every plan
+ * carrying such a name was deleted the moment it was added (HB-0447).
+ */
+const todoIsMade = (t) => agents.some(a => a.state !== 'DELETED' && v2Mine(a) && a.name.trim().toLowerCase() === t.name.trim().toLowerCase()
+  && (!a.createdAt || !t.createdAt || a.createdAt >= t.createdAt));
+async function loadTodos() {
+  if (todosBusy) return;
+  todosBusy = true;
+  try {
+    try { agentTodos = (await api('/v1/agent-todos')).todos || []; } catch { agentTodos = []; }
+    // Created since? An agent now carrying a planned name retires the plan.
+    for (const t of agentTodos.filter(todoIsMade)) {
+      try { await api(`/v1/agent-todos/${t.id}`, { method: 'DELETE' }); } catch {}
+      agentTodos = agentTodos.filter(x => x.id !== t.id);
+    }
+  } finally { todosBusy = false; }
+  renderV2(); // the home screen's Planned group
+}
+/** A planned agent was made (from its ghost tile, or by hand) since the plans were read: retire it. */
+function retireMadeTodos() {
+  if (!agentTodos?.length || todosBusy) return;
+  if (agentTodos.some(todoIsMade)) void loadTodos();
+}
+async function addTodo(boxId = 'v2TodoNew') {
+  const name = ($(boxId)?.value || '').trim();
+  if (!name) return;
+  try {
+    await api('/v1/agent-todos', { method: 'POST', body: { name } });
+    if ($(boxId)) $(boxId).value = ''; // the list keeps a draft across redraws; an added one is done
+    await loadTodos();
+    $(boxId)?.focus(); // ready for the next one
+  } catch (e) { toast(e.message); }
+}
+async function removeTodo(id, name) {
+  if (!confirm(`Remove "${name}" from the plan?`)) return;
+  try {
+    await api(`/v1/agent-todos/${id}`, { method: 'DELETE' });
+    await loadTodos();
+    $('v2TodoNew')?.focus(); // the button pressed is gone: keep the keyboard in the group
+  } catch (e) { toast(e.message); }
+}
+function createFromTodo(id) {
+  const t = (agentTodos || []).find(x => x.id === id);
+  if (!t) return;
+  pendingTodoName = t.name;
+  $('fabBtn').click(); // opens the create dialog; the name is pre-filled there
 }
 
 // Icons for agents that have none yet: one batch, picked by the management AI.
@@ -800,6 +838,134 @@ $('v2groups').addEventListener('click', (e) => {
   v2Open(el.dataset.v2id);
 });
 
+/**
+ * Where an agent stands in its group under My order: the agents of yours in
+ * that group as the home screen shows them (the stored order, the manager and
+ * child agents aside: those are not moved by hand), or null when it has no
+ * place to change.
+ */
+function v2PlaceInGroup(a) {
+  if (!a || !v2Mine(a) || a.ops || a.state === 'ARCHIVED') return null;
+  const liveIds = new Set(liveAgents().map(x => x.id));
+  const nested = (x) => !!x.parentAgentId && liveIds.has(x.parentAgentId);
+  if (nested(a)) return null;
+  const order = liveAgents().filter(x => v2Mine(x) && !x.ops && !nested(x) && (x.group || '') === (a.group || '')).map(x => x.id);
+  const i = order.indexOf(a.id);
+  return order.length > 1 && i >= 0 ? { order, i } : null;
+}
+/** Switch the home screen to My order (when moving an agent by hand); true if it was on another sort. */
+function v2UseManual() {
+  if (v2Sort.key === 'manual' && (v2View !== 'cost' || v2CostSort.key === 'manual')) return false;
+  v2Sort = { key: 'manual', dir: 1 };
+  try { localStorage.setItem('hb-v2-sort', JSON.stringify(v2Sort)); } catch {}
+  if (v2View === 'cost') { v2CostSort = { key: 'manual', dir: 1 }; try { localStorage.setItem('hb-v2-sort-cost', JSON.stringify(v2CostSort)); } catch {} }
+  return true;
+}
+/** The sheet's Move earlier / later: one place in its group (Shift: to the start or the end). The keyboard's drag. */
+async function v2MoveInGroup(id, delta, ev) {
+  const a = v2Find(id), place = v2PlaceInGroup(a);
+  if (!place) return;
+  const { order, i } = place;
+  const j = ev?.shiftKey ? (delta < 0 ? 0 : order.length - 1) : Math.max(0, Math.min(order.length - 1, i + delta));
+  if (j === i) { toast(delta < 0 ? 'Already first in its group' : 'Already last in its group', 1800); return; }
+  const before = order.filter(x => x !== id)[j] ?? null; // its place in the list without it
+  try {
+    await api(`/v1/agents/${id}/move`, { method: 'POST', body: before ? { before } : { before: null, group: a.group || '' } });
+    if (v2UseManual()) toast('The home screen now shows My order — the order you arrange.', 5000);
+    await refresh(false);
+  } catch (e) { toast(e.message); return; }
+  // The row, whether or not the sheet was redrawn; the keyboard stays on the button pressed.
+  if (!v2AgentDlg.open || v2AgentId !== id || v2Tab !== 'overview') return;
+  const now = v2PlaceInGroup(v2Find(id));
+  if (!now || !$('v2Place')) return;
+  $('v2Place').textContent = $('v2Place').textContent.replace(/^\d+ of \d+/, `${now.i + 1} of ${now.order.length}`);
+  $('v2MoveEarlier').disabled = now.i === 0;
+  $('v2MoveLater').disabled = now.i === now.order.length - 1;
+  const mine = $(delta < 0 ? 'v2MoveEarlier' : 'v2MoveLater'), other = $(delta < 0 ? 'v2MoveLater' : 'v2MoveEarlier');
+  (mine.disabled ? other : mine).focus();
+}
+
+async function v2SetGroup(id, value) {
+  let group = value;
+  if (value === V2_NEW_GROUP) {
+    group = (prompt('Name the new group:') || '').trim();
+    if (!group) { $('v2GroupSel').value = v2Find(id)?.group || ''; return; }
+  }
+  try {
+    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { group: group || null } });
+    toast(group ? `Moved to ${group}` : 'Moved out of its group');
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+/**
+ * Sorting a group is a one-shot, and the same button reverses it — the way a
+ * table column does. Which way "again" means is read off the order on screen
+ * rather than remembered: if the group already reads A→Z, A→Z gives you Z→A.
+ * That survives a reload, and it cannot disagree with what you are looking at.
+ */
+const SORT_LABEL = { name: 'A→Z', 'name-desc': 'Z→A', time: 'oldest first', 'time-desc': 'newest first', activity: 'quietest first', 'activity-desc': 'most recently active first' };
+
+/** Is this section already in ascending order for `mode`? */
+function sortedAscending(g, mode) {
+  const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED' && (a.group || '') === (g || ''));
+  if (mine.length < 2) return false;
+  const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+  const cmp = (x, y) => mode === 'time'
+    ? String(x.createdAt || '').localeCompare(String(y.createdAt || ''))
+    : mode === 'activity'
+      ? (!x.lastActiveAt !== !y.lastActiveAt ? (x.lastActiveAt ? -1 : 1) : String(x.lastActiveAt || '').localeCompare(String(y.lastActiveAt || '')))
+      : coll.compare(x.name, y.name);
+  return mine.every((a, i) => i === 0 || cmp(mine[i - 1], a) <= 0);
+}
+
+async function sortGroup(g, mode = 'name') {
+  const desc = sortedAscending(g, mode); // already that way? then the other way
+  try {
+    await api('/v1/groups/sort', { method: 'POST', body: { group: g, mode, desc } });
+    toast(`${g || 'Default'} sorted ${SORT_LABEL[desc ? `${mode}-desc` : mode]}.`);
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+/** Rename a group where it stands: the name becomes editable; Enter saves, Escape puts it back. */
+function editGroupName(el) {
+  if (!el || el.isContentEditable) return;
+  const from = el.textContent.trim();
+  el.contentEditable = 'plaintext-only'; el.classList.add('editing');
+  el.focus();
+  const range = document.createRange(); range.selectNodeContents(el); getSelection().removeAllRanges(); getSelection().addRange(range);
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    el.contentEditable = 'false'; el.classList.remove('editing');
+    const to = el.textContent.replace(/\s+/g, ' ').trim().slice(0, 48);
+    if (!save || !to || to === from) { el.textContent = from; return; }
+    try {
+      await api('/v1/groups/rename', { method: 'POST', body: { from, to } });
+      toast(`Group renamed to ${to}`);
+      await refresh(false);
+    } catch (e) { el.textContent = from; toast(e.message, 8000); }
+  };
+  el.onkeydown = (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+  };
+  el.onblur = () => finish(true);
+}
+
+async function moveGroup(name, dir) {
+  try {
+    const r = await api('/v1/groups/move', { method: 'POST', body: { group: name, dir } });
+    if (r && r.moved === false) {
+      // Agents without a group always sit first, so the top named group cannot go above them.
+      toast(dir === 'up' ? `"${name}" is already the top group — agents with no group always come first.` : `"${name}" is already the last group.`, 5000);
+      return;
+    }
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
 // ---- the menu on an icon (HB-0683) --------------------------------------------------
 // Right-click, the keyboard's menu key or Shift+F10, or on a touch screen a
 // press held still and let go (held and moved, it drags, as before). It offers
@@ -912,4 +1078,110 @@ function v2Open(id) {
   }
   if (st.cls === 'waiting' || a.state === 'FAILED' || a.opsDrift || !v2CanChat(a) || !window.isSecureContext) return openV2Agent(id, a.opsDrift ? 'advanced' : undefined);
   openGateway(a.id, a.slug);
+}
+
+// ---- the hub: the management bot at the centre --------------------------------------------
+
+/**
+ * The hub: this account's management agent. An OpenClaw agent that runs on
+ * any AI source; it prepares changes and they wait in "Alerts".
+ * Until one is set up, the hub offers to set it up (the older Claude-only chat
+ * is retired).
+ */
+
+/**
+ * The fleet at a glance, beside the manager: one tile per thing worth knowing,
+ * in the icon language of the home screen. Every tile is a button to the screen
+ * that does something about it — a number you cannot act on is decoration.
+ */
+
+function renderV2Stats() {
+  const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED');
+  // The numbers row is gone (Chris, 2026-09-26: never acted on; a clean hub is
+  // worth more). Everything it showed lives under Status, and what needs you
+  // shows below the hub and under View by → Alerts. Only the Bulk actions
+  // button's visibility is still decided here.
+  if ($('v2BulkBtn')) $('v2BulkBtn').hidden = mine.length < 2;
+}
+
+function v2RenderHub() {
+  const ops = agents.find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');
+  const hub = document.querySelector('.v2hub');
+  hub.classList.toggle('hub-ops', !!ops);
+  hub.classList.toggle('hub-unknown', !ops && !agentsLoaded);
+  hub.hidden = !!ops || !agentsLoaded; // with a manager, the grid holds it and the header holds the buttons
+  const box = $('v2OpsBox');
+  // Before the first agent list arrives there is nothing to say: offering to
+  // set up an agent that already exists, then replacing it a moment later,
+  // reads as a glitch.
+  if (!ops && !agentsLoaded) { box.hidden = true; return; }
+  let html;
+  if (ops) {
+    // No buttons of its own: it is an agent like the others, only bigger.
+    // Click it to talk; if it needs you, the click opens its settings instead.
+    const say = ops.opsDrift ? `<b style="color:var(--bad)">Paused:</b> its safety settings were changed (${esc(ops.opsDrift)}). Click it and Rebuild to restore them.`
+      : ops.state === 'FAILED' ? `It didn't start${ops.stateReason ? ': ' + esc(ops.stateReason) : '.'} Click it to retry.`
+      : ops.state === 'PROVISIONING' ? 'Setting up — about a minute.'
+      : ops.state === 'STOPPED' ? 'Stopped. Click it to start it again.'
+      : ''; // healthy: the icon says it all — no caption
+    const thin = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED').length < 3;
+    html = (say ? `<div class="sub">${say}</div>` : '')
+      + (thin && ops.state === 'RUNNING' && !ops.opsDrift
+        ? `<div class="sub" style="margin-top:4px">Not sure what to add?
+             <a href="#" ${onAction('click', 'askOpsSuggest', [{ $: 'el' }], 'prevent')}>Ask it what you're missing</a>.</div>`
+        : '');
+  } else {
+    html = `<div class="v2opsrow"><span class="sub" style="flex:1;min-width:220px"><b>Set up your Hatchabot agent.</b> A manager for your agents that you can talk to: it works with whichever AI source you have, remembers how you like things run, and asks before it changes anything.</span>
+      <button class="primary" id="v2OpsSetup" ${onAction('click', 'v2SetupOps', [{ $: 'el' }])} ${profiles.length ? '' : 'disabled title="Add an AI source first (Settings → AI)"'}>Set it up</button></div>`;
+  }
+  if (box.__html !== html) { box.innerHTML = html; box.__html = html; }
+  box.hidden = false;
+  renderV2Stats();
+  // Its icon IS an agent icon: same markup and classes as the grid's, so the
+  // ring, badge, tooltip and click all behave identically. Only the size differs.
+  const face = hub.querySelector('.v2face');
+  const st = ops && v2Status(ops);
+  const faceHtml = ops
+    ? `<button class="v2agent v2hubagent v2st-${st.cls}" data-v2id="${esc(ops.id)}" data-v2fixed="1" ${onAction('click', 'v2Open', [`${ops.id ?? ''}`])}
+         aria-label="${esc(ops.name)} — ${esc(st.label)}${v2Unread(ops) ? ', new messages' : ''}">${v2IconHTML(ops, st)}<span class="v2name">${esc(ops.name)}</span></button>`
+    : '🐣';
+  if (face.__html !== faceHtml) {
+    face.__html = faceHtml;
+    face.className = `v2face${ops ? ' live' : ''}`;
+    face.innerHTML = faceHtml;
+    if (ops) face.removeAttribute('aria-hidden'); else face.setAttribute('aria-hidden', 'true');
+  }
+}
+/**
+ * "What should I add?" — the hardest question a new owner has, handed to the
+ * one thing that can answer it from evidence. It asks in its own console; what
+ * it proposes arrives as ordinary cards.
+ */
+async function askOpsSuggest(el) {
+  const person = pagePerson, epoch = voiceEpoch;
+  const current = () => person === pagePerson && epoch === voiceEpoch && !pagePersonAway && !pageSignedOut;
+  if (el) { el.dataset.busy = '1'; el.textContent = 'Asking…'; }
+  // It is a real turn on a real model — half a minute is normal, and a silent
+  // button for that long reads as broken.
+  toast('Asking your Hatchabot agent — it reads your fleet first, so give it about half a minute.', 8000);
+  try {
+    const r = await api('/v1/ops-agent/suggest', { method: 'POST', body: {} });
+    if (!current()) return;
+    if (pageSecondFactorBusy()) {
+      toast('The suggestions are ready in your Hatchabot agent’s console. Finish signing in, then open it.', 8000);
+      return;
+    }
+    v2Close();
+    openGateway(r.agentId, r.slug);
+  } catch (e) { if (current()) toast(e.message, 9000); }
+  finally { if (el) { delete el.dataset.busy; el.textContent = "Ask Hatchabot what you're missing"; } }
+}
+
+async function v2SetupOps(btn) {
+  btn.disabled = true; btn.textContent = 'Setting up…';
+  try {
+    await api('/v1/ops-agent', { method: 'POST', body: {} });
+    toast('Setting up your Hatchabot agent — about a minute.', 6000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 9000); btn.disabled = false; btn.textContent = 'Set it up'; }
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { Jar, publicApp, type PublicApp } from './helpers/publicApp.js';
-import { totp } from '../src/api/totp.js';
+import { totp } from '../src/api/signIn/totp.js';
 import { PASS_COOKIE } from '../src/api/publicAccess.js';
 
 let h: PublicApp | undefined;

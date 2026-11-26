@@ -9,6 +9,7 @@ import type { RuntimeProvider } from '../../providers/provider.js';
 import type { Store } from '../../store/store.js';
 import { isBusy } from '../lifecycle/busy.js';
 import { createAgentRecord, slugify } from '../lifecycle/provision.js';
+import { keyedLock } from '../../util/queues.js';
 
 /** The manager's jail reaches only internet AI services, so it cannot run on a local model. */
 export const OPS_NO_LOCAL = "The Hatchabot agent can't use a local model: its locked-down network reaches only the internet AI services. Pick a Claude, OpenAI or Gemini source.";
@@ -49,7 +50,7 @@ export type SuggestOutcome =
  * registry calls it too: the door (registerMgmtChat) asks `peerOk`, and a
  * build, a confirmed card and an adopt post through `notifier`. Nothing here
  * knows about HTTP: who is asking and the reply's words are the route file's
- * (src/api/opsAgentRoutes.ts). `stop()` ends the lockdown check's timer.
+ * (src/api/ops/opsAgentRoutes.ts). `stop()` ends the lockdown check's timer.
  */
 export interface HatchabotAgent {
   /** The owner's management agent, if they have one. */
@@ -104,7 +105,7 @@ export interface HatchabotAgentDeps {
 
 export function createHatchabotAgent(deps: HatchabotAgentDeps): HatchabotAgent {
   const { store, providerFor, trace } = deps;
-  const operatorFanout = new Map<string, Promise<void>>(); // per-owner chain for the operator-profile push
+  const operatorFanout = keyedLock(); // per-owner turns for the operator-profile push
 
   /**
    * Who may use the management agents' door: their own doormen, nobody else.
@@ -292,14 +293,14 @@ export function createHatchabotAgent(deps: HatchabotAgentDeps): HatchabotAgent {
     });
     // Chain per owner: two saves seconds apart must not race their writes
     // (the later fan-out could otherwise commit the OLDER text on some agents).
-    const prev = operatorFanout.get(ownerId) ?? Promise.resolve();
-    const run = prev.then(async () => {
+    // Not awaited, and a failure is dropped here, as before: the answer is
+    // the count, and what a push did not reach is owed in the store.
+    void operatorFanout.run(ownerId, async () => {
       for (const a of targets) {
         // Held busy per agent (HB-0230): one that became busy since waits its turn (routes.ts `syncDocsFor`).
         await deps.syncDocsHeld(a);
       }
-    });
-    operatorFanout.set(ownerId, run.catch(() => undefined));
+    }).catch(() => undefined);
     return { pushing: targets.length };
   };
 

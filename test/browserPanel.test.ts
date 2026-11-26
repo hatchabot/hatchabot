@@ -11,8 +11,8 @@ import { join } from 'node:path';
 import { BrowserPanels, PANEL_MAX_OPS, panelAddress, panelCommands, panelSize, panelTransportOk, type PanelEvent } from '../src/orchestrator/console/browserPanel.js';
 import { channelFromChild, PANEL_CDP_METHODS, PANEL_RELAY_SOURCE, type BrowserPanelChannel } from '../src/providers/browserPanelRelay.js';
 import { makeWorld, seedRunningAgent, as, type World } from './support/world.js';
-import { registerAuth } from '../src/api/auth.js';
-import { mintSession } from '../src/api/accountsAuth.js';
+import { registerAuth } from '../src/api/signIn/auth.js';
+import { mintSession } from '../src/api/signIn/accountsAuth.js';
 import { publicApp } from './helpers/publicApp.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 

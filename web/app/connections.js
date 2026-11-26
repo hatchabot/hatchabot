@@ -1,4 +1,4 @@
-// web/app/connections.js: an agent's notices and peers, its workspace files and logs, platform connections (Google, git sources, environment values).
+// web/app/connections.js: an agent's notices and its Telegram token, starting and stopping it (act), the edit dialog (openEdit) and its panes: core files and logs, peers, connections, snapshots, the model and source, git and data sources, environment values, and the buttons a save holds (sheetSave); platform connections (Settings → Connections).
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -154,19 +154,132 @@ async function act(id, action) {
 
 const botOf = (a) => (a.deepLink ?? '').replace('https://t.me/', '');
 
-// "5m ago" / "3h ago" / "2d ago" — coarse on purpose; it's a health signal,
-// not a log.
-function ago(iso) {
-  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (s < 90) return 'just now';
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
-}
-
 // ---- workspace file editing + logs ----------------------------------------
 
 let editAgentId = null, logsAgentId = null;
+
+/**
+ * Which agent and file the editor's text really is. Save stays off until the
+ * current agent's current file has loaded: a failed load (a MEMORY.md over
+ * the size limit) used to leave an empty editor whose Save wrote over the
+ * file, and a slow answer for the agent opened before could land in the next
+ * one's editor and be saved into it (night review, 2026-09-27).
+ */
+let editLoaded = null;
+// Each read numbered: SOUL.md, then MEMORY.md, then SOUL.md again matched the
+// first read's agent and file once more, and its late answer replaced what was
+// typed since — and Save wrote that older text (audit #048).
+let editLoadGen = 0;
+/**
+ * Another file picked in the editor: an edit of the one shown that is not
+ * saved yet is asked about first, and kept, with its file still chosen,
+ * unless it is let go. Picking one went straight to loadEditFile, which put
+ * the other file over it without a word (HB-0936).
+ */
+function pickEditFile() {
+  const sel = $('editFile'), box = $('editContent');
+  const shown = v2SheetNotes.get(sel), drawn = v2SheetNotes.get(box);
+  if (shown !== undefined && shown !== sel.value && drawn !== undefined && box.value !== drawn
+      && !confirm(`Your changes to ${shown} are not saved. Open ${sel.value} and lose them?`)) {
+    sel.value = shown;
+    return;
+  }
+  return loadEditFile();
+}
+async function loadEditFile() {
+  // For the agent the forms are filled for, the latest read, and of the file still chosen: no other fills the editor.
+  const file = $('editFile').value;
+  let gen;
+  const r = sheetRead(() => gen === editLoadGen && $('editFile').value === file);
+  if (!r.id) return;
+  gen = ++editLoadGen;
+  editLoaded = null;
+  sheetFill(['editContent'], () => { // each value put in here is the page's, not typed
+    $('editErr').textContent = '';
+    $('editSaveBtn').disabled = true;
+    $('editContent').value = 'Loading…';
+  });
+  try {
+    const got = await api(`/v1/agents/${r.id}/files/${file}`);
+    r.fill(['editFile', 'editContent'], () => { // the file chosen, as it is on the agent: nothing unsaved
+      $('editContent').value = got.content;
+      if (editReverting.has(r.id)) { $('editErr').textContent = EDIT_REVERTING; return; }
+      editLoaded = { agentId: r.id, file };
+      sheetButton('editSaveBtn', r.id); // on, unless its own Save is still out (HB-1484)
+    });
+  } catch (e) {
+    r.fill(['editFile', 'editContent'], () => { // the file chosen stays, with nothing in it to save
+      $('editContent').value = '';
+      $('editErr').textContent = `${e.message} — nothing to save until it loads.`;
+    });
+  }
+}
+
+async function saveEditFile() {
+  const file = $('editFile').value, f = sheetSave('editContent');
+  if (!editLoaded || editLoaded.agentId !== f.id || editLoaded.file !== file) {
+    $('editErr').textContent = 'This file has not loaded, so there is nothing to save.';
+    return;
+  }
+  // The editor this save is for: closed, and another agent or file opened in
+  // it while it saved, its answer is said in a toast and leaves the new one
+  // (with whatever is typed there) as it is (review, 2026-10-22).
+  const loaded = editLoaded; // loaded for the agent the forms are filled for (above)
+  f.hold('editSaveBtn');
+  try {
+    await api(`/v1/agents/${f.id}/files/${file}`, {
+      method: 'PUT', body: { content: $('editContent').value },
+    });
+    f.say(`${file} saved`);
+    if (editLoaded === loaded) { f.saved(); editDlg.close(); }
+  } catch (e) {
+    if (editLoaded === loaded) f.fail(e);
+    else f.say(`${file} was not saved: ${e.message}`, 8000);
+  }
+  finally { f.done(); } // on again while a file of its agent's is loaded (SHEET_BUTTONS)
+}
+
+async function openLogs(id, name) {
+  logsAgentId = id;
+  $('logsAgent').textContent = name;
+  logsDlg.showModal();
+  await loadLogs();
+}
+
+let setupLogAgentId = null;
+async function openSetupLog(id, name) {
+  setupLogAgentId = id;
+  $('setupLogAgent').textContent = name;
+  setupLogDlg.showModal();
+  await loadSetupLog();
+}
+// Each read numbered: a slow answer for the agent opened before paints
+// nothing over the one opened since (review, 2026-10-22).
+let setupLogGen = 0, logsGen = 0;
+async function loadSetupLog() {
+  if (!setupLogAgentId) return;
+  const gen = ++setupLogGen;
+  try {
+    const r = await api(`/v1/agents/${setupLogAgentId}/events?limit=80`);
+    if (gen !== setupLogGen) return;
+    const when = (iso) => { const d = new Date(iso); return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`; };
+    $('setupLogBody').innerHTML = r.events.length
+      ? r.events.map(e => `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--line)"><span class="sub" style="flex:none;font-variant-numeric:tabular-nums">${esc(when(e.at))}</span><span>${esc(e.label)}${e.note ? ` <span class="sub">— ${esc(String(e.note).slice(0, 200))}</span>` : ''}</span></div>`).join('')
+      : '<div class="sub">Nothing recorded yet.</div>';
+  } catch (e) { if (gen === setupLogGen) $('setupLogBody').textContent = e.message; }
+}
+
+async function loadLogs() {
+  if (!logsAgentId) return;
+  const gen = ++logsGen;
+  $('logsText').textContent = 'Loading…';
+  try {
+    const l = await api(`/v1/agents/${logsAgentId}/logs?lines=120`);
+    if (gen !== logsGen) return;
+    $('logsText').textContent = l.text || '(no recent output)';
+    $('logsText').scrollTop = $('logsText').scrollHeight;
+  } catch (e) { if (gen === logsGen) $('logsText').textContent = e.message; }
+}
 
 // The sections of editDlg, which the agent sheet borrows.
 const EDIT_TABS = {
@@ -183,29 +296,30 @@ function showEditTab(name) {
 
 let peersLoadedFor = null, peersCurrent = null; // Save is armed only after the current list loaded
 async function loadPeers() {
-  const el = $('agentPeerList'), forId = editAgentId;
-  const current = sharingRead(el, forId);
+  const el = $('agentPeerList'), r = sheetRead(el);
   el.innerHTML = 'Loading…'; peersLoadedFor = null; peersCurrent = null; $('peerSaveBtn').disabled = true;
   try {
-    const { candidates } = await api(`/v1/agents/${forId}/peers`);
-    if (!current()) return;
-    peersLoadedFor = forId; peersCurrent = current; $('peerSaveBtn').disabled = false;
-    el.innerHTML = candidates.length
-      ? candidates.map(c => `<label class="pair" style="padding:3px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" class="peerCb" data-id="${esc(c.id)}"${c.granted ? ' checked' : ''} style="width:auto;flex:none">
-          <span class="grow">${esc(c.name)}</span>
-          <label class="sub" style="display:flex;align-items:center;gap:4px;font-weight:400"
-                 title="By default a consult is relayed as untrusted input the peer answers but never acts on. Tick this and it may carry out what this agent asks — for a pair you drive on purpose, like a QA agent resetting the system it tests. It can never hand over credentials either way.">
-            <input type="checkbox" class="peerAct" data-id="${esc(c.id)}"${c.allowActions ? ' checked' : ''} style="width:auto;flex:none"> may act on its requests
-          </label></label>`).join('')
-      : '<span>No other agents to consult yet.</span>';
-    v2SheetBaseline(el);
-  } catch (e) { if (current()) el.innerHTML = esc(e.message); }
+    const { candidates } = await api(`/v1/agents/${r.id}/peers`);
+    r.fill([el], () => {
+      peersLoadedFor = r.id; peersCurrent = r.mine; sheetButton('peerSaveBtn', r.id); // on, unless its own Save is out (HB-1484)
+      el.innerHTML = candidates.length
+        ? candidates.map(c => `<label class="pair" style="padding:3px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
+            <input type="checkbox" class="peerCb" data-id="${esc(c.id)}"${c.granted ? ' checked' : ''} style="width:auto;flex:none">
+            <span class="grow">${esc(c.name)}</span>
+            <label class="sub" style="display:flex;align-items:center;gap:4px;font-weight:400"
+                   title="By default a consult is relayed as untrusted input the peer answers but never acts on. Tick this and it may carry out what this agent asks — for a pair you drive on purpose, like a QA agent resetting the system it tests. It can never hand over credentials either way.">
+              <input type="checkbox" class="peerAct" data-id="${esc(c.id)}"${c.allowActions ? ' checked' : ''} style="width:auto;flex:none"> may act on its requests
+            </label></label>`).join('')
+        : '<span>No other agents to consult yet.</span>';
+    });
+  } catch (e) { r.draw(() => { el.innerHTML = esc(e.message); }); }
 }
 async function savePeers() {
+  const f = sheetSave('agentPeerList'); // the agent saved is the one rebuilt (audit #047)
   // Never PUT from an unloaded/failed list: that would silently revoke every grant.
-  if (peersLoadedFor !== editAgentId || !peersCurrent?.()) { toast('Peer list not loaded yet — reopen the tab.'); return; }
+  if (peersLoadedFor !== f.id || !peersCurrent?.()) { toast('Peer list not loaded yet — reopen the tab.'); return; }
   if ($('peerSaveBtn').disabled) return;
+  // The list it was pressed on, still the one read (its handle's mine, a sharing read: loadPeers).
   const current = peersCurrent;
   const ids = [...document.querySelectorAll('.peerCb:checked')].map(cb => cb.dataset.id);
   const acts = [...document.querySelectorAll('.peerAct:checked')].map(cb => cb.dataset.id).filter(id => ids.includes(id));
@@ -213,18 +327,16 @@ async function savePeers() {
     `This agent will be allowed to ask ${acts.length} peer${acts.length > 1 ? 's' : ''} to ACT — send mail, change files, ` +
     `run their tools — not just answer questions.\n\nOnly do this for agents you drive on purpose. Anything that can steer ` +
     `THIS agent (an injected email, a message from someone in its chat) can then reach into ${acts.length > 1 ? 'them' : 'it'}.\n\nContinue?`)) return;
-  $('peerSaveBtn').disabled = true;
-  const forId = editAgentId, f = forAgent(forId); // the agent saved is the one rebuilt (audit #047)
-  const saved = v2SheetSaving('agentPeerList');
+  f.hold('peerSaveBtn');
   try {
-    await api(`/v1/agents/${forId}/peers`, { method: 'PUT', body: { peerIds: ids, allowActions: acts } });
+    await api(`/v1/agents/${f.id}/peers`, { method: 'PUT', body: { peerIds: ids, allowActions: acts } });
     if (!current()) return;
-    saved(forId);
+    f.saved();
     // The call-agent tool + peer manifest are installed on rebuild, so offer it.
     if (ids.length) {
-      const name = agents.find(x => x.id === forId)?.name || 'this agent';
+      const name = agents.find(x => x.id === f.id)?.name || 'this agent';
       if (confirm(`Saved. Rebuild "${name}" now so it can consult ${ids.length} peer${ids.length > 1 ? 's' : ''}?\n\nThe call-agent tool is installed on rebuild (memory kept, briefly offline). Without a rebuild the grant is saved but the agent can't call them yet.`)) {
-        const r = await api(`/v1/agents/${forId}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+        const r = await api(`/v1/agents/${f.id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
         f.say(r?.atNextStart ? 'Saved. It is not running, so it stays that way: it can consult them from its next start.' : 'Rebuilding so it can consult its peers…');
         f.draw(() => editDlg.close());
       } else {
@@ -235,74 +347,73 @@ async function savePeers() {
     }
     await refresh(false);
   } catch (e) { if (current()) f.fail(e); }
-  finally { if (current()) $('peerSaveBtn').disabled = false; }
+  finally { f.done(); } // on again only while its list is the one read (SHEET_BUTTONS)
 }
 
 async function renderConnections() {
-  const el = $('connList'), forId = editAgentId;
+  // Two reads for the agent the forms are filled for: your accounts, for the picker, and the agent's own.
+  const el = $('connList'), picker = sheetRead('connAttachPick'), r = sheetRead('connList');
   el.innerHTML = 'Checking the agent…';
-  // Reset the attach-time "no send" toggle to its safe default every time the
-  // dialog opens — it's one shared control, not per-agent state, so without
-  // this it carries over whatever the previous agent card left it on.
-  $('connNoSend').checked = true;
-  // The attach picker: the caller's vault, minus accounts already on this agent.
-  // Emptied first: a failed read left the previous agent's list selectable
-  // (audit 2026-10-23, B20).
-  $('connAttachPick').innerHTML = '<option value="">Loading your accounts…</option>';
-  $('connAttachBtn').disabled = true;
-  v2SheetBaseline('connNoSend', 'connAttachPick');
-  api('/v1/connections').then(({ connections }) => {
-    if (editAgentId !== forId) return;
-    const open = connections.filter(c => !c.attachedTo.some(a => a.id === forId));
+  sheetFill(['connNoSend', 'connAttachPick'], () => {
+    // Reset the attach-time "no send" toggle to its safe default every time the
+    // dialog opens — it's one shared control, not per-agent state, so without
+    // this it carries over whatever the previous agent card left it on.
+    $('connNoSend').checked = true;
+    // The attach picker: the caller's vault, minus accounts already on this agent.
+    // Emptied first: a failed read left the previous agent's list selectable
+    // (audit 2026-10-23, B20).
+    $('connAttachPick').innerHTML = '<option value="">Loading your accounts…</option>';
+    $('connAttachBtn').disabled = true;
+  });
+  api('/v1/connections').then(({ connections }) => picker.fill(['connAttachPick'], () => {
+    const open = connections.filter(c => !c.attachedTo.some(a => a.id === picker.id));
     $('connAttachPick').innerHTML = open.length
       ? open.map(c => `<option value="${c.id}">${DEMO ? 'account' : esc(c.email)}</option>`).join('')
       : '<option value="">— no account left to attach —</option>';
-    $('connAttachBtn').disabled = !open.length;
-    v2SheetBaseline('connAttachPick');
-  }).catch(() => {
-    if (editAgentId === forId) { $('connAttachPick').innerHTML = '<option value="">— could not read your accounts; reopen to try again —</option>'; v2SheetBaseline('connAttachPick'); }
-  });
+    sheetButton('connAttachBtn', picker.id); // on with an account to attach, unless its own Attach is out (HB-1484)
+  })).catch(() => picker.fill(['connAttachPick'], () => {
+    $('connAttachPick').innerHTML = '<option value="">— could not read your accounts; reopen to try again —</option>';
+  }));
   try {
-    const { accounts } = await api(`/v1/agents/${forId}/connections`);
-    if (editAgentId !== forId) return; // dialog moved on while we fetched
-    el.innerHTML = accounts.length
-      ? accounts.map((a, i) => `<div class="pair"><span class="grow"><b class="pii">${esc(a.email)}</b>
-          <span class="sub">${esc(a.auth)}${a.client && a.client !== 'default' ? ` · client: ${esc(a.client)}` : ''}</span>
-          <span id="connGmailOut${i}" class="sub" role="status" style="display:block"></span></span>
-          ${!a.services || a.services.includes('gmail') ? `<button title="Checks the sign-in and asks Gmail for the inbox's counts, from inside the agent. Reads no mail and sends nothing." ${onAction('click', 'testAgentGmail', [{ $: 'el' }, `${a.email ?? ''}`, (i)])}>Test Gmail</button>` : ''}
-          <button class="danger" title="Takes this agent's access away at once; the Google account itself is untouched" ${onAction('click', 'disconnectAccount', [`${a.email ?? ''}`])}>Disconnect</button></div>`).join('')
-      : 'None yet — attach one above, or ask the agent to connect its own.';
-  } catch (e) {
-    if (editAgentId === forId) el.innerHTML = esc(e.message);
-  }
+    const { accounts } = await api(`/v1/agents/${r.id}/connections`);
+    r.draw(() => {
+      el.innerHTML = accounts.length
+        ? accounts.map((a, i) => `<div class="pair"><span class="grow"><b class="pii">${esc(a.email)}</b>
+            <span class="sub">${esc(a.auth)}${a.client && a.client !== 'default' ? ` · client: ${esc(a.client)}` : ''}</span>
+            <span id="connGmailOut${i}" class="sub" role="status" style="display:block"></span></span>
+            ${!a.services || a.services.includes('gmail') ? `<button title="Checks the sign-in and asks Gmail for the inbox's counts, from inside the agent. Reads no mail and sends nothing." ${onAction('click', 'testAgentGmail', [{ $: 'el' }, `${a.email ?? ''}`, (i)])}>Test Gmail</button>` : ''}
+            <button class="danger" title="Takes this agent's access away at once; the Google account itself is untouched" ${onAction('click', 'disconnectAccount', [`${a.email ?? ''}`])}>Disconnect</button></div>`).join('')
+        : 'None yet — attach one above, or ask the agent to connect its own.';
+    });
+  } catch (e) { r.draw(() => { el.innerHTML = esc(e.message); }); }
 }
 
 /** Real calls at Google from inside this agent, for one account. */
 async function testAgentGmail(btn, email, i) {
-  const forId = editAgentId, out = $(`connGmailOut${i}`);
+  // Its answer goes under its row while the forms are still its agent's (another's list is drawn over the row).
+  const f = sheetSave(), out = $(`connGmailOut${i}`);
   btn.disabled = true;
   out.textContent = 'Testing…';
   try {
-    const r = await api(`/v1/agents/${forId}/connections/${encodeURIComponent(email)}/test`, { method: 'POST' });
-    out.textContent = `${r.ok ? '✓' : '⚠'} ${r.detail}`;
-  } catch (e) { out.textContent = `⚠ ${e.message}`; }
+    const r = await api(`/v1/agents/${f.id}/connections/${encodeURIComponent(email)}/test`, { method: 'POST' });
+    f.draw(() => { out.textContent = `${r.ok ? '✓' : '⚠'} ${r.detail}`; });
+  } catch (e) { f.draw(() => { out.textContent = `⚠ ${e.message}`; }); }
   finally { btn.disabled = false; }
 }
 
 async function attachConnection() {
   const id = $('connAttachPick').value;
   if (!id) { toast('Pick a connection to attach.'); return; }
-  $('connAttachBtn').disabled = true;
-  const forId = editAgentId, f = forAgent(forId); // its success draws the picker and the box again: renderConnections notes them
+  const f = sheetSave().hold('connAttachBtn'); // its success draws the picker and the box again: renderConnections notes them
   try {
-    const r = await api(`/v1/agents/${forId}/connections/attach`, {
+    const r = await api(`/v1/agents/${f.id}/connections/attach`, {
       method: 'POST', body: { connectionId: id, gmailNoSend: $('connNoSend').checked },
     });
     f.say((r.live ? 'Attached — the agent can use it now.'
       : r.error ? `Attached, but not live yet: ${r.error}` : 'Attached — lands on the next rebuild/start.'), 8000);
     await f.draw(renderConnections);
   } catch (e) { f.fail(e, 10000); }
-  finally { $('connAttachBtn').disabled = !$('connAttachPick').value; }
+  finally { f.done(); } // on again with an account left to attach (SHEET_BUTTONS)
 }
 
 // ---- platform connections (main Settings → Connections) --------------------
@@ -450,14 +561,14 @@ async function removeConnection(id, email) {
 
 async function disconnectAccount(email) {
   if (!confirm(`Disconnect ${email} from this agent?\n\nThe agent loses access immediately. The account itself stays connected to the server (⚙ Settings → Connections) for other agents.`)) return;
-  const forId = editAgentId, f = forAgent(forId);
+  const f = sheetSave();
   try {
     // The server tells the two apart: a platform-attached account is DETACHED
     // (removing only the container copy re-imported it on the next rebuild),
     // anything else is an agent-made connection and is removed from gog. The
     // page used to decide from /v1/connections, and when that read failed it
     // sent a platform account down the raw remove.
-    const r = await api(`/v1/agents/${forId}/connections/${encodeURIComponent(email)}`, { method: 'DELETE' });
+    const r = await api(`/v1/agents/${f.id}/connections/${encodeURIComponent(email)}`, { method: 'DELETE' });
     f.say(r.detached && r.removed === false
       ? `${email} detached. It could not be taken off the agent just now; that is retried at its next start.`
       : `${email} disconnected.`, r.removed === false ? 10000 : undefined);
@@ -470,93 +581,96 @@ function openEdit(id, name, tab = 'def') {
   return openV2Agent(id, V2_TAB_FOR_EDIT[tab] ?? 'personality');
 }
 
-/** Fill the edit sections for this agent (the agent sheet borrows them from editDlg). */
+/**
+ * Fill the edit sections for this agent (the agent sheet borrows them from editDlg): from here on
+ * they are its (editAgentId, the view state's agent: forAgent), and what they hold is as filled.
+ */
 function prepareEdit(id, name, tab = 'def') {
-  // A value typed for the agent shown before and not added (an environment variable, a folder,
-  // a repo, and the choices beside them) is not this one's: back as drawn, or Add gave it to
-  // this agent (HB-0591).
-  if (id !== editAgentId) {
-    for (const f of ['envName', 'envValue', 'pathNew', 'repoUrl']) if ($(f)) $(f).value = '';
-    for (const f of ['pathAccess', 'repoAccess']) if ($(f)) $(f).value = 'ro';
-    if ($('repoPublic')) { $('repoPublic').checked = false; onRepoPublic(); }
-    // A setup field being declared, as drawn: its key, label, type, target, default and options.
-    for (const f of ['paramKey', 'paramLabel', 'paramDefault', 'paramOptions', 'paramRequired', 'paramType', 'paramTarget']) {
-      const el = $(f); if (!el) continue;
-      if (el.type === 'checkbox') el.checked = el.defaultChecked; else el.value = v2CtlDrawn(el);
+  sheetFill(V2_SHEET_FORMS, () => { // filled for this agent: nothing typed yet
+    // A value typed for the agent shown before and not added (an environment variable, a folder,
+    // a repo, and the choices beside them) is not this one's: back as drawn, or Add gave it to
+    // this agent (HB-0591).
+    if (id !== editAgentId) {
+      for (const f of ['envName', 'envValue', 'pathNew', 'repoUrl']) if ($(f)) $(f).value = '';
+      for (const f of ['pathAccess', 'repoAccess']) if ($(f)) $(f).value = 'ro';
+      if ($('repoPublic')) { $('repoPublic').checked = false; onRepoPublic(); }
+      // A setup field being declared, as drawn: its key, label, type, target, default and options.
+      for (const f of ['paramKey', 'paramLabel', 'paramDefault', 'paramOptions', 'paramRequired', 'paramType', 'paramTarget']) {
+        const el = $(f); if (!el) continue;
+        if (el.type === 'checkbox') el.checked = el.defaultChecked; else el.value = v2CtlDrawn(el);
+      }
+      if ($('paramType')) onParamTypeChange();
     }
-    if ($('paramType')) onParamTypeChange();
-  }
-  editAgentId = id;
-  $('editAgent').textContent = name;
-  $('editName').value = name;
-  $('editDesc').value = agents.find(x => x.id === id)?.persona ?? '';
-  $('gitKeyOut').style.display = 'none';
-  showEditTab(tab);
-  const cur = agents.find(x => x.id === id);
-  $('editProfile').innerHTML = profiles.map(p =>
-    `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
-  renderModelPickerForAgent(cur);
-  // Its saved source is selected again, so nothing waits on Use this: a source picked and
-  // left unapplied in the sheet before kept the model button off here (audit #050).
-  $('modelBtn').disabled = false;
-  $('modelBtn').title = '';
-  void populateImagePicker(cur?.image ?? '');
-  if ($('editEmbedMode')) { $('editEmbedMode').value = cur?.embedMode || 'baked'; $('embedModeStatus').textContent = cur ? embedModeText(cur) : ''; }
-  editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
-  editParamsSaved = JSON.stringify(editParams); editParamsFills++;
-  renderSetupValues(cur);
-  renderBotWho(cur);
-  void renderEditMembers();
-  renderParamList();
-  $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
-  $('editCheckpoint').checked = true; // shared control — reset to safe default so a prior card's uncheck doesn't silently drop this agent's conversation on switch
-  $('editBotToken').value = '';
-  $('botTokenBtn').textContent = 'Show';
-  renderDataList(cur?.dataSources);
-  renderEnvList(cur?.envVars);
-  if ($('agentSearchTestBtn')) $('agentSearchTestBtn').disabled = searchTests.has(id); // its own test, not another's
-  $('editErr').textContent = '';
-  $('snapList').innerHTML = '';
-  v2SheetBaseline(...V2_SHEET_FORMS); // filled for this agent: nothing typed yet
+    editAgentId = id;
+    $('editAgent').textContent = name;
+    $('editName').value = name;
+    $('editDesc').value = agents.find(x => x.id === id)?.persona ?? '';
+    $('gitKeyOut').style.display = 'none';
+    showEditTab(tab);
+    const cur = agents.find(x => x.id === id);
+    $('editProfile').innerHTML = profiles.map(p =>
+      `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
+    renderModelPickerForAgent(cur);
+    void populateImagePicker(cur?.image ?? '');
+    if ($('editEmbedMode')) { $('editEmbedMode').value = cur?.embedMode || 'baked'; $('embedModeStatus').textContent = cur ? embedModeText(cur) : ''; }
+    editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
+    editParamsSaved = JSON.stringify(editParams); editParamsFills++;
+    renderSetupValues(cur);
+    renderBotWho(cur);
+    void renderEditMembers();
+    renderParamList();
+    $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
+    $('editCheckpoint').checked = true; // shared control — reset to safe default so a prior card's uncheck doesn't silently drop this agent's conversation on switch
+    $('editBotToken').value = '';
+    $('botTokenBtn').textContent = 'Show';
+    renderDataList(cur?.dataSources);
+    renderEnvList(cur?.envVars);
+    // Its buttons are its own: off for its own press still out, or its lock, not another agent's
+    // (HB-1484). Its saved source is selected again, so its model waits on no Use this: a source
+    // picked and left unapplied in the sheet before kept the model button off here (audit #050).
+    for (const button of Object.keys(SHEET_BUTTONS)) sheetButton(button, id);
+    $('editErr').textContent = '';
+    $('snapList').innerHTML = '';
+  });
 }
 
 async function loadSnapshots() {
   const el = $('snapList');
-  const forId = editAgentId; // a slower answer for the agent opened before must not land here
+  const r = sheetRead('snapshots'); // a slower answer for the agent opened before, or an older read, must not land here
   try {
-    const snaps = await api(`/v1/agents/${forId}/snapshots`);
-    if (editAgentId !== forId) return;
-    el.innerHTML = snaps.length
-      ? snaps.map(s => `
-        <div class="pair">
-          <span class="grow">🕘 <b>${esc(s.label)}</b>
-            <span style="color:var(--dim)">${ago(s.createdAt)} · ${s.files.length} files${s.reason === 'manual' ? ' · kept' : ''}</span>
-          </span>
-          <button ${onAction('click', 'revertSnapshot', [`${s.id}`, `${s.label ?? ''}`])}>Revert</button>
-          <button class="danger" title="Delete this restore point" ${onAction('click', 'deleteSnapshot', [`${s.id}`, `${s.label ?? ''}`])}>×</button>
-        </div>`).join('')
-      : '<div class="sub">No snapshots yet — one is taken automatically before your next edit.</div>';
-  } catch (e) { if (editAgentId === forId) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+    const snaps = await api(`/v1/agents/${r.id}/snapshots`);
+    r.draw(() => {
+      el.innerHTML = snaps.length
+        ? snaps.map(s => `
+          <div class="pair">
+            <span class="grow">🕘 <b>${esc(s.label)}</b>
+              <span style="color:var(--dim)">${ago(s.createdAt)} · ${s.files.length} files${s.reason === 'manual' ? ' · kept' : ''}</span>
+            </span>
+            <button ${onAction('click', 'revertSnapshot', [`${s.id}`, `${s.label ?? ''}`])}>Revert</button>
+            <button class="danger" title="Delete this restore point" ${onAction('click', 'deleteSnapshot', [`${s.id}`, `${s.label ?? ''}`])}>×</button>
+          </div>`).join('')
+        : '<div class="sub">No snapshots yet — one is taken automatically before your next edit.</div>';
+    });
+  } catch (e) { r.draw(() => { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }); }
 }
 
 async function takeSnapshot() {
   const label = prompt('Name this snapshot (optional):', '');
   if (label === null) return;
-  const forId = editAgentId, f = forAgent(forId);
-  $('snapBtn').disabled = true;
+  const f = sheetSave().hold('snapBtn');
   try {
-    await api(`/v1/agents/${forId}/snapshots`, { method: 'POST', body: { label } });
+    await api(`/v1/agents/${f.id}/snapshots`, { method: 'POST', body: { label } });
     f.say('Snapshot saved');
     await f.draw(loadSnapshots);
   } catch (e) { f.fail(e); }
-  finally { $('snapBtn').disabled = false; }
+  finally { f.done(); }
 }
 
 async function deleteSnapshot(snapId, label) {
   if (!confirm(`Delete snapshot "${label}"? This restore point is gone for good — the agent's live files are untouched.`)) return;
-  const forId = editAgentId, f = forAgent(forId);
+  const f = sheetSave();
   try {
-    await api(`/v1/agents/${forId}/snapshots/${snapId}`, { method: 'DELETE' });
+    await api(`/v1/agents/${f.id}/snapshots/${snapId}`, { method: 'DELETE' });
     f.say('Snapshot deleted');
     await f.draw(loadSnapshots);
   } catch (e) { f.fail(e); }
@@ -569,16 +683,16 @@ const editReverting = new Set();
 const EDIT_REVERTING = 'Reverting… the editor reloads when it is done.';
 async function revertSnapshot(snapId, label) {
   if (!confirm(`Revert to "${label}"? The agent's SOUL, AGENTS and MEMORY files go back to that point. Its current files are snapshotted first, so this is undoable. Applies to new conversations (send /new in its chat).`)) return;
-  const forId = editAgentId, f = forAgent(forId);
+  const f = sheetSave();
   try {
-    const res = await api(`/v1/agents/${forId}/snapshots/${snapId}/restore`, { method: 'POST', body: {} });
+    const res = await api(`/v1/agents/${f.id}/snapshots/${snapId}/restore`, { method: 'POST', body: {} });
     // Since v2.156.0 a 202 with its operation: followed, its end said in a toast.
     // The 202 comes before a file is written, so the editor is read again when
     // it ends — read now, it showed the old text and a Save put it back (audit, 2026-10-20).
     if (res?.operation?.id) {
-      editReverting.add(forId);
+      editReverting.add(f.id);
       f.draw(() => { editLoaded = null; $('editSaveBtn').disabled = true; $('editErr').textContent = EDIT_REVERTING; });
-      v2FollowOp(res.operation, async () => { editReverting.delete(forId); await f.draw(async () => { await loadEditFile(); await loadSnapshots(); }); });
+      v2FollowOp(res.operation, async () => { editReverting.delete(f.id); await f.draw(async () => { await loadEditFile(); await loadSnapshots(); }); });
       return;
     }
     f.say(`Reverted ${res.restored.join(', ')}`);
@@ -612,20 +726,21 @@ function localClashWarning(chosen, exceptAgentId) {
  * value means "no override" — the PATCH sends null to clear it.
  */
 function renderModelPicker(menu, def, override) {
-  const row = $('modelRow');
-  if (!menu?.length) { row.style.display = 'none'; v2SheetBaseline('editModel'); return; }
-  row.style.display = '';
-  // A pin no longer on the menu (source edited under it) must not silently
-  // read as "Source default" — surface it as an explicit, selected option so
-  // the UI reports what the agent is actually still pinned to.
-  const stale = override && !menu.includes(override);
-  $('editModel').innerHTML =
-    `<option value=""${!override ? ' selected' : ''}>Source default (${esc(def)})</option>` +
-    menu.map(m =>
-      `<option value="${esc(m)}"${m === override ? ' selected' : ''}>${esc(m)}${m === def ? ' — default' : ''}</option>`
-    ).join('') +
-    (stale ? `<option value="${esc(override)}" selected>${esc(override)} — no longer offered</option>` : '');
-  v2SheetBaseline('editModel');
+  sheetFill(['editModel'], () => {
+    const row = $('modelRow');
+    if (!menu?.length) { row.style.display = 'none'; return; }
+    row.style.display = '';
+    // A pin no longer on the menu (source edited under it) must not silently
+    // read as "Source default" — surface it as an explicit, selected option so
+    // the UI reports what the agent is actually still pinned to.
+    const stale = override && !menu.includes(override);
+    $('editModel').innerHTML =
+      `<option value=""${!override ? ' selected' : ''}>Source default (${esc(def)})</option>` +
+      menu.map(m =>
+        `<option value="${esc(m)}"${m === override ? ' selected' : ''}>${esc(m)}${m === def ? ' — default' : ''}</option>`
+      ).join('') +
+      (stale ? `<option value="${esc(override)}" selected>${esc(override)} — no longer offered</option>` : '');
+  });
 }
 
 // The agent's own view (its saved profile + pin) vs a view of a source the
@@ -640,36 +755,37 @@ function renderModelPickerForProfile(p) {
   renderModelPicker(menu, p.model, undefined);
 }
 
+/**
+ * The source menu shows what agent `id` runs: its own source, or, when the menu does not list that
+ * source (prepareEdit then shows the first), the first. Else a source is picked and not yet applied.
+ */
+function sourceAsSaved(id) {
+  const menu = $('editProfile'), src = agents.find(x => x.id === id)?.aiProfileId;
+  const listed = [...menu.options].map(o => o.value);
+  return menu.value === (listed.includes(src) ? src : listed[0] ?? '');
+}
 // The source dropdown changed: reflect the newly-chosen source's models
 // immediately (before "Use this" is pressed), so the picker never lists the
 // previous source's models. But a model can't be PINNED until the source
 // switch itself is applied (the server validates the pin against the agent's
-// CURRENT source), so disable the model button with a hint until then.
+// CURRENT source), so the model button's lock keeps it off, with a hint, until
+// then (SHEET_BUTTONS: worked out from the menu and the agent, HB-1484).
 function onEditProfileChange() {
-  const cur = agents.find(x => x.id === editAgentId);
-  const sel = $('editProfile').value;
-  const btn = $('modelBtn');
-  if (sel === cur?.aiProfileId) {
-    renderModelPickerForAgent(cur);
-    btn.disabled = false;
-    btn.title = '';
-    return;
-  }
-  renderModelPickerForProfile(profiles.find(p => p.id === sel));
-  btn.disabled = true;
-  btn.title = 'Apply the source change first (Use this, above), then pick a model.';
+  if (sourceAsSaved(editAgentId)) renderModelPickerForAgent(agents.find(x => x.id === editAgentId));
+  else renderModelPickerForProfile(profiles.find(p => p.id === $('editProfile').value));
+  sheetButton('modelBtn', editAgentId);
 }
 
 async function switchModel() {
   const model = $('editModel').value || null; // '' → null clears the override
-  // The agent whose model it is, as Use this was pressed: what comes back is said for it.
-  const forId = editAgentId, f = forAgent(forId), saved = v2SheetSaving('editModel');
-  $('modelBtn').disabled = true;
+  // The agent whose model it is, as Use this was pressed: what comes back is said for it, and
+  // the button is given back only to its forms (another's lock stays: HB-1484).
+  const f = sheetSave('editModel').hold('modelBtn');
   try {
     // Live change: OpenClaw reads the model per turn, so a running agent picks
     // it up on the next message — no rebuild, no restart, no downtime.
-    const r = await api(`/v1/agents/${forId}/model`, { method: 'POST', body: { model } });
-    saved(forId);
+    const r = await api(`/v1/agents/${f.id}/model`, { method: 'POST', body: { model } });
+    f.saved();
     // failed: its runtime refused it, so it still answers on the old model (as Bulk actions say too, HB-0595).
     f.say((r.failed ? `Saved ${r.model}, but its runtime refused it: it answers on the old model until you try again or Rebuild.`
       : r.live
@@ -683,7 +799,7 @@ async function switchModel() {
     else if (r.classDetached) f.say('Detached from its class (the class pins a different model).', 6000);
     await refresh(false);
   } catch (e) { f.fail(e); }
-  finally { $('modelBtn').disabled = false; }
+  finally { f.done(); }
 }
 
 async function switchProfile() {
@@ -691,17 +807,22 @@ async function switchProfile() {
   // The agent and the checkpoint box as they were when Use this was pressed: with
   // the sheet closed and another agent's opened while it saved, the rebuild went
   // to that other agent, with its box (audit #047).
-  const forId = editAgentId, f = forAgent(forId), checkpoint = $('editCheckpoint').checked;
+  const f = sheetSave('editProfile', 'editCheckpoint'), checkpoint = $('editCheckpoint').checked;
   const chosen = profiles.find(p => p.id === id);
-  if (!confirm(`Use "${chosen?.name}" (${chosen?.model}) for this agent?\n\nApplies on the next Rebuild — its memory is kept.${localClashWarning(chosen, forId)}`)) return;
-  $('profileBtn').disabled = true;
-  const saved = v2SheetSaving('editProfile', 'editCheckpoint');
+  if (!confirm(`Use "${chosen?.name}" (${chosen?.model}) for this agent?\n\nApplies on the next Rebuild — its memory is kept.${localClashWarning(chosen, f.id)}`)) return;
+  f.hold('profileBtn');
   try {
-    await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { aiProfileId: id } });
-    saved(forId);
-    const name = agents.find(x => x.id === forId)?.name || 'this agent';
+    const saved = await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { aiProfileId: id } });
+    f.saved();
+    // The agent as saved, in the page's own record now: the poll below can fail, and the model
+    // button's lock and menu (sourceAsSaved) waited on it, "Apply the source change first" over
+    // the source just applied (HB-1484). Its answer is the agent; else what was sent.
+    const a = agents.find(x => x.id === f.id);
+    if (a && saved?.aiProfileId) for (const k of ['aiProfileId', 'profileModels', 'profileDefaultModel', 'modelOverride']) a[k] = saved[k];
+    else if (a) a.aiProfileId = id;
+    const name = a?.name || 'this agent';
     if (confirm(`Saved. Rebuild "${name}" now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline; one that is not running stays that way and uses it from its next start. Tip: send /new in its chat afterwards — a fresh conversation suits a new model.`)) {
-      const r = await api(`/v1/agents/${forId}/rebuild`, {
+      const r = await api(`/v1/agents/${f.id}/rebuild`, {
         method: 'POST', body: { checkpoint, stoppedWaits: true },
       });
       f.say(r?.atNextStart ? 'Saved. It is not running, so it stays that way: it starts on the new AI source next time.'
@@ -714,14 +835,12 @@ async function switchProfile() {
     await refresh(false);
     // Dialog stayed open: the agent is now on the new source (and any stranded
     // pin was cleared server-side). Re-render the model picker from the fresh
-    // agent so it lists the new source's models, not the old ones.
-    f.draw(() => {
-      renderModelPickerForAgent(agents.find(x => x.id === forId));
-      $('modelBtn').disabled = false;
-      $('modelBtn').title = '';
-    });
+    // agent so it lists the new source's models, not the old ones; or, with
+    // another source picked while this one saved, that one's, its model button
+    // still waiting on Use this (HB-1484).
+    f.draw(onEditProfileChange);
   } catch (e) { f.fail(e); }
-  finally { $('profileBtn').disabled = false; }
+  finally { f.done(); }
 }
 
 // The unified data list: legacy read-only folders + richer data sources, each
@@ -775,14 +894,13 @@ async function addGitSource() {
   if (!repoUrl) return;
   const isPublic = $('repoPublic').checked;
   const access = isPublic ? 'ro' : $('repoAccess').value;
-  const forId = editAgentId, f = forAgent(forId), saved = v2SheetSaving('repoAccess');
-  $('repoAddBtn').disabled = true;
+  const f = sheetSave('repoAccess').hold('repoAddBtn');
   try {
-    const updated = await api(`/v1/agents/${forId}/data-sources`, { method: 'POST', body: { kind: 'git', access, repoUrl, public: isPublic } });
+    const updated = await api(`/v1/agents/${f.id}/data-sources`, { method: 'POST', body: { kind: 'git', access, repoUrl, public: isPublic } });
     f.draw(() => {
-      $('repoUrl').value = ''; saved(forId); v2SheetBaseline('repoUrl'); // the box is empty again, and that is as filled; the access stays as chosen
+      sheetFill(['repoUrl'], () => { $('repoUrl').value = ''; }); f.saved(); // the box is empty again, and that is as filled; the access stays as chosen
       renderDataList(updated.dataSources);
-      if (isPublic) { $('repoPublic').checked = false; onRepoPublic(); v2SheetBaseline('repoPublic', 'repoAccess'); }
+      if (isPublic) sheetFill(['repoPublic', 'repoAccess'], () => { $('repoPublic').checked = false; onRepoPublic(); });
       // A private repo's deploy key, straight away: it must be added to the repo before a clone can work.
       else showDeployKeyForSource(updated.dataSources.filter(d => d.kind === 'git').slice(-1)[0]);
     });
@@ -792,7 +910,7 @@ async function addGitSource() {
       : 'Repo added — add its deploy key (on its Data tab) to the repo, then Rebuild: it is cloned then.', 9000);
     await refresh(false);
   } catch (e) { f.fail(e); }
-  finally { $('repoAddBtn').disabled = false; }
+  finally { f.done(); }
 }
 /**
  * "Its name: " before what is said about an agent that is not the one shown (the agent's
@@ -804,26 +922,161 @@ function agentPrefix(id) {
   return shown === id ? '' : `${agents.find(x => x.id === id)?.name || 'The agent'}: `;
 }
 /**
+ * The agent sheet's view state (HB-0644). One set of edit forms serves every agent: the sheet's
+ * tabs borrow them, and the classic edit dialog shows them. Whose they are, and which answers may
+ * still go into them, is kept in three places and asked in one, forAgent:
+ *   editAgentId   the agent they are filled for (prepareEdit fills them, and sets it);
+ *   a request generation, per thing read into them: a later read of it refuses the answer to an
+ *                 earlier one (sheetRead: sheetReads by name, or a read's own count, editLoadGen);
+ *   a form revision, per control: its fills, counted (v2SheetFills), so a save notes what it sent
+ *                 as saved only where nothing filled the control after the press (v2SheetSaving).
+ * Every save in the forms starts with sheetSave() (forAgent, for an agent it is given) and every
+ * read with sheetRead(): each reads editAgentId once, at the press, into its handle (its id).
+ * scripts/sheet-state.mjs holds the page's scripts to this where it can see: no async function,
+ * nor a function run later, reads editAgentId; after an await, nothing calls sheetFill or a
+ * function that fills the forms, or touches the shared error box, but in a handle's draw or fill;
+ * only sheetFill notes a baseline. The click-through races each save and read, and each other
+ * async function that touches the forms, against another agent's sheet opened meanwhile
+ * (sheetSavesStayWithTheirAgent, sheetReadsStayWithTheirAgent). So HB-0584 (one agent's folders
+ * sent to another) and HB-0590 (one agent's model menu drawn for another), written again in those
+ * shapes, fail a gate; what neither sees (an element taken before the await and written after, a
+ * helper that picks the agent shown itself: the list is at the top of sheet-state.mjs) is for review.
+ */
+const sheetReads = new Map();
+/**
  * What comes back from a change pressed in an agent's edit forms (its sheet's tabs of them, or
  * the classic edit dialog) is for the agent it was pressed for. By then another agent may be
  * open, another tab of its sheet, or nothing. Drawn into whichever forms were open, a legacy
  * folder's removal sent one agent's folders to another (HB-0584); written under forms out of
- * sight, an error was never seen. Every save asks this one helper:
- *   mine()   the edit forms are still filled for it (no other agent's have been drawn in them);
+ * sight, an error was never seen. Every save and read asks this one helper, the one place an
+ * answer is refused:
+ *   id       the agent;
+ *   mine()   the edit forms are still filled for it (no other agent's have been drawn in them),
+ *            and, for a read, no later read of the same thing was asked (`latest`);
  *   shown()  and the person sees them: its sheet on a tab of them, or the classic dialog;
  *   draw(fn) fn draws the answer into its forms, only while they are its (and returns what fn does);
+ *   fill(where, fn) the same, and what `where` then holds is as filled, not an edit (sheetFill);
  *   say(text, ms) a toast, its name before it unless it is the agent shown;
  *   fail(e)  under the forms while they are in sight, else said in a toast as say() is.
  */
-function forAgent(forId) {
-  const mine = () => editAgentId === forId;
+function forAgent(forId, latest = null) {
+  const mine = () => editAgentId === forId && (!latest || latest());
   const shown = () => mine() && (v2AgentDlg.open ? v2AgentId === forId && $('v2Pane').contains($('editErr')) : editDlg.open);
   const say = (text, ms) => toast(agentPrefix(forId) + text, ms);
   return {
-    mine, shown, say,
+    id: forId, mine, shown, say,
     draw: (fn) => mine() ? fn() : undefined,
+    fill: (where, fn) => mine() ? sheetFill(where, fn) : undefined,
     fail: (e, ms = 9000) => { if (shown()) $('editErr').textContent = e.message; else say(e.message, ms); },
   };
+}
+/**
+ * A press in the edit forms (a save, or a test): its handle (forAgent) for the agent they are
+ * filled for now, and, in `where`, the controls whose values it sends. Once the save has worked,
+ * f.saved() notes those values as saved, for that agent only and only where no fill came after
+ * the press (v2SheetSaving). Not for a save whose success draws its controls again: that drawing
+ * notes them. f.hold(button) turns the forms' button off while its request is out, and f.done(),
+ * in its finally, gives it back (sheetPress): returns f.
+ */
+function sheetSave(...where) {
+  const f = forAgent(editAgentId), saved = v2SheetSaving(...where), ends = [];
+  f.saved = () => saved(f.id);
+  f.hold = (button) => { ends.push(sheetPress(button, f.id)); return f; };
+  f.done = () => { for (const end of ends.splice(0)) end(f.mine()); };
+  return f;
+}
+/**
+ * The forms' buttons are shared too (HB-1484): one Rename, one Use this, one Add serve every agent.
+ * A press turns its button off while its request is out; given back by hand in its finally, A's
+ * answer turned it on under B's forms, opened meanwhile: B's model button came on over its "Apply
+ * the source change first" (audit #050), and B's own save, still out, could be pressed again. So:
+ *   a button's state is its agent's: off while a press of it for the agent the forms are filled
+ *     for is out (sheetPresses, counted by button and agent), or while its own lock holds
+ *     (SHEET_BUTTONS); on otherwise (sheetButton);
+ *   a press notes itself and turns its button off (f.hold, sheetPress); its end takes its note
+ *     away and sets the button as above only while the forms are still its agent's (f.done: f.mine()),
+ *     so under B's forms A's answer leaves B's button as B has it: its lock, or B's own press;
+ *   every fill for an agent sets each button as above for that agent (prepareEdit; the Schedule
+ *     form's, prepareCrons), and so does each read that arms one (loadEditFile, loadPeers, the
+ *     account picker, onEditProfileChange): B's sheet, opened while A's press is out, has its
+ *     buttons on, not stuck off by A's press; A's opened again has its button off until A's answer;
+ *   a lock is worked out from what the forms hold and what the agent has, never read back from the
+ *     button, and its hint (SHEET_HINTS) is set with it.
+ * scripts/sheet-state.mjs fails, after an await outside a handle's draw or fill, a button of the
+ * edit dialog turned on or off by hand and a hold or a sheetButton() call; a hold or a press of
+ * a button SHEET_BUTTONS does not list; and a hold that no finally of its function gives back.
+ */
+const sheetPresses = new Map();
+const MODEL_WAITS_ON_SOURCE = 'Apply the source change first (Use this, above), then pick a model.';
+/**
+ * Each of the forms' buttons a press holds, and its own lock: why it stays off for the agent
+ * (`id`) whose forms are filled, with none of its presses out (null: none).
+ */
+const SHEET_BUTTONS = {
+  renameBtn: null, descBtn: null, paramSaveBtn: null, snapBtn: null, profileBtn: null,
+  pathAddBtn: null, repoAddBtn: null, envAddBtn: null, agentSearchTestBtn: null,
+  // A source picked in the menu and not applied: a model is pinned against the agent's current source (audit #050).
+  modelBtn: (id) => !sourceAsSaved(id),
+  // Its file has not loaded for this agent: an empty or older editor's Save wrote over the file (night review, 2026-09-27).
+  editSaveBtn: (id) => editLoaded?.agentId !== id,
+  // No account left to attach, or the list still loading.
+  connAttachBtn: () => !$('connAttachPick').value,
+  // Its list of peers not loaded, or read again since: a save from it would revoke every grant.
+  peerSaveBtn: (id) => peersLoadedFor !== id || !peersCurrent?.(),
+};
+/** The hint a button shows while its lock holds, and none while it does not: set with the lock, never by hand. */
+const SHEET_HINTS = { modelBtn: MODEL_WAITS_ON_SOURCE };
+/** A shared button as the agent `id` has it: off while a press of it for that agent is out, or while its lock holds. */
+function sheetButton(button, id) {
+  const el = $(button);
+  if (!el) return;
+  const locked = !!SHEET_BUTTONS[button]?.(id);
+  el.disabled = (sheetPresses.get(`${button} ${id}`) ?? 0) > 0 || locked;
+  if (button in SHEET_HINTS) el.title = locked ? SHEET_HINTS[button] : '';
+}
+/**
+ * A press of a shared button for agent `id`: noted, and the button off. What it returns ends it
+ * once its answer came, the note taken away; `shown`: the forms (or the Schedule form) are still
+ * that agent's, and the button is set for it (sheetButton), else left as the agent shown has it.
+ */
+function sheetPress(button, id) {
+  const key = `${button} ${id}`;
+  sheetPresses.set(key, (sheetPresses.get(key) ?? 0) + 1);
+  const el = $(button);
+  if (el) el.disabled = true;
+  let out = true;
+  return (shown) => {
+    if (!out) return;
+    out = false;
+    const left = sheetPresses.get(key) - 1;
+    if (left > 0) sheetPresses.set(key, left); else sheetPresses.delete(key);
+    if (shown) sheetButton(button, id);
+  };
+}
+/**
+ * A read into the edit forms: its handle (forAgent) for the agent they are filled for now, whose
+ * answer goes in only while it is the latest of its kind. `latest` names what is read (numbered
+ * here, in sheetReads), or is a test of its own that no later read of it was asked (editLoadGen,
+ * imagePickGen), or is the sharing list read into (an element: its sharingRead, for this agent).
+ */
+function sheetRead(latest) {
+  if (typeof latest === 'string') {
+    const what = latest, gen = (sheetReads.get(what) ?? 0) + 1;
+    sheetReads.set(what, gen);
+    latest = () => sheetReads.get(what) === gen;
+  } else if (latest && typeof latest === 'object') latest = sharingRead(latest, editAgentId); // the list's element
+  return forAgent(editAgentId, latest);
+}
+/**
+ * A fill of the sheet's forms: fn puts the page's values in, and what `where` (ids or elements,
+ * of controls or of what holds them) then holds is as filled: its baseline, not an edit, and its
+ * form revision moves on (v2SheetBaseline). Every fill notes its baseline this way, on every path
+ * fn takes; an answer drawn in goes through a handle's fill, which refuses a stale one first.
+ */
+function sheetFill(where, fn) {
+  const r = fn();
+  v2SheetBaseline(...where);
+  return r;
 }
 
 function showDeployKey(id) { showDeployKeyForSource(editData.find(d => d.id === id)); }
@@ -853,12 +1106,12 @@ async function checkDataSource(id, btn) {
   const out = row?.querySelector('.ds-check');
   // Whose folder or repo it is: the answer goes under its row only while the forms are still
   // that agent's (and the row with them); otherwise in a toast with its name, as the search test.
-  const forId = editAgentId, f = forAgent(forId);
+  const f = sheetSave();
   if (btn) btn.disabled = true;
   if (out) { out.style.color = ''; out.textContent = 'Checking…'; }
   let r, said, color;
   try {
-    r = await api(`/v1/agents/${forId}/data-sources/${encodeURIComponent(id)}/check`, { method: 'POST', body: {} });
+    r = await api(`/v1/agents/${f.id}/data-sources/${encodeURIComponent(id)}/check`, { method: 'POST', body: {} });
     said = `${r.ok ? '✅' : '⚠️'} ${r.message}`; color = r.ok ? '' : 'var(--warn)';
   } catch (e) { said = `⚠️ ${e.message}`; color = 'var(--bad)'; }
   finally { if (btn) btn.disabled = false; }
@@ -873,18 +1126,17 @@ async function addDataSource() {
   if (!p) return;
   const access = $('pathAccess').value;
   if (access === 'rw' && !confirm(`Give the agent WRITE access to ${p}?\n\nIt can change or delete files there, and anyone who can message it can trigger that. Only do this for data you're comfortable it editing.`)) return;
-  const forId = editAgentId, f = forAgent(forId), saved = v2SheetSaving('pathAccess');
-  $('pathAddBtn').disabled = true;
+  const f = sheetSave('pathAccess').hold('pathAddBtn');
   try {
-    const updated = await api(`/v1/agents/${forId}/data-sources`, { method: 'POST', body: { kind: 'folder', access, path: p } });
+    const updated = await api(`/v1/agents/${f.id}/data-sources`, { method: 'POST', body: { kind: 'folder', access, path: p } });
     f.draw(() => {
-      $('pathNew').value = ''; saved(forId); v2SheetBaseline('pathNew'); // the box is empty again, and that is as filled; the access stays as chosen
+      sheetFill(['pathNew'], () => { $('pathNew').value = ''; }); f.saved(); // the box is empty again, and that is as filled; the access stays as chosen
       renderDataList(updated.dataSources);
     });
     f.say('Folder added — Rebuild to apply it.', 9000);
     await refresh(false);
   } catch (e) { f.fail(e); }
-  finally { $('pathAddBtn').disabled = false; }
+  finally { f.done(); }
 }
 
 async function setDataAccess(id, access) {
@@ -895,9 +1147,9 @@ async function setDataAccess(id, access) {
       !confirm(`Mark "${src.mountName}" writable?\n\nThis tells the agent it may change and commit in that checkout. Whether a PUSH is accepted is set by the deploy key's permission on the repo host — grant the key write access there too.`)) return;
   if (src.kind === 'folder' && access === 'rw' &&
       !confirm(`Let this agent WRITE to ${src.hostPath}?\n\nIt runs without permission prompts and is reachable by everyone in it, so one bad instruction could change or delete files here.`)) return;
-  const forId = editAgentId, f = forAgent(forId);
+  const f = sheetSave();
   try {
-    const updated = await api(`/v1/agents/${forId}/data-sources/${id}`, { method: 'PATCH', body: { access } });
+    const updated = await api(`/v1/agents/${f.id}/data-sources/${id}`, { method: 'PATCH', body: { access } });
     f.draw(() => renderDataList(updated.dataSources));
     f.say(`${src.mountName} is now ${access === 'rw' ? 'writable' : 'read-only'} — Rebuild to apply it.`, 9000);
     await refresh(false);
@@ -912,15 +1164,15 @@ async function removeDataSource(id) {
     ? ` Its copy in the agent (~/.openclaw/${src.mountName}) is deleted, with any changes not pushed${src.repoUrl && !/^https?:/.test(src.repoUrl) ? ', and so is its deploy key' : ''}.`
     : '';
   if (!confirm(`Remove ${src.kind === 'folder' ? 'the folder' : 'the repo'} “${src.mountName}” from this agent?${repoNote}`)) return;
-  const forId = editAgentId, f = forAgent(forId);
+  const f = sheetSave();
   try {
     let updated;
     if (src.legacy) {
       // Legacy folders still live on sharedPaths — drop this one from that list.
       const paths = editData.filter(d => d.legacy && d.id !== id).map(d => d.hostPath);
-      updated = await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { sharedPaths: paths } });
+      updated = await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { sharedPaths: paths } });
     } else {
-      updated = await api(`/v1/agents/${forId}/data-sources/${id}`, { method: 'DELETE' });
+      updated = await api(`/v1/agents/${f.id}/data-sources/${id}`, { method: 'DELETE' });
     }
     f.draw(() => renderDataList(updated.dataSources));
     // Hatchabot deletes its copies of a deploy key, but the repo's host still
@@ -948,25 +1200,24 @@ async function addEnvVar() {
   const name = $('envName').value.trim();
   const value = $('envValue').value;
   if (!name || !value) { toast('Both a name and a value are needed.'); return; }
-  $('envAddBtn').disabled = true;
   $('editErr').textContent = '';
-  const forId = editAgentId, f = forAgent(forId); // its list is drawn only in its own forms, as the Data tab's (HB-0584)
+  const f = sheetSave().hold('envAddBtn'); // its list is drawn only in its own forms, as the Data tab's (HB-0584)
   try {
-    const updated = await api(`/v1/agents/${forId}/env`, { method: 'POST', body: { name, value } });
+    const updated = await api(`/v1/agents/${f.id}/env`, { method: 'POST', body: { name, value } });
     // Emptied by the Add, as filled: a draft kept from before (and noted then) does not count as an edit.
-    f.draw(() => { $('envName').value = ''; $('envValue').value = ''; v2SheetBaseline('envName', 'envValue'); renderEnvList(updated.envVars); });
+    f.fill(['envName', 'envValue'], () => { $('envName').value = ''; $('envValue').value = ''; renderEnvList(updated.envVars); });
     f.say(`${name} added — Rebuild to apply it.`, 9000);
     await refresh(false);
   } catch (e) { f.fail(e); }
-  finally { $('envAddBtn').disabled = false; }
+  finally { f.done(); }
 }
 
 async function removeEnvVar(id, name) {
   if (!confirm(`Remove ${name}? The agent loses this variable on its next rebuild.`)) return;
   $('editErr').textContent = '';
-  const forId = editAgentId, f = forAgent(forId); // removed from the agent pressed for: its list only is drawn again
+  const f = sheetSave(); // removed from the agent pressed for: its list only is drawn again
   try {
-    const updated = await api(`/v1/agents/${forId}/env/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const updated = await api(`/v1/agents/${f.id}/env/${encodeURIComponent(id)}`, { method: 'DELETE' });
     f.draw(() => renderEnvList(updated.envVars));
     f.say(`${name} removed — Rebuild to apply it.`, 9000);
     await refresh(false);

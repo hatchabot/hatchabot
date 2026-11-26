@@ -184,6 +184,9 @@ export const USAGE_READER_SCRIPT = String.raw`
 const fs = require("fs"); const path = require("path"); const zlib = require("zlib");
 const root = "/home/node/.openclaw/agents";
 const models = {}; const sessions = new Set(); let first = Infinity, last = 0, bad = 0;
+// Run with -- --ids (the candidate gate's practice turn, scripts/practice-check.ts,
+// HB-1418), the event ids of the calls counted too: which calls, not only how many.
+const ids = process.argv.indexOf("--ids") > 0 ? [] : null;
 const since = Date.now() - 8 * 86400000; const slots = {};
 const dayAgo = Date.now() - 86400000; const day = { calls: 0, tokens: 0 }; let lastCtx = 0, lastCtxAt = 0;
 // Calls per 5-minute slot: OpenClaw logs only calls slower than 1 s, so the
@@ -342,7 +345,7 @@ const ev = (sid, at, e) => {
   srch(at, msg);
   health(sid, at, msg);
   prof(sid, at, msg);
-  add(sid, at, msg);
+  if (add(sid, at, msg) && ids && e.id && ids.length < 100000) ids.push(String(e.id));
 };
 // Only these lines are parsed: calls, what people wrote, failed tools, web searches, prompt errors, compactions.
 const wanted = (s) => s.indexOf('"usage"') >= 0 || s.indexOf('"toolName":"web_search"') >= 0 || s.indexOf('"role":"user"') >= 0 || s.indexOf('"isError":true') >= 0 || s.indexOf("prompt-error") >= 0 || s.indexOf('"compaction"') >= 0;
@@ -360,6 +363,7 @@ const add = (sid, at, msg) => {
   if (at >= since) { const k = new Date(at - (at % 300000) + 300000).toISOString(); slots[k] = (slots[k] || 0) + tok; callSlots[k] = (callSlots[k] || 0) + 1; }
   sessions.add(sid);
   if (at) { if (at < first) first = at; if (at > last) last = at; }
+  return true;
 };
 const lines = (d, sid, text) => {
   for (const line of text.split(String.fromCharCode(10))) {
@@ -569,6 +573,7 @@ out.health = { v: 1, since: W30, ...(ocv ? { ocv } : {}),
 out.window = { since: W30, models: wm, promptErrors, hourly: true };
 out.searches = { v: 1, since: SW, from: seenFrom === Infinity ? 0 : seenFrom, hours: SR };
 out.purposes = purposes; out.crons = crons;
+if (ids) out.ids = ids;
 process.stdout.write(JSON.stringify(out));
 `;
 

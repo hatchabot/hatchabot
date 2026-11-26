@@ -18,7 +18,7 @@ describe('deploy and upgrade', () => {
     const s = src('scripts/deploy-release.sh');
     const lines = s.split('\n');
     const removals = lines.map((l, i) => (/rm -rf node_modules\.prev/.test(l) && !/restore_deps|\[ -d node_modules \]/.test(l) ? i : -1)).filter((i) => i >= 0);
-    const serving = lines.findIndex((l) => /Serving \$GOT/.test(l));
+    const serving = lines.findIndex((l) => /Serving \$WANT/.test(l));
     // A stale leftover is removed before the working one goes aside (and before the
     // `.from` record is written, HB-0266); after that, only on the serving line.
     const aside = lines.findIndex((l) => /mv node_modules node_modules\.prev/.test(l));
@@ -37,21 +37,30 @@ describe('deploy and upgrade', () => {
     expect(u).toMatch(/DIR="\$PWD"/);
     // And judge a leftover the same way: by its holder, cleared under the same second lock (#226).
     // And tell the disk the same way (HB-0470): a full disk is 5 from either, never the release's.
-    // Every helper the two keep a copy of (eighth review: all of them, the
-    // messages too; deploy-release.sh names its tree DIR and its tag TARGET,
-    // and REDO what a person runs, so they can be the same text).
-    const fns = (s: string) => ['machine_short() {', 'free_mb() {', 'disk_words() {', 'proc_start() {', 'proc_start_utc() {', 'started_as() {', 'lock_left_over() {', 'checkout_recorded() {', 'take_lock() {', 'lock_short() {', 'lock_in_way() {',
-      'disk_short() {', 'run_step() {', 'put_rec() {', 'said_kind() {', 'said_path() {', 'step_tee() {', 'step_tail() {', 'new_step_log() {', 'own_place() {', 'step_short() {', 'change_failed() {',
-      'link_end() {', 'put_line() {', 'put_dir() {', 'put_failed() {', 'deps_holder_gone() {', 'deps_lock() {', 'deps_unlock() {'].map((f) => {
-      expect(s, f).toContain(f);
-      const at = s.indexOf(f), line = s.slice(at, s.indexOf('\n', at));
-      // A one-line helper ends on its own line; the others at the first "}" alone on a line.
-      return /\}\s*$/.test(line) ? line : s.slice(at, s.indexOf('\n}\n', at));
-    });
-    expect(fns(d)).toEqual(fns(u));
+    // Every helper the two share (eighth review: all of them, the messages
+    // too; deploy-release.sh names its tree DIR and its tag TARGET, and REDO
+    // what a person runs, so they can be the same text) is one file,
+    // scripts/upgrade-helpers.sh, which both read (HB-0636): defined there, and
+    // in neither script, so there is no copy to drift.
+    const l = src('scripts/upgrade-helpers.sh');
+    const names = ['machine_short', 'free_mb', 'disk_words', 'proc_start', 'proc_start_utc', 'started_as', 'lock_left_over', 'checkout_recorded', 'take_lock', 'lock_short', 'lock_in_way',
+      'disk_short', 'run_step', 'put_rec', 'said_kind', 'said_path', 'step_tee', 'step_tail', 'new_step_log', 'own_place', 'step_short', 'change_failed',
+      'link_end', 'put_line', 'put_dir', 'put_failed', 'deps_holder_gone', 'deps_lock', 'deps_unlock', 'older_release', 'mark_rolled_back', 'rolled_back_note', 'left_ran', 'unmark_rolled_back', 'kept_tries', 'kept_record',
+      'systemd_major', 'env_named'];
+    const defined = (t: string, name: string) => new RegExp(`^\\s*${name}\\(\\) \\{`, 'm').test(t);
+    for (const name of names) {
+      expect(defined(l, name), `${name} in upgrade-helpers.sh`).toBe(true);
+      for (const [f, t] of [['upgrade.sh', u], ['deploy-release.sh', d]]) expect(defined(t!, name), `${name} is defined in ${f} again`).toBe(false);
+    }
+    // restart.sh writes the rollback's note too, under an upgrade whose upgrade.sh may be older (HB-0840).
+    const fn = (t: string, name: string) => { const at = t.indexOf(`${name}() {`); expect(at, name).toBeGreaterThan(-1); return t.slice(at, t.indexOf('\n}\n', at)); };
+    for (const name of ['mark_rolled_back', 'rolled_back_note']) expect(fn(src('scripts/restart.sh'), name)).toBe(fn(l, name));
     // follow-latest.sh reads git's words with a copy of the same disk_words (fifteenth review).
     const disk = (s: string) => { const at = s.indexOf('disk_words() {'); expect(at).toBeGreaterThan(-1); return s.slice(at, s.indexOf('\n}\n', at)); };
-    expect(disk(src('scripts/follow-latest.sh'))).toBe(disk(u));
+    expect(disk(src('scripts/follow-latest.sh'))).toBe(disk(l));
+    // The timers tell a record kept for a release put back from one an upgrade cut off left with a copy of kept_record (review of HB-1456).
+    const kept = (t: string) => { const at = t.indexOf('kept_record() {'); expect(at).toBeGreaterThan(-1); return t.slice(at, t.indexOf('\n', at)); };
+    for (const f of ['scripts/follow-channel.sh', 'scripts/follow-latest.sh']) expect(kept(src(f)), f).toBe(kept(l));
     for (const s of [d, u]) expect(s).toContain('mkdir "$LOCK_PATH.clearing"');
     // The dependencies' lock, ensure-deps.sh's, by the same name and holder line (review of HB-1212).
     const deps = (s: string) => s.match(/^DEPS_LOCK=.*$/m)?.[0];

@@ -217,7 +217,7 @@ export function createDataSources(deps: DataSourcesDeps): DataSources {
         // file, and a save made meanwhile was written over without a snapshot
         // (audit #096). A save now waits for it ("another operation"). Taken
         // in this tick, so nothing can start between the check above and it.
-        void whileBusy(agent.id, async () => {
+        void whileBusy(agent.id, 'data-source-add', async () => {
           // This one alone: the others are as they were (HB-1126); a start or rebuild syncs them all.
           await syncGitDataSources(d, agent.id, agent.runtimeRef!, trace(agent.id), { only: id });
           await syncDataSourceDocs(d, agent.id, agent.runtimeRef!, trace(agent.id), { turn: (write) => withAgentsMdTurn(agent.id, write) }); // AGENTS.md "Data sources" learns the path

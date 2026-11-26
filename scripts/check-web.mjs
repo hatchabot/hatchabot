@@ -1,14 +1,16 @@
 // Checks the scripts of every page in web/: each parses (one bad escape in a
 // template literal stops its whole script), the pages hold no inline script
 // (their code is in web/app/, HB-0811), every file there is a page's, the
-// scripts can run in the order a page loads them (load-order.mjs), and the
-// event actions are sound. It runs as part of `npm test`: a page that doesn't
-// parse fails CI.
+// scripts can run in the order a page loads them (load-order.mjs), the event
+// actions are sound, and the agent sheet's forms take answers only through
+// their handles (sheet-state.mjs, HB-0644). It runs as part of `npm test`: a
+// page that doesn't parse fails CI.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Script } from 'node:vm';
 import { pageScripts, pageWithScripts } from './inline-scripts.mjs';
 import { loadOrderProblems } from './load-order.mjs';
+import { sheetFormIds, sheetStateProblems } from './sheet-state.mjs';
 
 let failed = false;
 
@@ -74,8 +76,9 @@ function syntaxOk(label, code) {
 }
 
 {
-  // External console enhancements ship as classic scripts alongside the app.
-  for (const file of readdirSync('web').filter(f => f.startsWith('control-ui-') && f.endsWith('.js'))) syntaxOk(`web/${file}`, readFileSync(join('web', file), 'utf8'));
+  // External console enhancements ship as classic scripts alongside the app, and so does the
+  // stand-in for a script of a release before an upgrade (web/upgraded.js, HB-0894).
+  for (const file of readdirSync('web').filter(f => (f.startsWith('control-ui-') || f === 'upgraded.js') && f.endsWith('.js'))) syntaxOk(`web/${file}`, readFileSync(join('web', file), 'utf8'));
   const used = new Set(), checked = new Map();
   const readSrc = (name) => readFileSync(join('web', 'app', name), 'utf8');
   for (const file of readdirSync('web').filter((f) => f.endsWith('.html'))) {
@@ -114,5 +117,11 @@ function syntaxOk(label, code) {
   for (const name of readdirSync(join('web', 'app'))) {
     if (!used.has(name)) { failed = true; console.error(`✗ web/app/${name}: no page loads it; name it in a page, or remove it`); }
   }
+  // Every script that parsed, once: a save or a read in the agent sheet's forms reads its agent at the press, and
+  // an answer goes in only through its handle (HB-0644). The forms are the edit dialog's elements (web/index.html).
+  const parsed = [...checked].filter(([, ok]) => ok).map(([name]) => ({ name: `web/app/${name}`, code: readSrc(name) }));
+  const sheet = sheetStateProblems(parsed, { formIds: sheetFormIds(readFileSync(join('web', 'index.html'), 'utf8')) });
+  for (const p of sheet) { failed = true; console.error(`✗ ${p}`); }
+  if (!sheet.length) console.log('✓ the agent sheet\'s forms take answers through their handles (sheet-state.mjs)');
 }
 process.exit(failed ? 1 : 0);

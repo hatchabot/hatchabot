@@ -6,8 +6,8 @@
 # whose release workflow (.github/workflows/release.yml) builds, attests and
 # publishes the release. Nothing is built or uploaded from this machine.
 #
-#   scripts/release.sh X.Y.Z [--commit <sha>]
-#   hbt release X.Y.Z
+#   scripts/release.sh X.Y.Z [--commit <sha>] [--publisher-copy-matches]
+#   hbt release X.Y.Z [--publisher-copy-matches]
 #
 # It refuses unless local main is origin/main, the version commit has landed
 # (package.json and a CHANGELOG section for X.Y.Z on main), CI passed on it
@@ -15,6 +15,14 @@
 # public repo (the remote `public`, read only), and the commit's
 # channels.json moves no channel back from what either main says —
 # scripts/release-check.sh.
+# Then the commit's publish.toml is held to the newest release tag's: the
+# publisher's gate holds the tag to its own copy of the file, which nothing
+# here can read, and a change landed here alone stalled v2.191.0 at the gate
+# until the owner changed that copy (HB-1492). A publish.toml that is not
+# that tag's, byte for byte, or a first release with no tag to compare
+# with, stops here (exit 4) with the file the owner sets the copy to, until
+# `--publisher-copy-matches` says the copy now matches —
+# scripts/publisher-copy.sh.
 # Then the release notes go through the privacy check (`privacy-check.mjs
 # --text`) and the public repo's privacy fingerprints are brought up to date
 # (`--sync-ci`), both here, where the private values are. Then it makes the
@@ -23,21 +31,24 @@
 # local tag again. `--commit <sha>` tags an earlier commit on main instead
 # of its head.
 #
-# Exit: 0 tagged; 1 refused; 2 usage.
+# Exit: 0 tagged; 1 refused; 2 usage; 4 publish.toml changed since the
+# last release tag (the publisher's copy must be changed to match first).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 die() { echo "✗ $1" >&2; exit "${2:-1}"; }
+. scripts/publisher-copy.sh || die "No scripts/publisher-copy.sh beside release.sh: run it from a whole checkout."
 
-VERSION=""; COMMIT=""
+VERSION=""; COMMIT=""; PUBLISHER_COPY_MATCHES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --draft-only) die "--draft-only is gone: a release is built only on the public repo, once the publisher has published its tag (docs/releasing.md)" 2 ;;
     --commit) COMMIT="${2:-}"; shift 2 ;;
-    -*) die "unknown option $1 (scripts/release.sh X.Y.Z [--commit <sha>])" 2 ;;
+    --publisher-copy-matches) PUBLISHER_COPY_MATCHES=1; shift ;;
+    -*) die "unknown option $1 (scripts/release.sh X.Y.Z [--commit <sha>] [--publisher-copy-matches])" 2 ;;
     *) [ -z "$VERSION" ] || die "one version only" 2; VERSION="${1#v}"; shift ;;
   esac
 done
-[ -n "$VERSION" ] || die "usage: scripts/release.sh X.Y.Z [--commit <sha>]" 2
+[ -n "$VERSION" ] || die "usage: scripts/release.sh X.Y.Z [--commit <sha>] [--publisher-copy-matches]" 2
 # The publisher publishes vX.Y.Z tags only: a pre-release tagged here would
 # never reach the public repo, while this said it would (audit, 2026-10-22).
 case "$VERSION" in *-*) die "$VERSION is a pre-release: the publisher publishes X.Y.Z releases only, so its tag would never reach the public repo. Nothing tagged." 2 ;; esac
@@ -63,6 +74,11 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 OUT="$(bash scripts/release-check.sh "$VERSION" ${COMMIT:+--commit "$COMMIT"} --repo "$SLUG" --public "$PUBLIC" --notes "$WORK/notes.md" --wait-ci)" || die "The release check stopped (exit $?) — its reason is above; with none, run scripts/release-check.sh $VERSION by hand."
 val() { printf '%s\n' "$OUT" | sed -n "s/^$1=//p"; }
 SHA="$(val commit)"; TAG="$(val tag)"
+
+# Before anything is changed or pushed (the fingerprints' sync below writes
+# to the public repo): the publisher's copy of publish.toml (HB-1492).
+publisher_copy_check "$SHA" "$TAG" "scripts/release.sh $VERSION${COMMIT:+ --commit $COMMIT} --publisher-copy-matches" \
+  "--tag $TAG${COMMIT:+ --rev $COMMIT}"
 
 # The notes are published apart from the code: no push hook sees them.
 # Said as the check says it: an incomplete check (3: a record it could not

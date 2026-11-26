@@ -91,7 +91,7 @@ function bundleTree(root: string, tag: string, platform: string, log: string): s
   for (const d of ['scripts', '.node/bin', 'node_modules']) mkdirSync(join(dir, d), { recursive: true });
   symlinkSync(process.execPath, join(dir, '.node', 'bin', 'node'));
   symlinkSync(driver, join(dir, 'node_modules', 'better-sqlite3'));
-  for (const s of ['upgrade.sh', 'release-target.sh', 'release-manifest.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
+  for (const s of ['upgrade.sh', 'upgrade-helpers.sh', 'release-target.sh', 'release-manifest.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
   writeFileSync(join(dir, 'scripts', 'restart.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
   shim(join(dir, 'scripts'), 'with-docker.sh', `echo "with-docker $*" >> ${JSON.stringify(log)}`);
   writeFileSync(join(dir, 'VERSION'), tag);

@@ -278,4 +278,32 @@ printf 'HATCHABOT_IMAGE=%s\\nNO_LATEST=%s\\nEMBED_ENGINE=%s\\nOPENCLAW_VERSION=%
       expect(r.out).toContain('Done — shell-runtime:latest is now OpenClaw 2026.9.8.');
     } finally { w.done(); }
   }, 90_000);
+
+  it('a default build with the .env pinning a version tag says it moves :latest, and that only agents pinned to it follow (HB-1256)', async () => {
+    handler = (req) => (req.url?.startsWith('/v1/runtime/build/check?') ? { json: { refused: null } } : undefined);
+    const w = install('HATCHABOT_IMAGE=example-runtime:2026.9.4\n');
+    try {
+      const r = await run(w.app, 'upgrade-image', '--version', '2026.9.8');
+      expect(r.code, r.err).toBe(0);
+      expect(w.seen()).toContain('HATCHABOT_IMAGE=example-runtime:2026.9.4\nNO_LATEST=\n');
+      expect(r.out).toContain('Building example-runtime:2026.9.8 for OpenClaw 2026.9.8 (moves example-runtime:latest; the fleet default stays example-runtime:2026.9.4)…');
+      expect(r.out).toContain('Done — example-runtime:latest is now OpenClaw 2026.9.8. The fleet default stays example-runtime:2026.9.4:\nonly agents pinned to example-runtime:latest show "update available". Rebuild one to adopt it, memory kept:  hatchabot rebuild "<agent>"');
+      expect(r.out).not.toContain('promotes to');
+      expect(r.out).not.toContain('Each agent shows');
+    } finally { handler = () => undefined; w.done(); }
+  }, 90_000);
+
+  // Review (L3): under the pin, "then promote: docker tag X example-runtime:latest" moved :latest, never the default.
+  it('a candidate build with the .env pinning a version tag says the setting makes it the default, not a retag of :latest (HB-1256)', async () => {
+    handler = (req) => (req.url?.startsWith('/v1/runtime/build/check?') ? { json: { refused: null } } : undefined);
+    const w = install('HATCHABOT_IMAGE=example-runtime:2026.9.4\n');
+    try {
+      const r = await run(w.app, 'upgrade-image', '--candidate', '--version', '2026.9.8');
+      expect(r.code, r.err).toBe(0);
+      expect(r.out).toContain('Candidate built as example-runtime:2026.9.8 (:latest untouched). Smoke-test it:\n  HATCHABOT_IMAGE=example-runtime:2026.9.8 npm run e2e:docker');
+      expect(r.out).toContain('The fleet default stays example-runtime:2026.9.4 (HATCHABOT_IMAGE): to make example-runtime:2026.9.8 the default, set HATCHABOT_IMAGE in .env to it and restart Hatchabot.');
+      expect(r.out).not.toContain('docker tag');
+      expect(r.out).not.toContain('then promote');
+    } finally { handler = () => undefined; w.done(); }
+  }, 90_000);
 });

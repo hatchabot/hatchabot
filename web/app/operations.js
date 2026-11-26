@@ -1,4 +1,4 @@
-// web/app/operations.js: memory cap, compressed swap, the long operations the page follows, Check all, archived agents, the management bot's presence.
+// web/app/operations.js: an agent's memory cap, compressed swap, memory search engine, image pin, sleep and file cap, downloading its history, the long operations the page follows, its context (resets and checkpoints), what needs attention, Check all.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -20,7 +20,7 @@ function fillMemoryCapRow(a, keep = false) {
   const choices = [...new Set([...MEMORY_CAP_CHOICES.filter(c => capBytes(c) <= max), ...(a.memoryCap ? [a.memoryCap] : []), ...(kept ? [kept] : [])])].sort((x, y) => capBytes(x) - capBytes(y));
   sel.innerHTML = `<option value="">No cap of its own — ${esc(inherited)}</option>` + choices.map(c => `<option value="${c}">${capLabel(c)}${c === dflt ? ' (the fleet default)' : ''}</option>`).join('');
   if (kept !== null) sel.value = kept; // still unsaved: its baseline stays the fill's or the last save's
-  else { sel.value = a.memoryCap || ''; v2SheetBaseline('editMemoryCap'); }
+  else sheetFill(['editMemoryCap'], () => { sel.value = a.memoryCap || ''; });
   $('memoryBumpBtn').hidden = !(a.state === 'RUNNING' || a.state === 'STOPPED') || (capBytes(a.memoryCapEffective) + 1073741824 > max);
   $('memoryCapStatus').textContent = memoryCapText(a);
   fillSwapRow(a, keep);
@@ -39,14 +39,14 @@ const limitsWhere = (r) => r.limitsKept ? ` — kept for its next start: its con
   : r.state === 'RUNNING' ? ' — applied to the running container' : '';
 async function saveMemoryCap() {
   const v = $('editMemoryCap').value;
-  const forId = editAgentId, f = forAgent(forId); // drawn again below, in its own forms: fillMemoryCapRow notes it
+  const f = sheetSave(); // drawn again below, in its own forms: fillMemoryCapRow notes it
   try {
-    const r = await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { memoryCap: v || null } });
+    const r = await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { memoryCap: v || null } });
     // Its container kept its old limits (its machine asleep or gone): saved for its next start, said, not "applied".
     f.say(v ? `Memory cap ${capLabel(v)}${limitsWhere(r)}.` : `Memory cap back to the default${r.limitsKept ? limitsWhere(r) : ''}.`, r.limitsKept ? 12000 : 7000);
     await refresh(false);
     // The cap saved is the record now; a swap chosen and not saved yet stays.
-    f.draw(() => { const a = agents.find(x => x.id === forId); if (a) fillMemoryCapRow(a, true); });
+    f.draw(() => { const a = agents.find(x => x.id === f.id); if (a) fillMemoryCapRow(a, true); });
   } catch (e) { f.fail(e); }
 }
 // ---- compressed swap: an allowance on top of the cap, only where the machine compresses swap ----
@@ -64,7 +64,7 @@ function fillSwapRow(a, keep = false) {
   sel.innerHTML = `<option value="">No setting of its own — ${esc(inherited)}</option><option value="off">Off for this agent</option>`
     + choices.map(c => `<option value="${c}">${capLabel(c)} on top of its cap</option>`).join('');
   if (kept !== null) sel.value = kept;
-  else { sel.value = own; v2SheetBaseline('editSwapAllowance'); }
+  else sheetFill(['editSwapAllowance'], () => { sel.value = own; });
   $('swapStatus').textContent = swapText(a);
   $('swapStatus').style.color = a.swapWithheld ? 'var(--warn)' : '';
 }
@@ -79,21 +79,22 @@ function swapText(a) {
 }
 async function saveSwapAllowance() {
   const v = $('editSwapAllowance').value;
-  const forId = editAgentId, f = forAgent(forId); // drawn again below, in its own forms: fillSwapRow notes it
+  const f = sheetSave(); // drawn again below, in its own forms: fillSwapRow notes it
   try {
-    const r = await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { swapAllowance: v || null } });
+    const r = await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { swapAllowance: v || null } });
     f.say((v === 'off' ? 'Swap off for this agent' : v ? `Swap allowance ${capLabel(v)}` : 'Swap back to the default') + (v && v !== 'off' || r.limitsKept ? limitsWhere(r) : '') + '.', r.limitsKept ? 12000 : 7000);
     await refresh(false);
     // As the cap's: a cap chosen and not saved yet stays.
-    f.draw(() => { const a = agents.find(x => x.id === forId); if (a) fillMemoryCapRow(a, true); });
+    f.draw(() => { const a = agents.find(x => x.id === f.id); if (a) fillMemoryCapRow(a, true); });
   } catch (e) { f.fail(e); }
 }
-async function bumpMemoryCap() {
+/** One step up, and saved at once (saveMemoryCap): it waits for nothing, so it reads the forms' agent here. */
+function bumpMemoryCap() {
   const a = agents.find(x => x.id === editAgentId); if (!a) return;
   const next = `${Math.floor(capBytes(a.memoryCapEffective || myAccount.memoryCapDefault || '3g') / 1073741824) + 1}g`;
   $('editMemoryCap').value = next;
   if ($('editMemoryCap').value !== next) { const o = document.createElement('option'); o.value = next; o.textContent = capLabel(next); $('editMemoryCap').append(o); $('editMemoryCap').value = next; }
-  await saveMemoryCap();
+  return saveMemoryCap();
 }
 function embedModeText(a) {
   const want = a.embedMode || 'baked', have = a.appliedEmbedMode;
@@ -105,6 +106,18 @@ function embedModeText(a) {
   return t;
 }
 
+/** Which engine does the agent's semantic memory search. Applies on its next rebuild, which re-indexes. */
+async function saveEmbedMode() {
+  const mode = $('editEmbedMode').value;
+  const f = sheetSave('editEmbedMode');
+  try {
+    await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { embedMode: mode } });
+    f.saved();
+    f.say(mode === 'shared' ? 'Will use the shared service from its next rebuild — memory search re-indexes then (a few minutes).' : 'Back on its own engine from its next rebuild.');
+    await refresh(false);
+  } catch (e) { f.fail(e); }
+}
+
 /** Pin (or clear) the runtime image. Empty input = back to the fleet default. */
 /** Pin (or clear) the runtime image AND rebuild onto it now, the way `hatchabot image try` does — a pin that
  *  waited for "the next rebuild" looked as if it had taken effect while the agent still ran the old image
@@ -112,22 +125,22 @@ function embedModeText(a) {
 async function saveImagePin() {
   const v = $('editImage').value.trim();
   // The agent pinned is the one rebuilt, even when another agent's sheet opened meanwhile (audit #047).
-  const forId = editAgentId, f = forAgent(forId), saved = v2SheetSaving('editImage');
+  const f = sheetSave('editImage');
   // Only a choice from this agent's own list, loaded (populateImagePicker): not another's pin left in it.
   const pick = $('editImage').dataset;
-  if (pick.loading || (pick.agent && pick.agent !== String(forId))) { f.fail(new Error('Its list of images is still loading — choose again once it has.')); return; }
-  const a = agents.find(x => x.id === forId);
+  if (pick.loading || (pick.agent && pick.agent !== String(f.id))) { f.fail(new Error('Its list of images is still loading — choose again once it has.')); return; }
+  const a = agents.find(x => x.id === f.id);
   try {
-    const r = await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { image: v || null } });
-    saved(forId);
+    const r = await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { image: v || null } });
+    f.saved();
     // Whether it runs now is the save's answer, the agent as the server has it: the page's is a poll old, and one it
     // saw asleep that woke since was told "when it next starts" and stayed on the old image (HB-1143).
     const now = r?.state ? r : a;
     if (r.sameImage) f.say(v ? `Pinned to ${v} — it already runs that image, so no rebuild.` : 'Back on the fleet default — it already runs that image, so no rebuild.');
     else if (now?.state === 'RUNNING' && now.runtimeRef) {
-      if (!confirmRebuild(forId, v ? `Moving onto ${v}` : 'Returning to the fleet default image', now)) { f.say('Pinned — it moves onto that image at its next rebuild.', 6000); await refresh(false); return; }
+      if (!confirmRebuild(f.id, v ? `Moving onto ${v}` : 'Returning to the fleet default image', now)) { f.say('Pinned — it moves onto that image at its next rebuild.', 6000); await refresh(false); return; }
       // That read is the page's last poll, and the question above takes as long as it takes: stopped by now, it stays so.
-      const r2 = await api(`/v1/agents/${forId}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+      const r2 = await api(`/v1/agents/${f.id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
       if (r2?.atNextStart) f.say(v ? `Pinned to ${v} — it moves onto it when it next starts.` : 'Back on the fleet default image — it moves onto it when it next starts.');
       else f.say(v ? `Pinned to ${v} — rebuilding onto it now, memory kept (about a minute).` : 'Back on the fleet default — rebuilding, memory kept.');
     } else {
@@ -136,6 +149,12 @@ async function saveImagePin() {
     }
     await refresh(false);
   } catch (e) { f.fail(e); }
+}
+
+/** The agent's own sleep and file policy (Advanced tab): saved and applied at once. */
+async function v2SetAgentPolicy(id, body) {
+  try { const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body }); r?.filesCapPending ? toast(r.filesCapPending, 8000) : toast('Saved.'); await refresh(false); }
+  catch (e) { toast(e.message, 6000); await refresh(false); }
 }
 
 /**
@@ -296,77 +315,6 @@ async function checkpointAgent(id, name) {
   } catch (e) { toast(e.message); }
 }
 
-/**
- * Sorting a group is a one-shot, and the same button reverses it — the way a
- * table column does. Which way "again" means is read off the order on screen
- * rather than remembered: if the group already reads A→Z, A→Z gives you Z→A.
- * That survives a reload, and it cannot disagree with what you are looking at.
- */
-const SORT_LABEL = { name: 'A→Z', 'name-desc': 'Z→A', time: 'oldest first', 'time-desc': 'newest first', activity: 'quietest first', 'activity-desc': 'most recently active first' };
-
-/** Is this section already in ascending order for `mode`? */
-function sortedAscending(g, mode) {
-  const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED' && (a.group || '') === (g || ''));
-  if (mine.length < 2) return false;
-  const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-  const cmp = (x, y) => mode === 'time'
-    ? String(x.createdAt || '').localeCompare(String(y.createdAt || ''))
-    : mode === 'activity'
-      ? (!x.lastActiveAt !== !y.lastActiveAt ? (x.lastActiveAt ? -1 : 1) : String(x.lastActiveAt || '').localeCompare(String(y.lastActiveAt || '')))
-      : coll.compare(x.name, y.name);
-  return mine.every((a, i) => i === 0 || cmp(mine[i - 1], a) <= 0);
-}
-
-async function sortGroup(g, mode = 'name') {
-  const desc = sortedAscending(g, mode); // already that way? then the other way
-  try {
-    await api('/v1/groups/sort', { method: 'POST', body: { group: g, mode, desc } });
-    toast(`${g || 'Default'} sorted ${SORT_LABEL[desc ? `${mode}-desc` : mode]}.`);
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-}
-
-/** Rename a group where it stands: the name becomes editable; Enter saves, Escape puts it back. */
-function editGroupName(el) {
-  if (!el || el.isContentEditable) return;
-  const from = el.textContent.trim();
-  el.contentEditable = 'plaintext-only'; el.classList.add('editing');
-  el.focus();
-  const range = document.createRange(); range.selectNodeContents(el); getSelection().removeAllRanges(); getSelection().addRange(range);
-  let done = false;
-  const finish = async (save) => {
-    if (done) return; done = true;
-    el.contentEditable = 'false'; el.classList.remove('editing');
-    const to = el.textContent.replace(/\s+/g, ' ').trim().slice(0, 48);
-    if (!save || !to || to === from) { el.textContent = from; return; }
-    try {
-      await api('/v1/groups/rename', { method: 'POST', body: { from, to } });
-      toast(`Group renamed to ${to}`);
-      await refresh(false);
-    } catch (e) { el.textContent = from; toast(e.message, 8000); }
-  };
-  el.onkeydown = (ev) => {
-    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
-    else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
-  };
-  el.onblur = () => finish(true);
-}
-
-async function moveGroup(name, dir) {
-  try {
-    const r = await api('/v1/groups/move', { method: 'POST', body: { group: name, dir } });
-    if (r && r.moved === false) {
-      // Agents without a group always sit first, so the top named group cannot go above them.
-      toast(dir === 'up' ? `"${name}" is already the top group — agents with no group always come first.` : `"${name}" is already the last group.`, 5000);
-      return;
-    }
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-}
-
-/** The fleet you're actually running, and the ones parked. */
-function liveAgents() { return agents.filter(a => a.state !== 'ARCHIVED'); }
-function archivedAgents() { return agents.filter(a => a.state === 'ARCHIVED'); }
 /**
  * True while an operation that RE-CHECKS an agent's rebuild-fixable statuses is
  * in flight (a rebuild marks the agent busy from the moment it's triggered; the
@@ -572,62 +520,3 @@ function agentAttention(a) {
 }
 /** Alerts severity by key: an operation waiting for a choice and a failure first, then a loop, a budget at 100% and a spike (their own sev), then the rest. */
 const V2_ATTN_SEV = { op: 100, failed: 95, 'not-started': 90, pending: 70, opsDrift: 65, nobot: 50, unsynced: 50, template: 45, migrated: 45, rebuild: 42 };
-
-let agentTodos = null, pendingTodoName = null, todosBusy = false;
-/**
- * A plan is done when one of your own agents with its name was made after it. An
- * older agent, or one shared with you, says nothing about the plan: every plan
- * carrying such a name was deleted the moment it was added (HB-0447).
- */
-const todoIsMade = (t) => agents.some(a => a.state !== 'DELETED' && v2Mine(a) && a.name.trim().toLowerCase() === t.name.trim().toLowerCase()
-  && (!a.createdAt || !t.createdAt || a.createdAt >= t.createdAt));
-async function loadTodos() {
-  if (todosBusy) return;
-  todosBusy = true;
-  try {
-    try { agentTodos = (await api('/v1/agent-todos')).todos || []; } catch { agentTodos = []; }
-    // Created since? An agent now carrying a planned name retires the plan.
-    for (const t of agentTodos.filter(todoIsMade)) {
-      try { await api(`/v1/agent-todos/${t.id}`, { method: 'DELETE' }); } catch {}
-      agentTodos = agentTodos.filter(x => x.id !== t.id);
-    }
-  } finally { todosBusy = false; }
-  renderV2(); // the home screen's Planned group
-}
-/** A planned agent was made (from its ghost tile, or by hand) since the plans were read: retire it. */
-function retireMadeTodos() {
-  if (!agentTodos?.length || todosBusy) return;
-  if (agentTodos.some(todoIsMade)) void loadTodos();
-}
-async function addTodo(boxId = 'v2TodoNew') {
-  const name = ($(boxId)?.value || '').trim();
-  if (!name) return;
-  try {
-    await api('/v1/agent-todos', { method: 'POST', body: { name } });
-    if ($(boxId)) $(boxId).value = ''; // the list keeps a draft across redraws; an added one is done
-    await loadTodos();
-    $(boxId)?.focus(); // ready for the next one
-  } catch (e) { toast(e.message); }
-}
-async function removeTodo(id, name) {
-  if (!confirm(`Remove "${name}" from the plan?`)) return;
-  try {
-    await api(`/v1/agent-todos/${id}`, { method: 'DELETE' });
-    await loadTodos();
-    $('v2TodoNew')?.focus(); // the button pressed is gone: keep the keyboard in the group
-  } catch (e) { toast(e.message); }
-}
-function createFromTodo(id) {
-  const t = (agentTodos || []).find(x => x.id === id);
-  if (!t) return;
-  pendingTodoName = t.name;
-  $('fabBtn').click(); // opens the create dialog; the name is pre-filled there
-}
-
-// ---- polling ------------------------------------------------------------------
-
-// ---- management-bot presence card --------------------------------------------
-// The mgmt bot is a separate process; it heartbeats to the control plane and
-// this strip is that heartbeat made visible. Deliberately NOT an agent card —
-// it has no container, no volume, no members — just a slim always-on rail.
-let mgmtTick = 0; // counts polls, so the heavier meta reads run every 4th

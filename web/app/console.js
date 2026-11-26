@@ -1,4 +1,4 @@
-// web/app/console.js: console tabs, the quick switcher and the console dialog.
+// web/app/console.js: console tabs, the quick switcher and the console dialog: opening it (openGateway), approving its browser, and marking what it showed as seen.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -499,6 +499,146 @@ function consoleResizeInit() {
 }
 consoleResizeInit();
 
+/** Only named console destinations are accepted; authentication stays in the existing fragment. */
+function consoleViewUrl(id, slug, view, existing = '') {
+  const fragment = existing.includes('#') ? existing.slice(existing.indexOf('#')) : '';
+  const session = encodeURIComponent(`agent:${slug}:main`);
+  return view === 'voice-settings' ? `/v1/agents/${id}/ui/settings/talk${fragment}`
+    : `/v1/agents/${id}/ui/chat?session=${session}${fragment}`;
+}
+async function openGateway(id, slug, view) {
+  if (view !== undefined && view !== 'voice-settings' && view !== 'chat') return toast('That console view is not available.');
+  const epoch = voiceEpoch, person = pagePerson;
+  const viewAllowed = () => !view || (epoch === voiceEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut && !!v2Find(id) && v2Mine(v2Find(id)));
+  if (!viewAllowed()) return;
+  if (view) slug = v2Find(id).slug;
+  // OpenClaw's own Control UI: an ADMIN console with a terminal, not a chat
+  // window — whoever opens it has shell inside the agent's container. Hence
+  // owner-only, and hence the ⋯ menu rather than the card's main row.
+  //
+  // It requires a browser SECURE CONTEXT: it uses WebCrypto for device
+  // identity, which browsers expose only over https:// or localhost. Tailscale
+  // encrypting the wire doesn't count — the browser judges by the URL scheme
+  // alone. Without it the tab loads and then reports a bare "Could not
+  // connect", which is a genuinely baffling thing to hand someone, so say it
+  // up front instead.
+  if (!window.isSecureContext) {
+    // WebCrypto (device identity) is exposed only in a secure context, which
+    // the browser judges by the page's URL scheme — you're on plain http.
+    const httpsHere = location.protocol === 'http:' && location.hostname !== 'localhost'
+      ? `https://${location.host}` : null;
+    toast(
+      "OpenClaw's console needs a secure context — this tab is on plain http. " +
+      (httpsHere
+        ? `Reopen Hatchabot at ${httpsHere} (the https version of this address) and it'll work.`
+        : 'Open Hatchabot at its https Tailscale address (or http://localhost on the host itself), then try again.'),
+      16000,
+    );
+    return;
+  }
+  // Plain opens keep the cached place. An explicit destination must navigate even an existing tab.
+  if (consoleSwitchTo(id, view)) return;
+  consoleOpening++;
+  consoleTabFor(id, slug);
+  // A newer pick (another tab, the switcher) or closing this tab supersedes
+  // this open while it waits on the network: it then stops, rather than take
+  // the panel back when its answer lands.
+  const ticket = ++consoleTicket;
+  const current = () => $('consoleDlg').open && ticket === consoleTicket && consoleTabs.some(t => t.id === id && t.frame) && viewAllowed();
+  // The panel opens NOW, with a spinner: the access and gateway reads below,
+  // and then the console's own load, took seconds on a slow link, during
+  // which a tap on the icon seemed to do nothing (Chris, 2026-10-23).
+  const opening = (agents || []).find(x => x.id === id);
+  if (!$('consoleDlg').open) {
+    $('consoleTitle').textContent = opening?.name || slug;
+    $('consoleGearBtn').style.display = 'none';
+    $('consoleApproveBtn').hidden = true;
+    $('consoleProps').hidden = true;
+    consoleCoverSay('Opening the console…');
+    $('consoleDlg').showModal();
+  } else consoleCoverSay('Opening the console…');
+  try {
+    // A sleeping agent is woken first, with the cover saying so — the proxy's
+    // own wake used to time out before the gateway answered (2026-09-26).
+    const sleeper = (agents || []).find(x => x.id === id);
+    if (sleeper?.hibernatedAt && sleeper.state === 'STOPPED') {
+      $('consoleTitle').textContent = sleeper.name;
+      consoleCoverSay('Waking it up — about a minute…');
+      $('consoleFrame').src = 'about:blank';
+      if (!$('consoleDlg').open) $('consoleDlg').showModal();
+      try { await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} }); }
+      catch (e) { if (current()) $('consoleCover').lastElementChild.textContent = `Could not wake it: ${e.message}`; return; }
+      for (let i = 0; i < 150; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        if (!current() || !$('consoleDlg').open) return;
+        // "reachable" is the gateway answering at all; its own ok can be false with a plugin warning.
+        try { const h = await api(`/v1/agents/${id}/health`); if (h.reachable || h.healthy || h.ok) break; } catch { /* not yet */ }
+      }
+      $('consoleCover').lastElementChild.textContent = 'Connecting this browser…';
+      await refresh(false);
+    }
+    // A rebuilt agent's console knows people by name (the console with
+    // identities): no token rides in the address — Hatchabot's proxy says who
+    // you are. One not rebuilt yet still takes the token, as before.
+    let access = null;
+    try { access = await api(`/v1/agents/${id}/console/access`); } catch { access = null; }
+    if (!current()) return;
+    const g = access?.console === 'identity' ? null : await api(`/v1/agents/${id}/gateway`);
+    // Proxied same-origin through the control plane so the gateway port can
+    // stay bound to the host's loopback. Pass ONLY the token: the Control UI
+    // derives its gateway from the page it was served from, and handing it an
+    // explicit gatewayUrl instead parks it behind a "Change Gateway URL"
+    // confirmation that also withholds the token.
+    //
+    // Open straight on the agent's own conversation. Each container also holds
+    // OpenClaw's built-in default agent, "main" — unused, with its own empty
+    // workspace — and the console's bare address lands there, which looked
+    // like the agent had forgotten everything said on Telegram. Telegram DMs
+    // live in `agent:<slug>:main` (OpenClaw's agent id is always the slug).
+    if (!current()) return;
+    const url = consoleViewUrl(id, slug, view, g ? `#token=${encodeURIComponent(g.token)}` : '');
+    // In the app, not a new tab: the proxy now permits framing by this origin
+    // (and still refuses every other one).
+    const a = (agents || []).find(x => x.id === id);
+    $('consoleTitle').textContent = a?.name || slug;
+    consoleGuest = false;
+    $('consoleGearBtn').style.display = '';
+    renderConsoleChannels(a);
+    const fr = $('consoleFrame');
+    // The spinner stays until the console's page has loaded (or 15 s): a blank
+    // frame for several seconds looked like nothing had happened.
+    consoleCoverSay('Opening the console…');
+    // Shown: what its chat shows is read then, not while it is covered (HB-1147).
+    const loaded = () => { if (consoleAgentId === id && $('consoleCover').lastElementChild.textContent === 'Opening the console…') { $('consoleCover').hidden = true; markConsoleSeen(id); } };
+    fr.addEventListener('load', loaded, { once: true });
+    setTimeout(loaded, 15000);
+    fr.src = url;
+    const tab = consoleTabs.find(t => t.id === id); if (tab) tab.url = url;
+    $('consoleApproveBtn').hidden = true;
+    if (!$('consoleDlg').open) $('consoleDlg').showModal();
+    // A new browser has to be approved once. OpenClaw's own instruction ("run
+    // this on the Gateway host") means a shell inside the container, which is
+    // no use from a laptop — so look for the request and offer to approve it.
+    consoleAgentId = id;
+    consoleUrl = url;
+    renderConsoleTabs();
+    consoleMark(id);
+    void autoApproveConsole(id);
+  } catch (e) {
+    if (!current()) return;
+    // The panel is open with the spinner: say what went wrong there, not only in a toast.
+    consoleCoverSay(`Could not open it: ${e.message}`);
+    toast(e.message);
+  }
+  finally { consoleOpening--; }
+}
+/** Show the console's cover (the spinner and a line of text) over the frame. */
+function consoleCoverSay(text) {
+  const c = $('consoleCover');
+  c.lastElementChild.textContent = text;
+  c.hidden = false;
+}
+
 function closeConsole() {
   consoleTicket++;
   markConsoleSeen(consoleSeenAgent()); // what it showed, before its frames go (the close event comes after)
@@ -507,23 +647,4 @@ function closeConsole() {
   closeConsoleSwitcher();
   consoleUnmark(); // now, not from the late close event (which skips while another console opens)
   $('consoleDlg').close();
-}
-
-async function downloadAgent(id, name) {
-  if (!confirm(`Download "${name}"?${channelsLostOnExport(id)}\n\nIt's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't share it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
-  // Fetched, not navigated to: a refusal (busy, not exportable) is a message,
-  // not a page of raw JSON in place of the app.
-  toast('Preparing the copy…', 20000);
-  try {
-    const res = await sfFetch(`/v1/agents/${id}/backup`);
-    if (!res.ok) { const j = await res.json().catch(() => ({})); toast(j.error || `The download failed (${res.status}).`, 10000); return; }
-    const blob = await res.blob();
-    const file = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || 'agent.hatchabot';
-    const url = URL.createObjectURL(blob);
-    const link = Object.assign(document.createElement('a'), { href: url, download: file });
-    document.body.append(link); link.click(); link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
-    toast(`Saved ${file}. "${name}" is stopped here now — keep it stopped once it runs elsewhere.`, 8000);
-  } catch (e) { toast(e.message, 8000); }
-  finally { setTimeout(() => refresh(false), 500); }
 }

@@ -12,15 +12,18 @@ import { join } from 'node:path';
  * the question being asked, so this test asks it: a Map or Set that
  * outlives a request and is not in the table fails here, with what to do.
  *
- * What it finds: an empty `new Map()` or `new Set()` (Weak ones too) kept
+ * What it finds: an empty `new Map()` or `new Set()` (Weak ones too), or a
+ * `keyedLock()` (src/util/queues.ts: a Map of turns of its own), kept
  *   - at the top of a module,
  *   - as a field of a class,
  *   - at the top of a function that builds something long-lived
  *     (`registerX`, `createX`, `makeX`: the routes, a service, a watch).
  * One filled where it is declared (`new Set(['a', 'b'])`) is a fixed list,
  * not state. One inside a handler or any other function is gone when that
- * returns. Where a Map moves to another file its row's "Where" should
- * follow, but the test asks only that the name is sorted somewhere.
+ * returns. It asks that a row's State cell names it, in any table of the
+ * section: a mention in the prose around them is no row. Where a Map moves
+ * to another file its row's "Where" should follow, but the test does not
+ * ask which file a row gives.
  */
 const SPEC = 'docs/architecture.md';
 const read = (p: string) => readFileSync(p, 'utf8');
@@ -42,7 +45,7 @@ const NOT_STATE: Record<string, string[]> = {
 
 interface Found { file: string; line: number; name: string }
 
-const EMPTY = String.raw`new (?:Map|Set|WeakMap|WeakSet)(?:<.*>)?\(\)`;
+const EMPTY = String.raw`(?:new (?:Map|Set|WeakMap|WeakSet)(?:<.*>)?\(\)|keyedLock\()`;
 const MODULE = new RegExp(String.raw`^(?:export )?(?:const|let) ([A-Za-z_$][\w$]*)(?:: [^=]+)? = ${EMPTY}`);
 const FIELD = new RegExp(String.raw`^  (?:(?:readonly|private|protected|public|static) )*(#?[A-Za-z_$][\w$]*)(?:: [^=]+)? = ${EMPTY}`);
 const IN_FACTORY = new RegExp(String.raw`^  (?:const|let) ([A-Za-z_$][\w$]*)(?:: [^=]+)? = (?:[\w.]+ \?\? )?${EMPTY}`);
@@ -102,9 +105,11 @@ describe('in-memory state is sorted (HB-0809)', () => {
       'export const busy = new Set<string>();',
       'const seen = new WeakMap<object, Map<string, number>>();',
       "const WORDS = new Set(['a', 'b']);", // a fixed list
+      'const rowTurns = keyedLock();',
       'export function registerThings(app: App) {',
       '  const turns = new Map<string, Promise<unknown>>();',
       '  const providers = deps.providers ?? new Map<string, Provider>();',
+      '  const applies = keyedLock({ refusal: () => new Error("busy") });',
       '  app.get("/x", async () => {',
       '    const local = new Set<string>();', // a handler's own
       '  });',
@@ -115,21 +120,24 @@ describe('in-memory state is sorted (HB-0809)', () => {
       'export class Keeper {',
       '  readonly #last = new Map<string, number>();',
       '  private readonly open = new Set<Socket>();',
+      '  readonly #nameTurns = keyedLock();',
       '  sweep() {',
       '    const gone = new Set<string>();',
       '  }',
       '}',
     ].join('\n')).map((f) => f.name);
-    expect(found).toEqual(['cache', 'busy', 'seen', 'turns', 'providers', '#last', 'open']);
+    expect(found).toEqual(['cache', 'busy', 'seen', 'rowTurns', 'turns', 'providers', 'applies', '#last', 'open', '#nameTurns']);
   });
 
   it('every Map and Set that outlives a request has a row in the table', () => {
-    const { section } = sorted();
+    const { section, rows } = sorted();
     expect(section, `${SPEC} has no "In-memory state, sorted" section`).not.toBe('');
+    // A row's State cell names it: a word of the prose around the tables sorts nothing.
+    const inRows = new Set(rows.flatMap((r) => names(r.state)));
     const missing = sourceFiles('src').flatMap((file) => {
       const skip = NOT_STATE[file] ?? [];
       if (skip.includes('*')) return [];
-      return longLived(file, read(file)).filter((f) => !skip.includes(f.name) && !section.includes(`\`${f.name}\``));
+      return longLived(file, read(file)).filter((f) => !skip.includes(f.name) && !inRows.has(f.name));
     }).map((f) => `${f.file}:${f.line} ${f.name}`);
     expect(missing, [
       `These outlive a request and are not sorted in ${SPEC} ("In-memory state, sorted").`,

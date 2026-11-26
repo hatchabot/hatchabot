@@ -1,30 +1,56 @@
+import { forgetReservation, freeWithin, isReserved, reserve, waitersFor, whenFree, whileReserved, type Purpose, type Reservation } from './reservations.js';
+
 /**
- * Agents with an operation in flight right now (provision, rebuild, import,
- * migrate). Reconcile must leave these alone: it judges an agent by what
- * docker reports, and mid-operation that is meaningless — a container being
+ * One operation per agent at a time: the busy flag, by the names its callers
+ * use. Since HB-1465 it is the facade of the agent's reservation
+ * (reservations.ts), which keeps the holder and what it was taken for; every
+ * take in src names its purpose.
+ *
+ * Reconcile must leave a busy agent alone: it judges an agent by what docker
+ * reports, and mid-operation that is meaningless — a container being
  * created looks "absent", one being replaced looks "stopped".
  *
  * Getting this wrong is not cosmetic. Reconcile marking an importing agent
  * FAILED made the import's final `setAgentState('RUNNING')` an illegal
  * transition, which surfaced to the user as a rolled-back migration.
+ *
+ * Each flag is its holder's (HB-1385): the mark it was given, which only
+ * that holder's release lets go. It was a Set, and a holder that let go
+ * late (its finally run twice, or after the agent had passed to another)
+ * freed whoever held the agent then.
  */
-const busy = new Set<string>();
-/** Who waits for an agent to be free (busyDone), let go when it is. */
-const freed = new Map<string, Array<() => void>>();
+export { AgentBusyError, heldFor, PURPOSES, type Purpose, type Reservation } from './reservations.js';
 
-export function markBusy(agentId: string): void {
-  busy.add(agentId);
+/**
+ * Mark the agent busy for `purpose`, for a holder that cannot put its work
+ * in one function (whileBusy): what it returns is the one way to let this
+ * mark go, in the holder's finally. Refused (AgentBusyError) when the agent
+ * is held already: one holder at a time, as whileBusy. The release lets go
+ * of this mark only: called again, or once the agent has passed to another
+ * holder, it does nothing.
+ *
+ * With no purpose: a holder that names none, which only tests are (a stand-in
+ * for another holder); test/reservations.test.ts holds src to naming one.
+ */
+export function markBusy(agentId: string, purpose: Purpose): () => void;
+export function markBusy(agentId: string): () => void;
+export function markBusy(agentId: string, purpose?: Purpose): () => void {
+  const r = reserve(agentId, purpose);
+  return () => r.release();
 }
 
+/**
+ * Forget the agent's flag, whoever holds it, and let its waiters go: what a
+ * restart does to every flag (they are this process's memory). For tests,
+ * which stand for a restart with it; src lets a flag go only through its
+ * holder's release (test/busy.test.ts keeps it out of src).
+ */
 export function clearBusy(agentId: string): void {
-  busy.delete(agentId);
-  const waiting = freed.get(agentId);
-  freed.delete(agentId);
-  for (const go of waiting ?? []) go();
+  forgetReservation(agentId);
 }
 
 export function isBusy(agentId: string): boolean {
-  return busy.has(agentId);
+  return isReserved(agentId);
 }
 
 /**
@@ -35,17 +61,7 @@ export function isBusy(agentId: string): boolean {
  * free. Never rejects.
  */
 export function busyDone(agentId: string, signal?: AbortSignal): Promise<void> {
-  if (!busy.has(agentId) || signal?.aborted) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    const go = () => { signal?.removeEventListener('abort', leave); resolve(); };
-    const leave = () => {
-      const rest = (freed.get(agentId) ?? []).filter((w) => w !== go);
-      if (rest.length) freed.set(agentId, rest); else freed.delete(agentId);
-      resolve();
-    };
-    freed.set(agentId, [...(freed.get(agentId) ?? []), go]);
-    signal?.addEventListener('abort', leave, { once: true });
-  });
+  return whenFree(agentId, signal);
 }
 
 /**
@@ -64,48 +80,40 @@ export const OWED_BUSY_WAIT_MS = 30 * 60_000;
  * does not say it is still free: whoever goes first takes it, and the rest
  * are refused again.
  */
-export async function freedWithin(agentId: string, maxMs: number, signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted) return false;
-  if (!busy.has(agentId)) return true;
-  const stop = new AbortController();
-  const timer = setTimeout(() => stop.abort(), maxMs);
-  timer.unref?.();
-  const end = () => stop.abort();
-  signal?.addEventListener('abort', end, { once: true });
-  try { await busyDone(agentId, stop.signal); } finally { clearTimeout(timer); signal?.removeEventListener('abort', end); }
-  return !stop.signal.aborted;
+export function freedWithin(agentId: string, maxMs: number, signal?: AbortSignal): Promise<boolean> {
+  return freeWithin(agentId, maxMs, signal);
 }
 
 /** How many wait for this agent to be free (tests: a waiter that gave up is not among them). */
 export function busyWaiters(agentId: string): number {
-  return freed.get(agentId)?.length ?? 0;
-}
-
-/** A second lifecycle operation arrived while one was still running. */
-export class AgentBusyError extends Error {
-  constructor(readonly userMessage: string) {
-    super(userMessage);
-    this.name = 'AgentBusyError';
-  }
+  return waitersFor(agentId);
 }
 
 /**
- * Run `fn` with the agent marked busy, clearing it however that ends.
+ * Run `fn` with the agent marked busy for `purpose`, clearing it however
+ * that ends (reservations.ts, `whileReserved`).
  *
  * Exclusive: a caller arriving while the agent is already busy is refused,
  * not queued. Overlapping lifecycle operations (a Rebuild during a migrate's
  * stopped window, an adopt during a rebuild) don't merely race — they end in
  * two containers polling one bot token, or a container replaced underneath a
  * volume restore. Refusing loudly is the only safe answer.
+ *
+ * `fn` is given the reservation; `reuse` hands a holder's own on to code
+ * that would take the agent again, which then goes on under it (in place of
+ * `busyHeld`, HB-1465).
+ *
+ * With no purpose (`whileBusy(id, fn)`): a holder that names none, which
+ * only tests are.
  */
-export async function whileBusy<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
-  if (busy.has(agentId)) {
-    throw new AgentBusyError('Another operation is already running on this agent.');
-  }
-  markBusy(agentId);
-  try {
-    return await fn();
-  } finally {
-    clearBusy(agentId);
-  }
+export function whileBusy<T>(agentId: string, purpose: Purpose, fn: (held: Reservation) => Promise<T>, opts?: { reuse?: Reservation }): Promise<T>;
+export function whileBusy<T>(agentId: string, fn: () => Promise<T>): Promise<T>;
+export function whileBusy<T>(
+  agentId: string,
+  purposeOrFn: Purpose | (() => Promise<T>),
+  fn?: (held: Reservation) => Promise<T>,
+  opts?: { reuse?: Reservation },
+): Promise<T> {
+  if (typeof purposeOrFn === 'function') return whileReserved(agentId, undefined, purposeOrFn);
+  return whileReserved(agentId, purposeOrFn, fn!, opts);
 }

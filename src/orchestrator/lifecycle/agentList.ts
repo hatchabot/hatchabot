@@ -18,7 +18,7 @@ import { localModelListed } from '../sources/warmModels.js';
  * reach that it should not, its bots, its unread mark and its progress). Part
  * of the agent lifecycle service (agentLifecycle.ts). Who may see the
  * machine owner's view of every account (`?all=1`) is the route's
- * (src/api/lifecycleRoutes.ts); each tile is `publicAgent`'s shape.
+ * (src/api/agents/lifecycleRoutes.ts); each tile is `publicAgent`'s shape.
  *
  * A machine that doesn't answer is skipped for a minute (`slowHostUntil`, a
  * cache: a restart only tries it once more, sooner).

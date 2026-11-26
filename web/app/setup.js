@@ -1,4 +1,4 @@
-// web/app/setup.js: the first-run setup guide.
+// web/app/setup.js: the first-run setup guide, and what its steps read (the newest backup, the tailnet, the shared keys).
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -6,6 +6,29 @@
 // ---- setup: first-run subscription profile --------------------------------
 
 let setupOpen = false; // the guide is also reachable long after the first agent
+
+let backupAgeH = null; // hours since the newest backup set; null = unknown or not the machine owner
+let backupIncomplete = false; // the newest set's run failed or never finished (review, 2026-09-29)
+/** What this machine knows about its own tailnet, for the HTTPS setup step. */
+let tailnet = null;
+async function loadTailnet() {
+  try { tailnet = await api('/v1/tailscale'); }
+  catch { tailnet = null; } // not the machine owner, or the probe is unavailable
+}
+/** Whether the fleet's Gemini and Brave keys are set — the two optional setup steps. */
+let fleetKeys = { media: null, search: null }; // null = unknown or not the machine owner
+async function loadFleetKeys() {
+  try { fleetKeys = { media: !!(await api('/v1/media-key')).set, search: !!(await api('/v1/search-key')).set }; }
+  catch { fleetKeys = { media: null, search: null }; }
+}
+async function loadBackupAge() {
+  try {
+    const r = await api('/v1/backups?latest=1');
+    const newest = (r.backups ?? [])[0];
+    backupAgeH = newest ? (Date.now() - Date.parse(newest.date + 'T03:30:00')) / 3600_000 : null;
+    backupIncomplete = newest?.complete === false;
+  } catch { backupAgeH = null; backupIncomplete = false; } // not the host owner, or no backups configured
+}
 
 /**
  * The setup checklist, in the order a house actually gets set up: three steps
@@ -81,8 +104,10 @@ function setupSteps() {
         — someone knocking, a card waiting — down the same conversation. Confirming still happens here, in the app.</p>
       ${ops ? `<div class="actions" style="justify-content:flex-start"><button class="primary" ${onAction('click', 'openV2Agent', [`${ops.id ?? ''}`, "messaging"])}>Open its chat apps</button></div>`
             : `<p class="sub" style="margin:0">Set the agent up first — the step above.</p>`}` },
-    ...(managed ? [] : [{ key: 'https', done: httpsDone || !!tailnet?.reachable,
-      title: httpsDone || tailnet?.reachable
+    // Serve still at the app's own port (HB-1239): not done until it is moved, so the step says how.
+    ...(managed ? [] : [{ key: 'https', done: (httpsDone || !!tailnet?.reachable) && !tailnet?.oldPort,
+      title: tailnet?.oldPort ? 'Point Tailscale serve at its own port'
+        : httpsDone || tailnet?.reachable
         ? `Reachable at ${esc(((tailnet?.url || appConfig?.appUrl) ?? '').replace(/^https:\/\//, ''))}`
         : 'Reach it from your phone, over HTTPS',
       body: tailnetStepBody() }]),
@@ -112,7 +137,34 @@ function setupSteps() {
  */
 function tailnetStepBody() {
   const port = tailnet?.port ?? 8080;
-  const cmd = `tailscale serve --bg http://localhost:${port}`;
+  // Serve goes to the listener for it, not the app's own port (HB-1239).
+  const proxyPort = tailnet?.proxyPort ?? 8094;
+  const cmd = tailnet?.serveCommand || `tailscale serve --bg http://127.0.0.1:${proxyPort}`;
+  // The listener for it did not open: Hatchabot moves or turns on serve only onto an open one (the owner's call, 2026-11-24).
+  if (tailnet?.installed && tailnet.dns && tailnet.proxyListening === false) {
+    return `<p class="sub" style="margin:4px 0 6px"><b style="color:var(--warn)">Not yet.</b> Hatchabot's listener for Tailscale serve,
+        <code>127.0.0.1:${proxyPort}</code>, is not open${tailnet.proxyError ? ` — <i>${esc(String(tailnet.proxyError).replace(/\.$/, ''))}</i>` : ''}. Until it opens,
+        Hatchabot leaves Tailscale serve as it is${tailnet.serving && tailnet.oldPort ? `, still on port ${port}` : ''}.</p>
+      <p class="sub" style="margin:0">If another program has port ${proxyPort}, set <code>HATCHABOT_PROXY_PORT</code> to a free port in
+        <code>.env</code>, then restart Hatchabot. <code>hatchabot doctor</code> checks it.</p>`;
+  }
+  // Pointed at the app's own port, as before 2.192.0: there every device on the tailnet shares one sign-in limit.
+  // On a Mac at the listener too, for now (docs/tailscale.md): the guide does not promise otherwise there.
+  if (tailnet?.serving && tailnet.oldPort) {
+    const why = tailnet.mac
+      ? `On a Mac every device on your tailnet shares one sign-in limit at either port for now, unless Tailscale runs as your own
+        user and your uid is in <code>HATCHABOT_PROXY_TRUST_UIDS</code> (docs/tailscale.md).`
+      : `Until it is moved, every device on your tailnet shares one sign-in limit: one person's wrong passwords lock the others out.`;
+    return `<p class="sub" style="margin:4px 0 6px"><b style="color:var(--warn)">One step left.</b> Tailscale serves this machine at
+        <code>https://${esc(tailnet.dns ?? '')}</code>, but to port ${port}, not to port ${proxyPort}, the one for it. ${why}</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="primary" id="tsServeBtn" ${onAction('click', 'turnOnServe', [{ $: 'el' }, true])}>Move it to port ${proxyPort}</button>
+        <span class="sub">The same address, on your tailnet only.</span>
+      </div>
+      <div class="sub" id="tsServeErr" style="margin-top:6px"></div>
+      <p class="sub" style="margin:6px 0 0">Or run it yourself: <code>${esc(cmd)}</code>
+        <button ${onAction('click', 'copyAndSay', [`${cmd ?? ''}`, "Command copied", "Copy it by hand"])}>Copy</button></p>`;
+  }
   // Configured but not answering: the usual cause is that the tailnet has
   // never issued an HTTPS certificate, which no amount of `serve` will fix.
   if (tailnet?.serving && !tailnet.reachable) {
@@ -175,18 +227,28 @@ function tailnetStepBody() {
  * not have — on Linux the CLI wants root unless you are its operator — so a
  * refusal is shown as it came back, with the command to run by hand.
  */
-async function turnOnServe(btn) {
-  if (!confirm('Serve Hatchabot over HTTPS on your tailnet?\n\nEvery device signed into your tailnet will be able to reach it. Nothing is exposed to the public internet.')) return;
-  btn.disabled = true; btn.textContent = 'Turning on…';
+async function turnOnServe(btn, moving = false) {
+  // Moving it (HB-1239) puts nothing anywhere new: the same address, the same devices.
+  if (!moving && !confirm('Serve Hatchabot over HTTPS on your tailnet?\n\nEvery device signed into your tailnet will be able to reach it. Nothing is exposed to the public internet.')) return;
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = moving ? 'Moving…' : 'Turning on…';
   $('tsServeErr').textContent = '';
   try {
     const r = await api('/v1/tailscale/serve', { method: 'POST', body: {} });
-    tailnet = { ...(tailnet ?? {}), ...r };
-    toast(r.url ? `On — open ${r.url.replace(/^https:\/\//, '')} on your phone.` : 'Turned on.', 9000);
+    // "Moved" only when it moved: an answer that still lands on the app's own port is a refusal.
+    if (moving && (r.oldPort === true || !r.moved?.length)) throw Object.assign(new Error(`Tailscale still sends your tailnet to port ${tailnet?.port ?? 8080}.`), { data: {} });
+    tailnet = { ...(tailnet ?? {}), oldPort: false, ...r };
+    toast(moving ? `Moved: your tailnet reaches Hatchabot on port ${tailnet.proxyPort ?? 8094} now.`
+      : r.url ? `On — open ${r.url.replace(/^https:\/\//, '')} on your phone.` : 'Turned on.', 9000);
     setupRedraw();
   } catch (e) {
-    $('tsServeErr').innerHTML = `<b style="color:var(--bad)">Hatchabot could not turn it on:</b> ${esc(e.message)}<br>Run the command below in a terminal instead.`;
-    btn.disabled = false; btn.textContent = 'Turn on HTTPS';
+    // The listener not open: no command would help, and the step says so once it is drawn again.
+    const closed = e?.data?.noListener === true;
+    if (closed) tailnet = { ...(tailnet ?? {}), proxyListening: false };
+    // The refusal's own command when it has one (each entry left, its path kept); none, no hint to run one.
+    const cmd = typeof e?.data?.command === 'string' ? e.data.command : '';
+    $('tsServeErr').innerHTML = `<b style="color:var(--bad)">Hatchabot could not ${moving ? 'move it' : 'turn it on'}:</b> ${esc(e.message)}${cmd && !closed ? `<br>Run this in a terminal instead: <code>${esc(cmd)}</code>` : ''}`;
+    btn.disabled = false; btn.textContent = label;
   }
 }
 

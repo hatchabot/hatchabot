@@ -201,7 +201,7 @@ export function createHosts(deps: HostsDeps, installs?: { underWay(hostId: strin
       try {
         // Hold the busy flag for the stop so an export/migrate can't start
         // between the check and the stop and get its container killed mid-tar.
-        const done = await whileBusy(listed.id, async () => {
+        const done = await whileBusy(listed.id, 'drain', async () => {
           // As it is now, not as listed: while an earlier agent's stop waited,
           // this one could have moved to another host (its old copy left
           // there), stopped or been rebuilt. Stopped by the old listing, its

@@ -36,6 +36,7 @@ import { isBusy, whileBusy } from '../lifecycle/busy.js';
 import { beginOperation, rethrowIfCrash, type OpHandle } from '../lifecycle/operations.js';
 import { slugify } from '../lifecycle/provision.js';
 import { agentTimeZone } from '../schedules/timezone.js';
+import { keyedLock } from '../../util/queues.js';
 
 /**
  * The apps installed in agents (HB-0808; docs/apps-in-agents.md): a codebase
@@ -241,16 +242,8 @@ export function createAgentApps(deps: AgentAppsDeps): AgentApps {
    * the others' records, and two running side by side both found none and both
    * went in on the same mailbox.
    */
-  const appAccountLocks = new Map<string, Promise<unknown>>();
-  const oneAppAtATime = <T>(ownerId: string, app: string, fn: () => Promise<T>): Promise<T> => {
-    const key = `${ownerId}\n${app}`;
-    const prev = appAccountLocks.get(key) ?? Promise.resolve();
-    const run = prev.then(fn, fn);
-    const tail = run.catch(() => {});
-    appAccountLocks.set(key, tail);
-    void tail.then(() => { if (appAccountLocks.get(key) === tail) appAccountLocks.delete(key); });
-    return run;
-  };
+  const appAccountLocks = keyedLock();
+  const oneAppAtATime = <T>(ownerId: string, app: string, fn: () => Promise<T>): Promise<T> => appAccountLocks.run(`${ownerId}\n${app}`, fn);
 
   /** Recorded as it goes (appOperations.ts): its steps, and how it ended. A (simulated) dead process records nothing more. */
   const appOpFailed = (op: OpHandle | undefined, e: unknown) => {
@@ -284,7 +277,7 @@ export function createAgentApps(deps: AgentAppsDeps): AgentApps {
       // and go back on if this install fails, so the agent still matches the record.
       const replaced = had && had.app !== rel.manifest.app ? had : undefined;
       let op: OpHandle | undefined;
-      const done = await whileBusy(a.id, async () => {
+      const done = await whileBusy(a.id, 'app-install', async () => {
         a = appStillAsWas(a, had);
         // The tasks the owner had turned off go back on turned off, and the
         // operation records which before any comes off, for a restart too:
@@ -493,7 +486,7 @@ export function createAgentApps(deps: AgentAppsDeps): AgentApps {
       const rel = { ...at, tar: await releaseTar(appGit, repo, at.sha) };
       let op: OpHandle | undefined;
       const done = await oneAppAtATime(a.ownerId, had.app, async () => {
-        const d = await whileBusy(a.id, () => {
+        const d = await whileBusy(a.id, 'app-update', () => {
           const now = appStillAsWas(a, had);
           op = beginOperation(store, 'app-update', a.id, { app: had.app, toSha: rel.sha, fromSha: had.sha, fromApp: had.app, source: had.source, ref }, { requestedBy: o.requestedBy });
           // An update that points it at another mailbox (new values, or a new
@@ -513,7 +506,7 @@ export function createAgentApps(deps: AgentAppsDeps): AgentApps {
 
     rollback: async (a, had, requestedBy) => {
       let op: OpHandle | undefined;
-      await whileBusy(a.id, () => {
+      await whileBusy(a.id, 'app-rollback', () => {
         op = beginOperation(store, 'app-rollback', a.id, { app: had.app, toSha: had.previousSha!, fromSha: had.sha, fromApp: had.app }, { requestedBy });
         return switchTo(withSteps(appDeps(a), op), had.previousManifest as AppManifest, had.previousSha!, had.manifest as AppManifest);
       }).catch((e: unknown) => { appOpFailed(op, e); throw e; });
@@ -524,7 +517,7 @@ export function createAgentApps(deps: AgentAppsDeps): AgentApps {
     },
 
     remove: async (a, had) => {
-      const n = await whileBusy(a.id, async () => {
+      const n = await whileBusy(a.id, 'app-remove', async () => {
         appStillAsWas(a, had);
         const removed = await removeTasks(appDeps(a), had.app, had.manifest as AppManifest);
         store.deleteAgentApp(a.id);

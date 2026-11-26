@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { SecretStore } from '../secrets/secretStore.js';
 import { setTelegramDisplayName } from './telegramName.js';
+import { keyedLock } from '../util/queues.js';
 import type {
   ChannelProvisioner,
   ChannelProvisionRequest,
@@ -339,14 +340,10 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    * "unassigned" with nothing queued to put it right (HB-1035). Keyed by the
    * lower-cased @handle; an entry goes once its last write ends.
    */
-  readonly #nameTurns = new Map<string, Promise<void>>();
+  readonly #nameTurns = keyedLock();
 
   #applyDisplayName(secretRef: string, username: string, name: string, fromSweep = false): Promise<void> {
-    const key = username.toLowerCase();
-    const run = (this.#nameTurns.get(key) ?? Promise.resolve()).then(() => this.#writeDisplayName(secretRef, username, name, fromSweep));
-    const tail: Promise<void> = run.then(() => {}, () => {}).then(() => { if (this.#nameTurns.get(key) === tail) this.#nameTurns.delete(key); });
-    this.#nameTurns.set(key, tail);
-    return run;
+    return this.#nameTurns.run(username.toLowerCase(), () => this.#writeDisplayName(secretRef, username, name, fromSweep));
   }
 
   /** From the sweep: is `name` still the one queued for this bot? A lease or a sync may have queued its own while it waited. */

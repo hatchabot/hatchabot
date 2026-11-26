@@ -5,22 +5,23 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { clearBusy, isBusy } from '../src/orchestrator/lifecycle/busy.js';
-import { markInterrupted, newBootForTests } from '../src/orchestrator/lifecycle/operations.js';
+import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { filesReplacingCount, markInterrupted, newBootForTests, setStepHookForTests } from '../src/orchestrator/lifecycle/operations.js';
 import { resumeOperations } from '../src/orchestrator/lifecycle/operationsResume.js';
 import { reconcileAgents } from '../src/orchestrator/lifecycle/reconcile.js';
 import { MigrateError } from '../src/orchestrator/transfer/migrate.js';
 import { peekFormat, TransferError } from '../src/orchestrator/transfer/transfer.js';
 import { createTransfers, type Transfers } from '../src/orchestrator/transfer/transfers.js';
 import { createAgentRecords } from '../src/orchestrator/lifecycle/agentRecords.js';
-import { createCoreFileTurns, type CoreFileTurns } from '../src/orchestrator/files/coreFileTurns.js';
+import { CORE_FILES_WAIT_MS, createCoreFileTurns, type CoreFileTurns } from '../src/orchestrator/files/coreFileTurns.js';
+import { ADOPT_PASS_TURN_WAIT_MS } from '../src/orchestrator/transfer/adopts.js';
 import { workspacePath } from '../src/orchestrator/files/snapshots.js';
 import { parseTemplate, readTemplate } from '../src/orchestrator/transfer/template.js';
 import { migrateCrons } from '../src/orchestrator/transfer/cronImport.js';
 import { MemSecrets, seedRunningAgent } from './support/world.js';
 import Fastify from 'fastify';
 import { installErrorHandler } from '../src/api/errorHandler.js';
-import { registerTransferRoutes } from '../src/api/transferRoutes.js';
+import { registerTransferRoutes } from '../src/api/data/transferRoutes.js';
 import type { RouteContext } from '../src/api/routeContext.js';
 import * as zlib from 'node:zlib';
 import { randomBytes } from 'node:crypto';
@@ -55,6 +56,8 @@ interface World {
   kicked: string[];
   forgotten: string[];
   notes: string[];
+  /** The events traced, by name. */
+  events: string[];
   peerCalls: string[];
   /** What the other server answers, by the end of its path. */
   peer: Record<string, { status: number; body: unknown }>;
@@ -71,7 +74,7 @@ function world(): World {
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'cloud', provider: 'mock', name: 'Runner', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'Claude', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now', shared: true } as never);
-  const w = { store, secrets, local, runner, kicked: [], forgotten: [], notes: [], peerCalls: [], peer: {}, gone: new Set() } as unknown as World;
+  const w = { store, secrets, local, runner, kicked: [], forgotten: [], notes: [], events: [], peerCalls: [], peer: {}, gone: new Set() } as unknown as World;
   w.turns = createCoreFileTurns({ store, agentGone: (id) => w.gone.has(id) });
   w.svc = createTransfers({
     store, secrets,
@@ -80,7 +83,7 @@ function world(): World {
       if (hostId === 'h2') return runner;
       throw new Error(`no host ${hostId}`);
     },
-    trace: () => () => {},
+    trace: () => (event) => { w.events.push(event); },
     channel: { kind: 'telegram', pool: { availableCount: () => 0, owns: () => false }, release: async () => {}, discardPending: () => {} } as never,
     embedder: () => undefined as never,
     isInFlight: () => false,
@@ -95,7 +98,7 @@ function world(): World {
     forgetAgent: (id) => { w.forgotten.push(id); },
     notify: (_ownerId, body) => { w.notes.push(body); },
     logError: () => {},
-    withCoreFilesTurn: (id, fn) => w.turns.withCoreFilesTurn(id, fn),
+    withCoreFilesTurn: (id, fn, waitMs?: number) => w.turns.withCoreFilesTurn(id, fn, waitMs),
   });
   return w;
 }
@@ -750,6 +753,28 @@ describe('a template import storing its setup answers', () => {
     expect(w.store.getAgent(op!.agentId!)!.state).toBe('DELETED');
     expect([...w.secrets.map.keys()].filter((k) => k.startsWith('agent-env/'))).toEqual([]);
   });
+
+  it('a copy and a template with answers to store are imports: each counts once as its row begins, under its draft\'s take; with none to store, no row and nothing counted; the original counts nothing (HB-1465)', async () => {
+    // The count a snapshot by hand and an access check compare (operations.ts, filesReplacingCount).
+    const w = world();
+    const data = await templateWithTwoKeys(w);
+    const seen: Array<{ count: number; held: boolean }> = [];
+    setStepHookForTests((op, k) => { if (op.kind === 'import' && k === '#succeeded') seen.push({ count: filesReplacingCount(op.agentId!), held: isBusy(op.agentId!) }); });
+    try {
+      const { agent: answered } = await w.svc.copies.importTemplateFile(w.store.getHost('h1')!, data, { ownerId: OWNER, name: 'Kitchen Two', values });
+      expect(filesReplacingCount(answered.id)).toBe(1);
+      const { agent: bare } = await w.svc.copies.importTemplateFile(w.store.getHost('h1')!, data, { ownerId: OWNER, name: 'Kitchen Three' });
+      expect(w.store.listOperations([bare.id])).toEqual([]);
+      expect(filesReplacingCount(bare.id)).toBe(0);
+      const before = filesReplacingCount('a1');
+      const { clone } = await w.svc.copies.clone(w.store.getAgent('a1')!, { owner: OWNER, current: () => w.store.getAgent('a1'), ask: () => ({ name: 'Kitchen Copy', telegram: false }) });
+      expect(w.store.listOperations([clone.id])[0]).toMatchObject({ kind: 'import', status: 'succeeded' });
+      expect(filesReplacingCount(clone.id)).toBe(1);
+      expect(filesReplacingCount('a1')).toBe(before);
+      // Each ended under its draft's take, counted once.
+      expect(seen).toEqual([{ count: 1, held: true }, { count: 1, held: true }]);
+    } finally { setStepHookForTests(undefined); }
+  });
 });
 
 describe('inbox', () => {
@@ -966,6 +991,321 @@ describe('adopts', () => {
     expect(w.store.listAdoptPending()).toEqual([]);
     expect(w.notes).toHaveLength(1);
     expect(w.notes[0]).toMatch(/^The scheduled tasks of the OpenClaw agent adopted into Kitchen could not be read \(the task store could not be read .*\), so none of them came over\. Add them again in its Tasks page\.$/);
+  });
+
+  const adds = (w: World) => w.local.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add');
+  const looks = (w: World) => w.local.execLog.filter((a) => a[0] === 'cron' && a[1] === 'list').length;
+  /**
+   * The two refusals a re-point meets (HB-1466), each let go by what it
+   * returns. Another operation takes the agent's busy flag between the copy
+   * and the re-point (as the adopt keeps its record), or at the quick pass's
+   * look at its gateway; or a change holds the agent's files turn, and the
+   * re-point does not wait for it.
+   */
+  function takenAfterTheCopy(w: World, id: string) {
+    let release: (() => void) | undefined;
+    const set = w.store.setAdoptPending.bind(w.store);
+    w.store.setAdoptPending = (...args) => { set(...args); release ??= markBusy(id); };
+    return async () => { release?.(); w.store.setAdoptPending = set; };
+  }
+  function takenAtTheLook(w: World, id: string) {
+    let release: (() => void) | undefined;
+    const exec = w.local.exec.bind(w.local);
+    w.local.exec = async (r, argv, o) => {
+      const out = await exec(r, argv, o);
+      if (argv[0] === 'cron' && argv[1] === 'list') release ??= markBusy(id);
+      return out;
+    };
+    return async () => { release?.(); w.local.exec = exec; };
+  }
+  function filesTurnHeld(w: World, id: string) {
+    const turns = w.turns;
+    w.turns = { ...turns, withCoreFilesTurn: (agentId, fn) => turns.withCoreFilesTurn(agentId, fn, 0) };
+    let go!: () => void;
+    const until = new Promise<void>((r) => { go = r; });
+    const held = turns.withCoreFilesTurn(id, () => until);
+    return async () => { go(); await held; w.turns = turns; };
+  }
+
+  it.each([
+    ['another operation takes the agent after the copy', takenAfterTheCopy],
+    ['its files turn does not come in time', filesTurnHeld],
+  ] as const)('an adopt into a running agent whose re-point is refused (%s) says its tasks were put off, and the pass carries them (HB-1466)', async (_how, refuse) => {
+    const w = world();
+    const id = await seed(w);
+    const free = refuse(w, id);
+    let adopted;
+    try { adopted = await w.svc.adopts.adoptInto(w.store.getAgent(id)!, ws); } finally { await free(); }
+    // It answered no tasks at all, though its record carried them later.
+    expect(adopted.crons).toEqual({ total: 1, carried: 0, failed: 0, deferred: 1 });
+    expect(w.store.listAdoptPending()).toHaveLength(1);
+    expect(adds(w)).toHaveLength(0);
+    await w.svc.adopts.finishDeferredAdopts();
+    expect(w.store.listAdoptPending()).toEqual([]);
+    expect(adds(w)[0]).toContain('--disabled');
+  });
+
+  /** Adopted into a stopped agent, then started: its adopt waits for the quick pass. */
+  async function putOffThenStarted(w: World) {
+    const id = await seed(w);
+    const ref = w.store.getAgent(id)!.runtimeRef!;
+    await w.local.stop(ref);
+    w.store.setAgentState(id, 'STOPPED');
+    expect((await w.svc.adopts.adoptInto(w.store.getAgent(id)!, ws)).crons).toMatchObject({ deferred: 1 });
+    await w.local.start(ref);
+    w.store.setAgentState(id, 'RUNNING');
+    return id;
+  }
+
+  it.each([
+    ['another operation takes the agent at its look', takenAtTheLook],
+    ['its files turn does not come in time', filesTurnHeld],
+  ] as const)('a put-off adopt whose re-point is refused (%s) is tried again at the next pass, not an hour on (HB-1466)', async (_how, refuse) => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse('2026-11-20T09:00:00.000Z'));
+      const free = refuse(w, id);
+      try { await w.svc.adopts.finishDeferredAdopts(); } finally { await free(); }
+      expect(w.store.listAdoptPending()).toHaveLength(1);
+      expect(adds(w)).toHaveLength(0);
+      vi.setSystemTime(Date.parse('2026-11-20T09:05:00.000Z'));   // the next quick pass
+      await w.svc.adopts.finishDeferredAdopts();
+    } finally { vi.useRealTimers(); }
+    expect(w.store.listAdoptPending()).toEqual([]);
+    expect(adds(w)[0]).toContain('--disabled');
+  });
+
+  /**
+   * A change that holds the agent's files turn until let go (`free`), and
+   * `asked`, settled once something else asks for the turn (the copy before
+   * it reads and packs real files, not on the fake clock), as `next()` is
+   * for the ask after. What waits for it keeps the turn's own limits.
+   */
+  function changeHoldsTheTurn(w: World, id: string) {
+    const turns = w.turns;
+    let go!: () => void;
+    const until = new Promise<void>((r) => { go = r; });
+    const held = turns.withCoreFilesTurn(id, () => until);
+    let ask: (() => void) | undefined;
+    /** Settled once something next asks for the turn. */
+    const next = () => new Promise<void>((r) => { ask = r; });
+    const asked = next();
+    w.turns = { ...turns, withCoreFilesTurn: (agentId, fn, waitMs) => { ask?.(); return turns.withCoreFilesTurn(agentId, fn, waitMs); } };
+    return { asked, next, free: async () => { go(); await held; w.turns = turns; } };
+  }
+  const ticks = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+
+  it('the pass\'s re-point waits a short while for a held files turn, then lets the agent go and is left for the next pass (HB-1466)', async () => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    const { asked, free } = changeHoldsTheTurn(w, id);
+    let settled = false;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      vi.setSystemTime(Date.parse('2026-11-20T09:00:00.000Z'));
+      const pass = w.svc.adopts.finishDeferredAdopts().finally(() => { settled = true; });
+      await asked;
+      await vi.advanceTimersByTimeAsync(ADOPT_PASS_TURN_WAIT_MS - 1);
+      await ticks();
+      expect(settled).toBe(false);
+      expect(isBusy(id)).toBe(true);       // it waits for the turn under the agent's busy flag
+      await vi.advanceTimersByTimeAsync(1);
+      await ticks();
+      // Refused at the short wait, the flag let go: at the turn's full limit
+      // (2 minutes) the owner's other operations were refused as busy meanwhile.
+      expect(settled).toBe(true);
+      expect(isBusy(id)).toBe(false);
+      await pass;
+      expect(w.store.listAdoptPending()).toHaveLength(1);
+      expect(adds(w)).toHaveLength(0);
+      await free();
+      vi.setSystemTime(Date.parse('2026-11-20T09:05:00.000Z'));   // the next quick pass
+      const again = w.svc.adopts.finishDeferredAdopts();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await again;
+    } finally {
+      // Failing, let what still waits end before the timers are real again.
+      if (!settled) { await free(); await vi.advanceTimersByTimeAsync(CORE_FILES_WAIT_MS); }
+      vi.useRealTimers();
+    }
+    expect(w.store.listAdoptPending()).toEqual([]);
+    expect(adds(w)[0]).toContain('--disabled');
+  });
+
+  it('an adopt\'s own re-point still waits the files turn\'s full limit (HB-1466)', async () => {
+    const w = world();
+    const id = await seed(w);
+    const { asked, free } = changeHoldsTheTurn(w, id);
+    let settled = false;
+    let adopted;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const adopting = w.svc.adopts.adoptInto(w.store.getAgent(id)!, ws).finally(() => { settled = true; });
+      await asked;                                                       // its re-point waits for the turn
+      await vi.advanceTimersByTimeAsync(CORE_FILES_WAIT_MS - 1_000);   // well past the pass's short wait
+      await ticks();
+      expect(settled).toBe(false);
+      await free();
+      await vi.advanceTimersByTimeAsync(60_000);
+      adopted = await adopting;
+    } finally {
+      if (!settled) { await free(); await vi.advanceTimersByTimeAsync(CORE_FILES_WAIT_MS); }
+      vi.useRealTimers();
+    }
+    // It got the turn once the change ended, and carried the task then.
+    expect(adopted.crons).toEqual({ total: 1, carried: 1, failed: 0 });
+    expect(w.store.listAdoptPending()).toEqual([]);
+  });
+
+  it('a run of refused passes is said once, and goes straight to the re-point with no look at its gateway each time (HB-1466)', async () => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    const turn = changeHoldsTheTurn(w, id);
+    const before = looks(w);
+    const start = Date.parse('2026-11-20T09:00:00.000Z');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      // An hour of the turn held: twelve passes, each refused at the short wait.
+      for (let i = 0; i < 12; i++) {
+        vi.setSystemTime(start + i * 5 * 60_000);
+        const asked = i === 0 ? turn.asked : turn.next();
+        const pass = w.svc.adopts.finishDeferredAdopts();
+        await asked;
+        await vi.advanceTimersByTimeAsync(ADOPT_PASS_TURN_WAIT_MS);
+        await pass;
+      }
+      // Twelve of each before: the timeline keeps 200 events an agent.
+      expect(w.events.filter((e) => e === 'adopt.repoint_busy')).toHaveLength(1);
+      expect(looks(w) - before).toBe(1);   // the first pass's look only
+      expect(w.store.listAdoptPending()).toHaveLength(1);
+      expect(adds(w)).toHaveLength(0);
+      await turn.free();
+      vi.setSystemTime(start + 12 * 5 * 60_000);
+      const pass = w.svc.adopts.finishDeferredAdopts();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await pass;
+    } finally { await turn.free(); vi.useRealTimers(); }
+    expect(w.store.listAdoptPending()).toEqual([]);
+    expect(adds(w)[0]).toContain('--disabled');
+    expect(w.events).toContain('adopt.deferred_done');
+  });
+
+  // What ends a run of refusals (HB-1466): a re-point that runs, the agent
+  // found stopped, the record gone. After each the next pass looks first,
+  // and a new refusal is said again.
+  const said = (w: World) => w.events.filter((e) => e === 'adopt.repoint_busy').length;
+
+  it('a refused adopt whose next re-point runs and finds its gateway down looks at it first again after that (HB-1466)', async () => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    const start = Date.parse('2026-11-20T09:00:00.000Z');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      vi.setSystemTime(start);
+      const free = takenAtTheLook(w, id);
+      await w.svc.adopts.finishDeferredAdopts();                 // looked, then refused
+      await free();
+      // Its gateway stops answering. The next pass goes straight to the
+      // re-point, which runs, and finds it so: the adopt waits.
+      w.local.execResponses.set('cron list', { code: 1, stdout: '', stderr: 'gateway not ready' });
+      vi.setSystemTime(start + 5 * 60_000);
+      let pass = w.svc.adopts.finishDeferredAdopts();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await pass;
+      expect(w.events).toContain('adopt.deferred_waiting');
+      expect(w.store.listAdoptPending()).toHaveLength(1);
+      // An hour on, it looks first (one `cron list`, outside the busy flag)
+      // and stops there, rather than the re-point's two under the flag.
+      const before = looks(w);
+      vi.setSystemTime(start + 66 * 60_000);
+      pass = w.svc.adopts.finishDeferredAdopts();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await pass;
+      expect(looks(w) - before).toBe(1);
+    } finally { vi.useRealTimers(); }
+    expect(w.store.listAdoptPending()).toHaveLength(1);
+  });
+
+  it('a refused adopt whose agent stops and starts again says a new refusal again (HB-1466)', async () => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    const ref = w.store.getAgent(id)!.runtimeRef!;
+    const turn = changeHoldsTheTurn(w, id);
+    const start = Date.parse('2026-11-20T09:00:00.000Z');
+    const refusedPass = async (asked: Promise<void>) => {
+      const pass = w.svc.adopts.finishDeferredAdopts();
+      await asked;
+      await vi.advanceTimersByTimeAsync(ADOPT_PASS_TURN_WAIT_MS);
+      await pass;
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      vi.setSystemTime(start);
+      await refusedPass(turn.asked);
+      expect(said(w)).toBe(1);
+      await w.local.stop(ref);
+      w.store.setAgentState(id, 'STOPPED');
+      vi.setSystemTime(start + 5 * 60_000);
+      await w.svc.adopts.finishDeferredAdopts();                 // found stopped
+      await w.local.start(ref);
+      w.store.setAgentState(id, 'RUNNING');
+      vi.setSystemTime(start + 10 * 60_000);
+      await refusedPass(turn.next());                            // the turn still held
+    } finally { await turn.free(); vi.useRealTimers(); }
+    expect(said(w)).toBe(2);
+    expect(w.store.listAdoptPending()).toHaveLength(1);
+  });
+
+  it('a refused adopt whose record goes is forgotten: the folder adopted again and refused is said again (HB-1466)', async () => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    let free = takenAtTheLook(w, id);
+    await w.svc.adopts.finishDeferredAdopts();                   // refused, and said
+    await free();
+    expect(said(w)).toBe(1);
+    // Its record goes (as a newer adopt with nothing to re-point drops it),
+    // and the pass after that forgets the refusal.
+    w.store.dropAdoptPending(id);
+    await w.svc.adopts.finishDeferredAdopts();
+    free = takenAfterTheCopy(w, id);
+    let adopted;
+    try { adopted = await w.svc.adopts.adoptInto(w.store.getAgent(id)!, ws); } finally { await free(); }
+    expect(adopted.crons).toMatchObject({ deferred: 1 });
+    expect(said(w)).toBe(2);
+  });
+
+  it('a put-off adopt whose re-point failed, not refused, is looked at again an hour on, not at every pass (HB-1466)', async () => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse('2026-11-20T09:00:00.000Z'));
+      // Its machine is one this server does not know when the re-point reads
+      // it, after the look: the re-point throws, and nothing refused it.
+      const exec = w.local.exec.bind(w.local);
+      w.local.exec = async (r, argv, o) => {
+        const out = await exec(r, argv, o);
+        if (argv[0] === 'cron' && argv[1] === 'list') w.store.setAgentHost(id, 'h-made-up');
+        return out;
+      };
+      await w.svc.adopts.finishDeferredAdopts();
+      w.local.exec = exec;
+      w.store.setAgentHost(id, 'h1');
+      expect(w.store.listAdoptPending()).toHaveLength(1);
+      // Said as a failure, tried again within the hour: not as the agent busy.
+      expect(w.events.filter((e) => e.startsWith('adopt.repoint_'))).toEqual(['adopt.repoint_failed']);
+      const before = looks(w);
+      vi.setSystemTime(Date.parse('2026-11-20T09:05:00.000Z'));
+      await w.svc.adopts.finishDeferredAdopts();
+      expect(looks(w)).toBe(before);                                // not looked at again yet
+      expect(w.store.listAdoptPending()).toHaveLength(1);
+      vi.setSystemTime(Date.parse('2026-11-20T10:01:00.000Z'));
+      await w.svc.adopts.finishDeferredAdopts();
+    } finally { vi.useRealTimers(); }
+    expect(w.store.listAdoptPending()).toEqual([]);
+    expect(adds(w)[0]).toContain('--disabled');
   });
 });
 

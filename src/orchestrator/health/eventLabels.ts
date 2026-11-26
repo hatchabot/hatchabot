@@ -1,3 +1,5 @@
+import { defaultLabel, type SnapshotReason } from '../files/snapshots.js';
+
 /**
  * The agent's event trail (store.recordEvent, the `trace` in routes) in plain
  * words: what a step means to the person watching a card say REBUILDING.
@@ -80,6 +82,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'memory.budget_not_told': (d) => `its new memory budget was not written to AGENTS.md${d.why === 'busy' ? ' (it stayed busy)' : d.why ? ` (${String(d.why)})` : ''} — a rebuild writes it`,
   'snapshot.captured': 'memory files snapshotted',
   'snapshot.unchanged': 'memory files unchanged since the last snapshot, so no new one',
+  // Not "the change went ahead": an adopt is judged again after it, and may be refused then.
+  'snapshot.auto_failed': (d) => `the snapshot ${typeof d.reason === 'string' && d.reason.startsWith('pre-') ? defaultLabel(d.reason as SnapshotReason) : 'before the change'} could not be taken`,
   'memory.checkpointed': 'conversation written to memory',
   'channel.dm_policy': 'chat access policy applied',
   'channel.rechecked': (d) => `${String(d.kind ?? 'channel')} checked again with the platform${Number(d.warnings) ? ` — ${d.warnings} thing${d.warnings === 1 ? '' : 's'} to fix` : ' — all good'}`,
@@ -174,6 +178,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'adopt.path_rewrite_failed': 'a task path could not be rewritten for the container',
   'adopt.path_rewrite_skipped': 'task paths left as they were',
   'adopt.repoint_busy': 'workspace re-point waits — the agent is busy; it runs on a later pass',
+  'adopt.repoint_failed': (d) => `workspace re-point failed${d.error ? `: ${String(d.error)}` : ''}; it is tried again within the hour`,
   'agent.adopted_workspace': 'workspace adopted',
   'agent.clone_failed': 'clone failed and was undone',
   'agent.clone_env_skipped': (d) => `cloned without the credentials that could not be read: ${String(d.names ?? '')}`,

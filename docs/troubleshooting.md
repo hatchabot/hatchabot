@@ -113,7 +113,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** regular-expression insertion could place the assets inside inert HTML or mistake a commented marker for an installed adapter.
 - **Fix:** locate actual document tags while preserving upstream bytes, quoted attributes and the initial doctype. This is covered with valid alternate HTML fixtures, not a failure observed in the pinned runtime page.
 - **Fixed in:** `v2.188.1`
-- **Code:** `src/api/controlUiMath.ts` — `withControlUiMath`; `src/api/controlUiHtml.ts` — `controlUiScriptInsertionPoint`
+- **Code:** `src/api/console/controlUiMath.ts` — `withControlUiMath`; `src/api/console/controlUiHtml.ts` — `controlUiScriptInsertionPoint`
 
 ### The console's agent switcher hides its last choices above the phone keyboard
 - **Check:** open the console switcher with the phone keyboard showing and enough agents to require scrolling. The last choice or arrow-key selection must remain reachable inside the console.
@@ -141,7 +141,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** global attribute replacement also rewrote JavaScript string literals, comments and lookalike attribute names.
 - **Fix:** rebase only actual HTML attributes using their source offsets. Inline scripts remain byte-for-byte intact, including CSP-protected scripts.
 - **Fixed in:** `v2.188.1`
-- **Code:** `src/api/controlUiRebase.ts` — `rebaseControlUi`; `src/api/controlUiHtml.ts` — `controlUiHtmlTags`, `controlUiHtmlAttributes`
+- **Code:** `src/api/console/controlUiRebase.ts` — `rebaseControlUi`; `src/api/console/controlUiHtml.ts` — `controlUiHtmlTags`, `controlUiHtmlAttributes`
 
 ### A skill update reports success after its directory was replaced during the operation
 - **Check:** the workspace or skill directory is renamed and replaced while a preview or update is running. A changed live path must cause a conflict instead of success for the detached old directory.
@@ -204,7 +204,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** roster filtering was conditional on first finding the permitted agent, so a mismatched or stale roster bypassed filtering.
 - **Fix:** always apply the guest's scope, even when no matching entry exists, and retain only the guest's own default session identifiers.
 - **Fixed in:** `v2.188.1`
-- **Code:** `src/api/consoleProxy.ts` — `guestAgentsList`
+- **Code:** `src/api/console/consoleProxy.ts` — `guestAgentsList`
 
 ### A filename ending in a newline opens or overwrites its differently named sibling
 - **Check:** Files contains distinct entries whose names differ only by trailing newlines. Reading, uploading or archiving the selected entry must use that exact path.
@@ -281,7 +281,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the completion handler updated shared element IDs without verifying which agent's sheet was now displayed.
 - **Fix:** refresh the fleet normally, but update and focus position controls only when the original agent's Overview is still open.
 - **Fixed in:** `v2.188.1`
-- **Code:** `web/app/channels.js` — `v2MoveInGroup`
+- **Code:** `web/app/home.js` — `v2MoveInGroup`
 
 ### Reopening the icon picker leaves Ideas disabled or displays old suggestions
 - **Check:** ask for icon ideas, close and reopen the picker for the same agent, and change the requested direction before the earlier response arrives.
@@ -379,7 +379,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the delayed completion opened the console without rechecking the current account or authentication dialog.
 - **Fix:** keep the sign-in dialog visible and explain where the completed suggestions are available. Ignore completion UI belonging to an earlier account session.
 - **Fixed in:** `v2.188.1`
-- **Code:** `web/app/start.js` — `askOpsSuggest`; `web/app/templates.js` — `pageSecondFactorBusy`; `scripts/ui-clickthrough.mjs` — `suggestionsDoNotCoverSecondFactor`
+- **Code:** `web/app/home.js` — `askOpsSuggest`; `web/app/signin.js` — `pageSecondFactorBusy`; `scripts/ui-clickthrough.mjs` — `suggestionsDoNotCoverSecondFactor`
 
 ### A failed import leaves a partial agent or an agent permanently marked busy
 - **Check:** writing the initial import settings or operation row fails before provisioning begins; a partial provisioning record remains or later actions report the agent busy indefinitely.
@@ -393,9 +393,9 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### The page shows, but nothing on it works: no agents, no sign-in, buttons do nothing
 - **Check:** open `/app/core.js` at the app's address in the same browser. JavaScript text means the page's scripts are served; "Not found" means they are not. The browser's console (F12) then says "… is not defined" for each one missing, and with a proxy or filter in front of Hatchabot, its log shows `/app/` requests refused.
 - **Cause:** since v2.191.0 the page's code is not inside the page: `web/index.html` is markup, and its scripts are the files in `web/app/`, which the page loads from `/app/NAME.js`. An install missing that folder (a checkout copied by hand, a partial copy of `web/`), or something in front of Hatchabot that only lets through the page and `/v1/`, leaves the page with no code.
-- **Fix:** put the release back whole (`hatchabot upgrade` to the release you run; in a git checkout, `hatchabot doctor` says "Checkout has local changes" and names them, a missing file included), or let `/app/` through the proxy or filter as it lets `/` through. A browser that kept an old copy needs nothing: the page names each script by its contents.
+- **Fix:** put the release back whole (`hatchabot upgrade` to the release you run; in a git checkout, `hatchabot doctor` says "Checkout has local changes" and names them, a missing file included), or let `/app/` through the proxy or filter as it lets `/` through. A tab left open from before an upgrade shows "Hatchabot was just upgraded. Reload to finish." (since 2.192.0): press Reload.
 - **Fixed in:** —
-- **Code:** `src/api/pageRoutes.ts` — `registerPageRoutes`, `pageScripts`; `src/api/auth.ts` — `PAGE_SCRIPT_PATH`; `web/index.html`; `web/sw.js`
+- **Code:** `src/api/machine/pageRoutes.ts` — `registerPageRoutes`, `pageScripts`, `upgraded`; `src/api/signIn/auth.ts` — `PAGE_SCRIPT_PATH`; `web/index.html`; `web/sw.js`; `web/upgraded.js`
 
 ### Linux: every agent fails with "Could not create the agent volume", while your terminal runs `docker` fine
 - **Check:** `hatchabot doctor` prints "Service running, but it cannot use Docker — it started before your user joined the docker group".
@@ -599,14 +599,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a row's removal checked only its own agents, then removed everything of Hatchabot's on that daemon, whose names are per machine rather than per row.
 - **Fix:** rebuild the agents that lost them, which brings the memory search service back. Now the same address is refused, another address for the same daemon is warned about when it is added, and removing a row leaves the machine alone while another row points at it. Rows told apart only by a daemon's ID may be cloned machines that share one, so that removal says what to remove by hand if it really is another machine; the same address says nothing.
 - **Fixed in:** `v2.173.0`
-- **Code:** `src/api/machineRoutes.ts` — `/v1/hosts`, `/v1/hosts/:id`; `src/orchestrator/machines/hosts.ts` — `rowsOnSameDaemon`, `addProblem`
+- **Code:** `src/api/machine/machineRoutes.ts` — `/v1/hosts`, `/v1/hosts/:id`; `src/orchestrator/machines/hosts.ts` — `rowsOnSameDaemon`, `addProblem`
 
 ### A runner added by an IPv6 address stays at "Permission denied"
 - **Check:** its row's address is `ssh://…@[…]`. `grep -c agentclaw-runner ~/.ssh/config` on this machine has no block for it.
 - **Cause:** the managed ssh block is written only for a hostname or IPv4 address, and such an address was saved without one, so ssh offered only the default keys.
 - **Fix:** remove the row and add the machine by hostname or IPv4 address (a tailnet machine has both). Such an address is now refused when added.
 - **Fixed in:** `v2.173.0`
-- **Code:** `src/orchestrator/machines/runnerSetup.ts` — `parseSshEndpoint`; `src/orchestrator/machines/hosts.ts` — `addProblem`; `src/api/machineRoutes.ts` — `/v1/hosts`
+- **Code:** `src/orchestrator/machines/runnerSetup.ts` — `parseSshEndpoint`; `src/orchestrator/machines/hosts.ts` — `addProblem`; `src/api/machine/machineRoutes.ts` — `/v1/hosts`
 
 ### "I upgraded but nothing changed"
 - **Check:** `hatchabot doctor` prints "Checkout has local changes (…) — the installer refuses to upgrade over them", or "Running vX, but the stable channel names vY".
@@ -634,14 +634,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the upgrade lock was judged by age alone: after an hour the next run removed it even though the first upgrade was still downloading, and both swapped the code at once.
 - **Fix:** upgrade, then run `hatchabot upgrade` again if the tree was left mixed (the previous release is put back on failure). The lock now names its holder: a running upgrade keeps it however long it takes, and one whose holder is gone is cleared at once. A lock with no `owner` file is still cleared after an hour.
 - **Fixed in:** `v2.162.0`
-- **Code:** `scripts/upgrade.sh` — `lock_left_over`, `take_lock`; `scripts/deploy-release.sh` — `lock_left_over`
+- **Code:** `scripts/upgrade-helpers.sh` — `lock_left_over`, `take_lock`
 
 ### Two upgrades ran at about the same time, and the install ended on the older release
 - **Check:** the channel timer's log (`journalctl --user -u hatchabot-follow-channel`) or a hand-run upgrade shows `Upgrading vA → vB` where vA is older than the release another upgrade had just installed (for example `hatchabot upgrade latest` finished a moment before), and the install is now on vB.
 - **Cause:** upgrade.sh read the installed release before it took the upgrade lock. A run that read it just before another upgrade finished went on from the old release, and its channel's older target took the machine backwards, though a channel never should.
 - **Fix:** upgrade, then `hatchabot upgrade <the release or channel you want>` once. The installed release is now read under the lock, so the second run sees the newer release and leaves it.
 - **Fixed in:** `v2.168.0`
-- **Code:** `scripts/upgrade.sh` — `take_lock`, `vernewer`
+- **Code:** `scripts/upgrade.sh` — `vernewer`; `scripts/upgrade-helpers.sh` — `take_lock`
 
 ### After an upgrade, agents still run the old OpenClaw version
 - **Check:** `hatchabot doctor` "Runtime image: OpenClaw …" against the release notes; the agent's sheet shows "newer image available" or not.
@@ -768,14 +768,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.178.0 a full disk ended `upgrade.sh` with exit 3, the same as an install that failed, and the eighth in a row set the release aside until the channel's next one. Now a full disk, or a folder it cannot write, is exit 5: the timer waits longer each time as before, but never counts it against the release. The wait doubles by the release's own failed tries (a day at most); tries that only the disk failed wait an hour at most, however long the disk stays full (twelfth review: before, nine of them made the wait a day, and the release, once there was room, waited that day for its first try of its own). That covers a bundle's download, unpacking and swap, and on a git install the checkout and `npm ci` (their error says "No space left on device" or a disk quota, or the disk has under 64 MB left), the upgrade's own records (the pin, the channel it follows, the checkout's record, the lock and its folder) and the temporary copy of the script. A lock it could not write its name in is removed, where it was left behind and the next hour of runs said "Another upgrade … is running". Only those exit 5: another command that exits 5 under the script is exit 3, and so is "ENOSPC: System limit for number of file watchers reached", which is the inotify watcher limit and not the disk. `deploy-release.sh` and the follow-latest timer do the same for a production checkout. A timer that cannot write its own record of the try on the full disk says "Could not record this try" and keeps it in the user's runtime folder (`$XDG_RUNTIME_DIR`, only when it is a folder of the user's own, and never through a symlink) until it can, so it still waits; with no runtime folder it keeps nothing and says the next tick tries again (never in a shared `/tmp`, where another user could plant the file). Before, it stopped there with no word and tried again every ten minutes. The record keeps the three fields the timers of releases before read (`<release> <failures> <time>`); how many of those failures were the disk's is kept beside it, in the same name with `.disk` (tenth review: a fourth field in the record made an older timer, after a rollback, start its count again). The checkout is asked in English (`LC_ALL=C`), and the install for its messages only (`LC_MESSAGES=C`, the user's `LC_ALL` moved to `LANG`), so a build keeps the user's locale (fourteenth review: `LC_ALL=C` over the whole install set every category); either way a full disk is read as one in any language, and their errors are kept in the state folder, not `$TMPDIR`, which may be the same full disk, and the last 4 KB in memory too, for when that file cannot be written. Where the state folder takes no new file, the errors go to `$TMPDIR`, so the path a permission names is still said (twelfth review: it said "could not write what it needed"). A step's words that say the disk ("No space left on device", ENOSPC, a disk quota, or a write that came up short with no reason given: "unable to write", "write error", "short write", as git's "fatal: unable to write new index file") are the disk; so is any failure when the disk has under 64 MB left, whatever it said. Words that say a permission or a read-only disk on writing ("Permission denied", EACCES, "Read-only file system", EROFS from opening, making, renaming, writing, copying or moving: npm's cache folder it may not write, a move onto a read-only disk) are the machine's too, exit 5, when the path they name is one of this install's own places (the install, its state folder, npm's and node-gyp's caches in the home folder, `$TMPDIR`); a write refused anywhere else, such as a global install into `/usr/local`, is the release's own, exit 3 (fourteenth review), and the run names the path they give: "This user could not write … (above: no permission there, or a read-only disk)" (tenth review; before, they were exit 3 and counted against the release). An ssh key a server turned away ("Permission denied (publickey)") is not one of them, nor a file the step could not run (a script without its execute bit, such as the release's `ensure-deps.sh`: bash's exit 126, npm's "code 126", "sh: 1: …: Permission denied", Node's "spawn … EACCES"), which is the release's own, exit 3 (eleventh review). Bash's own "line N: FILE: Permission denied", which it says both for a file it could not run and for a redirection it could not write, is judged by FILE: a regular file in the release's tree without its execute bit, that this user may write, is the release's (3); any other (a file outside the release, a record of the install's made read-only, or a file of its own on a disk mounted `noexec`) is the machine's, 5 (twelfth review). Words of its own (npm's lockfile mismatch) with more room than that are the step's own failure, exit 3. Only the step's last lines are judged (the last 20, 2 KB at most), which hold the error that ended it, and each line on its own (twelfth review: "spawn" on one line and EACCES on a later one read together as a file it could not run, so npm's "EACCES: permission denied, mkdir …" after gyp's "spawn make" was exit 3): before the eleventh review an early warning decided, such as gyp's "WARN EACCES" for its dev dir before a compile error, which then read as a permission (exit 5). Those last lines are kept in memory as the step runs, and the log is read only when there is nothing there: a log that stopped taking lines part-way, on the disk that filled, held only the step's earlier warnings. Each step is judged by its own words only: a warning an earlier step printed (the checkout's, say) no longer decides an install that failed after it. The lock's folder and the checkout's record, written before anything moves, are judged as the channel files are: something in the way is named (exit 2); any other failure there (no room, no permission, a read-only disk) is the machine's, 5, never the release's, as these are the install's own files. So is the lock itself: "Could not take the upgrade lock …" shows what mkdir said and names the folder to check, and is 5. Another upgrade holding the lock (exit 4) is routine: the channel timer's tick ends there quietly (0) and counts nothing, with the release found or offline, and so does the follow-latest timer's, its repair of a cut-off deploy too (tenth review); a full disk (5) still ends the tick as failed, so the unit shows it, but is never counted against the release. A relative `HATCHABOT_PROD_DIR` (run from another folder) is made absolute after the deploy's `cd`: before, the disk was looked for at a folder that was not there, and a nearly full one read as the release's failure (tenth review). `deploy-release.sh` says 5 only to a caller that sets `HATCHABOT_FOLLOW_KNOWS_5=1`, as `follow-latest.sh` does from v2.178.0: the timer that runs a new release's deploy is the release before's, and one from before 5 tried again every tick with no wait. To any other caller (that older timer, or a deploy by hand) the disk is 3, as it was, and it still says the disk is full. Under 64 MB left, a release that cannot install (npm's lockfile mismatch) is taken for the disk too, and not counted against it: a full disk whose error names no reason could not be told from it (eighth review). The channel files are written whole or not at all: a write that fails leaves the old value, not an empty file; one that is a link to a file (stow, a dotfiles folder) is written through, and the link kept. The records the swap and the checkout keep as they go (`.swapping`, its `in` lines and `restarted`, and the checkout's `restarted`) are judged the same way when a write fails: the disk is 5, after the old release is put back. Their errors are kept beside the lock, and one a killed run left there is removed by the next run to take the lock.
 - **Fix:** free about 1 GB, then `rm ~/.local/state/hatchabot/follow-channel-failed*` (or run `hatchabot upgrade stable`).
 - **Fixed in:** `v2.178.0`
-- **Code:** `scripts/upgrade.sh` — `machine_short`, `said_kind`, `said_path`, `own_place`, `disk_short`, `step_tee`, `step_tail`, `new_step_log`, `run_step`, `step_short`, `put_rec`, `STEP_LOG`, `change_failed`, `disk_full`, `no_stage`, `swap_failed`, `pin_named`, `remember_channel`, `put_line`, `put_failed`, `unpin`, `take_lock`, `lock_short`; `scripts/follow-tries.sh` — `tries_open`, `tries_waiting`, `tries_put`, `note_try`, `forget_tries`, `HELD`; `scripts/follow-channel.sh` — `tries_open`, `note_try`; `scripts/deploy-release.sh` — `machine_short`, `said_kind`, `said_path`, `own_place`, `step_tee`, `step_short`, `put_rec`, `change_failed`, `STEP_LOG`, `take_lock`, `lock_short`, `put_dir`, `put_failed`, `finish`, `PROD`; `scripts/follow-latest.sh` — `tries_open`, `note_try`, `repair_cut`, `HATCHABOT_FOLLOW_KNOWS_5`
+- **Code:** `scripts/upgrade.sh` — `STEP_LOG`, `disk_full`, `no_stage`, `swap_failed`, `pin_named`, `remember_channel`, `unpin`; `scripts/follow-tries.sh` — `tries_open`, `tries_waiting`, `tries_put`, `note_try`, `forget_tries`, `HELD`; `scripts/follow-channel.sh` — `tries_open`, `note_try`; `scripts/deploy-release.sh` — `STEP_LOG`, `finish`, `PROD`; `scripts/follow-latest.sh` — `tries_open`, `note_try`, `repair_cut`, `HATCHABOT_FOLLOW_KNOWS_5`; `scripts/upgrade-helpers.sh` — `machine_short`, `said_kind`, `said_path`, `own_place`, `disk_short`, `step_tee`, `step_tail`, `new_step_log`, `run_step`, `step_short`, `put_rec`, `change_failed`, `put_line`, `put_failed`, `take_lock`, `lock_short`, `put_dir`
 
 ### An upgrade or deploy says "Putting vX back did not work either (above), so … may be part-way between vX and vY"
 - **Check:** the lines above it give why the step failed and why the rollback did too (a checkout git refused, a file it could not replace); `ls ~/.local/state/hatchabot/upgrade-*.from` (a git install or production checkout) or `ls -a <install>/.swapping` (a bundle install) shows the record of the change is still there.
 - **Cause:** a step of the upgrade (or deploy) failed, and putting the previous release back failed as well, so the install may hold some of each. Before v2.178.0 that was not said: the run went on to say the disk was full (exit 5), which reads as "the previous release is back as it was; try again later". Now it says the rollback did not work, names the two releases, says what to run, and exits 3. A bundle's rollback on the disk that filled no longer needs room: the unpacked bundle is removed first, and a `.swapping` it cannot rewrite as the files go back no longer stops it ("Could not write …/.swapping as the files went back (a full disk?): they are back all the same."), so the run ends as the disk's, exit 5. Before the twelfth review that ended "did not work either", exit 3, with the old release a rename from back. A rollback cut off after that (killed before it removed `.swapping`) is finished by the next run, which keeps the files it finds put back: the unpacked bundle is gone, so it cannot tell them from the new release's, and before the fourteenth review it removed them, and the install lost the old release's files.
 - **Fix:** fix what the lines above name (free space, a permission, a stuck file), then run what it says: `hatchabot upgrade` on an install, or `scripts/deploy-release.sh vY` for a production checkout. Either one puts vX back first from the record it kept, before anything else (the timers do the same on their next tick).
 - **Fixed in:** `v2.178.0`
-- **Code:** `scripts/upgrade.sh` — `change_failed`, `REDO`, `undo`, `rollback_bundle`, `restore_prev`; `scripts/deploy-release.sh` — `change_failed`, `REDO`, `rollback`
+- **Code:** `scripts/upgrade.sh` — `REDO`, `undo`, `rollback_bundle`, `restore_prev`; `scripts/deploy-release.sh` — `REDO`, `rollback`; `scripts/upgrade-helpers.sh` — `change_failed`
 
 ### The channel timer says "Could not read …/follow-tries.sh: this tick keeps no count of its tries"
 - **Check:** `ls -l scripts/follow-tries.sh` in the install (on the machine that follows the newest tag, beside `follow-latest.sh`): missing, or not readable by the user the timer runs as.
@@ -789,7 +789,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the upgrade lock is a folder made there for each run. Something else at that path (a file left by a tool, a link, or one made by hand) could never be taken, and before v2.178.0 every run said "Another upgrade … is running" (or, once the lock read failures as the disk, that the disk was full; a dangling symlink was read that way until the fourth review). Now it is named and the run refuses (exit 2) without changing anything. The same goes for a folder (or anything not a file) where `hatchabot upgrade` writes which channel the machine follows (`data/channel`, `~/.config/hatchabot/channel`) or a pin's record beside the lock, or where it writes them first (the same name with `.tmp`): "… is in the way". It said the disk was full (exit 5). Since the seventh review the same goes for the checkout's record beside the lock (`upgrade-<n>.from`, from `upgrade.sh` and `deploy-release.sh`) and for a file where the lock's folder (`~/.local/state/hatchabot`, or one above it) should be. Since the tenth review a file where a folder above any of these records goes (`~/.config/hatchabot` a file, or this install's `data`) is named the same way: mkdir's failure there read as the disk (exit 5). A link to a file there is written through (the file it names is replaced, the link stays); a link to no file, dangling or to a folder, is in the way.
 - **Fix:** remove it (`rm` the path the message gives), then run the upgrade again.
 - **Fixed in:** `v2.178.0`
-- **Code:** `scripts/upgrade.sh` — `take_lock`, `lock_in_way`, `put_line`, `put_dir`, `link_end`, `put_failed`; `scripts/deploy-release.sh` — `take_lock`, `lock_in_way`, `put_line`, `put_dir`, `put_failed`
+- **Code:** `scripts/upgrade-helpers.sh` — `take_lock`, `lock_in_way`, `put_line`, `put_dir`, `link_end`, `put_failed`
 
 ### With no network, the channel timer leaves an upgrade that was cut off half done
 - **Check:** the install has `.swapping` (a bundle install) or `~/.local/state/hatchabot/upgrade-<number>.from` (a git install), and the machine is offline; `journalctl --user -u hatchabot-follow-channel` shows ticks that do nothing.
@@ -810,7 +810,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the upgrade and the deploy judge a failed step by its last lines, and a line that said a permission was the machine's (exit 5, never counted against the release). Before v2.178.0 that held for a warning too, and for a line that names no path (gyp quotes its dev dir in double quotes, which were not read): a build that failed on its own was called the machine's, and the timer tried it again for ever. Now a warning (`WARN`, `npm warn`, `warning:`) decides nothing (its disk words still count: npm says a full disk as `npm WARN tar ENOSPC`), a path in double quotes is read like one in single quotes and judged by where it is, and the step's own words of failure (gyp's `ERR!`, a compiler's `error:` or `fatal error:`, make's `***`) outrank a permission line that names no place, which is the machine's only when nothing else says why (fifteenth review).
 - **Fix:** upgrade. The release's build failure then counts against it: the timer waits longer each time and sets it aside after 8 tries in a row, until the channel's next release.
 - **Fixed in:** `v2.178.0`
-- **Code:** `scripts/upgrade.sh` — `said_kind`, `said_path`, `disk_words`, `own_place`; `scripts/deploy-release.sh` — `said_kind`, `said_path`, `disk_words`
+- **Code:** `scripts/upgrade-helpers.sh` — `said_kind`, `said_path`, `disk_words`, `own_place`
 
 ### On a full disk the channel timer runs a failing release again every ten minutes, and never sets it aside
 - **Check:** `journalctl --user -u hatchabot-follow-channel` (or `-u hatchabot-follow-latest`): a tick ends right after "failed and was rolled back" (or "did not complete 8 times in a row" is never reached) with a shell error naming `follow-channel-failed-<n>` (or `follow-latest-failed`): "No space left on device" or "Permission denied"; `df -h ~/.local/state`.
@@ -1200,6 +1200,13 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Fixed in:** —
 - **Code:** `scripts/release.sh` — `refs/tags/$TAG`; `docs/releasing.md` — `How a release reaches the public repo`
 
+### Releasing: the publisher's issue "hatchabot: vX.Y.Z: the gate could not finish" says "the candidate's publish.toml differs from the publisher's copy (exclude)"
+- **Check:** the issue in `cksci/publisher` names `publish.toml` and the keys that differ (`exclude`, `wait_hours`, …); in the dev clone, `git diff <the last release that published> vX.Y.Z -- publish.toml` shows a change since. `kit preflight hatchabot --tag vX.Y.Z` (the owner runs it: it reads the publisher's copy) says the same before a tag. A fast-lane tag says it as `channels-…: fast lane could not finish`.
+- **Cause:** the publisher keeps its own copy of `publish.toml` (`projects/hatchabot.toml` in `cksci/publisher`), and its gate requires the tagged commit's `publish.toml` to equal it, compared as parsed TOML. A change landed in the dev repo alone (for v2.191.0, a path added to `exclude`) never reaches the copy, so the tag stays incomplete on every run until the owner changes it. Nothing before the tag said so: neither this machine nor the dev repo's token can read the copy, and `scripts/release.sh` compared nothing.
+- **Fix:** the owner sets `projects/hatchabot.toml` on `cksci/publisher`'s `main` to the tag's `publish.toml` (`git show vX.Y.Z:publish.toml`), then waits for the next publisher run or starts one (`gh workflow run publish.yml -R cksci/publisher`): the gate finishes and the release's wait starts. Before changing the copy, let any older release still waiting publish: a changed copy strands every candidate gated under the old one (publish kit backlog B-010) until a newer release publishes and supersedes it. Since the fix, `scripts/release.sh` stops before tagging, with exit 4 and `✗ publish.toml at <sha> has changed since vA.B.C, the last release tag`, and prints the file to set the copy to and the releases and fast-lane tags still waiting; once the copy matches, run `scripts/release.sh X.Y.Z --publisher-copy-matches`. `scripts/promote.sh` stops the same way before a fast-lane tag (`HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES=1` goes on). docs/releasing.md, "A change to `publish.toml`", has the order.
+- **Fixed in:** `v2.192.0`
+- **Code:** `scripts/publisher-copy.sh` — `publisher_copy_check`, `PUBLISHER_COPY_MATCHES`, `publisher_copy_clear`; `scripts/release.sh` — `--publisher-copy-matches`; `scripts/promote.sh` — `copy_check`, `HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES`
+
 ### Releasing: the publisher blocked a release for a fingerprint hit across two lines (`path:N-N+1`)
 - **Check:** the publisher's issue for the release names a fingerprint hit at two lines in a row, such as `docs/features.md:9-10`, and the release passed `scripts/release.sh`'s own privacy check.
 - **Cause:** a private name was wrapped onto the next line, in a paragraph or a comment. The publisher's gate reads each line break, but the privacy check here read a line at a time, so the name went through the pre-push hook and CI's `privacy` job.
@@ -1263,35 +1270,35 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** with sign-in off every request is treated as the owner. On Docker Desktop, agents reach Hatchabot at `host.docker.internal`, which is this machine's loopback, so any agent could call its API with the owner's powers. Rootless Docker was refused already; Docker Desktop was not (HB-0238).
 - **Fix:** turn sign-in on: `HATCHABOT_AUTH=accounts` in `.env` (the installer's default), or set a `HATCHABOT_PASSWORD`, then restart. A machine that is truly not Docker Desktop can say so with `HATCHABOT_DOCKER_DESKTOP=0`.
 - **Fixed in:** `v2.175.0`
-- **Code:** `src/api/auth.ts` — `noSignInRefusal`, `loopbackIsRemote`; `src/index.ts`
+- **Code:** `src/api/signIn/auth.ts` — `noSignInRefusal`, `loopbackIsRemote`; `src/index.ts`
 
 ### Password mode: requests to the app's address were served without the password
 - **Check:** the install signs in with one shared password (`HATCHABOT_AUTH=password`) and runs a version before v2.152.1; the log shows requests whose path ends in `#/message` with no sign-in.
 - **Cause:** the sign-in hooks exempted the agent-to-agent call by testing the raw URL, while the router stops at `#`: a hand-made request for `/v1/agents/<id>#/message` skipped the sign-in check and was served as `/v1/agents/<id>`, as the local owner, which in password mode is the owner. With accounts or Google sign-in the local owner owns nothing, so the same request found nothing.
 - **Fix:** upgrade to v2.152.1 or later. If the address was reachable by others, change the password and the agents' sensitive settings (Telegram tokens, API keys) as a precaution.
 - **Fixed in:** `v2.152.1`
-- **Code:** `src/api/auth.ts` — `isAgentMessageRoute`; `src/api/routedPath.ts` — `routedPath`
+- **Code:** `src/api/signIn/auth.ts` — `isAgentMessageRoute`; `src/api/routedPath.ts` — `routedPath`
 
 ### Google sign-in asks you to sign in again about every hour
 - **Check:** the install uses `HATCHABOT_AUTH=identity`; it happens on a release before v2.98.0, or when you switch between addresses (LAN address, localhost, the public one).
 - **Cause:** the session ended with Google's own token (about an hour). Each address also keeps its own cookie, so a different address always asks again.
 - **Fix:** upgrade (sessions last 14 days, `HATCHABOT_SESSION_DAYS`), and always open Hatchabot at the same address, ideally `HATCHABOT_PUBLIC_URL`.
 - **Fixed in:** `v2.98.0`
-- **Code:** `src/api/auth.ts` — `sessionTtlMs`, `HATCHABOT_SESSION_DAYS`
+- **Code:** `src/api/signIn/auth.ts` — `sessionTtlMs`, `HATCHABOT_SESSION_DAYS`
 
 ### Google sign-in says "Your login could not be verified — try signing in again." just after a restart
 - **Check:** the install uses `HATCHABOT_AUTH=identity`; it happened within a minute of the service starting (or of Google rotating its keys), while someone else, or another tab, was signing in too; trying again a moment later works.
 - **Cause:** the first sign-in fetched Google's signing certificates, and the once-a-minute limit on that fetch sent every other sign-in arriving meanwhile straight to the still-empty cache, where it was refused.
 - **Fix:** upgrade; sign-ins that arrive during the fetch wait for it (still one request to Google). On an older version, sign in again.
 - **Fixed in:** `v2.162.0`
-- **Code:** `src/api/identity.ts` — `IdentityVerifier`
+- **Code:** `src/api/signIn/identity.ts` — `IdentityVerifier`
 
 ### Google sign-in mode: a new email-and-password account says "Verify your email address, then sign in again", and no email came
 - **Check:** the install uses `HATCHABOT_AUTH=identity`; the account was made with **Create account** (not the Google button); no email from the project's Identity Platform arrived, spam folder included.
 - **Cause:** the server refuses an unverified email address (anyone could otherwise sign up as anyone), but before v2.162.0 the app never asked Identity Platform to send the verification email.
 - **Fix:** upgrade; **Create account** now sends the link and says where it went, and signing in before it was opened offers **Send the link again**. Or sign in with the Google button, which arrives verified.
 - **Fixed in:** `v2.162.0`
-- **Code:** `web/app/signin.js` — `idSendVerification`, `idSignUp`; `src/api/identity.ts` — `principalFor`
+- **Code:** `web/app/signin.js` — `idSendVerification`, `idSignUp`; `src/api/signIn/identity.ts` — `principalFor`
 
 ### The sign-in screen says "This page is open over plain http from another device"
 - **Check:** the address bar shows `http://` and a LAN address or name (not `localhost` or `127.0.0.1`).
@@ -1312,21 +1319,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** by design: before any account exists, only someone on the machine itself, or holding the code printed at start-up, may create the owner account. Under rootless Docker and Docker Desktop an agent's request reaches Hatchabot from the machine's own loopback, so loopback is not proof of being on the machine there, and the code is asked of everyone (before `v2.169.0` a prompt-injected agent on a Mac could create the owner account in that window).
 - **Fix:** use the link the installer printed (it carries the code after `#setup=`), or find "first-run setup code" in the server log (`data/server.log` on a Mac), or run `hatchabot accounts create <you> --host-owner` on the machine.
 - **Fixed in:** `v2.169.0` (Docker Desktop asks for the code too)
-- **Code:** `src/index.ts` — `first-run setup code`; `src/api/accountsAuth.ts` — `onThisMachine`; `src/api/auth.ts` — `loopbackIsRemote`; `src/ops/opsServer.ts` — `dockerDesktop`; `scripts/first-run-link.sh` — `setup=`
+- **Code:** `src/index.ts` — `first-run setup code`; `src/api/signIn/accountsAuth.ts` — `onThisMachine`; `src/api/signIn/auth.ts` — `loopbackIsRemote`; `src/ops/opsServer.ts` — `dockerDesktop`; `scripts/first-run-link.sh` — `setup=`
 
 ### Sign-in refuses after several wrong passwords
 - **Check:** the sign-in answers "Too many failed attempts — try again later." (HTTP 429).
 - **Cause:** the sign-in throttle: 10 failures per 15 minutes per address (`HATCHABOT_LOGIN_FAILS_PER_WINDOW`). Before v2.97.1, ten wrong guesses in password mode could lock out everyone.
 - **Fix:** wait 15 minutes; a forgotten password is reset as in the next entry.
 - **Fixed in:** `v2.97.1`
-- **Code:** `src/api/auth.ts` — `HATCHABOT_LOGIN_FAILS_PER_WINDOW`, `FAIL_WINDOW_MS`
+- **Code:** `src/api/signIn/auth.ts` — `HATCHABOT_LOGIN_FAILS_PER_WINDOW`, `FAIL_WINDOW_MS`
 
 ### An invitation or reset link says "Too many attempts — try again later."
 - **Check:** the link's page answers 429 after several links that had been used or had expired were opened from the same address.
 - **Cause:** from `v2.169.0` the link lookup (`GET /v1/local-accounts/claim`) counts misses like sign-in does (10 per 15 minutes per address), so codes cannot be guessed at speed. It is the links' own count: the password form is not locked by it.
 - **Fix:** wait 15 minutes, then open the newest link; ask for a new one if it has expired.
 - **Fixed in:** `v2.169.0`
-- **Code:** `src/api/accountsAuth.ts` — `registerAccountRoutes`; `src/api/auth.ts` — `throttleKeys`
+- **Code:** `src/api/signIn/accountsAuth.ts` — `registerAccountRoutes`; `src/api/signIn/auth.ts` — `throttleKeys`
 
 ### The owner is locked out of the app
 - **Check:** "Forgot password?" is unavailable (no Telegram linked) and the recovery code is lost.
@@ -1347,21 +1354,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.153.0, two first-account requests sent at the same moment both passed the "no accounts yet" check while their passwords were being hashed, and both became host owners.
 - **Fix:** upgrade. Then, as the owner you mean to keep, remove the extra account (or run `hatchabot accounts disable <user>`) and check the security record for what it did.
 - **Fixed in:** `v2.153.0`
-- **Code:** `src/api/accountsAuth.ts` — `'/v1/local-accounts/bootstrap'`
+- **Code:** `src/api/signIn/accountsAuth.ts` — `'/v1/local-accounts/bootstrap'`
 
 ### A recovery code reset the password twice, or the password you just chose does not work
 - **Check:** two "account.recovered_with_code" log lines for one account at nearly the same time, or two pages each showed a new recovery code.
 - **Cause:** before v2.153.0, the code was spent in a separate step after the new password was stored, so two requests with the same code could both succeed; the later one's password and recovery code won.
 - **Fix:** upgrade. Then sign in with the password from the page that answered last (or use the newest recovery code shown), and make a new recovery code under "Your account".
 - **Fixed in:** `v2.153.0`
-- **Code:** `src/api/accountsAuth.ts` — `'/v1/local-accounts/recover-with-code'`; `src/store/store.ts` — `recoverLocalAccount`
+- **Code:** `src/api/signIn/accountsAuth.ts` — `'/v1/local-accounts/recover-with-code'`; `src/store/store.ts` — `recoverLocalAccount`
 
 ### A password reset did not hold: the password chosen with the old one works instead, or "Your password was changed while this was being checked"
 - **Check:** the owner reset someone's password (in the app or with `hatchabot accounts reset-password`) while that person was changing it, or making a recovery code, with the old one; the security record and log show both at nearly the same time.
 - **Cause:** before v2.162.0 the change checked the old password, then stored the new one without looking again: a reset made during the check was overwritten, so whoever held the old password kept the account (and could mint a recovery code).
 - **Fix:** upgrade; a change or a new recovery code is stored only while the password that was checked is still the account's, and otherwise answers "Your password was changed while this was being checked". On an older version, reset the password again and make the person a new recovery code.
 - **Fixed in:** `v2.162.0`
-- **Code:** `src/api/accountsAuth.ts` — `PASSWORD_CHANGED_MEANWHILE`; `src/store/store.ts` — `setLocalAccountPassword`, `setLocalAccountRecovery`
+- **Code:** `src/api/signIn/accountsAuth.ts` — `PASSWORD_CHANGED_MEANWHILE`; `src/store/store.ts` — `setLocalAccountPassword`, `setLocalAccountRecovery`
 
 ### A second factor nobody recognises on a member's account, or their password stopped working, with public access on
 - **Check:** Settings → Security record shows `second_factor.added` for an account with no factor before it, after a password change or recovery the person did not make; the service log shows `account.recovery_code_created` for that account shortly before it.
@@ -1382,42 +1389,42 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** each person had one pending passkey challenge of each kind, so the second tab's request replaced the first tab's.
 - **Fix:** upgrade; each tab's passkey request now stands on its own (up to five at once). On an older version, finish in the tab that asked last, or start again.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/secondFactor.ts` — `issue`, `take`; `src/api/webauthn.ts` — `clientDataChallenge`
+- **Code:** `src/api/signIn/secondFactor.ts` — `issue`, `take`; `src/api/signIn/webauthn.ts` — `clientDataChallenge`
 
 ### A passkey was added after the owner reset that person's second factors
 - **Check:** the security record shows `second_factor.reset` for them, then `second_factor.added` (passkey) within a few minutes, without them signing in again.
 - **Cause:** a passkey enrolment started before the reset kept its challenge and could finish after it.
 - **Fix:** upgrade; a reset (or a removed factor) voids every passkey request begun before it. Reset them again if the passkey is not theirs.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/secondFactor.ts` — `forgetCeremonies`, `'/v1/second-factor/reset/:id'`
+- **Code:** `src/api/signIn/secondFactor.ts` — `forgetCeremonies`, `'/v1/second-factor/reset/:id'`
 
 ### An authenticator app was added after a factor was removed or a password reset ("Your password or second factors changed while this was being checked")
 - **Check:** the security record shows `second_factor.added` (totp) after a `second_factor.removed` or a password reset; or adding one now says "Your password or second factors changed while this was being checked", or confirming one says "This setup was cancelled" right after a factor was removed.
 - **Cause:** an authenticator app shown before a factor was removed could still be confirmed after it, and a password checked while it was being reset (or the person's factors reset) still counted.
 - **Fix:** upgrade. Remove any factor you did not add; then add the app again: start over from **Add an authenticator app**, and sign in again first if your password was reset.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/api/secondFactor.ts` — `proveManage`, `forgetCeremonies`
+- **Code:** `src/api/signIn/secondFactor.ts` — `proveManage`, `forgetCeremonies`
 
 ### "This setup was cancelled" with the Add an authenticator app box still open
 - **Check:** Settings → You, with **Add an authenticator app** open: a factor was removed (here or in another tab) or reset by the owner, and the box stayed on the page. A code typed there is refused with "This setup was cancelled", or an older message telling you to close a box that has no close button.
 - **Cause:** removing or resetting a factor cancels an app still being added, on the server, but the page kept its box open and its QR code on show.
 - **Fix:** upgrade; the box closes when a factor is removed and when the server says the setup was cancelled. On an older version press **Add an authenticator app** again: it starts over, and any new QR code replaces the old one in the box. A code from the old QR code will not work: remove that entry from the app and scan the new one.
 - **Fixed in:** `v2.172.0`
-- **Code:** `web/app/signin.js` — `sfCloseTotp`, `sfRemove`, `sfConfirmTotp`; `src/api/secondFactor.ts` — `'/v1/second-factor/totp/confirm'`
+- **Code:** `web/app/signin.js` — `sfCloseTotp`, `sfRemove`, `sfConfirmTotp`; `src/api/signIn/secondFactor.ts` — `'/v1/second-factor/totp/confirm'`
 
 ### Public access is on, but the owner has no second factor left
 - **Check:** Settings → You lists no passkey or authenticator app for an owner, public access is on, and the security record shows two `second_factor.removed` entries for them seconds apart.
 - **Cause:** before v2.162.0, removing a factor checked "is another one left?" before the password check, not after it: two removals sent at once each saw the other factor, and both went through.
 - **Fix:** upgrade; the check is made again after the password, with nothing in between it and the removal, so the second request is refused. On an older version, add a factor again at the private address (or turn public access off until you do).
 - **Fixed in:** `v2.162.0`
-- **Code:** `src/api/secondFactor.ts` — `lastOne`, `'/v1/second-factor/:id'`
+- **Code:** `src/api/signIn/secondFactor.ts` — `lastOne`, `'/v1/second-factor/:id'`
 
 ### "Make new backup codes" failed, and now neither the old codes nor any new ones work
 - **Check:** the request failed (a full disk, say) and Settings → You shows fewer than 10 backup codes, or none of your saved codes is accepted.
 - **Cause:** the old codes were deleted before the new ones were stored, one at a time; a failure part-way left only some new codes, which were never shown.
 - **Fix:** upgrade; the new set now replaces the old in one step, so a failure keeps your saved codes. On an older version, free the disk and make new codes again (your authenticator app or passkey proves it is you).
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/store/store.ts` — `replaceBackupCodes`; `src/api/secondFactor.ts` — `newBackupCodes`
+- **Code:** `src/store/store.ts` — `replaceBackupCodes`; `src/api/signIn/secondFactor.ts` — `newBackupCodes`
 
 ### The service log shows an invitation code in a `/v1/agents/<id>/invites/<code>/knock-window` line
 - **Check:** `journalctl --user -u hatchabot | grep knock-window` shows the code in full.
@@ -1459,42 +1466,42 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the sign-in cleared dialogs, report text and unsaved source edits, but not these boxes. An unsaved key is a credential: pressing **Add source** would have saved it as the new person's source.
 - **Fix:** upgrade: when another account signs in, the add-a-source form (key, token, name and models) and the plan box are emptied, and the page loads again (see "Another account signed in on a shared browser…" below). A setup token that was added is now cleared from its box too, as an API key already was. On an older release, reload the page before handing it over.
 - **Fixed in:** `v2.174.0`
-- **Code:** `web/app/templates.js` — `pageClearLast`; `web/app/images.js` — `addAiProfile`
+- **Code:** `web/app/signin.js` — `pageClearLast`; `web/app/usage.js` — `addAiProfile`
 
 ### Backup codes or a recovery code closed before you saved them, after the sign-in screen appeared by itself
 - **Check:** the codes (or the recovery code) were on the screen when the session ended, you signed back in as yourself on the same page without reloading it, and they were gone. Settings → You shows the codes were made (fewer left than you saved, or a recovery code dated today you never saw).
 - **Cause:** a sign-in closes what the last person had open. When the page had never read who you were, or could not read it at that sign-in, it could not tell you were the same person, and closed your codes with the rest. Until then they also stayed on the screen, dimmed, under the sign-in.
 - **Fix:** upgrade: codes open when the session ends leave the screen, and wait with whose they are (the server now says so with them). Sign in again as yourself and they are back, until you tick that you have saved them; if who you are cannot be read yet, they come back at the first read that works. Another account never sees them, and codes shown with no owner are given back to nobody. A click outside the codes, or Esc, no longer closes them before you tick that you have saved them. Codes that answer after the session ended wait behind the sign-in for their person too, and the recovery code made by **Turn on family accounts** is shown to the owner making the switch. On any release, codes you did not save can be replaced: **Make new backup codes**, or make a new recovery code, in Settings → You.
 - **Fixed in:** `v2.174.0`
-- **Code:** `web/app/templates.js` — `pageSecretShown`, `pageSecretNotHere`, `pageSecretLater`, `pageSecretsPutAway`, `pageSecretsBack`, `pageClearLast`; `web/app/signin.js` — `showBackupCodes`, `showRecoveryCode`; `src/api/secondFactor.ts`; `src/api/accountsAuth.ts`; `src/orchestrator/accounts/familyAccounts.ts` (the switch's recovery code, with `ownerId`)
+- **Code:** `web/app/signin.js` — `showBackupCodes`, `showRecoveryCode`, `pageSecretShown`, `pageSecretNotHere`, `pageSecretLater`, `pageSecretsPutAway`, `pageSecretsBack`, `pageClearLast`; `src/api/signIn/secondFactor.ts`; `src/api/signIn/accountsAuth.ts`; `src/orchestrator/accounts/familyAccounts.ts` (the switch's recovery code, with `ownerId`)
 
 ### Another account signed in on a shared browser, and a form still held the last person's text
 - **Check:** one person's session ended on that page, or another tab signed in as someone else, and the page was not reloaded. A form such as the new-agent or task form still held what the first person typed, or a list was theirs until the next refresh.
 - **Cause:** a sign-in cleared what the page knew to clear (dialogs, chat drafts, report text, the add-a-source form), but the page keeps more for a person than that, and none of the rest was reset.
 - **Fix:** upgrade: when the page reads that another account than the one it showed is signed in, it loads again. It waits while a second-factor step is under way, so nothing that must be seen is lost: a sign-in finishing and the recovery code it shows, the second-factor prompt and the request it was for, an authenticator app or a passkey being added, a request for new codes, and backup codes or a recovery code on the screen. It reloads once that step ends. New codes that answer after the switch belong to the last account and are not shown to the new one (it says so; make new ones in Settings → You). The same account signing back in, or a first sign-in on a fresh page, does not reload. Another tab's switch is noticed when this tab is shown again, or at its next refresh. Until the reload, every password box and free-text form is emptied. On an older release, reload the page before handing it over.
 - **Fixed in:** `v2.174.0`
-- **Code:** `web/app/templates.js` — `pagePersonIs`, `pageReloadWhenQuiet`, `pageSecondFactorBusy`, `pageHold`, `pageSigningIn`, `pageSignedIn`, `pageClearLast`; `web/app/signin.js` — `sfDone`
+- **Code:** `web/app/signin.js` — `sfDone`, `pagePersonIs`, `pageReloadWhenQuiet`, `pageSecondFactorBusy`, `pageHold`, `pageSigningIn`, `pageSignedIn`, `pageClearLast`
 
 ### The second-factor prompt went away after a click beside it, and nothing asks for it again
 - **Check:** at the public address, the "Confirm it is you" or "One more step" box closed on a click outside it or Esc, and since then a sensitive change (or the whole page) waits with no prompt.
 - **Cause:** a click outside closed the prompt without answering it, and every later request waited on that same unanswered prompt without showing it.
 - **Fix:** upgrade: the prompt closes only by **Continue**, a passkey or **Cancel**, and it comes back if it is ever off the screen while a request waits on it. A prompt belongs to the session and the person it was raised for: when that session ends, when the page reads that someone else is signed in, or when the factor given turns out to be another account's (signed in in another tab or window meanwhile), the request waiting on it is answered "The second factor was not given." and is not sent, so nothing one person asked for is sent again under the next person's sign-in. On an older release, reload the page.
 - **Fixed in:** `v2.174.0`
-- **Code:** `web/app/signin.js` — `askSecondFactor`, `sfDone`, `sfCancel`, `sfDrop`; `web/app/templates.js` — `pageSessionEnded`, `pagePersonIs`
+- **Code:** `web/app/signin.js` — `askSecondFactor`, `sfDone`, `sfCancel`, `sfDrop`, `pageSessionEnded`, `pagePersonIs`
 
 ### A member's Settings shows forms that only answer "Only the account that set up this machine can do that"
 - **Check:** you are signed in with an account that does not own the machine (Settings → You has no host owner chip), and the refusal came from Voice & media key, Fleet search key, Add a runner, the "Every bot this server has a token for" drawer or the Default box on a source.
 - **Cause:** those forms were drawn for everyone, and the server refuses them for anyone but the owner, as it should.
 - **Fix:** nothing to repair: ask the machine's owner. Upgrade and they are hidden from other accounts.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/templates.js` — `paintMachineOwnerOnly`; `web/app/usage.js` — `renderAiList`
+- **Code:** `web/app/signin.js` — `paintMachineOwnerOnly`; `web/app/usage.js` — `renderAiList`
 
 ### A request with a damaged session cookie answered 500 instead of asking to sign in
 - **Check:** the service log shows `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH` ("Input buffers must have the same byte length") for a request whose session cookie (or public-address pass) ends in something other than 64 plain hex characters, such as accented letters.
 - **Cause:** the cookie's signature was compared by its number of characters, then byte for byte; a signature of 64 characters that are more than 64 bytes made the comparison throw. Every sign-in mode (password, accounts, Google) and the public-address pass read it that way. Nothing was let in.
 - **Fix:** none needed: sign in again, or clear the site's cookies. Since the fix, such a cookie is read as no sign-in (401).
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/util/safeEqual.ts` — `safeEqual`; `src/api/accountsAuth.ts` — `sessionAccount`; `src/api/auth.ts` — `validSession`, `readSession`; `src/api/publicAccess.ts` — `decodePass`
+- **Code:** `src/util/safeEqual.ts` — `safeEqual`; `src/api/signIn/accountsAuth.ts` — `sessionAccount`; `src/api/signIn/auth.ts` — `validSession`, `readSession`; `src/api/publicAccess.ts` — `decodePass`
 
 ## AI sources and Claude login
 
@@ -1545,7 +1552,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** an agent still points at it or its container still runs on it (a switch without a rebuild). Before v2.89.2 an archived agent also counted forever.
 - **Fix:** move the agents (or, as the machine owner, "↪ Migrate all off…"), rebuild switched agents, then delete.
 - **Fixed in:** `v2.89.2`
-- **Code:** `src/api/routes.ts` — `appliedProfileId`; `web/app/images.js` — `openMigrate`
+- **Code:** `src/api/routes.ts` — `appliedProfileId`; `web/app/usage.js` — `openMigrate`
 
 ### A local model source: "points at this machine's loopback, which an agent container cannot reach" or "Couldn't reach a model server"
 - **Check:** the message when saving the source; `curl http://<docker bridge address>:11434/api/tags` from the machine (`docker network inspect bridge` shows the address).
@@ -1559,14 +1566,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** changing a shared source's default (the "apply default model" step) kept your choice stored but left it off the source's model list, and an agent's choice only counts while it is on that list.
 - **Fix:** upgrade; the owner's next default change keeps every other member's current choice on the list. Until then, ask the source's owner to add the model back to the list, or pick another one.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/aiSourceRoutes.ts` — `apply-default-model`; `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`; `src/orchestrator/lifecycle/provision.ts` — `effectiveModel`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `apply-default-model`; `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`; `src/orchestrator/lifecycle/provision.ts` — `effectiveModel`
 
 ### An agent left unticked when a source's default changed ran on another model after its next rebuild
 - **Check:** the source's default had been changed once before without applying it to that agent (it still ran its old model), then changed again with that agent left unticked; its AI tab now names the earlier, never-applied default as its own model.
 - **Cause:** before v2.168.0 "stay on the model they run today" pinned a follower to the source's current default, even when that default had never been applied to it, so the "held" agent moved to it at its next rebuild.
 - **Fix:** upgrade: an unticked follower is pinned to the model it was last built with on that source. For an agent already pinned wrongly, pick its model again on its AI tab.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/aiSourceRoutes.ts` — `apply-default-model`; `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `apply-default-model`; `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`
 
 ### After switching an agent's AI source, it still uses the old one and no rebuild is offered
 - **Check:** the agent's page shows the new source, but its replies (or `openclaw models status` in its console) use the old source, and there is no "rebuild to apply" mark; the model was changed around the same time as the source.
@@ -1615,7 +1622,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** an empty list was sent as "no list", which the server reads as every agent of yours.
 - **Fix:** upgrade; an `--agents` that names nobody is refused before anything changes. Leave `--agents` out to mean all. Switch the agents that should not have moved back with `hatchabot switch-source --to <their source> --agents …`.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/cli.ts` — `agentsFilter`; `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/adopt-agents'`
+- **Code:** `src/cli.ts` — `agentsFilter`; `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/adopt-agents'`
 
 ### `hatchabot adopt` put the new agent on a source other than your ⭐ default
 - **Check:** ⚙ Settings → AI sources has the ⭐ default below another source; the adopted agent's AI tab names the source at the top of the list; no `--profile` was given.
@@ -1636,14 +1643,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** those checks ran after the first fields of the request had been saved.
 - **Fix:** upgrade: a refused save changes nothing. Put the field back by hand if it changed, then save the parts that are allowed on their own.
 - **Fixed in:** `v2.160.0` (#56, #57)
-- **Code:** `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id'`; `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `createAgentEdits`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id'`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `createAgentEdits`
 
 ### A class change said "applied", but an agent in it still answers on its old model
 - **Check:** the agent's page shows the class's model as waiting (not yet on the runtime), and its Setup log has `model.live_set_failed` at the time of the class change or of putting it in the class.
 - **Cause:** a class passes its model to each running member live (`openclaw models set`). When the runtime refused it (its gateway was not answering, for example), the class change still counted that agent as applied, and putting an agent in a class said "model applied".
 - **Fix:** upgrade: the class change now lists such agents as still on the old model, and putting one in a class says so. Change the class's model again when the agent answers, or Rebuild the agent, which writes the model from its record.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/classRoutes.ts` — `'/v1/agent-classes/:id'`, `'/v1/agents/:id/class'`; `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`; `src/orchestrator/lifecycle/modelRuntime.ts` — `applyModelToRuntime`
+- **Code:** `src/api/agents/classRoutes.ts` — `'/v1/agent-classes/:id'`, `'/v1/agents/:id/class'`; `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`; `src/orchestrator/lifecycle/modelRuntime.ts` — `applyModelToRuntime`
 
 ### An agent put in a class fails every message with "request format rejected, HTTP 400" (a class with claude-opus-5-5 on a Claude subscription)
 - **Check:** the agent's class sets claude-opus-5-5, its AI source is a Claude subscription, and its OpenClaw is older than 2026.9.7 (Settings → Advanced → Runtime images); its gateway log has `claude_code_version_too_old`.
@@ -1657,7 +1664,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** each way of changing an agent checked only the part it changed. Choosing the model itself was refused on such a runtime, but clearing a pin did not check the default it fell back to, a class with only a source skipped the check a source switch makes, and an image pin did not check the model the agent runs.
 - **Fix:** upgrade: every change checks what the agent will run once it is stored (its source, model and image together) and refuses with the reason; a class with only a source drops a pin the new runtime cannot use, as a source switch does. For an agent already failing, pick a model its runtime accepts on its AI tab, or give it a newer runtime image.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `finalModelCheck`; `src/api/modelRoutes.ts` — `'/v1/agents/:id/model'`; `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`; `src/orchestrator/lifecycle/modelRuntime.ts` — `finalModelCheck`, `modelChoiceProblem`
+- **Code:** `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `finalModelCheck`; `src/api/agents/modelRoutes.ts` — `'/v1/agents/:id/model'`; `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`; `src/orchestrator/lifecycle/modelRuntime.ts` — `finalModelCheck`, `modelChoiceProblem`
 
 ### "Switch these agents" dropped a model you had just chosen for one of them
 - **Check:** you chose a model for an agent while "Switch these agents" (or "Migrate all") was moving several agents to another source, the new source offers that model, and after the switch the agent follows the new source's default; its model ledger shows your choice and then the switch clearing it.
@@ -1713,21 +1720,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a class change applies to its agents one at a time, and two changes applied at once. The earlier change, still waiting on a memory update, went on to write its own model over the later change's. An agent joining the class meanwhile was not yet one of its agents, so the later change passed it by.
 - **Fix:** upgrade, then save the class again. Changes to one class (an edit, its deletion, an agent joining or leaving) now run one after another: each starts once the one before has written every agent's record, reads the class as that one left it, and says everything it did. The checks that ask an agent's machine (an image pin, the runtime a model needs) are made before that, never while the change holds the class, and are used only while the class and the agent are still as they were checked (checked again otherwise; after three tries the change is refused with nothing written: "The class or its members kept changing while this applied"); the class and its agents' records are written together, so another change never reads the class before its agents have it; the containers (a model, memory limits) are changed after it, six agents at a time, each agent's in its own turn, which puts on what is stored when it comes. An agent slow to answer or to take a model, or on a runner asleep, no longer holds up another change of the class (a join answers meanwhile), and the last change saved is the one its container ends up with. An agent whose own model, source or image was changed while an edit was applying keeps that change: the edit lists it ("keeps that change"), and when it no longer runs what the class now sets it leaves the class there and then ("it left the class"; `class.detached` in its timeline) rather than stay in it on the class's old settings. A model Hatchabot wrote on its own (a budget's switch to a cheaper model and back, a source's new default holding what an agent runs) is not the agent's change: the edit applies to it as to the rest, and an agent on a budget's cheaper model stays on it, keeps its class meanwhile (a later change of its image does not take it out), and gets the class's new model back when the budget's switch ends, a class change made while that switch was being applied included. Leaving a class with no memory limits of its own does not touch the container's limits, so a model change on a runner asleep answers at once. The change answers at once and says so (`classDetached: 'pending'`; "may leave a class" after "Switch these agents"): whether it leaves is decided once the edits of its class under way (checking or writing its agents) are done, and only those; another agent joining or leaving the class does not make it wait. One whose own model was set while an edit moving its class's source or image checked it leaves the class the same way ("its own model was set while this was checked"). A change made then that looks like leaving the class only because the edit has not reached the agent yet (a source's new default) waits for the edit, and the agent stays in. One taken out of the class meanwhile is no longer one of its agents, and the change leaves it alone. One changed while it joined a class keeps the change too, and the join is refused ("changed while this applied"); a join that waited while its old class was deleted goes ahead, and so does one whose old class's edit wrote the agent meanwhile (checked again). A class's memory limits go only on agents still in it, and a member on a machine that is gone is named ("its machine is not known here") while the others still get them.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/classRoutes.ts` — `classStep`, `'/v1/agent-classes/:id'`, `'/v1/agents/:id/class'`; `src/orchestrator/lifecycle/classChanges.ts` — `inClassQueue`, `checkClassFor`, `writeClassEdit`, `applyClassToAgent`, `classModelOn`, `changedSince`, `classWrote`, `classChangedThrice`, `classEditsUnderWay`, `detachClassIfDrifted`; `src/orchestrator/lifecycle/memoryLimits.ts` — `applyCurrentLimits`; `src/store/store.ts` — `setAgentClassIf`, `setAgentModel`, `setCheaperPauseFrom`; `web/app/usage.js` — `updateClass`
+- **Code:** `src/api/agents/classRoutes.ts` — `classStep`, `'/v1/agent-classes/:id'`, `'/v1/agents/:id/class'`; `src/orchestrator/lifecycle/classChanges.ts` — `inClassQueue`, `checkClassFor`, `writeClassEdit`, `applyClassToAgent`, `classModelOn`, `changedSince`, `classWrote`, `classChangedThrice`, `classEditsUnderWay`, `detachClassIfDrifted`; `src/orchestrator/lifecycle/memoryLimits.ts` — `applyCurrentLimits`; `src/store/store.ts` — `setAgentClassIf`, `setAgentModel`, `setCheaperPauseFrom`; `web/app/usage.js` — `updateClass`
 
 ### Clearing a class's model from a script or the API answers 500
 - **Check:** `PUT /v1/agent-classes/<id>` with `"model": null` (or `"name": null`) answers HTTP 500 and changes nothing.
 - **Cause:** null was let through as "clear it", then read as text.
 - **Fix:** upgrade: `"model": null` clears the class's model, and `"name": null` is refused with "A class needs a name." Until then, send `"model": ""` to clear it.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/classRoutes.ts` — `'/v1/agent-classes/:id'`
+- **Code:** `src/api/agents/classRoutes.ts` — `'/v1/agent-classes/:id'`
 
 ### Switching an agent's AI source while its move or rebuild waits for you lets the operation go on with the new source
 - **Check:** the agent has a held or interrupted operation (its page and Alerts say "Choose what to do"), and its AI source was changed afterwards on its AI tab or by giving it a class with a source.
 - **Cause:** "Switch these agents" refused such an agent, but a switch of one agent or a class only checked whether it was busy, not for an operation waiting on disk.
 - **Fix:** upgrade: the switch is refused until the operation is settled on its page. If it already happened, settle the operation, then set the source you want and rebuild the agent.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/routes.ts` — `operationRefuses`; `src/orchestrator/lifecycle/agentEdits.ts` — `refusedOnDisk`; `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`
+- **Code:** `src/api/routes.ts` — `operationRefuses`; `src/orchestrator/lifecycle/agentEdits.ts` — `refusedOnDisk`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`
 
 
 ### After changing a Claude plan source's default model and switching agents to it, some of them fail every message with "request format rejected, HTTP 400"
@@ -1735,28 +1742,28 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** "Change the default, and switch these agents" moved every ticked agent without the runtime check a class model or a single agent's model gets.
 - **Fix:** upgrade: a ticked agent whose runtime is too old keeps the model it runs, and the message says which ones were not switched and why. For one already moved, set its model back in Hatchabot, or give it a newer runtime image first.
 - **Fixed in:** `v2.169.0`
-- **Code:** `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`; `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`; `src/orchestrator/lifecycle/modelRuntime.ts` — `subscriptionRuntimeProblem`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`; `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`; `src/orchestrator/lifecycle/modelRuntime.ts` — `subscriptionRuntimeProblem`
 
 ### On a shared Claude plan source, my agent fails every message with "request format rejected, HTTP 400" after the source's owner changed its default
 - **Check:** your agent follows the shared source's default (no model of its own on its AI tab), the source is a Claude subscription, the new default is claude-opus-5-5, and your agent runs OpenClaw older than 2026.9.7; its gateway log has `claude_code_version_too_old`.
 - **Cause:** v2.169.0 held back the source owner's own agents whose runtime was too old for the new default, but another account's agents that follow the default moved with it unchecked.
 - **Fix:** upgrade: such an agent is kept on the model it runs (pinned to it), and the source's owner is told how many other accounts' agents were kept, without their names. For one already moved, pick its earlier model on its AI tab, or give it a newer runtime image.
 - **Fixed in:** `v2.170.0`
-- **Code:** `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`; `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`; `src/orchestrator/lifecycle/modelRuntime.ts` — `subscriptionRuntimeProblem`; `web/app/usage.js` — `applyModelToSelected`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`; `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`; `src/orchestrator/lifecycle/modelRuntime.ts` — `subscriptionRuntimeProblem`; `web/app/usage.js` — `applyModelToSelected`
 
 ### A Claude source's model menu leaves out models the newer agents on it can run
 - **Check:** the source's agents run different runtime images (one on a runner, or one pinned to an older image); `openclaw models list --provider anthropic --all` in the console of the agent on the newest image lists the missing model.
 - **Cause:** the menu came from the first running agent found on the source; one on an older image has a smaller catalog, and its list pruned the menu (and flagged the missing models as stale) for every agent on the source.
 - **Fix:** upgrade: the agent on the newest OpenClaw is asked, and the answer says which version it came from. On an older version, stop or update the agent on the old image while you pick the model.
 - **Fixed in:** `v2.169.0`
-- **Code:** `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/orchestrator/sources/aiSources.ts` — `availableModels`; `src/orchestrator/sources/runtimeModels.ts` — `runtimeModels`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/orchestrator/sources/aiSources.ts` — `availableModels`; `src/orchestrator/sources/runtimeModels.ts` — `runtimeModels`
 
 ### A Claude source with more than twelve running agents still leaves models out of its menu
 - **Check:** more than twelve running agents use the source, and the one on the newest runtime image is not among the first twelve on the home screen; the source's model list names an older OpenClaw version than that agent runs.
 - **Cause:** only the first twelve running agents were looked at before the newest was picked.
 - **Fix:** upgrade: every running agent's version is read (one listing of each machine's containers, kept for 20 seconds and listed again once when it lacks one started since, that second listing kept as long, so a container that has exited is not listed again on every look; or, where that listing fails, the first twelve agents inspected; an agent on a machine not known here is left out rather than failing the menu), and the newest is asked for its models.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/orchestrator/sources/aiSources.ts` — `availableModels`; `src/providers/localDockerProvider.ts` — `openclawVersions`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/orchestrator/sources/aiSources.ts` — `availableModels`; `src/providers/localDockerProvider.ts` — `openclawVersions`
 
 
 ### A class saved without complaint, but giving it to an agent fails: the model "isn't one of this source's models"
@@ -1764,7 +1771,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a class's model was only checked against its source when the class was given to an agent, not when it was saved.
 - **Fix:** upgrade: the class is refused when it is saved, with the reason. For one saved before, edit the class's model (or add the model to the source's switchable list).
 - **Fixed in:** `v2.169.0`
-- **Code:** `src/api/classRoutes.ts` — `'/v1/agent-classes'`; `src/orchestrator/lifecycle/modelRuntime.ts` — `modelOverrideProblem`
+- **Code:** `src/api/agents/classRoutes.ts` — `'/v1/agent-classes'`; `src/orchestrator/lifecycle/modelRuntime.ts` — `modelOverrideProblem`
 
 ### An agent answers on a model you picked earlier, not the one you picked last
 - **Check:** the agent's page shows the model you picked last, but `openclaw models status` in its console names the one before; both changes said they applied live.
@@ -1799,21 +1806,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** these controls wrote their errors into that drawer, closed and, for New token, on another tab.
 - **Fix:** upgrade: the error shows on the source's own row with a toast, and New token has its own line on the Security tab.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/usage.js` — `aiRowSay`, `shareAiProfile`, `saveAiProfile`; `web/app/images.js` — `newCliToken`
+- **Code:** `web/app/usage.js` — `aiRowSay`, `shareAiProfile`, `saveAiProfile`; `web/app/settings.js` — `newCliToken`
 
 ### Move agents here: some agents did not move, and the reason flashed past
 - **Check:** after **Move agents here…**, an agent you ticked still shows its old source under Settings → AI or on its AI tab.
 - **Cause:** the summary and each skipped agent were separate toasts, each replacing the last, and the dialog closed at the same moment.
 - **Fix:** upgrade: when any agent is skipped the dialog stays open, with the summary, each skipped agent and its reason, and only the agents still to move, and it keeps your choices for a retry. If you pressed Cancel meanwhile it stays closed, and a toast says what was skipped. If you reopened it, for this source or another, the move answers in a toast and the open list drops what moved, keeping your ticks. On an older release, move the agent alone to read its reason.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/images.js` — `moveAgentsApply`, `moveSourceRedraw`; `web/app/usage.js` — `moveAgentsToSource`
+- **Code:** `web/app/usage.js` — `moveAgentsToSource`, `moveAgentsApply`, `moveSourceRedraw`
 
 ### An agent's AI source is gone: switched to a source while it was being deleted
 - **Check:** the agent's page names no AI source, or a rebuild fails because its source cannot be found, and the source it was switched to was deleted at about the same time.
 - **Cause:** deleting a source checked that no agent used it, then deleted its key, and only then the source. An agent switched to it during the key's deletion kept a source that no longer existed. The other way round, a switch (an agent's AI source, Move agents here, a class that brings its source) or an import (Restore, a move from another Hatchabot) that was checking the agent's runtime, applying its memory limit or reading the file when the source went also went ahead.
 - **Fix:** switch the agent to another source. Since the fix, the source is gone the moment it is found unused, and a switch to it is refused ("That AI source was deleted meanwhile") with nothing changed. A switch (an agent's AI source, Move agents here, a class) holds the source until the switch is stored, even if the page that asked was closed; from then on the agent is on it, and a delete says it is in use. While it does, for ten minutes at most, deleting the source is refused with "An agent is switching to it; try again in a moment.", or "Still in use by …" when an agent already uses it. An agent's settings saved with a source switch are stored all at once: when the switch is refused or the save fails, none of them is kept, nothing follows from them or is logged for them, and a memory limit already given to its container is put back as stored. An import is not held, since a large one takes minutes: one whose source is gone by the time its agent is written is refused (409, "That AI source was deleted meanwhile") with no agent made, and so is a template. An agent deleted during its switch is said to be deleted ("It was deleted."), not its source, and one deleted while any of its settings were being saved has none of them stored. A source switch, a class or Move agents here judges each agent as it is when it writes it: one busy by then is skipped as busy, and one moved to a runner meanwhile is not put on this machine's login (an agent's own switch is refused, as it would have been up front).
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id'` (DELETE); `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `withSourceHold`; `src/api/transferRoutes.ts` — `'/v1/agents/restore'`, `'/v1/agents/import'`; `src/orchestrator/sources/aiSources.ts` — `switchAgentToSource`; `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`; `src/orchestrator/lifecycle/memoryLimits.ts` — `applyCurrentLimits`; `src/orchestrator/lifecycle/sourceHolds.ts` — `holdSource`, `withSourceHold`; `src/store/store.ts` — `setAgentAIProfile`, `insertAgentOnSource`, `SourceGoneError`; `src/orchestrator/transfer/transfer.ts` — `importAgent`; `src/orchestrator/transfer/template.ts` — `importTemplate`; `src/api/transferRoutes.ts` — `'/v1/agents/restore'`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id'` (DELETE); `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `withSourceHold`; `src/api/data/transferRoutes.ts` — `'/v1/agents/restore'`, `'/v1/agents/import'`; `src/orchestrator/sources/aiSources.ts` — `switchAgentToSource`; `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`; `src/orchestrator/lifecycle/memoryLimits.ts` — `applyCurrentLimits`; `src/orchestrator/lifecycle/sourceHolds.ts` — `holdSource`, `withSourceHold`; `src/store/store.ts` — `setAgentAIProfile`, `insertAgentOnSource`, `SourceGoneError`; `src/orchestrator/transfer/transfer.ts` — `importAgent`; `src/orchestrator/transfer/template.ts` — `importTemplate`; `src/api/data/transferRoutes.ts` — `'/v1/agents/restore'`
 
 ### On OpenClaw 2026.9 an agent can't select some of its source's models (Fable, Opus 5.5 or Sonnet 5.5 missing from /model)
 - **Check:** the agent runs OpenClaw 2026.9.x. In its console, `openclaw models list` shows fewer models than its AI source lists, and `openclaw config get agents.defaults.modelPolicy --json` has an `allow` list without the missing ones. A rebuild does not change it.
@@ -1827,14 +1834,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** saving a source's list only stored it. The agent's own list was written when it was built.
 - **Fix:** upgrade. A saved list is now written to each of the source's agents at once, running or stopped, one agent after another. An agent whose model is about to change (its pin was dropped from the list, or a source switch waits) gets the list with the rebuild that change waits for, which its page shows. Its Setup log shows `model.list_set`, or `model.list_set_failed` when the write failed; then it gets the list at its next rebuild.
 - **Fixed in:** `v2.179.1`
-- **Code:** `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id'` (PATCH); `src/orchestrator/lifecycle/modelRuntime.ts` — `pushModelList`, `applyModelListNow`, `runtimeVersionOf`
+- **Code:** `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id'` (PATCH); `src/orchestrator/lifecycle/modelRuntime.ts` — `pushModelList`, `applyModelListNow`, `runtimeVersionOf`
 
 ### A Claude source's "Add a model" menu offers the same model twice (`claude-haiku-4-5` and `claude-haiku-4-5-20251001`), or ⟳ Sync fails on a long list
 - **Check:** the menu shows ids that end in a date beside the same model without one. A source's list holds at most 16 models, its default among them; a Sync that would pass 16 was refused.
 - **Cause:** the menu listed every id the agent's runtime catalogues, and some models are catalogued twice, with and without a date. Each took a place on the list. The editor did not say when the list was full, and Sync added every model it found.
 - **Fix:** upgrade. The menu offers each model once (the undated id where there is one), says when the list is full, and Sync adds what fits and names the rest. A dated id already on a list stays until you remove it; remove the duplicate by hand to free its place.
 - **Fixed in:** `v2.179.1`
-- **Code:** `src/orchestrator/sources/modelOptions.ts` — `foldDatedIds`; `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/orchestrator/sources/aiSources.ts` — `availableModels`; `web/app/usage.js` — `renderExtras`, `syncModels`; `web/app/images.js` — `MAX_SOURCE_MODELS`
+- **Code:** `src/orchestrator/sources/modelOptions.ts` — `foldDatedIds`; `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/available-models'`; `src/orchestrator/sources/aiSources.ts` — `availableModels`; `web/app/usage.js` — `renderExtras`, `syncModels`, `MAX_SOURCE_MODELS`
 
 ## Telegram, Discord and Slack
 
@@ -1892,7 +1899,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the bare command asked every running agent, and an agent without a chat app (or not yours) has no pairing requests to read: its "Not found" stopped the whole command.
 - **Fix:** upgrade; the command asks only running agents of yours on a chat app. Until then, name the agent: `hatchabot pairing <agent>`.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/cli.ts` — `pairingTargets`; `src/api/channelRoutes.ts` — `'/v1/agents/:id/pairing'`
+- **Code:** `src/cli.ts` — `pairingTargets`; `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/pairing'`
 
 ### Two agents answer on one bot, or messages to a bot go missing
 - **Check:** two running containers carry the same bot token (the bot was moved, swapped, or is also used by a hand-built OpenClaw).
@@ -2151,7 +2158,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.168.0 Update installed whatever app its source now named. A renamed `"app"` scheduled the new app's tasks beside the old app's and recorded them under the old name, so Stop app took off only the new ones.
 - **Fix:** upgrade: Update now refuses it ("… is another app (…), so it was not installed as an update") and changes nothing; to replace the app, install it again from the same source (the old app's tasks come off first). On an older version, remove the leftover jobs with `openclaw cron rm <id>`, then Stop app and install again.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/appRoutes.ts` — `/v1/agents/:id/app/update`; `src/orchestrator/apps/agentApps.ts` — `installFromSource`
+- **Code:** `src/api/data/appRoutes.ts` — `/v1/agents/:id/app/update`; `src/orchestrator/apps/agentApps.ts` — `installFromSource`
 
 ### Every app install, update or Stop app says "The agent's scheduled task list is incomplete or malformed"
 - **Check:** `openclaw cron list --all --json` in the agent's console has a job with no `name` (one of the agent's own, not the app's), and the message comes back on every try.
@@ -2165,21 +2172,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.170.0 the install that had waited for the new agent stayed recorded after a direct install replaced it, and Stop app did not remove it, so the start installed it again.
 - **Fix:** upgrade, then press Stop app again: a direct install now retires the waiting install, and Stop app removes one still recorded.
 - **Fixed in:** `v2.170.0`
-- **Code:** `src/api/appRoutes.ts` — `/v1/agents/:id/app`; `src/orchestrator/apps/agentApps.ts` — `runPendingApp`; `src/orchestrator/apps/appPending.ts` — `dropAppPending`
+- **Code:** `src/api/data/appRoutes.ts` — `/v1/agents/:id/app`; `src/orchestrator/apps/agentApps.ts` — `runPendingApp`; `src/orchestrator/apps/appPending.ts` — `dropAppPending`
 
 ### A new agent's app never goes in: its page keeps saying "Installing its app from … once it is running…"
 - **Check:** the agent is running, its App row still says it is waiting, and its Setup log has no `app.installed` or `app.install_failed`; either setup finished while the app's repo was being read, or a second request to install was made while the first was still running.
 - **Cause:** before v2.170.0 the request judged the agent by its state before reading the repo, so one whose setup finished meanwhile was never started; and a request that finished deleted a newer request saved while it ran (or put its error on it).
 - **Fix:** upgrade. On an older version, restart Hatchabot, or make the request again from the agent's page once the first has finished.
 - **Fixed in:** `v2.170.0`
-- **Code:** `src/orchestrator/apps/agentApps.ts` — `runPendingApp`, `runPendingOnce`; `src/api/appRoutes.ts` — `/v1/agents/:id/app/pending`; `src/orchestrator/apps/appPending.ts` — `dropAppPending`, `onePendingChange`
+- **Code:** `src/orchestrator/apps/agentApps.ts` — `runPendingApp`, `runPendingOnce`; `src/api/data/appRoutes.ts` — `/v1/agents/:id/app/pending`; `src/orchestrator/apps/appPending.ts` — `dropAppPending`, `onePendingChange`
 
 ### A waiting app install fails after Unarchive: a password or key it was given is missing
 - **Check:** the agent was archived while a second install from a repo was being prepared for it (Install when ready), the second request said "It was deleted or archived meanwhile, so nothing was saved", and the install that was already waiting fails on a secret field once the agent is back.
 - **Cause:** both requests keep a secret field at the same place. The refused one put its own value there and then deleted it, which took the waiting install's value with it.
 - **Fix:** give the install its values again (Install when ready on the agent's page). Since the fix, a refused request puts back what was there.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/appRoutes.ts` — `/v1/agents/:id/app/pending`; `src/orchestrator/apps/agentApps.ts` — `savePending`; `src/orchestrator/apps/appPending.ts` — `stashPendingSecrets`, `pendingSecretRefs`
+- **Code:** `src/api/data/appRoutes.ts` — `/v1/agents/:id/app/pending`; `src/orchestrator/apps/agentApps.ts` — `savePending`; `src/orchestrator/apps/appPending.ts` — `stashPendingSecrets`, `pendingSecretRefs`
 
 ### Installing an app is refused: "Its app changed meanwhile (another install or update finished)"
 - **Check:** another install, update or Stop app of this agent's app finished while this install was still reading its repo.
@@ -2207,7 +2214,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before 2.146.1 the promote check was inverted: it refused moving the fleet UP across 2026.8 over agents still on 2026.7 (the normal path; their volume is healed on rebuild), instead of refusing a move DOWN below 2026.8 over agents already migrated.
 - **Fix:** update to 2.146.1. `hatchabot image promote 2026.9.8` (a bare version now means that base image, not a derived image's name).
 - **Fixed in:** `v2.146.1`
-- **Code:** `src/api/imageRoutes.ts` — `'/v1/runtime/images/promote'`; `src/openclaw/configWriter.ts` — `needsPortHeal`
+- **Code:** `src/api/machine/imageRoutes.ts` — `'/v1/runtime/images/promote'`; `src/openclaw/configWriter.ts` — `needsPortHeal`
 
 ### An agent's times are hours off (it thinks it is in UTC)
 - **Check:** `openclaw config get agents.defaults.userTimezone` in the agent (unset before 2.143.0); `date` in its container says UTC.
@@ -2228,7 +2235,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the page wrote what should have happened, not what did: parking a pasted bot in the pool can fail (its token could not be read or stored), and the archive goes on without it.
 - **Fix:** upgrade: the archive's answer says where the bot went, and the page says that ("its bot @… could not be put back in the pool"). To use the bot again, paste its token into an agent, or add it to the pool.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/orchestrator/lifecycle/archive.ts` — `archiveAgent`, `ArchiveOutcome`; `web/app/templates.js` — `confirmArchive`; `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id/archive'`
+- **Code:** `src/orchestrator/lifecycle/archive.ts` — `archiveAgent`, `ArchiveOutcome`; `web/app/templates.js` — `confirmArchive`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id/archive'`
 
 ### An unarchived agent hangs in PROVISIONING: "waiting for a bot token"
 - **Check:** after Restore (`hatchabot unarchive`), the Setup log ends with "waiting for a bot token" and Settings → Messaging → Telegram shows no spare bot. From 2.142.0 the same situation shows instead as an Alerts line on a running agent: "No Telegram bot was free — it is running in the web app; attach a bot later".
@@ -2263,7 +2270,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the swap put a pasted bot back in the pool before the agent stopped, and swapped the row even when the stop failed; a Start could also boot the old container before its rebuild.
 - **Fix:** upgrade. Then stop the agent still holding the old bot and rebuild it.
 - **Fixed in:** `v2.153.0`
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/agents/:id/channel/swap'`; `src/orchestrator/lifecycle/rebuildQueue.ts` — `rebuildAfterHandover`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/channel/swap'`; `src/orchestrator/lifecycle/rebuildQueue.ts` — `rebuildAfterHandover`
 
 ### Discord or Slack: "It answers you now" on an agent that is stopped or rebuilding
 - **Check:** the sheet after connecting said **It stays stopped** (or **It restarts now**), and a few seconds later **✓ Linked. It answers you on … now**, while the agent's tile shows it stopped or being rebuilt.
@@ -2312,7 +2319,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the unlink dropped every agent's binding first and then scrubbed the agents' allowlists on their volumes, where the pairing approval lives and survives a rebuild. A scrub that failed was only logged; the binding it needed to retry was gone. And it took one id (the newest binding) and scrubbed that from every agent, so an agent that knew you under another id kept it.
 - **Fix:** upgrade, then unlink again. Each agent is now scrubbed of the id it knows, and its binding goes only once the scrub is done; when an agent cannot be reached the reply names it (`unlinked: false`, `failed`) and the rest are done, so unlinking again finishes it when the machine is awake. On an older version, or for an agent that lost its binding already: remove your Discord id from that agent by hand (Access → the member's channels), or rebuild it after removing the approval from `credentials/discord-*-allowFrom.json` on its volume.
 - **Fixed in:** `v2.166.0`
-- **Code:** `src/api/channelRoutes.ts` — `/v1/account/discord`, `allowlistScrubScript`; `src/store/store.ts` — `unbindMemberIdentity`, `memberIdentities`
+- **Code:** `src/api/chat/channelRoutes.ts` — `/v1/account/discord`, `allowlistScrubScript`; `src/store/store.ts` — `unbindMemberIdentity`, `memberIdentities`
 
 ### Someone removed just as they first messaged the bot can still chat with it
 - **Check:** they are not in the agent's members, yet the bot answers them; the trail shows their removal at the moment their invite's window let them in.
@@ -2340,28 +2347,28 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** adding a known person always made a new seat, after writing them into the agent's allowlist; the seat they had before was still there (removed), so the new one was refused.
 - **Fix:** upgrade, then press Add again: their old seat is taken up again, linked to the chat app they are known on. Until then, send them an invite: redeeming one takes the old seat up again.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/memberRoutes.ts` — `'/v1/agents/:id/members/known'`; `src/orchestrator/members/roster.ts` — `addKnown`; `src/store/store.ts` — `reactivateMembership`
+- **Code:** `src/api/chat/memberRoutes.ts` — `'/v1/agents/:id/members/known'`; `src/orchestrator/members/roster.ts` — `addKnown`; `src/store/store.ts` — `reactivateMembership`
 
 ### Someone joined with an invite but has no way in: the join page said they were in, with no link, and the invite now says "already used"
 - **Check:** the person chose Discord or Slack (or Telegram) on the invite page, and that app was removed from the agent between their opening the page and pressing Join; Members lists them, not linked on any app.
 - **Cause:** the join spent the single-use invite and made the seat before it looked for the app they chose; with the app gone there was nothing to link them on.
 - **Fix:** upgrade: such a join is refused ("… is no longer on Discord") and the invite stays good for an app the agent is on, after a reload. For someone already stranded: remove them and send a new invite.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/memberRoutes.ts` — `'/v1/join'`; `src/orchestrator/members/invitations.ts` — `joinOnApp`; `src/orchestrator/members/invite.ts` — `redeemInvite`
+- **Code:** `src/api/chat/memberRoutes.ts` — `'/v1/join'`; `src/orchestrator/members/invitations.ts` — `joinOnApp`; `src/orchestrator/members/invite.ts` — `redeemInvite`
 
 ### A web-chat invite keeps asking for the password: the right one brings the same form back, with no message
 - **Check:** the link is at the public address and the account has no second factor, owns an agent, or has a factor not yet given in this browser. In the browser's network tab `/v1/login` answers 200 and `/v1/join` answers 401.
 - **Cause:** the public address needs a second factor before a sign-in counts. That refusal is right, but it looked the same as no sign-in at all, so the page showed the form again and said nothing.
 - **Fix:** upgrade: the page says what is missing. With a factor: open Hatchabot, give it there, come back and press Join. With none: use a reset link from the owner and add one right after it, or add one at the private address, then open the invite again. The owner can instead let chat-only guests in without one (Settings → Reach it from anywhere), which works only for an account that owns nothing. Without upgrading, the same steps work: nothing but the message was missing.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/join.js` — `joinWebAccount`, `postJoin`; `src/api/memberRoutes.ts` — `joinForWebChat`, `joiningAccount`; `src/api/publicAccess.ts` — `factorRefusal`, `refuseSession`
+- **Code:** `web/app/join.js` — `joinWebAccount`, `postJoin`; `src/api/chat/memberRoutes.ts` — `joinForWebChat`, `joiningAccount`; `src/api/publicAccess.ts` — `factorRefusal`, `refuseSession`
 
 ### A web-chat invite only offers "Sign in with Google", and someone with a username and password cannot join
 - **Check:** this Hatchabot uses Google sign-in with password accounts as well (`HATCHABOT_AUTH=identity` and `HATCHABOT_LOCAL_ACCOUNTS=1`), and the person signs in with a username and password; or they are signed in here already and the page still asks for Google.
 - **Cause:** before v2.179.0 the join page chose its sign-in by the install's mode alone: on a Google install it offered only Google, though Hatchabot would have taken their password account or the session they already had.
 - **Fix:** upgrade: the page offers the password form where password accounts sign in, and **Join as …** when the browser is signed in here already. Or skip the link: in the agent's **Sharing** → **Members**, pick them from **Share with someone on this Hatchabot…** and the agent is on their home screen at once. Without upgrading, give them a Google account to sign in with, or add them on a chat app first and then use **Allow web chat…** in Members.
 - **Fixed in:** `v2.179.0`
-- **Code:** `web/app/join.js` — `initWebChat`, `setWebMode`, `joinWebAccount`; `src/api/memberRoutes.ts` — `'/v1/invites/:code'`, `joiningAccount`; `src/orchestrator/members/roster.ts` — `webChatPeople`
+- **Code:** `web/app/join.js` — `initWebChat`, `setWebMode`, `joinWebAccount`; `src/api/chat/memberRoutes.ts` — `'/v1/invites/:code'`, `joiningAccount`; `src/orchestrator/members/roster.ts` — `webChatPeople`
 
 ### Signed in with a password account named with my email, I don't see the agents of my Google sign-in (or the other way round)
 - **Check:** the install has Google sign-in and password accounts; the password account's username is the same email as the Google account.
@@ -2375,14 +2382,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the roster called any code on the row an invitation, and an expired code stays on the row. A reset link is a code too, as is an invitation never claimed past its 48 hours.
 - **Fix:** upgrade. Their password was never affected. A member with a password keeps the agent count and **Send a reset link**, and an expired invitation says so, with **Send a new invitation**. Without upgrading: `hatchabot accounts reset-password <username>` on the machine.
 - **Fixed in:** `v2.173.0`
-- **Code:** `src/api/accountsAuth.ts` — `'/v1/local-accounts'`, `'/v1/local-accounts/:id/reset-link'`; `web/app/signin.js` — `loadAccounts`, `sendResetLink`, `copyAccountInvite`
+- **Code:** `src/api/signIn/accountsAuth.ts` — `'/v1/local-accounts'`, `'/v1/local-accounts/:id/reset-link'`; `web/app/signin.js` — `loadAccounts`, `sendResetLink`, `copyAccountInvite`
 
 ### Turning on family accounts answers "An account already exists — restart to finish switching", and restarting changes nothing
 - **Check:** the app still asks for the shared password after a restart, and `.env` has no `HATCHABOT_AUTH=accounts`. The service stopped, or the machine lost power, during the switch. The recovery code was never shown.
 - **Cause:** the switch makes the account first and writes `.env` second. A crash between the two left an account that nothing finished, and every try was refused because an account existed.
 - **Fix:** upgrade, then press **Turn on family accounts** again: an account nobody has used is replaced, the switch finishes, and a new recovery code is shown. An account that has been used, or was made with `hatchabot accounts create`, is kept and the answer says how to use it: set `HATCHABOT_AUTH=accounts` in `.env` and restart. The same hand fix works without upgrading; make a recovery code afterwards in Settings.
 - **Fixed in:** `v2.173.0`
-- **Code:** `src/api/accountsRoutes.ts` — `'/v1/auth/family-accounts'`; `src/orchestrator/accounts/familyAccounts.ts` — `halfMadeFamilyAccount`; `src/store/store.ts` — `localAccountNeverUsed`
+- **Code:** `src/api/signIn/accountsRoutes.ts` — `'/v1/auth/family-accounts'`; `src/orchestrator/accounts/familyAccounts.ts` — `halfMadeFamilyAccount`; `src/store/store.ts` — `localAccountNeverUsed`
 
 ### After turning on accounts, "Only bots I parked" is off again, problem report drafts are gone, or budget and spending alerts stopped
 - **Check:** the install went from the shared password to accounts. The owner's agents moved to the new account, but Settings → Messaging shows **Only bots I parked** off though it was on, Report a problem lists none of the earlier drafts, and an agent's budget or "Tell me every $X" alert no longer sends its message.
@@ -2401,21 +2408,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
   - An old agent with the same name as one of yours stays behind, with its budget, members and the rest. An AI source, machine or Google connection that only such agents use stays with them; one that any agent of yours uses is yours. The log says "some of this installation's agents stayed with the old owner". Rename or delete yours, then restart the service.
   - The log says "this installation's data is held for the account that signed in first" when another account (not a member) signs in. That account takes it at its next sign-in. When the log says that account no longer exists, release the hold, then restart the service: `sqlite3 data/hatchabot.sqlite "DELETE FROM first_account"` (or the database `HATCHABOT_DB` names). A member's sign-in logs nothing.
 - **Fixed in:** `v2.178.0` for the retry latch; browser-cookie retries are fixed in `v2.185.1` (HB-0548, HB-0625).
-- **Code:** `src/api/firstAccount.ts` — `firstAccountAdoption`, `RELEASE_PIN`; `src/store/store.ts` — `pinFirstAccount`, `adoptLocalOwnerData`, `localOwnerHasAnything`, `localOwnerHasData`, `mayTakeOverInstall`, `installOwner`; `src/api/auth.ts` — `registerIdentityAuth`; `src/index.ts`
+- **Code:** `src/api/signIn/firstAccount.ts` — `firstAccountAdoption`, `RELEASE_PIN`; `src/store/store.ts` — `pinFirstAccount`, `adoptLocalOwnerData`, `localOwnerHasAnything`, `localOwnerHasData`, `mayTakeOverInstall`, `installOwner`; `src/api/signIn/auth.ts` — `registerIdentityAuth`; `src/index.ts`
 
 ### After Google could not be reached, Google sign-in says "Too many failed attempts", even with Google back
 - **Check:** identity mode. Sign-in said "Could not reach Google to verify your login." a few times, then "Too many failed attempts — try again later." (HTTP 429). The machine's network or Google had a fault shortly before.
 - **Cause:** every failed check counted as a wrong guess, even one where Google's keys could not be fetched. After 10 the address waited out the 15 minutes, or longer at the public address, where it also went on the security record as a burst of failures. It needs a fresh start or a rotated key, as keys already fetched keep working.
 - **Fix:** upgrade: failing to reach Google answers 503 with the same message and is not counted. Without upgrading, wait out the window once the network is back.
 - **Fixed in:** `v2.173.0`
-- **Code:** `src/api/identity.ts` — `IdentityUnavailableError`, `#certFor`; `src/api/auth.ts` — `'/v1/session'`, `noteFailure`
+- **Code:** `src/api/signIn/identity.ts` — `IdentityUnavailableError`, `#certFor`; `src/api/signIn/auth.ts` — `'/v1/session'`, `noteFailure`
 
 ### People on Discord or Slack were told the agent "no longer answers" there, but it still does
 - **Check:** removing Discord or Slack from the agent answered "Its runtime could not be confirmed stopped", "busy" or "changed meanwhile", and the bot is still listed on the agent.
 - **Cause:** the goodbye DMs went out before the removal took the agent's lock and stopped it, so a removal that was then refused had already told everyone.
 - **Fix:** upgrade: the goodbye goes out only once the agent holds still and is stopped, just before its bot is parked. Tell those people it is still there, or remove it again.
 - **Fixed in:** `v2.169.0`
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind'`; `src/orchestrator/channels/chatBots.ts` — `dmChannelPeople`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind'`; `src/orchestrator/channels/chatBots.ts` — `dmChannelPeople`
 
 ### A new agent on a pool bot answers messages that were sent to the bot's previous agent
 - **Check:** the agent was just created (or brought back) on a bot from the pool that served another agent within the last day; its first replies answer messages sent before it existed. The service log has no `pool.updates_dropped` line for that bot at the lease, or has `pool.updates_not_dropped`.
@@ -2436,14 +2443,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** Detach stopped the container only when the record said RUNNING. A record that had drifted to STOPPED while the container ran was trusted, and the bot went back to the pool with its old agent still polling it.
 - **Fix:** stop the old container (Stop on its tile, or `docker stop` it). Since the fix Detach stops the container whatever the record says and confirms it stopped before the bot goes back; when it cannot, the bot stays and Detach says "It did not stop".
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/api/channelRoutes.ts` — the `'/v1/agents/:id/telegram'` delete route, `stopAndConfirm`; `src/orchestrator/lifecycle/quiesce.ts` — `stopAndConfirm`
+- **Code:** `src/api/chat/channelRoutes.ts` — the `'/v1/agents/:id/telegram'` delete route, `stopAndConfirm`; `src/orchestrator/lifecycle/quiesce.ts` — `stopAndConfirm`
 
 ### The Bot pool lists a bot in use by an agent that was deleted while its Telegram was being added
 - **Check:** Settings → Messaging → Telegram → Bot pool shows a bot leased to an agent that no longer exists; that agent was deleted while Add Telegram was still finding it a bot.
 - **Cause:** the attach checked the agent before it went looking for a bot and not after, so it saved the bot (row and token) on the deleted agent.
 - **Fix:** upgrade; remove the bot from the pool and park it again to free it. Since the fix an attach that finds its agent gone (or no longer running or stopped) connects nothing and sends the bot back, and says so.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/api/channelRoutes.ts` — the `'/v1/agents/:id/telegram'` post route, `attached`
+- **Code:** `src/api/chat/channelRoutes.ts` — the `'/v1/agents/:id/telegram'` post route, `attached`
 
 ### "Who can reach it" says Invite only, and strangers can still knock
 - **Check:** reopen the agent's Telegram tab: on an older release a save that failed left the select on your choice, and the tab drawn afresh shows the saved one. A brief error toast came at the time.
@@ -2457,14 +2464,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the connect asked whether the agent could take an app only before the platform checked the token. Deleted meanwhile, the deleted agent got the channel and its stored token, and a parked bot taken for it left the pool.
 - **Fix:** park the bot again with its token under ⚙ Settings → Discord or Slack. Since the fix, the connect asks again once it holds the agent and answers "It was deleted.", and a parked bot stays parked.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind'` (POST), `agentGone`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind'` (POST), `agentGone`
 
 ### The Telegram card shows the old bot's name or group warnings after Re-check and Change bot
 - **Check:** the agent's Telegram card shows the old bot's name, or group warnings that are not true of the new bot, and you pressed Re-check just before changing the bot.
 - **Cause:** a re-check that was waiting for Telegram's answer about the old bot wrote it over the new bot's details.
 - **Fix:** press Re-check again. Since the fix, a re-check whose bot was changed meanwhile writes nothing and says "Its Telegram bot changed meanwhile — look again."
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind/recheck'`; `src/orchestrator/channels/chatBots.ts` — `channelRechecks`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind/recheck'`; `src/orchestrator/channels/chatBots.ts` — `channelRechecks`
 
 ### Security → Agent exposure says "low" or "medium" for an agent shared on Discord, Slack or web chat
 - **Check:** ⚙ Settings → Security → Agent exposure names the people on Discord or Slack under "can message it", yet gives no "N people can message it" reason, and an agent that writes a shared folder reads "medium"; people given web chat are marked "invited, not yet linked".
@@ -2478,21 +2485,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** adopt did not ask to skip the pool. With a spare bot there, the agent came up on it, and the step that hands over the old bot never ran.
 - **Fix:** upgrade: `--reuse-bot` skips the pool, hands over the old bot before the workspace is copied, and stops (removing the new agent) if the agent does not wait for that bot. After the hand-over it waits for setup to finish, however long it takes, and counts the bot as refused only when setup asks for a bot again. If the agent fails to start, before the hand-over or after it, adopt says it "could not start" and why, removes it and copies nothing. The web app's adopt with "Take over its bot" does the same, and waits as long as the CLI (15 minutes) for setup; an agent not yet running then (setting up, rebuilding or stopped) is left to finish once its bot was handed over, by the web app and the CLI alike, and they say so (the CLI names `hatchabot setup-log <id>` to watch), rather than removing it. One still setting up before anything was handed over (its old bot, or a pasted token) is removed, as the CLI removes it, and it says so (or that the delete was refused, and why). For an agent already adopted on a pool bot: delete it (its pool bot goes back to the pool), then adopt again with `--reuse-bot`.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/cli.ts` — `'adopt'` (`skipPool`), `pollAgent`; `src/api/agentSecretRoutes.ts` — `'/v1/agents/:id/channel-token'`; `web/app/create.js` — `doAdopt`, `pollAgent`
+- **Code:** `src/cli.ts` — `'adopt'` (`skipPool`), `pollAgent`; `src/api/agents/agentSecretRoutes.ts` — `'/v1/agents/:id/channel-token'`; `web/app/create.js` — `doAdopt`, `pollAgent`
 
 ### `hatchabot create` with a pasted bot token says "is RUNNING" while the agent is still being set up, or `hatchabot adopt` removes the agent it just made
 - **Check:** `hatchabot list` shows the agent PROVISIONING right after create said it was running; or adopt with a pasted token (`HATCHABOT_BOT_TOKEN` or the prompt) failed and removed the agent; or adopt stopped on "Telegram did not answer" and removed the agent.
 - **Cause:** the server took the token and answered while the agent still showed the "waiting for a bot token" step. The CLI's first look after that took the old step as the end: create printed RUNNING, and adopt went on to copy the workspace into an agent still being set up. A first fix waited 30 seconds for setup to take the token up, so a slower setup (a busy machine, a slow Telegram) still read as a refused token. And "Telegram did not answer" (503) was taken as a wrong token.
 - **Fix:** upgrade: the server marks the step answered when the token comes in, and shows the agent as setting up; setup clears the step when it takes the token, and asks again only if it turns the token down. The CLI waits for the agent to run, fail or ask again, however long setup takes. The CLI tells such a server by what its `/v1/config` says (`handover: 2`), not by timing: there, and in the web app's adopt and paste-a-token box (which talk to their own server), a 409 to a post sent again makes it read the agent, and a step still open means the first post never landed, so that 409 is the refusal and the agent is removed; a step answered is watched on. Against a server of v2.177 or before, which shows the step until setup takes the token and does not tell a refusal apart, a step that stays 30 seconds after the hand-over stops the CLI with the agent left to finish (watch `hatchabot setup-log <id>`), not removed; so does a post sent again after no answer that such a server answers 409 (it took the first). When the agent runs on another bot than the one handed over (by the server's name for it, not the workspace's account key), create and adopt say which, and that the pasted bot was not used. "Telegram did not answer" (502, 503 or 504), or a connection refused, reset or dropped before an answer (another error, such as an invalid address, is not), is sent again on its own, with the same token, after 2, 4 and 8 seconds, by the CLI, by the web app's adopt and by its paste-a-token box; the CLI asks for the token again only when the token itself is refused (400 or 422, which includes a spare pool bot's token); a 409 about the agent (it is not waiting for a token, or another token came in already) stops with that message. A post the server took already (a proxy's 504 lost its answer) is answered 202 again when it brings the same token; another token gets 409. "Go on without a bot" sent again is answered 202 again only where the step was answered so; an agent made web-only, that never waited, gets 409. create says RUNNING only once it is, and otherwise says what state the agent is in. adopt copies the workspace only into a running agent: when setup turns the token down, it says the agent "is PROVISIONING and waiting on you", removes it and copies nothing. Check the token with @BotFather and run adopt again. On an older release, wait for `hatchabot list` to show RUNNING before using the agent.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/cli.ts` — `'create'`, `'adopt'`, `pollAgent`, `HANDOVER_SAYS`, `HANDOVER_RETRY_MS`, `STEP_GRACE_MS`, `tokenTurnedDown`, `noAnswer`, `otherBotLine`; `src/api/configRoutes.ts` — `'/v1/config'`; `src/orchestrator/reach/appConfig.ts` — `handover`; `src/api/agentSecretRoutes.ts` — `'/v1/agents/:id/channel-token'`; `src/orchestrator/agentSecrets/botTokenStep.ts` — `sameTokenAgain`; `src/store/store.ts` — `telegramSkippedByOwner`; `web/app/create.js` — `handOverBot`; `web/app/connections.js` — `submitToken`
+- **Code:** `src/cli.ts` — `'create'`, `'adopt'`, `pollAgent`, `HANDOVER_SAYS`, `HANDOVER_RETRY_MS`, `STEP_GRACE_MS`, `tokenTurnedDown`, `noAnswer`, `otherBotLine`; `src/api/machine/configRoutes.ts` — `'/v1/config'`; `src/orchestrator/reach/appConfig.ts` — `handover`; `src/api/agents/agentSecretRoutes.ts` — `'/v1/agents/:id/channel-token'`; `src/orchestrator/agentSecrets/botTokenStep.ts` — `sameTokenAgain`; `src/store/store.ts` — `telegramSkippedByOwner`; `web/app/create.js` — `handOverBot`; `web/app/connections.js` — `submitToken`
 
 ### An agent shows "Setup was interrupted — tap Retry" right after its bot token was pasted
 - **Check:** the token was pasted (in the app, `hatchabot create` or `hatchabot adopt`) and accepted, and the agent's Setup log then has `reconcile.interrupted`, with no `channel.provisioned` after its last `channel.setup_required`. Either a setup or rebuild of that agent was still running when the token came in (a Retry, or setup still ending after it asked for the token), or Hatchabot restarted between the paste and setup.
 - **Cause:** the server cleared the "waiting for a bot token" step when the token came in, outside setup. With a setup still running, the new setup was not started; after a restart, the token was gone, as it was held only in memory. Either way the agent was left setting up, with no step and nothing running, and the health sweep failed it.
 - **Fix:** upgrade: the token is held on disk with the agent until setup takes it, and the step stays, marked answered, until then. A token that comes in while a setup or rebuild runs is taken by a setup right after it; so is "go on without one", which then ends web-only. Two answers at once: the first is taken and the other is refused. When another change holds the agent (an import, a move), setup waits for it, up to 30 minutes, rather than failing. After a restart, setup runs again with the held token; an answer whose token never got stored asks again, and the restart's note in Activity says which happened (or that setup goes on without a bot). Deleting the agent, or going on without a bot, drops a held token; a delete that is refused leaves it to setup, and a token posted while the agent is being deleted is told "It is being deleted." Held tokens are kept in memory and read from the store once, at start, all at once; one let go or taken while that read runs is not brought back by it. Adding a bot whose token cannot be stored, or whose setup then fails, lets the pasted token go, from memory and disk, before it answers. A held token also goes once the agent gets a bot another way (attached from the pool, or setup ends with another bot), so it never wins over the pool later. Adding a bot to an agent checks a pasted token (with Telegram, against other agents' bots and the pool's spares) before it is held, so a refused one is never stored. A step asked again after it was answered shows in Alerts again, even if it was cleared before; one put back because the token could not be stored is not asked again, so a Clear stands. On an older release, tap Retry and paste the token again.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/routes.ts` — `resumeOperations`; `src/orchestrator/agentSecrets/botTokenStep.ts` — `sameTokenAgain`; `src/api/agentSecretRoutes.ts` — `'/v1/agents/:id/channel-token'`; `src/api/channelRoutes.ts` — `'/v1/agents/:id/telegram'`; `src/channels/telegramManual.ts` — `pendingRef`, `loadHeld`, `waitingFor`, `heldBot`, `sameToken`; `src/orchestrator/lifecycle/provision.ts` — `runProvisionSteps`; `src/orchestrator/lifecycle/operationsResume.ts` — `resumeBackground`, `tokenKept`; `src/store/store.ts` — `setAgentPendingAction`; `src/orchestrator/lifecycle/rebuildQueue.ts` — `provisionWhenFree`
+- **Code:** `src/api/routes.ts` — `resumeOperations`; `src/orchestrator/agentSecrets/botTokenStep.ts` — `sameTokenAgain`; `src/api/agents/agentSecretRoutes.ts` — `'/v1/agents/:id/channel-token'`; `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/telegram'`; `src/channels/telegramManual.ts` — `pendingRef`, `loadHeld`, `waitingFor`, `heldBot`, `sameToken`; `src/orchestrator/lifecycle/provision.ts` — `runProvisionSteps`; `src/orchestrator/lifecycle/operationsResume.ts` — `resumeBackground`, `tokenKept`; `src/store/store.ts` — `setAgentPendingAction`; `src/orchestrator/lifecycle/rebuildQueue.ts` — `provisionWhenFree`
 
 ### Adding a bot, pasting a bot token or importing an agent with a bot waits for minutes, or never answers
 - **Check:** Telegram, or a proxy in the way, was slow or down at the time (`curl -m 10 https://api.telegram.org` from the machine).
@@ -2506,21 +2513,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** any answer to the token check that was not a good bot counted as a wrong token: a proxy's 502 page, Telegram's own 5xx or its 429 (too many requests). Adding a bot to the pool also counted a check Telegram never answered as a failed try, so a few tries during an outage locked the person out of token checks for a while. Importing an agent said "Telegram rejected the bot token".
 - **Fix:** upgrade: only Telegram's own "no" (401 or 404) means a wrong token. Anything else answers 503 with "Telegram did not answer, so the token could not be checked. Try again in a moment.", does not count against the person, and an import says to try it again. On an older release, wait until Telegram answers, and wait out "Too many token checks" if it shows.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/channels/telegramManual.ts` — `verifyBotToken`; `src/api/errorHandler.ts` — `installErrorHandler`; `src/api/channelRoutes.ts` — `/v1/pool`; `src/orchestrator/transfer/transfer.ts` — `importAgent`
+- **Code:** `src/channels/telegramManual.ts` — `verifyBotToken`; `src/api/errorHandler.ts` — `installErrorHandler`; `src/api/chat/channelRoutes.ts` — `/v1/pool`; `src/orchestrator/transfer/transfer.ts` — `importAgent`
 
 ### A new agent made without a pool bot took one after its setup was interrupted
 - **Check:** the agent was created with "use a pool bot" unticked, its setup then failed as interrupted ("Setup was interrupted — tap Retry") because Hatchabot restarted moments after it was made, and after Retry it has a bot from the pool instead of asking for a token.
 - **Cause:** that the pool was to be skipped was held in memory until the setup had parked the agent for its token. A restart before that left a Retry that knew nothing of it.
 - **Fix:** upgrade: it is kept in the database with the agent's row until the agent is parked for its token or has its bot. On an older release, remove the pool bot from the agent, which returns it to the pool, and add the bot you made.
 - **Fixed in:** `v2.191.0`
-- **Code:** `src/orchestrator/lifecycle/provision.ts` — `provisionChannelOrGoWebOnly`, `SKIP_POOL`; `src/api/lifecycleRoutes.ts` — `'/v1/agents'`
+- **Code:** `src/orchestrator/lifecycle/provision.ts` — `provisionChannelOrGoWebOnly`, `SKIP_POOL`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents'`
 
 ### After a restart during a bot change, starting the agent brings it up on the bot it gave back
 - **Check:** Hatchabot restarted while an agent's Telegram, Slack or Discord bot was being removed or swapped. The agent is stopped, its page shows no bot (or the new one), and no rebuild is queued. After Start, the old bot answers again, or two agents answer on one bot. `docker exec <its container> openclaw config get channels` still names the old bot.
 - **Cause:** a bot handed on stops the agent, gives the bot back, and then asks for the rebuild that writes the change into a new container. Only that last step said a rebuild was owed. A restart between the bot going back and the rebuild being asked for left a stopped agent with nothing owed, and Start ran its old container, which still held the old bot's token.
 - **Fix:** upgrade: the rebuild is owed on the agent's record from the moment it is stopped for the handover, so its next start is a rebuild whatever happens in between. On an older release, press Rebuild instead of Start; if it was started already, Rebuild it now and check the pool for the bot it gave back.
 - **Fixed in:** `v2.191.0`
-- **Code:** `src/orchestrator/channels/chatBots.ts` — `stopForBotHandover`, `owedAfterHandover`; `src/api/channelRoutes.ts` — `'/v1/agents/:id/telegram'`, `'/v1/agents/:id/channels/:kind/swap'`; `src/orchestrator/lifecycle/provision.ts` — `recordApplied`; `src/orchestrator/lifecycle/rebuildQueue.ts` — `rebuildOrOwe`; `src/orchestrator/lifecycle/power.ts` — `startStopped`
+- **Code:** `src/orchestrator/channels/chatBots.ts` — `stopForBotHandover`, `owedAfterHandover`; `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/telegram'`, `'/v1/agents/:id/channels/:kind/swap'`; `src/orchestrator/lifecycle/provision.ts` — `recordApplied`; `src/orchestrator/lifecycle/rebuildQueue.ts` — `rebuildOrOwe`; `src/orchestrator/lifecycle/power.ts` — `startStopped`
 
 ## Agents, builds and rebuilds
 
@@ -2585,7 +2592,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** an archive's memory turn runs before it takes the agent's lock, and only Rebuild knew to check for it. A move started in that window stopped the agent mid-turn, so the conversation was not saved and the archive was refused.
 - **Fix:** upgrade: a move is refused while the turn runs. On an older version, archive the agent again where it now is; tick the same box, so it saves what the cut-off turn did not.
 - **Fixed in:** `v2.173.0`
-- **Code:** `src/api/routes.ts` — `busyNow`; `src/api/transferRoutes.ts` — `'/v1/agents/:id/move-host'`, `'/v1/agents/:id/rehost'`
+- **Code:** `src/api/routes.ts` — `busyNow`; `src/api/data/transferRoutes.ts` — `'/v1/agents/:id/move-host'`, `'/v1/agents/:id/rehost'`
 
 ### A stopped agent turned FAILED with "Something went wrong setting up your agent", from pressing Start or Rebuild
 - **Check:** its container is still there and stopped (`docker ps -a`), and its Setup log has `rebuild.failed` with a reason such as a missing key. It had been switched to a source whose key is missing or no longer shared.
@@ -2634,14 +2641,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a delete the process was stopped in leaves the agent DELETING, and nothing finishes it on its own. Before v2.171.0 the agent's page offered no Delete in that state, so only `hatchabot delete <agent>` finished it.
 - **Fix:** open the agent and press Delete… at the foot of its Overview: it finishes the delete. While a delete is still running, a second one is turned away ("It is being deleted already").
 - **Fixed in:** `v2.171.0`
-- **Code:** `web/app/sheet.js` — `v2Pane`; `src/api/lifecycleRoutes.ts` — `deleteAgent`; `src/orchestrator/lifecycle/agentRecords.ts` — `deletesRunning`, `whileDeleting`
+- **Code:** `web/app/sheet.js` — `v2Pane`; `src/api/agents/lifecycleRoutes.ts` — `deleteAgent`; `src/orchestrator/lifecycle/agentRecords.ts` — `deletesRunning`, `whileDeleting`
 
 ### Trying a candidate image on agents did not save their conversation to memory first
 - **Check:** after trying an image on agents (⚙ Settings → Runtime images → 🧪, Pin & rebuild), an agent's memory lacks what was said just before; its Setup log has no `memory.checkpointed` (or `memory.checkpoint_failed`) line for that rebuild.
 - **Cause:** before v2.171.0 the trial's question said Chat → Memory runs first, but its rebuild did not ask for it.
 - **Fix:** upgrade. Before trying an image with an older version, use 📝 Chat → Memory on the agent's Personality tab first.
 - **Fixed in:** `v2.171.0`
-- **Code:** `web/app/images.js` — `runTryOnAgents`; `src/api/lifecycleRoutes.ts` — `/v1/agents/:id/rebuild`
+- **Code:** `web/app/images.js` — `runTryOnAgents`; `src/api/agents/lifecycleRoutes.ts` — `/v1/agents/:id/rebuild`
 
 ### A new agent's first setup failed, and after Delete its volume is still on the disk
 - **Check:** `docker volume ls` lists a `hatchabot-<name>-<id>-vol` for an agent that no longer exists; its setup had failed at the seed or at creating its container (a missing image, a Docker error) before it was deleted.
@@ -2655,7 +2662,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** that save is a whole agent turn, run before the state changes; before 2.142.0 nothing marked the agent meanwhile, so the click looked lost.
 - **Fix:** wait: it archives, and says so if the save failed ("Archived, but couldn't save the conversation…"). Upgrade: from 2.142.0 the tile spins with "Archiving — saving its conversation to memory" from the click, `hatchabot list` says ARCHIVING, and a second tap is refused.
 - **Fixed in:** `v2.142.0`
-- **Code:** `web/app/templates.js` — `archivingHere`, `confirmArchive`; `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id/archive'`; `src/orchestrator/lifecycle/agentRecords.ts` — `archiving`, `progressOf`
+- **Code:** `web/app/templates.js` — `archivingHere`, `confirmArchive`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id/archive'`; `src/orchestrator/lifecycle/agentRecords.ts` — `archiving`, `progressOf`
 
 ### A working agent was left STOPPED and FAILED after a rebuild that could not start
 - **Check:** the Setup log says the rebuild was refused at render time (an engine-free image with the memory service off, an un-shared source, a missing secret).
@@ -2732,14 +2739,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the read ran `head … || true` and used its output without looking at whether the command had worked, so a failed read and an empty file both came back as '' with status 200. The push built its layer from the same read and dropped a file that read as '', the only way it had to leave out a file it could not read.
 - **Fix:** upgrade. The editor's read is the snapshot read now: a failed read is an error in words (502) and nothing loads, so there is nothing to save; a file that is not there is told apart from one that is there and empty (`missing: true`). The push refuses when the master's files cannot be read, and an emptied file is pushed as empty. On an older version, restore the `pre-edit` snapshot to get the file back, and open the editor only while the agent's machine is awake.
 - **Fixed in:** `v2.166.0`
-- **Code:** `src/api/fileRoutes.ts` — `/v1/agents/:id/files/:name`; `src/orchestrator/files/coreFiles.ts` — `read`; `src/orchestrator/definition/definitionPush.ts` — `readCapped`; `src/orchestrator/files/snapshots.ts` — `readCoreFile`, `EMPTY_FILE_MARK`
+- **Code:** `src/api/data/fileRoutes.ts` — `/v1/agents/:id/files/:name`; `src/orchestrator/files/coreFiles.ts` — `read`; `src/orchestrator/definition/definitionPush.ts` — `readCapped`; `src/orchestrator/files/snapshots.ts` — `readCoreFile`, `EMPTY_FILE_MARK`
 
 ### The Definition editor put back older text after you went to another file and back, and Save wrote it
 - **Check:** on a slow machine (or with a large file) you picked SOUL.md, then another file, then SOUL.md again and started typing; the text changed under you to an older version, or emptied with an error.
 - **Cause:** a read was matched to the editor by agent and file name only, so the first SOUL.md read, answering last, matched again and replaced the newer one.
 - **Fix:** revert to the snapshot taken automatically before the save (its History list, under the editor), or put the text back by hand. Since v2.168.0 only the latest read fills the editor.
 - **Fixed in:** `v2.168.0`
-- **Code:** `web/app/panels.js` — `loadEditFile`, `editLoadGen`
+- **Code:** `web/app/connections.js` — `loadEditFile`, `editLoadGen`
 
 ### A master's Proposals list shows another master's proposals, and Dismiss or Merge says it is not found
 - **Check:** you opened one master's 📥 Proposals, then another's before the first list loaded; the list shows the first master's children's proposals under the second master's name.
@@ -2753,7 +2760,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the push checked that each child was RUNNING and not busy in memory; after a restart the in-memory busy flag is empty, while the operation on disk still protects the half-written files. Every other file-writing action also asks the operation on disk.
 - **Fix:** upgrade. A child under an unfinished operation is now refused in the operation's words and named in the push's result while the others are pushed; a master under one is refused up front. Let the operation finish (or choose on its page under Alerts), then push again. For a child already written into, restore its `pre-params` snapshot once the operation is over.
 - **Fixed in:** `v2.166.0`
-- **Code:** `src/api/routes.ts` — `busyNow`; `src/api/definitionRoutes.ts` — `/v1/agents/:id/push-definition`; `src/orchestrator/lifecycle/operations.ts` — `operationRefusal`
+- **Code:** `src/api/routes.ts` — `busyNow`; `src/api/agents/definitionRoutes.ts` — `/v1/agents/:id/push-definition`; `src/orchestrator/lifecycle/operations.ts` — `operationRefusal`
 
 
 ### After Push definition, a child has the master's old SOUL.md with its new AGENTS.md
@@ -2761,14 +2768,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the push read the master's two files one after the other without holding the master, so a save between the reads went into the push half done.
 - **Fix:** upgrade and push again. Since this release a save during the push's reads is refused as "Another operation is already running"; save again once it is done.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/api/definitionRoutes.ts` — `'/v1/agents/:id/push-definition'`
+- **Code:** `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/push-definition'`
 
 ### Setup values: Apply says the write failed, and SOUL.md has the new values while AGENTS.md and the stored values have the old
 - **Check:** the agent runs on a runner (or its machine's Docker stopped answering) at the moment of the Apply.
 - **Cause:** a file whose write failed with an error was put back, but a write that broke off (the connection lost mid-call) skipped the putting back.
 - **Fix:** upgrade, then Apply again, or restore the `pre-params` snapshot. Since this release both kinds of failure put back what was written, including a file that landed just before the connection was lost (in a Push definition to a child too); a file that cannot be put back is named, with the snapshot to restore.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/api/definitionRoutes.ts` — `'/v1/agents/:id/params'`, `'/v1/agents/:id/push-definition'`
+- **Code:** `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/params'`, `'/v1/agents/:id/push-definition'`
 
 ### Setup values: an optional choice cannot be cleared ("must be one of: …")
 - **Check:** the field is a choice that is not required, and the value sent is blank.
@@ -2845,21 +2852,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the consult's permission was checked before waking the sleeping peer, and not again once it was awake; a change made during the wake did not stop it.
 - **Fix:** upgrade; the caller's permission and call token are checked again once the peer is awake.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/consultRoutes.ts` — `'/v1/agents/:id/message'`; `src/orchestrator/consult/consults.ts` — `consult`; `src/api/routes.ts` — `ensureAwake`
+- **Code:** `src/api/chat/consultRoutes.ts` — `'/v1/agents/:id/message'`; `src/orchestrator/consult/consults.ts` — `consult`; `src/api/routes.ts` — `ensureAwake`
 
 ### "Connect to each other" failed once, and after trying again the agents still cannot consult ("Agent call token required")
 - **Check:** the agents list each other as peers, but a consult is refused with HTTP 401 "Agent call token required", and the first Connect returned an error.
 - **Cause:** the connect saved the grants first and then made each agent's call token. When making a token failed, a second Connect found the grants already in place and skipped the token.
 - **Fix:** upgrade, press Connect to each other again, then rebuild the agents it names. Connect now makes any missing token even when nothing else changes.
 - **Fixed in:** `v2.160.0` (#167)
-- **Code:** `src/api/consultRoutes.ts` — `'/v1/agent-peers/mesh'`; `src/orchestrator/consult/peers.ts` — `mesh`, `ensureAgentCallToken`
+- **Code:** `src/api/chat/consultRoutes.ts` — `'/v1/agent-peers/mesh'`; `src/orchestrator/consult/peers.ts` — `mesh`, `ensureAgentCallToken`
 
 ### A script's peers update removed every peer an agent could consult
 - **Check:** the agent's peers emptied right after a `PUT /v1/agents/<id>/peers` whose body had no `peerIds`, or not a list there.
 - **Cause:** anything but a list was read as an empty list, which revokes every grant.
 - **Fix:** upgrade: such a body is refused (HTTP 400) and changes nothing; send `{"peerIds": []}` to remove all. Grant the lost peers again (the agent's Sharing → Other agents it can ask).
 - **Fixed in:** `v2.160.0` (#166)
-- **Code:** `src/api/consultRoutes.ts` — `'/v1/agents/:id/peers'`, `SetPeers`; `src/orchestrator/consult/peers.ts` — `set`
+- **Code:** `src/api/chat/consultRoutes.ts` — `'/v1/agents/:id/peers'`, `SetPeers`; `src/orchestrator/consult/peers.ts` — `set`
 
 ### An agent's "## Peers" section in AGENTS.md is cut short, or text from a peer's name reads as an instruction
 - **Check:** one of the agent's peers has a name with a line break, a `#`, a run of backticks or `**` in it (an imported template's name can); in the agent's AGENTS.md, "## Peers" ends at a heading that came from that name, or the list's bold runs on.
@@ -2901,7 +2908,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** on purpose: what you type in the panel is a password, and over plain http it would cross your network unencrypted. A device talking to the machine's tailnet address directly is encrypted by the tailnet and allowed; so is a proxy that says the request came over https (`X-Forwarded-Proto: https`).
 - **Fix:** open Hatchabot at its https address (the setup guide's "Turn on HTTPS" step gives it one on your tailnet), or on the machine itself, and open the panel there.
 - **Fixed in:** `v2.184.0` (the panel, and this rule)
-- **Code:** `src/orchestrator/console/browserPanel.ts` — `panelTransportOk`; `src/api/browserRoutes.ts` — `'/v1/agents/:id/browser/panel'`
+- **Code:** `src/orchestrator/console/browserPanel.ts` — `panelTransportOk`; `src/api/console/browserRoutes.ts` — `'/v1/agents/:id/browser/panel'`
 
 ### "Sign in to a site" says its browser is not running yet, or the panel closes saying the browser closed
 - **Check:** `hatchabot browser "<agent>"` says whether its browser runs; the agent's timeline shows `browser.panel_closed` with why.
@@ -2964,7 +2971,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** "no Telegram" applies only to templates and was silently ignored for full copies.
 - **Fix:** a full copy always brings its bot. For a new agent with no bot, export a template and import that.
 - **Fixed in:** `v2.153.0`
-- **Code:** `src/api/transferRoutes.ts` — `'/v1/agents/import'`
+- **Code:** `src/api/data/transferRoutes.ts` — `'/v1/agents/import'`
 
 ### After importing a downloaded agent, your first message to its bot gets a pairing code
 - **Check:** the agent came from a Download (a full copy) or a move; Members shows you as owner with no Telegram; a knock card (or `hatchabot pairing <agent>`) shows your request.
@@ -2985,7 +2992,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the clone was made first and its settings (environment variables) copied after; when a copy failed, the half-made clone and the secrets copied so far were left behind.
 - **Fix:** upgrade: a failed clone is undone completely and says "Nothing was kept". Until then, delete the half-made clone, then clone again.
 - **Fixed in:** `v2.160.0` (#165)
-- **Code:** `src/api/transferRoutes.ts` — `'/v1/agents/:id/clone'`
+- **Code:** `src/api/data/transferRoutes.ts` — `'/v1/agents/:id/clone'`
 
 
 ### A clone is missing some of its source's daily notes, and the message did not say so
@@ -3021,7 +3028,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** where the agent's code fences do not balance, Hatchabot cannot tell whether the section's heading is real or quoted in an example, so it leaves that section as it is rather than risk the agent's own text. Before the fix it did this without saying so.
 - **Fix:** close the code block in AGENTS.md at the line it names (the same backticks it opened with, on a line of their own), or indent the quoted lines of an indented block as far as its fences, then rebuild the agent. The section is then brought up to date. A template export (Share) takes Hatchabot's sections out either way. Pushing a master's definition skips such a child, before any copy is taken, and reports "its AGENTS.md has a code fence that doesn't close above "Data sources"; fix it and push again" (or "Google accounts"): fix it the same way and push again. When it is the master's own AGENTS.md, a child with its own section of that name reports "<the master>'s AGENTS.md has a code fence that doesn't close above …; fix it there and push again"; one without gets the push with every copy of the master's Google accounts taken out.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/openclaw/workspace.ts` — `unsureSections`, `fenceDisagreement`, `readFences`, `fenceMask`, `readSection`, `managedSection`; `src/orchestrator/lifecycle/provision.ts` — `syncDataSourceDocs`; `src/api/definitionRoutes.ts` — `push-definition`
+- **Code:** `src/openclaw/workspace.ts` — `unsureSections`, `fenceDisagreement`, `readFences`, `fenceMask`, `readSection`, `managedSection`; `src/orchestrator/lifecycle/provision.ts` — `syncDataSourceDocs`; `src/api/agents/definitionRoutes.ts` — `push-definition`
 
 ### An agent's AGENTS.md changes on the rebuild after a section was added, with only a blank line removed
 - **Check:** after a section was added to the agent's AGENTS.md (say `## Peers`, when it got its first peer), the next sync wrote the file again, and the only change was the blank line before that section taken out.
@@ -3035,21 +3042,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.168.0 adding a public repo cloned it and then rewrote AGENTS.md's data-sources section in the background without holding the agent, unlike every other change to its files. The rewrite read AGENTS.md, and a save made before it wrote back was written over with the older text.
 - **Fix:** upgrade: the clone and the rewrite hold the agent, so a save in those seconds is refused with "Another operation is already running on this agent"; save again once it is over. On an older version, write the edit again, and wait for a public repo's clone to finish before editing AGENTS.md.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `syncDataSourceDocs`; `src/orchestrator/lifecycle/provision.ts` — `syncDataSourceDocs`
+- **Code:** `src/api/data/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `syncDataSourceDocs`; `src/orchestrator/lifecycle/provision.ts` — `syncDataSourceDocs`
 
 ### An AGENTS.md edit saved just after a memory cap, About you, Push definition or removing a repo is gone
 - **Check:** shortly before the save, the agent's memory cap or the machine's agent memory default was changed, About you (the operator profile) was saved, its master pushed its definition, or a repo was removed from it; the saved text is not in AGENTS.md, which has the text from before the save with its "## Memory budget", "## About the operator" or "## Data sources" section updated.
 - **Cause:** before v2.169.0 those changes rewrote AGENTS.md's managed sections in the background without holding the agent, as adding a public repo did before v2.168.0. The rewrite read AGENTS.md, and a save made before it wrote back was written over with the older text.
 - **Fix:** upgrade: each rewrite holds the agent, so a save in those seconds is refused with "Another operation is already running on this agent"; save again once it is over. An agent busy with something else when the change is made gets its sections at its next start or rebuild. On an older version, write the edit again.
 - **Fixed in:** `v2.169.0`
-- **Code:** `src/api/routes.ts` — `syncDocsHeld`; `src/api/definitionRoutes.ts` — `'/v1/agents/:id/push-definition'`; `src/api/machineSettingsRoutes.ts` — `'/v1/machine-defaults'`; `src/orchestrator/settings/defaults.ts` — `createDefaults`; `src/api/opsAgentRoutes.ts` — `'/v1/operator-profile'`; `src/orchestrator/ops/hatchabotAgent.ts` — `setOperatorProfile`; `src/orchestrator/lifecycle/provision.ts` — `syncDataSourceDocs`
+- **Code:** `src/api/routes.ts` — `syncDocsHeld`; `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/push-definition'`; `src/api/machine/machineSettingsRoutes.ts` — `'/v1/machine-defaults'`; `src/orchestrator/settings/defaults.ts` — `createDefaults`; `src/api/ops/opsAgentRoutes.ts` — `'/v1/operator-profile'`; `src/orchestrator/ops/hatchabotAgent.ts` — `setOperatorProfile`; `src/orchestrator/lifecycle/provision.ts` — `syncDataSourceDocs`
 
 ### An agent's template or downloaded copy will not import: "That template file is malformed or from an incompatible version" or "That export is malformed … (agent.dataSources)"
 - **Check:** the agent has more than 32 data sources (Settings → Data lists them).
 - **Cause:** a template and a full copy carry at most 32 data sources, but adding a source had no limit, so an agent could hold more and its own export could not be read back.
 - **Fix:** upgrade, then remove data sources until it has 32 or fewer and export again. Since this release adding a 33rd source is refused ("already has 32 data sources").
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/orchestrator/apps/dataSourceLimits.ts` — `MAX_DATA_SOURCES`; `src/orchestrator/transfer/template.ts` — `dataNeeds`; `src/orchestrator/transfer/transfer.ts` — `dataSources`; `src/api/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `MAX_DATA_SOURCES`
+- **Code:** `src/orchestrator/apps/dataSourceLimits.ts` — `MAX_DATA_SOURCES`; `src/orchestrator/transfer/template.ts` — `dataNeeds`; `src/orchestrator/transfer/transfer.ts` — `dataSources`; `src/api/data/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `MAX_DATA_SOURCES`
 
 
 ### A template made here will not import ("That template file is malformed or from an incompatible version"), though the agent has 32 data sources or fewer
@@ -3057,7 +3064,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a template carries names of at most 128 characters and at most 64 variables. A folder or repo with a longer name was accepted, and two variables added at the same moment (two tabs) could each take the 64th place.
 - **Fix:** upgrade, then remove the long-named source (rename the folder, or share it at its own path, and add it again) or the extra variables, and share again. Since this release a longer name is refused when added, and a variable past the 64th is refused even when two arrive together.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/orchestrator/apps/dataSourceLimits.ts` — `MAX_MOUNT_NAME`; `src/api/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `MAX_MOUNT_NAME`; `src/api/agentSecretRoutes.ts` — `'/v1/agents/:id/env'`; `src/orchestrator/transfer/template.ts` — `parseTemplate`
+- **Code:** `src/orchestrator/apps/dataSourceLimits.ts` — `MAX_MOUNT_NAME`; `src/api/data/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `MAX_MOUNT_NAME`; `src/api/agents/agentSecretRoutes.ts` — `'/v1/agents/:id/env'`; `src/orchestrator/transfer/template.ts` — `parseTemplate`
 
 ### A downloaded copy of an agent will not import: "That export is malformed … (agent.model)" or "(agent.persona)"
 - **Check:** for agent.model, the agent was held on its model when its AI source's default changed, and that model's name is over 64 characters; for agent.persona, the agent was made from a template whose setup answers fill its description past 8,000 characters.
@@ -3071,14 +3078,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** both were added at almost the same moment (two tabs): the name check ran before each saved its deploy key, and neither saw the other.
 - **Fix:** upgrade, remove one of the two sources, and rebuild the agent so its clone is the one kept. Since this release a name being added is held until its source is saved, and the second add is refused.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/orchestrator/apps/dataSources.ts` — `addingSources`; `src/api/appRoutes.ts` — `'/v1/agents/:id/data-sources'`
+- **Code:** `src/orchestrator/apps/dataSources.ts` — `addingSources`; `src/api/data/appRoutes.ts` — `'/v1/agents/:id/data-sources'`
 
 ### Sharing a folder "at its own path" says "… is already shared with this agent", but it is not
 - **Check:** the agent already shares another folder at its host path whose path differs only in where the `/` and `-` fall (`/srv/recipes/family` and `/srv/recipes-family`).
 - **Cause:** a host-path folder was told apart by a name flattened from its path, and the two paths flatten to the same name.
 - **Fix:** upgrade: a host-path folder clashes only with the same folder, and its name gets a number when another has it.
 - **Fixed in:** `v2.169.0`
-- **Code:** `src/api/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `is already shared with this agent`
+- **Code:** `src/api/data/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `is already shared with this agent`
 
 ### A failed app install or update shows no test output
 - **Check:** the error says the tests failed, but no output appears under it.
@@ -3140,7 +3147,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the source asks with the peer token that server gave it for moves, which opened only the import routes. The receipt route answered 401, which reads as "no answer", so a move the destination knew had failed stayed held. A second request under the same move id from another account could also write its outcome over the first one's receipt.
 - **Fix:** upgrade the destination: the peer token may read its own move receipts (and nothing else), and a receipt is written only by requests of the account that made it. Until then, check the other server and choose "It is not on … — keep it here".
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/auth.ts` — `REHOST_MOVE_RECEIPT`, `cliBearer`; `src/orchestrator/transfer/migrate.ts` — `receiveMove`, `moveState`
+- **Code:** `src/api/signIn/auth.ts` — `REHOST_MOVE_RECEIPT`, `cliBearer`; `src/orchestrator/transfer/migrate.ts` — `receiveMove`, `moveState`
 
 ### "Move to another Hatchabot" is refused: "This server's runtime image is OpenClaw X, older than the agent's Y", though the agent runs X
 - **Check:** this machine's default image was upgraded and the agent has not been rebuilt since; its Runtime tab names the older OpenClaw version.
@@ -3202,7 +3209,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.160.0 the page said "unchanged" after any failed update, and when putting the old release back failed too, the staging folder holding the config it replaced was deleted all the same and the operation marked failed.
 - **Fix:** upgrade: the page says "unchanged" only when the server confirms it; when the put-back fails, the staging folder is kept and the operation waits on the agent's page for **Use the new release** or **Go back to the previous one**. On an older version, run Update again (or Roll back); if the old config is gone, set its values again with `hatchabot app update <agent> key=value …`.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/orchestrator/apps/apps.ts` — `installRelease`, `outcome`; `src/orchestrator/apps/agentApps.ts` — `appOpFailed`; `src/api/appRoutes.ts` — `appFail`; `web/app/sheet.js` — `v2AppUpdate`
+- **Code:** `src/orchestrator/apps/apps.ts` — `installRelease`, `outcome`; `src/orchestrator/apps/agentApps.ts` — `appOpFailed`; `src/api/data/appRoutes.ts` — `appFail`; `web/app/sheet.js` — `v2AppUpdate`
 
 ### An app update said "its tests passed", but the app has no tests
 - **Check:** the app's `hatchabot.json` has no `test`, and the update's message said "— its tests passed".
@@ -3286,7 +3293,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** an arriving agent goes on the destination's ⭐ Default source. Before `v2.168.0` the move's check named the matching source instead, so it approved a move that then ran (and billed) on the Default, a local agent included.
 - **Fix:** the refusal offers that server's source of the agent's vendor: say yes to **Move onto …** (CLI: the `--profile <id>` it prints, `hatchabot rehost <agent> <server> --profile <id>`) and the agent lands on it. Or make the matching source the ⭐ Default there and move it again.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/orchestrator/transfer/transfer.ts` — `importProfile`; `src/orchestrator/transfer/migrate.ts` — `preflight`, `migrateAgent`, `sourceChoiceFrom`; `web/app/images.js` — `rehostAgent`
+- **Code:** `src/orchestrator/transfer/transfer.ts` — `importProfile`; `src/orchestrator/transfer/migrate.ts` — `preflight`, `migrateAgent`, `sourceChoiceFrom`; `web/app/moves.js` — `rehostAgent`
 ### Importing an agent's own download says "That export is malformed or from an incompatible version (ai.model)" or "(envVars)"
 - **Check:** the agent's AI source names a model id longer than 64 characters (Settings → AI), or the agent has more than 64 environment variables (its Environment tab).
 - **Cause:** the source machine accepted both, but the import read model ids up to 64 characters and at most 64 variables, so a valid agent's own copy was refused.
@@ -3307,7 +3314,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the value held a NUL character, which a program's environment cannot carry. The setting stored it; the next build could not hand it to Docker.
 - **Fix:** upgrade: such a value is refused when it is set, and an archive carrying one is refused on import with the variable's name. Remove that variable (Environment tab) and set it again without the NUL, then rebuild.
 - **Fixed in:** `v2.160.0` (#142)
-- **Code:** `src/domain/envPolicy.ts` — `envValueProblem`; `src/api/agentSecretRoutes.ts` — `'/v1/agents/:id/env'`
+- **Code:** `src/domain/envPolicy.ts` — `envValueProblem`; `src/api/agents/agentSecretRoutes.ts` — `'/v1/agents/:id/env'`
 
 ### An app's scheduled tasks are missing after an interrupted app install ("Put its scheduled tasks back")
 - **Check:** the agent's app operation waits for you with this choice and names the missing jobs; `openclaw cron list` in the agent's console has no `<app>-…` jobs for the app on record.
@@ -3328,21 +3335,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a refresh token works only with the OAuth client that issued it. Saving a client with a different client ID paired every stored token with the new client.
 - **Fix:** put the original client back if you still have it, or press Connect and pick each marked account again (each person, from their own login). From v2.160.0 saving a different client ID asks first, naming how many accounts will need connecting again; a new secret for the same client ID does not.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/googleRoutes.ts` — `/v1/google-oauth/client`; `src/orchestrator/google/googleClient.ts` — `save`, `countConnectionsFromOtherClient`; `src/orchestrator/google/googleConnections.ts` — `materializeConnection`
+- **Code:** `src/api/data/googleRoutes.ts` — `/v1/google-oauth/client`; `src/orchestrator/google/googleClient.ts` — `save`, `countConnectionsFromOtherClient`; `src/orchestrator/google/googleConnections.ts` — `materializeConnection`
 
 ### Removing the Google OAuth client said it was gone, but Connections still shows it configured
 - **Check:** after Remove, ⚙ Settings → Connections still shows the client; from v2.160.0 Remove says "could not be removed from the secret store".
 - **Cause:** a failed delete in the secret store was swallowed and the answer said the client was removed.
 - **Fix:** upgrade and press Remove again; if it keeps failing, the server log names the secret-store error (`google.client_remove_failed`).
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/googleRoutes.ts` — `/v1/google-oauth/client`; `src/orchestrator/google/googleClient.ts` — `remove`
+- **Code:** `src/api/data/googleRoutes.ts` — `/v1/google-oauth/client`; `src/orchestrator/google/googleClient.ts` — `remove`
 
 ### A Google account came back after Disconnect in the agent's Connections
 - **Check:** the account was attached under ⚙ Settings → Connections and disconnected from the agent's own Connections list; after its next start, wake or rebuild `gog auth list --json` in the agent names it again, and the account still shows attached to the agent under ⚙ Settings → Connections.
 - **Cause:** that Disconnect only removed the account from gog inside the agent and left the attachment, so the next sync imported it again. The page detached it first, but fell back to the plain remove when it could not read the connection list.
 - **Fix:** upgrade, then Detach it (or Disconnect again). From v2.160.0 the server detaches an attached account and records the removal, whatever the page sends.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/googleRoutes.ts` — `/v1/agents/:id/connections/:email`; `src/orchestrator/google/connectionVault.ts` — `disconnect`; `web/app/connections.js` — `disconnectAccount`
+- **Code:** `src/api/data/googleRoutes.ts` — `/v1/agents/:id/connections/:email`; `src/orchestrator/google/connectionVault.ts` — `disconnect`; `web/app/connections.js` — `disconnectAccount`
 
 ### A failed Google removal was cleared although the account was still in the agent
 - **Check:** the trail shows `connection.remove_failed` and then `connection.removed_from_agent` with `alreadyGone`, yet `gog auth list --json` in the agent still names the account.
@@ -3384,21 +3391,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the agent was importing the account's old sign-in (a rebuild, a wake or an attach) when it was connected again. The import was recorded as done when it ended, after the new consent, so it counted as current although it carried the old token.
 - **Fix:** upgrade: the import is now dated by when it read the token, so the agent shows as needing a re-attach. Until then, detach the account from the agent and attach it again (or rebuild the agent).
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/orchestrator/google/googleConnections.ts` — `materializeConnection`; `src/store/store.ts` — `markConnectionMaterialized`; `src/api/googleRoutes.ts` — `'/v1/connections'`; `src/orchestrator/google/connectionVault.ts` — `stale`
+- **Code:** `src/orchestrator/google/googleConnections.ts` — `materializeConnection`; `src/store/store.ts` — `markConnectionMaterialized`; `src/api/data/googleRoutes.ts` — `'/v1/connections'`; `src/orchestrator/google/connectionVault.ts` — `stale`
 
 ### An agent's Connections says "None yet" for Google accounts it has
 - **Check:** the agent is running and was signed into the account (it uses it, or Access lists it), and opening its Connections again a little later lists it.
 - **Cause:** when reading the agent's list of accounts failed (the container was busy, or the read printed something else), the list was shown as empty instead of as unread, with no Disconnect buttons.
 - **Fix:** upgrade: a failed read now says "Couldn't read which Google accounts it is signed into just now". Open the agent's Connections again in a moment.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/googleRoutes.ts` — `'/v1/agents/:id/connections'`; `src/orchestrator/google/connectionVault.ts` — `accountsIn`; `src/orchestrator/google/googleConnections.ts` — `gogAccounts`
+- **Code:** `src/api/data/googleRoutes.ts` — `'/v1/agents/:id/connections'`; `src/orchestrator/google/connectionVault.ts` — `accountsIn`; `src/orchestrator/google/googleConnections.ts` — `gogAccounts`
 
 ### A removed repo source still pulls or pushes
 - **Check:** after removing a repo source, the agent still has `~/.openclaw/.ssh/<repo>_deploy`, or the trail shows `datasource.key_left`.
 - **Cause:** the source's record was deleted first; if taking the key off the volume (or out of the secret store) then failed, nothing retried it.
 - **Fix:** upgrade; the removal is recorded and retried at the agent's next start, wake or rebuild until the key is gone. Also delete the deploy key on the repo's host (its settings → Deploy keys): a copy outside Hatchabot stays trusted until then.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/orchestrator/lifecycle/provision.ts` — `scrubRemovedDataSources`; `src/api/appRoutes.ts` — `/v1/agents/:id/data-sources/:dsId`; `src/orchestrator/apps/dataSources.ts` — `addDataSourceRemoval`
+- **Code:** `src/orchestrator/lifecycle/provision.ts` — `scrubRemovedDataSources`; `src/api/data/appRoutes.ts` — `/v1/agents/:id/data-sources/:dsId`; `src/orchestrator/apps/dataSources.ts` — `addDataSourceRemoval`
 
 ### A repo never clones: "The repo rejected this agent's deploy key", though the key is on the repo and Test passes
 - **Check:** the source's card keeps the message after every rebuild, its trail shows `datasource.git_sync_failed` with "Permission denied (publickey)", yet **Test** on the row says the repo answered. In the agent's console: `ssh-keygen -y -f ~/.openclaw/.ssh/<repo>_deploy | ssh-keygen -lf -` and `ssh-keygen -lf ~/.openclaw/.ssh/<repo>_deploy.pub` give different fingerprints (`ssh-keygen -lf` on the key itself reads the .pub, so it shows the wrong one).
@@ -3551,28 +3558,28 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** Promote checked only active followers for data the older image cannot read; an archived follower keeps its volume and is restored onto the default.
 - **Fix:** upgrade, then promote the newer image back (or pin the archived agent to it) before restoring. Since v2.160.0 Promote names archived followers too.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/imageRoutes.ts` — `/v1/runtime/images/promote`
+- **Code:** `src/api/machine/imageRoutes.ts` — `/v1/runtime/images/promote`
 
 ### Bulk actions → Class gave the agents different classes, or cleared some
 - **Check:** you applied a class to several agents and changed the class menu (or opened Bulk actions again) before it finished; agents later in the list have the other class, or none.
 - **Cause:** the class was read from the menu again for each agent, and the menu stayed usable while Apply worked.
 - **Fix:** apply the class again to the agents that got the wrong one. Since v2.168.0 the class is read once, when Apply is pressed, as the model and image already were.
 - **Fixed in:** `v2.168.0`
-- **Code:** `web/app/images.js` — `faApply`
+- **Code:** `web/app/usage.js` — `faApply`
 
 ### A class's memory cap says applied, but the container still has the old limit
 - **Check:** `docker inspect -f '{{.HostConfig.Memory}}' <container>` differs from the agent's Overview memory cap, after setting, clearing or deleting a class with a memory cap (often while its runner was asleep).
 - **Cause:** assigning a class swallowed a failed `docker update`, and deleting a class changed no container at all, so members kept the deleted class's cap and swap.
 - **Fix:** rebuild the agent (or set its cap again). Since v2.160.0 assigning says the container kept its old limits, and deleting applies the limits that now hold and names any member it could not change.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/classRoutes.ts` — `/v1/agents/:id/class`, `/v1/agent-classes/:id`
+- **Code:** `src/api/agents/classRoutes.ts` — `/v1/agents/:id/class`, `/v1/agent-classes/:id`
 
 ### Setting a class's memory cap again after "kept its old limits" says nothing was skipped, but the container still has the old limit
 - **Check:** a class edit named a member under `skipped` (its machine did not answer); the same edit again lists no one, yet `docker inspect -f '{{.HostConfig.Memory}}' <container>` still shows the old cap.
 - **Cause:** the class saved the new cap before applying it, so the repeat saw no change and did not touch the containers.
 - **Fix:** upgrade, then set the cap again: a class edit that names the cap or swap applies it to every member that takes it from the class. The limits check also puts it right within its next pass.
 - **Fixed in:** `v2.162.0`
-- **Code:** `src/api/classRoutes.ts` — `/v1/agent-classes/:id`
+- **Code:** `src/api/agents/classRoutes.ts` — `/v1/agent-classes/:id`
 
 
 ### After changing an agent's model, source or image, it keeps its old class's memory cap
@@ -3728,14 +3735,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** an unreadable task list was taken as "no tasks", so the tasks then missed their runs while it slept.
 - **Fix:** upgrade: putting it to sleep is refused with "Couldn't read its scheduled tasks just now" until the list can be read. Wake the agent so its tasks run.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id/hibernate'`
+- **Code:** `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id/hibernate'`
 
 ### A task added just as the agent went to sleep never ran
 - **Check:** the agent is asleep (its tile says so, or `hatchabot events <agent>` has `agent.hibernated`) and its Schedule tab has a task switched on that was added within a few seconds before that; the task's runs list is empty since.
 - **Cause:** putting it to sleep (by hand or after its quiet period) read the task list before taking the agent's lock, so a task added during that read was accepted and the agent was stopped with the older, empty list.
 - **Fix:** upgrade; the list is read again under the lock that adding a task takes, so the task is either refused ("Another operation is already running", try again) or keeps the agent awake. Wake the agent so its task runs.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/orchestrator/lifecycle/hibernate.ts` — `hibernateAgent`, `NoLongerSleepy`; `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id/hibernate'`
+- **Code:** `src/orchestrator/lifecycle/hibernate.ts` — `hibernateAgent`, `NoLongerSleepy`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id/hibernate'`
 
 ### A sleeping agent did not wake for the first message after the service restarted
 - **Check:** the service restarted within seconds of `agent.hibernated` on the timeline; the first Telegram message sent after that waits unanswered until another message comes or the agent is started.
@@ -3763,14 +3770,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the ideas came from the AI's reading of the name alone, with no way to say what you wanted; when the AI didn't answer, the keyword table stood in, and it knew no seasonal or everyday words ("Holiday list" matched nothing). A reply that held usable ideas could also be lost: the parser read from the first `[` to the last `]` as one piece of JSON, so a stray bracket, a trailing comma or a cut-off reply gave nothing, and on a Claude plan's source (a setup token or the machine's login) the prompt also told the model about calling tools and replying in plain prose, which goes against "JSON only", and a reply shaped like a tool call came back empty.
 - **Fix:** upgrade, then type what it should show ("a birthday cake") in **What should it show?** and press ✨ (or Enter); that box came in `v2.170.0`. Any emoji can also be pasted straight into the Emoji box. Since the fix the parser reads a reply's entries one by one, from any array in it, and a source with no tools gets no tool protocol. If the note still says no ideas could be read, the log line's shape says what came back: `cutOff` means the reply was too long for its limit (the source's own stop reason says so; with no stop reason, an array ran out at the end of the text); a short `length` with no `bracket` means something other than the ideas came back, so try another model for the source under ⚙ Settings → AI sources.
 - **Fixed in:** `v2.172.0`
-- **Code:** `src/orchestrator/homeScreen/agentIcons.ts` — `suggestIcons`, `pickIcons`, `parseIdeas`, `replyArrays`, `replyShape`, `keywordIcon`; `src/api/cliChatModel.ts` — `completeViaCli`; `src/api/routes.ts` — `iconCompleter`; `web/app/start.js` — `v2IconIdeas`
+- **Code:** `src/orchestrator/homeScreen/agentIcons.ts` — `suggestIcons`, `pickIcons`, `parseIdeas`, `replyArrays`, `replyShape`, `keywordIcon`; `src/api/ops/cliChatModel.ts` — `completeViaCli`; `src/api/routes.ts` — `iconCompleter`; `web/app/start.js` — `v2IconIdeas`
 
 ### Two of your agents have the same name, and the command line says the name "matches more than one"
 - **Check:** the app lists two agents of yours with one name (case aside); one was renamed to it, with a memory change in the same save, at about the time the other was renamed to it or made.
 - **Cause:** the rename checked for the name before it waited on the memory change, and another rename, or a new agent, passed the same check during that wait.
 - **Fix:** rename one of them. Since the fix a name being given to one agent is held until that save answers, and a second rename to it, or a new agent with it, is refused.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/api/lifecycleRoutes.ts` — the `'/v1/agents/:id'` patch route, `holdOnce`; `src/orchestrator/lifecycle/agentEdits.ts` — `holdName`
+- **Code:** `src/api/agents/lifecycleRoutes.ts` — the `'/v1/agents/:id'` patch route, `holdOnce`; `src/orchestrator/lifecycle/agentEdits.ts` — `holdName`
 
 ### After a restart during a rebuild, the agent runs but its repo, rebuild hook or waiting scheduled tasks are missing
 - **Check:** the rebuild's operation says "it was running again, so it is marked running"; the agent's Data tab shows a repo never synced, or Tasks lacks a task its template promised, and the timeline has no `runtime.rebuilt` for it.
@@ -3791,7 +3798,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** adding a folder checked only that the path existed, so a file's path was saved as a folder.
 - **Fix:** remove it and add the folder the file is in. Since the fix a file's path is refused when it is added.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/api/appRoutes.ts` — `'/v1/agents/:id/data-sources'`
+- **Code:** `src/api/data/appRoutes.ts` — `'/v1/agents/:id/data-sources'`
 ### A git data source removed while it was syncing still has its deploy key on the agent, though removing it said the key was taken off
 - **Check:** the repo source was removed while its sync was running (just after it was added, a Rebuild or a start); removing it answered that the key was taken off, and `data_source_removals` in the store is empty, yet in the agent `ls ~/.openclaw/.ssh/<mount>_deploy` finds the key and the clone can still pull.
 - **Cause:** the sync had read the deploy key before the removal and wrote it to the volume after the removal had scrubbed it, and nothing was left to retry the scrub.
@@ -3867,14 +3874,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the agent page's tabs of edit sections (Personality, AI, Data, Telegram, Sharing, Schedule, Advanced) were drawn once for the state they opened in, and the poll repainted only the bar.
 - **Fix:** upgrade: the tab redraws when the state changes. It waits while a field is in use, and while a control in the page's forms holds something other than what it held when it was filled or last saved, a setup field added or removed and a task being edited included, so an unsaved edit is not lost. Before `v2.178.0` a change that was saved (a Telegram token Connect used, or a setting that saves itself, such as the memory limit) held it too, until the page was closed; so did an edit left on another agent's page before this agent's Schedule tab was opened, a file in the Personality tab's editor that would not load, and a save answered after the page was closed and opened again. On an older release, change tab and back.
 - **Fixed in:** `v2.173.0`; a saved change no longer holds it: `v2.178.0`
-- **Code:** `web/app/channels.js` — `v2RefreshSheet`, `v2SheetNotes`, `v2SheetBaseline`, `v2SheetSaving`, `v2SheetUnsaved`; `web/app/sheet.js` — `v2RenderSheet`, `v2EmbedPanes`; `web/app/values.js` — `editParamsSaved`; `web/app/panels.js` — `loadEditFile`
+- **Code:** `web/app/sheet.js` — `v2RefreshSheet`, `v2SheetNotes`, `v2SheetBaseline`, `v2SheetSaving`, `v2SheetUnsaved`, `v2RenderSheet`, `v2EmbedPanes`; `web/app/values.js` — `editParamsSaved`; `web/app/connections.js` — `loadEditFile`
 
 ### Planned: pressing Add clears the box and nothing appears
 - **Check:** an agent you can see already has that name, in any capitalisation, including an archived one or one shared with you.
 - **Cause:** a plan was deleted as "made" as soon as any visible agent carried its name, however old, and adding one never checked.
 - **Fix:** upgrade: a name one of your own agents already uses, archived ones too, is refused with a message, and a plan goes only when your own agent of that name was made after it. On an older release, plan a different name.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/operations.js` — `todoIsMade`, `addTodo`, `loadTodos`; `src/api/homeScreenRoutes.ts` — `/v1/agent-todos`
+- **Code:** `web/app/home.js` — `todoIsMade`, `addTodo`, `loadTodos`; `src/api/agents/homeScreenRoutes.ts` — `/v1/agent-todos`
 
 ### An archived agent dragged onto a group came back in its old group
 - **Check:** you restored it by dragging it from Archived onto a group or the new-group strip, and it stands in the group it was in before, with no new group made.
@@ -3888,35 +3895,35 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the page checked its own last reading of the agent's state. The rebuild asked of the server was the kind that starts a stopped agent, as a Rebuild pressed by name does.
 - **Fix:** upgrade: these rebuilds ask the server to leave a stopped agent down, and it takes the change at its next start. On an older release, stop it again; what it was to carry is already in place.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/operations.js` — `saveImagePin`; `web/app/images.js` — `faApply`; `web/app/panels.js` — `rebuildAll`; `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id/rebuild'`
+- **Code:** `web/app/operations.js` — `saveImagePin`; `web/app/usage.js` — `faApply`; `web/app/panels.js` — `rebuildAll`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id/rebuild'`
 
 ### Apply values brought back an old description (persona) after a file was saved
 - **Check:** the agent's description went back to an older one after Apply values, and you had changed the description while a SOUL.md or AGENTS.md save, a merge of a learning, a push of its master's definition, or Apply values itself was under way.
 - **Cause:** each of those wrote the whole setup layer back as it had read it before its wait, which put the old description back into the layer; Apply values also rendered the description from the layer it read at the start. Apply values renders from the layer.
 - **Fix:** set the description again. Since the fix, each writes only its own file into the layer, in one step, and Apply values renders the description from the layer as it is then. A description changed meanwhile that the new values would make too long is left as it is, and Apply values says so ("Values applied, but ⚠ …").
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/store/store.ts` — `setAgentParamFile`; `src/api/fileRoutes.ts` — `'/v1/agents/:id/files/:name'` (PUT); `src/orchestrator/files/coreFiles.ts` — `save`; `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `setAgentParamFile`; `src/api/definitionRoutes.ts` — `'/v1/agents/:id/params'`, `'/v1/agents/:id/push-definition'`; `src/api/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`; `web/app/values.js` — `saveSetupValues`, `resetSetupValues`
+- **Code:** `src/store/store.ts` — `setAgentParamFile`; `src/api/data/fileRoutes.ts` — `'/v1/agents/:id/files/:name'` (PUT); `src/orchestrator/files/coreFiles.ts` — `save`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `setAgentParamFile`; `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/params'`, `'/v1/agents/:id/push-definition'`; `src/api/chat/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`; `web/app/values.js` — `saveSetupValues`, `resetSetupValues`
 
 ### A snapshot holds a SOUL.md and an AGENTS.md that never went together
 - **Check:** a named snapshot's files read as part old setup values and part new ones; it was taken while setup values were applied or a snapshot was restored.
-- **Cause:** taking a snapshot reads the files one at a time and did not wait for an edit that writes several.
+- **Cause:** taking a snapshot reads the files one at a time and did not wait for an edit that writes several. Until 2.192.0 an adopt's re-point also rewrote SOUL.md, AGENTS.md and MEMORY.md one at a time, each in place, outside the agent's files turn, and the adopt's first snapshot was taken outside that turn too: a snapshot, template export or share during the re-point, or that first snapshot while setup values, a push or a restore wrote the files, could hold some files from before and some from after.
 - **Fix:** take the snapshot again, and don't restore the mixed one. Since the fix, a snapshot taken by hand and a change that writes core files (setup values applied, a definition pushed to the agent, a snapshot restored, a file saved, a proposal merged into a master's playbook) take turns: each waits for the other to finish, and a snapshot after such a change holds its setup values and layer with its files. A snapshot that waited looks at the agent again: one archived, stopped or deleted meanwhile is refused in those words. The changes that waited do too: Apply values renders from the files, fields and values as they are when its turn comes (a SOUL.md saved meanwhile is kept, and a field a push added meanwhile keeps its value, a reset too: a reset puts back only the fields it showed), a pushed definition keeps the values a child was given meanwhile, and a restore of an agent moved meanwhile is refused ("It moved while this waited; restore again."). One that waits more than two minutes is refused ("Another change to its files is still running; try again when it ends.") and does not run later; a push works on four children at a time, waits for their turns until one deadline two minutes from its start, and reports a child it could not reach as not pushed; a child waiting for one of the four does not hold its files up meanwhile. A snapshot asked for during a change that replaces its files (a rebuild, a move, an archive, a restore, an app update or rollback), when they may be half replaced, is refused ("It is busy (a rebuild); take the snapshot when that ends.", or the change's own words) and takes nothing. Other work on the agent, such as a backup, a task switched on or an app install, does not hold a snapshot up. A change that replaces the files and begins while a snapshot taken by hand reads them (a Rebuild pressed then) goes ahead, and the snapshot is not stored ("A rebuild or restore started while the snapshot read its files; take it again."). One started again after a restart counts the same. A file saved while a snapshot reads waits for it, so the snapshot keeps each file with the layer it goes with.
-- **Fixed in:** `v2.178.0`
-- **Code:** `src/orchestrator/files/coreFileTurns.ts` — `withCoreFilesTurn`, `freshRunning`; `src/api/fileRoutes.ts` — `'/v1/agents/:id/files/:name'` (PUT); `src/api/definitionRoutes.ts` — `'/v1/agents/:id/params'`, `'/v1/agents/:id/push-definition'`; `src/api/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`; `src/api/backupRoutes.ts` — `'/v1/agents/:id/snapshots'` (POST), `'/v1/agents/:id/snapshots/:snapId/restore'`; `src/orchestrator/backups/agentSnapshots.ts` — `take`, `restore`; `src/orchestrator/lifecycle/operations.ts` — `FILES_REPLACED_BY`, `noteFilesReplacing`, `filesReplacingCount`; `src/orchestrator/lifecycle/operationsResume.ts` — `runKind`; `src/orchestrator/files/snapshots.ts` — `captureSnapshot`
+- **Fixed in:** `v2.178.0`; the adopt's re-point and first snapshot in `v2.192.0` (HB-0629): they run in the agent's files turn, each file is replaced whole through a new file renamed over it, and an adopt whose snapshot can't get the turn in time is refused with nothing changed.
+- **Code:** `src/orchestrator/files/coreFileTurns.ts` — `withCoreFilesTurn`, `freshRunning`; `src/api/data/fileRoutes.ts` — `'/v1/agents/:id/files/:name'` (PUT); `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/params'`, `'/v1/agents/:id/push-definition'`; `src/api/chat/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`; `src/api/data/backupRoutes.ts` — `'/v1/agents/:id/snapshots'` (POST), `'/v1/agents/:id/snapshots/:snapId/restore'`; `src/orchestrator/backups/agentSnapshots.ts` — `take`, `restore`; `src/orchestrator/lifecycle/operations.ts` — `FILES_REPLACED_BY`, `noteFilesReplacing`, `filesReplacingCount`; `src/orchestrator/lifecycle/operationsResume.ts` — `runKind`; `src/orchestrator/files/snapshots.ts` — `captureSnapshot`; `src/orchestrator/transfer/adopts.ts` — `repointAdopted`, `snapshotBefore`
 
 ### A stopped agent connected to others still cannot consult them after Start
 - **Check:** you connected agents to each other (the bulk Connect, or an agent's Peers tab without its Rebuild), or deleted one it could consult, while it was stopped or asleep, and after you started it its icon still says it needs a rebuild for its peers.
 - **Cause:** the page promised that a stopped agent picks the change up when it next starts, but nothing marked its next start as the rebuild that installs it.
 - **Fix:** rebuild that agent. Since the fix, when you press Start it rebuilds any agent whose peers are not the ones it has installed, however they changed (connected or removed while it was stopped, a peer deleted, a change made during an operation); peers put back as they were mean a plain start. A sleeping agent is different, by design: it wakes for a message as it was, so the message is answered at once, and an agent a budget pause lets go of starts as it was too. It takes new peers at its next Start or Rebuild; until then its card says its peers changed, and the bulk Connect's answer names it as asleep. An agent deleted, or being deleted, while the bulk Connect works is not named at all.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/routes.ts` — `peersNotInstalled`; `src/api/consultRoutes.ts` — `'/v1/agent-peers/mesh'`, `'/v1/agents/:id/peers'`; `src/orchestrator/consult/peers.ts` — `mesh`; `src/store/store.ts` — `peersCsv`, `agentsWithPeersPending`; `src/orchestrator/lifecycle/power.ts` — `rebuildOwedAtStart`, `startStopped`
+- **Code:** `src/api/routes.ts` — `peersNotInstalled`; `src/api/chat/consultRoutes.ts` — `'/v1/agent-peers/mesh'`, `'/v1/agents/:id/peers'`; `src/orchestrator/consult/peers.ts` — `mesh`; `src/store/store.ts` — `peersCsv`, `agentsWithPeersPending`; `src/orchestrator/lifecycle/power.ts` — `rebuildOwedAtStart`, `startStopped`
 
 ### A master's playbook has the same distilled learning twice
 - **Check:** the master's AGENTS.md has two `<!-- distilled from … -->` blocks with the same text. The first merge failed with an error (its machine was slow, or its link dropped), and the merge was tried again.
 - **Cause:** the write landed but its answer was lost, so the proposal went back to waiting, and the retry appended it again.
 - **Fix:** delete the second block (Files, or ask the agent). Since the fix, each block carries its proposal's id, and a merge whose block is already there does not write it again.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`
+- **Code:** `src/api/chat/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`
 
 ### `hatchabot adopt` timed out or failed, and the agent it made is still there
 - **Check:** `hatchabot list` shows the agent named in the failed adopt. The adopt ended with "still PROVISIONING after N min", or said the agent "was cleaned up".
@@ -3944,35 +3951,35 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** Rebuild all sent rebuilds to running agents only. Nothing marked the stopped ones, so their next start reused the old container.
 - **Fix:** press **Rebuild** on that agent (this starts it). Since the fix, Rebuild all, and Bulk actions → **Rebuild** the same way, asks the server to rebuild each stopped or sleeping agent that a rebuild would change when it next starts. That is the same rule as Bulk actions' **Needs rebuild** chip: the server's "Needs a rebuild" (an image older than the fleet default among its reasons), a model waiting for a rebuild, or peer changes waiting for one. The agent stays down until then, and the result counts these agents separately. One already current is left as it is; one pinned to an image it does not run yet is rebuilt by its start in any case. Rebuild all's result also counts a request that failed as failed, naming the first three agents with their reasons; only an agent busy or already being changed is counted as skipped. Bulk actions → **Rebuild** skips an agent never built (no container yet) or moved to another machine, as Rebuild all does, instead of sending it a rebuild, and counts one turned away as busy or already changing as skipped, as Rebuild all does.
 - **Fixed in:** `v2.178.0`
-- **Code:** `web/app/panels.js` — `rebuildAll`, `rebuildPlan`, `rebuildOrMark`, `rebuildChangesIt`, `reasonsSaid`; `web/app/images.js` — `faApply`; `src/api/lifecycleRoutes.ts` — `stoppedWaits`
+- **Code:** `web/app/panels.js` — `rebuildAll`, `rebuildPlan`, `rebuildOrMark`, `rebuildChangesIt`, `reasonsSaid`; `web/app/usage.js` — `faApply`; `src/api/agents/lifecycleRoutes.ts` — `stoppedWaits`
 
 ### Bulk actions said a model or class change was done, but the agent kept its old model
 - **Check:** after Bulk actions → **Model** or **Class**, the result said "✓ N done", yet an agent's AI tab shows the old model, or it still answers on it.
 - **Cause:** the result counted every saved change as done. The server's answer also says whether the running agent took the change. It may have refused it, left a model or memory limit pending, or need a rebuild for a source change. The page did not read that part.
 - **Fix:** open the agent and choose the model again, or press **Rebuild**. Since the fix, the result counts what was applied, what waits for the next rebuild, and what was saved but not applied, naming every agent saved but not applied with its own reason; the failures' reasons, the first three, are above it. A class whose model applied while only the container's memory limits wait is counted as done, with a note that the limits come at the next rebuild.
 - **Fixed in:** `v2.178.0`
-- **Code:** `web/app/images.js` — `faApply`; `web/app/connections.js` — `switchModel`
+- **Code:** `web/app/usage.js` — `faApply`; `web/app/connections.js` — `switchModel`
 
 ### After switching agents, one showed another's image pin, folders, variables, model menu or update form, or an error was never shown
 - **Check:** you started a change on agent A (its image list loading, a folder, repo or variable added or removed, a class set, its app updated, a rename, a web search test) and opened agent B before it finished. Then B's image menu showed A's pin, or B's folder or variable list showed A's, or B's model menu was redrawn for A, or B's page asked for a value for A's app, or B's settings header showed A's new name, or B's Test web search or a folder's Test showed A's result, or B's Telegram tab offered people to add who were A's. Or, back on A while B's image list loaded, A's image menu showed B's pin, and Pin & rebuild pinned it to A. Or a change on A failed while B's Overview, or no page, was open, and nothing said so.
 - **Cause:** the answer for A was drawn into whichever agent's page was open when it came back. With A's folders in B's list, removing an old-style folder from B sent A's folder list to B. An error was written under A's forms, which were out of sight.
 - **Fix:** close the page and open the agent again. Check its folders (Knowledge), its variables (Advanced) and its image pin, and remove anything that is not its own; make again a change that may have failed. Since the fix, an answer for an agent whose forms are not on screen appears in a toast with that agent's name, and the page shown is left alone.
 - **Fixed in:** `v2.178.0`
-- **Code:** `web/app/connections.js` — `forAgent`, `agentPrefix`, `addDataSource`, `removeDataSource`, `removeEnvVar`, `checkDataSource`; `web/app/usage.js` — `populateImagePicker`, `assignClass`; `web/app/operations.js` — `saveImagePin`; `web/app/sheet.js` — `v2AppUpdate`; `web/app/panels.js` — `renameAgent`, `renderKnownPeople`, `addKnownPerson`; `web/app/settings.js` — `testAgentSearch`
+- **Code:** `web/app/connections.js` — `forAgent`, `agentPrefix`, `addDataSource`, `removeDataSource`, `removeEnvVar`, `checkDataSource`; `web/app/usage.js` — `assignClass`; `web/app/images.js` — `populateImagePicker`; `web/app/operations.js` — `saveImagePin`; `web/app/sheet.js` — `v2AppUpdate`; `web/app/panels.js` — `renameAgent`, `renderKnownPeople`, `addKnownPerson`; `web/app/settings.js` — `testAgentSearch`
 
 ### After saving setup fields or adding a variable, folder or repo, the agent's page kept saying something was unsaved
 - **Check:** the agent's page held back its redraw after Start or Stop, as if an edit were unsaved, until you closed it. Before that, either you pressed Save fields on its Personality tab and closed and reopened the page before the save finished; or you typed a variable (Advanced), a folder or a repo address (Knowledge), closed and reopened the page, and then pressed Add.
 - **Cause:** the setup fields' save marked the list it sent as saved, while the page showed the list the reopening filled in. An Add emptied its box, while the page still took the text kept from before the reopening as the box's filled value. Either way the page counted an edit that was not there.
 - **Fix:** close the agent's page and open it again. Since the fix, a save answered after the forms were filled again leaves the new fill as the saved list, as every other save in the page does, and an Add takes its emptied box as filled.
 - **Fixed in:** `v2.178.0`
-- **Code:** `web/app/values.js` — `saveSetupFields`; `web/app/connections.js` — `prepareEdit`, `addEnvVar`, `addDataSource`, `addGitSource`; `web/app/channels.js` — `v2SheetSaving`
+- **Code:** `web/app/values.js` — `saveSetupFields`; `web/app/connections.js` — `prepareEdit`, `addEnvVar`, `addDataSource`, `addGitSource`; `web/app/sheet.js` — `v2SheetSaving`
 
 ### An image or memory setting chosen on Advanced was gone after looking at another tab
 - **Check:** on an agent's Advanced tab you chose an image under Runtime and did not press Pin & rebuild, or chose a memory search engine, a memory cap or a swap allowance and did not press its Save. You opened another tab of the same agent and came back: the menu showed the saved value again, and leaving said nothing was unsaved.
 - **Cause:** each time Advanced was drawn, the page filled these menus from the agent's saved values (and read the machine's images again).
 - **Fix:** choose again and press Pin & rebuild, or Save. Since the fix, these menus are filled when the agent's forms are (opening its page), and again only for another agent, an image list that never loaded, or a value changed elsewhere (Bulk actions) while nothing else is chosen there. A choice stays, counted as unsaved, and the menu's other wording (what the agent inherits from its class or the fleet) is brought up to date around it. Saving the memory cap no longer resets a swap allowance chosen and not saved yet, or the reverse. While the image list loads (again, after a pin changed elsewhere, too), only the pin is offered and Pin & rebuild waits for it.
 - **Fixed in:** `v2.178.0`
-- **Code:** `web/app/sheet.js` — `v2EmbedPanes`; `web/app/usage.js` — `populateImagePicker`; `web/app/connections.js` — `prepareEdit`; `web/app/channels.js` — `v2KeepsChoice`; `web/app/operations.js` — `fillMemoryCapRow`, `fillSwapRow`
+- **Code:** `web/app/sheet.js` — `v2EmbedPanes`; `web/app/images.js` — `populateImagePicker`; `web/app/connections.js` — `prepareEdit`; `web/app/sheet.js` — `v2KeepsChoice`; `web/app/operations.js` — `fillMemoryCapRow`, `fillSwapRow`
 
 ### Saving an edited scheduled task after looking at another tab added it a second time
 - **Check:** on an agent's Schedule tab you pressed **Edit** on a task, looked at another tab of the same agent (Overview, say), came back and pressed the button under the form: the list then held the old task and a new one with your change.
@@ -3986,7 +3993,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the page took every menu on that tab that acts on its own as one that saves itself, so a change in Group chats or the room picker did not count as unsaved, and the redraw after a state change went ahead over it.
 - **Fix:** choose again and press Save. Since the fix, only a menu whose change saves it (Who can reach it, Rich messages, and the group, class, sleep, files limit and browser menus) is left out; a change in Group chats or the room picker counts as unsaved until Save, and the tab waits for it.
 - **Fixed in:** `v2.178.0`
-- **Code:** `web/app/channels.js` — `v2SheetCounts`, `v2LoadChans`; `web/index.html` — `data-saves`
+- **Code:** `web/app/sheet.js` — `v2SheetCounts`; `web/app/channels.js` — `v2LoadChans`; `web/index.html` — `data-saves`
 
 ### A value typed for one agent's environment variable, folder, repo or task was added to another
 - **Check:** you typed a variable's name and value (or a folder path, a repo address, or a scheduled task) on one agent's page without pressing Add. Then you opened another agent and pressed Add there, and the value went to the second agent. Or a folder or repo was added to the second agent with write access, or as a public repo, chosen on the first agent's page. Or a setup field half-declared on the first agent (its key, label, type, default or options) was added to the second.
@@ -4044,7 +4051,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the second question was a `confirm()` whose Cancel meant "the other option".
 - **Fix:** upgrade. The question now has its own Cancel.
 - **Fixed in:** `v2.153.0`
-- **Code:** `web/app/templates.js` — `askChoice`, `shareTemplate`; `web/app/operations.js` — `recoverContext`
+- **Code:** `web/app/core.js` — `askChoice`; `web/app/templates.js` — `shareTemplate`; `web/app/operations.js` — `recoverContext`
 
 ### Download history or Recover context finds nothing, or only old conversations, on OpenClaw 2026.9
 - **Check:** the agent's sheet shows OpenClaw 2026.9 or newer; Data → History says "No chat history found", or the download stops at the day the agent moved to 2026.9; Recover context says there is nothing to recover after a reset you saw.
@@ -4072,7 +4079,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a move starts no rebuild for such an agent, and a recovery only runs chained to one. A stopped or sleeping agent takes the new source at its next start, which is a plain rebuild, and nothing is kept to run the recovery then.
 - **Fix:** once the agent is up, its owner presses **Recover context** on its Personality tab, under Memory. It reads the old conversation on the new source. Nobody else can press it: after **Migrate all**, the machine's owner gets "Not found" on another account's agent, and the result counts those apart (`notRecoveredOthers`) so they can tell that owner. From `v2.173.0` the box, the result and the answer's `notRecovered` count all say so.
 - **Fixed in:** `v2.173.0`
-- **Code:** `src/orchestrator/sources/aiSources.ts` — `switchAgentToSource`; `web/app/usage.js` — `notRecoveredNote`; `web/app/images.js` — `moveAgentsApply`, `faApply`, `runMigrate`
+- **Code:** `src/orchestrator/sources/aiSources.ts` — `switchAgentToSource`; `web/app/usage.js` — `notRecoveredNote`, `moveAgentsApply`, `runMigrate`, `faApply`
 
 ### Recover context said it started, but the agent never confirmed
 - **Check:** the toast said "Recovering N messages…", no confirmation arrived in the agent's chat, and `recovered/chat-history-<date>.md` is in its workspace.
@@ -4164,7 +4171,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** pinned OpenClaw 2026.9.8's Markdown pipeline does not typeset math. Markdown can also consume escapes and underscores, so rendering its visible text directly would change some formulas.
 - **Fix:** upgrade Hatchabot, then reload or close and reopen console tabs. The local renderer uses the original assistant message and runs after streaming ends; agents need no rebuild. Inline dollar/parenthesis and display double-dollar/bracket delimiters are supported. Invalid, ambiguous or unsupported formulas stay readable source. If every valid formula remains raw after reopening, check the console's local math JavaScript, CSS and font requests for load errors; they need the same signed-in console access as the page.
 - **Fixed in:** `v2.188.0`
-- **Code:** `src/api/controlUiMath.ts` — `withControlUiMath`, `readControlUiMathAsset`; `web/control-ui-math-source.js` — `mathExpressions`; `web/control-ui-math.js` — `enhance`, `textRuns`
+- **Code:** `src/api/console/controlUiMath.ts` — `withControlUiMath`, `readControlUiMathAsset`; `web/control-ui-math-source.js` — `mathExpressions`; `web/control-ui-math.js` — `enhance`, `textRuns`
 
 ### On a phone, the keyboard covers the box you are typing in (a panel, the web chat, the console)
 - **Check:** the page is open on a phone; tapping a text box in a panel, the web chat or the console brings up the keyboard over it, and the box cannot be scrolled into sight.
@@ -4178,7 +4185,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** 2026.9 serves its page with root-absolute links, which pointed at Hatchabot's own root through the console proxy.
 - **Fix:** upgrade; no rebuild needed.
 - **Fixed in:** `v2.60.3`
-- **Code:** `src/api/controlUiRebase.ts` — `data-openclaw-control-ui-base-path`
+- **Code:** `src/api/console/controlUiRebase.ts` — `data-openclaw-control-ui-base-path`
 
 ### The console sits on OpenClaw's "Approve this browser" screen
 - **Check:** the agent runs OpenClaw 2026.8 or newer.
@@ -4192,14 +4199,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the console's device identity uses WebCrypto, which browsers allow only over https or on localhost.
 - **Fix:** open Hatchabot at its https address (with Tailscale: the setup guide's **Turn on HTTPS**), or at `http://localhost` on the machine itself.
 - **Fixed in:** —
-- **Code:** `web/app/channels.js` — `isSecureContext`; `web/app/panels.js` — `openGateway`
+- **Code:** `web/app/channels.js` — `isSecureContext`; `web/app/console.js` — `openGateway`
 
 ### Opening an agent's console: "The agent's gateway did not answer."
 - **Check:** is the agent asleep, or on a runner?
 - **Cause:** a sleeping agent's gateway is stopped (before v2.83.1 the console did not wake it); before v2.34.6 a runner agent's console was looked for on this machine.
 - **Fix:** upgrade; the console now wakes a sleeper ("Waking it up — about a minute…") and reaches runner agents through the runner's SSH connection.
 - **Fixed in:** `v2.83.1`
-- **Code:** `src/api/consoleRoutes.ts` — `The agent's gateway did not answer.`; `web/app/home.js` — `Waking it up`
+- **Code:** `src/api/console/consoleRoutes.ts` — `The agent's gateway did not answer.`; `web/app/home.js` — `Waking it up`
 
 ### Adopting an OpenClaw agent stops at "This agent needs a bot", or the agent is greyed out in the list
 - **Check:** the workspace has no Telegram bot of its own, and the bot pool is empty (or you would rather not use a bot slot).
@@ -4269,14 +4276,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** OpenClaw's console app asks for a few owner-only things each time a guest opens the chat; each was recorded, and the 200-line history filled with them.
 - **Fix:** upgrade to v2.158.3 (the startup refusals go to the service log; a visit is recorded at most once an hour, with its device). If you don't recognise the visits, the note on each says the browser and address; remove that member's web chat on the agent's Sharing tab, or sign that account out everywhere.
 - **Fixed in:** `v2.158.3`
-- **Code:** `src/api/guestConsoleLog.ts` — `GuestConsoleLog`
+- **Code:** `src/api/console/guestConsoleLog.ts` — `GuestConsoleLog`
 
 ### A web chat guest's page says "… was not sent: too many requests are waiting for an answer" (or "it has no id", "its id is too long", "got no answer: the agent took too long to answer")
 - **Check:** the guest's browser has many requests open on one connection (a stuck tab, a script), or the agent is not answering (its status, `hatchabot doctor`). The message names `health` or `agents.list`. Before `v2.178.0` it could also say "its id is already in use", and name any request sent under an id still waiting.
 - **Cause:** a guest's health and agent-list replies are rewritten to leave other people out, so each must be matched to its request. Before `v2.168.0` a request the proxy could not follow (past 1,000 waiting, with no id, or under an id still waiting) went through, and its reply reached the guest unrewritten. Before `v2.178.0` the match was by the guest's own id, so another reply under that id (a request sent under it, or the second answer to an `agent` request) could take the health reply's place, and the health reply then passed unrewritten. Now a health or agent-list request goes to the agent under an id the proxy makes, and its reply gets the guest's id back; a reply under such an id that nothing waits for is dropped, the reply keeps the agent's other fields but a refusal loses any payload it carried, and a reply in a form a guest's copy cannot be made from (or that Hatchabot fails to rewrite: `console.guest_scrub_failed` in the service log) is answered with an error. A message from the agent that is not a JSON object (not JSON, binary, an array or a bare value) is never passed on as it came: it is logged the same way and the guest's chat is closed with "Hatchabot could not read the agent's answer", as a request it may have answered would otherwise wait for ever. This is deliberate: OpenClaw sends only JSON objects in text frames, so anything else is refused rather than passed on unscrubbed. Such a request is refused (and not sent) past 1,000 waiting, with no id, or with an id longer than 256 characters; one not answered within 2 minutes is answered here ("took too long"), and a later answer to it is dropped. The 2 minutes are timed by a clock that only goes forward, so setting the machine's clock does not cut them short or stretch them. Other requests are not counted.
 - **Fix:** reload the page; the console's requests always have short ids.
 - **Fixed in:** `v2.168.0`; `v2.178.0` for a reply taken for another's under the same id
-- **Code:** `src/api/consoleProxy.ts` — `spliceGuest`, `guestUntracked`, `guestError`, `MAX_GUEST_PENDING`, `MAX_GUEST_ID_LENGTH`, `GUEST_REPLY_WAIT_MS`, `GuestReplies`, `onScrubError`
+- **Code:** `src/api/console/consoleProxy.ts` — `spliceGuest`, `guestUntracked`, `guestError`, `MAX_GUEST_PENDING`, `MAX_GUEST_ID_LENGTH`, `GUEST_REPLY_WAIT_MS`, `GuestReplies`, `onScrubError`
 
 ### An agent's icon shows unread after a Telegram chat, with nothing new in its console
 - **Check:** the conversation's record (the agent's session records) names Telegram only as its `origin.provider`, with no `lastChannel` or `lastTo`.
@@ -4297,7 +4304,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** every agent's console lives under its own path on one site address, so each one registered OpenClaw's service worker, which caches the console's files (55 MB a build) for offline use and keeps three builds — one copy per agent. A household of agents filled the browser's storage quota for the site, and the draft store (IndexedDB) shares that quota: its write fails after every change, 200 ms later, and the console says so. A private window, or site data blocked for the site, shows the same line for the same reason (no storage at all).
 - **Fix:** upgrade: the proxy answers each console's `sw.js` with a stand-in worker that keeps nothing, deletes the `openclaw-control-*` caches and unregisters itself; a browser cleans up on its next visit to any console. Before the upgrade, or to clear it at once: in Chrome, chrome://settings/content/all → the Hatchabot address → Delete data (or DevTools → Application → Storage → Clear site data); it signs you out and the home screen forgets its console tabs, nothing else. A computer whose disk is nearly full gets a smaller quota from Chrome; make room.
 - **Fixed in:** `v2.166.0`
-- **Code:** `src/api/consoleWorkerStub.ts` — `CONSOLE_WORKER_STUB`; `src/api/consoleRoutes.ts` — the `'/v1/agents/:id/ui/*'` route answers the worker itself
+- **Code:** `src/api/console/consoleWorkerStub.ts` — `CONSOLE_WORKER_STUB`; `src/api/console/consoleRoutes.ts` — the `'/v1/agents/:id/ui/*'` route answers the worker itself
 
 ### The home screen's sort buttons run off the edge of a phone's screen
 - **Check:** on a phone (390 px wide), under the View by pills, the sort buttons (Age, Name, Activity, My order; Cost under View by → Cost) run past the right edge and the last cannot be tapped.
@@ -4339,7 +4346,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** rows laid out for a desktop: buttons kept on the line beside their words, a dropdown kept beside its buttons and shrunk instead of given a line of its own, rows that did not wrap, wide tables scrolling sideways inside their box with nothing to say so, and a chart drawn 640 px wide and scaled down to the phone.
 - **Fix:** upgrade: on a phone (640 px wide or less) the header's buttons narrow a little so all of them fit with Inbox showing (below 360 px, Resources moves to the account menu only); buttons go under the words they belong to; a dropdown with buttons beside it, a folder's path and the Audit log's filters wrap onto lines of their own, and the longest choices are shorter; long words break; each wide table becomes a card per row, every value named after its column; Files puts a name across the width with its size and age under it; a capability's name and version wrap rather than overlap; a file tapped in the inspector is brought into view when it starts out of sight; the cost chart is drawn at the width of its box, and again when that changes (the phone turned, or a Settings tab shown), its range buttons wrapping as a row. A computer draws the chart the same way, at its box's width up to 640 px: in a usual window its boxes are wider than that (an agent's Usage panel gives it about 750 px), so it looks as before, and in a window narrow enough to make a box narrower its words stay full size instead of shrinking. Nothing else on a desktop changed. Until then, turn the phone sideways or use a computer for those screens.
 - **Fixed in:** `v2.178.0`
-- **Code:** `web/app/spend.js` — `phoneQuery`, `isPhone`, `mpRow`, `spendChartWidth`, `spendChartSVG`, `spendChartFit`, `spendChartResized`, `spendChartsRefit`; `web/index.html` — `.v2hubactions`, `#v2ResBtn`, `.pair`, `.phone-stack`, `.phone-wrap`, `.phone-flow`, `.reportdraft`, `#inspFileList`, `#setupLogBody`, `.cap-table`; `web/app/templates.js` — `loadInspectFile`; `scripts/ui-clickthrough.mjs` — `phoneEveryScreenFits`, `phoneInspectorShowsTheFile`
+- **Code:** `web/app/core.js` — `phoneQuery`, `isPhone`; `web/app/spend.js` — `mpRow`, `spendChartWidth`, `spendChartSVG`, `spendChartFit`, `spendChartResized`, `spendChartsRefit`; `web/index.html` — `.v2hubactions`, `#v2ResBtn`, `.pair`, `.phone-stack`, `.phone-wrap`, `.phone-flow`, `.reportdraft`, `#inspFileList`, `#setupLogBody`, `.cap-table`; `web/app/templates.js` — `loadInspectFile`; `scripts/ui-clickthrough.mjs` — `phoneEveryScreenFits`, `phoneInspectorShowsTheFile`
 
 ### A file opened from Files on a phone has no way back
 - **Check:** the app was opened from the phone's home screen (installed), a sound, video or PDF file was tapped in an agent's Files tab, and it filled the screen with no Back: the installed app has no browser bar.
@@ -4374,14 +4381,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the box was emptied and the message shown before the request. Only the needs-a-rebuild refusal put it back, though every refusal happens before the agent sees the message.
 - **Fix:** upgrade: a refused message goes back in its agent's box and leaves the log, so it can be sent again, ahead of anything typed since. That covers a session that ended, a second factor not given, and an agent that could not be woken. "No answer within…", "The turn did not complete" and a lost connection leave it as sent, because it may have got through; reopen the chat to see. If it is not in the conversation it comes back to the box with a note, and is not sent until you send it. On an older release, copy it from the log before you close the chat.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/sheet.js` — `webChatSend`, `webChatGiveBack`, `webChatOfferUnsure`; `src/api/webChat.ts`
+- **Code:** `web/app/sheet.js` — `webChatSend`, `webChatGiveBack`, `webChatOfferUnsure`; `src/api/chat/webChat.ts`
 
 ### Web chat: the box holds what someone else typed, or their chat is still open, after a sign-in
 - **Check:** one person's session ended on a shared browser (the sign-in screen appeared by itself), and the next person signed in without the page being reloaded. Their box for that agent held the first person's draft, or the first person's chat and log stayed open, where Enter would send the draft as the new person.
 - **Cause:** Sign out reloads the page, but a session that lapses and a sign-in do not, and nothing cleared what the page held for the person.
 - **Fix:** upgrade: when a session ends the chat closes and its text leaves the screen. If the same account signs back in, its drafts are back in their boxes. If another account does, they are dropped, with other dialogs, unsaved source edits and report text. On an older release, reload the page before handing it over.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/signin.js` — `showLogin`; `web/app/templates.js` — `pageSessionEnded`, `pagePersonIs`, `pageSignedIn`; `web/app/sheet.js` — `webChatPutAway`, `webChatForget`
+- **Code:** `web/app/signin.js` — `showLogin`, `pageSessionEnded`, `pagePersonIs`, `pageSignedIn`; `web/app/sheet.js` — `webChatPutAway`, `webChatForget`
 
 ### Web chat: text from one agent's chat is in another agent's box, or a message disappeared after switching
 - **Check:** you sent a message and switched agent, or closed the chat, before it was answered; or a message was refused and you then opened another agent's chat. Enter there would send it to that agent.
@@ -4409,7 +4416,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a guest's console connection goes through Hatchabot's filter, which used to write to a side that was not reading while it kept reading the other, so the unsent bytes piled up in Hatchabot's memory without limit; and a message's size was capped but not the number of frames it came in, so a client could leave any number of empty ones waiting. Now the agent is not read while more than 64 KB waits for the browser. The browser is still read then: its pings and pongs reach the agent at once, and so does a stop (`chat.abort`, `sessions.abort`) unless requests are kept ahead of it, while its other requests are kept and sent, in order, once it catches up, so a guest who is not taking replies sends nothing new to the agent meanwhile; once 64 KB of them are kept, the browser is not read until it catches up. Its close goes at once, what is kept is dropped, and nothing it sends after its close is passed on. The browser is not read while more than 64 KB waits for the agent either. The refusals waiting for the browser may not pass 256 KB. What waits for a side is handed over 16 KB at a time; a side that takes nothing for 60 seconds closes the connection, so does more than the largest message and 4 MB waiting for one side. When the agent closes the chat, its close is answered at once, and what waits for the browser still goes first, then the agent's own close code and reason; the browser has 30 seconds to take it, after which the connection is ended; meanwhile it is read again, if it was held back, so its leaving is seen, and what it sends is dropped. Until the browser's connection ends, the chat still counts toward the guest's limits and is closed like any other (access removed, sign-out, the idle limit, one chat more), and what it holds counts down as the browser takes it. When the browser closes it, what waits for the browser is dropped (but for the rest of a message part sent), its close goes to the agent once (if the chat ends before the agent has taken it, it is written then), and the agent's answer comes back to it next. A message may come in at most 1,024 frames, and must keep coming: a side that sends part of one and then none of it for 60 seconds while it is read (counted from when it is read again, if Hatchabot held it back; pings and pongs do not count) closes the connection ("stopped sending"), and so does one not whole within 10 minutes of its first bytes, however they come ("took over 10 minutes to send one message": a 32 MB attachment needs about 55 KB/s). Only time the side is read counts toward those 10 minutes: an agent held back while a phone slowly downloads a long history does not use them up. So a message never finished is not held for ever. A frame's header is read once, however many pieces it comes in, and its bytes are copied once, when it is whole; a message in several frames is held as it came and unmasked once, when it is whole. Each piece Hatchabot holds counts for 64 bytes more than its size, so many tiny ones count as more. A guest's open chats together may hold at most 160 MB (messages begun and not finished, and what waits to be sent): more than one chat can hold on its own, so the chat whose bytes push past it is closed ("your open chats hold too much at once") only when others hold some too. A guest may have 8 chats open at once (all agents together). Chats still connecting count too. One more is let in only if one of theirs that is connected has gone unused for 2 minutes (timed by a clock that only goes forward, so a wall clock set forward makes none idle) and is not being answered (a reply or the agent's work for a run that chat started streaming to it in the last 2 minutes, or a message sent from it, by the chat or the `agent` request, whose run has not ended: the agent saying it started or accepted the run is not its end, the run's last reply or result is; for up to 10 minutes from the last of these; another chat of theirs on the same conversation does not keep it from being idle): as it is let in, the one they used least recently is set aside for it and counted as gone, so two opened at once cannot both take the same place, and once it connects, that one is closed ("opened in another tab"). If it fails to connect, or the guest leaves first, nothing is closed. One unused for 10 minutes or more (a tab whose phone slept without closing its connection) can always be closed this way, so those never lock them out; one unused for less, only once in 10 minutes, so idle tabs that reconnect cannot close each other in turn. Otherwise one more is refused at the door ("you have 8 chats open; close one"), so tabs in use cannot close each other either. At most 8 of a guest's chats may be connecting at once (one more is not let in: `console.guest_too_many_connecting`); one the agent has not accepted within 30 seconds is closed (`console.guest_connect_timeout` in the service log) and stops counting. A reply the chat waits for that Hatchabot fails to make a guest's copy of (the agent's first reply) closes it ("Hatchabot could not prepare this chat"), and so does anything from the agent that is not a JSON object ("Hatchabot could not read the agent's answer"): passed on as it came, either could show other people's sessions. At the public address, a guest's console stays active (the idle limit) only by what the guest sends: each message, each piece of an upload (a message of 16 KB or more still arriving; once whole, one that does not count, refused or a poll, puts back what its pieces marked, but not a message of theirs the agent took meanwhile), and a message waiting for the agent each time the agent takes some of it (any frame of it); not pings or pongs, the console's own `health` and `agents.list` polls, requests refused here, or the agent streaming to a slow browser.
 - **Fix:** reload the page. "opened in another tab" needs nothing: use the newer tab, and close tabs the guest no longer uses. For "you have 8 chats open; close one", close a chat tab first. For "your open chats hold too much at once", close the guest's other chat tabs first. "Hatchabot could not prepare this chat" or "Hatchabot could not read the agent's answer" that keeps happening is worth a report, with the `console.guest_scrub_failed` line. For a `gateway:` reason, check that the agent is running and not overloaded, then reload. A browser on a slow connection is not closed while it keeps taking what it is sent. A `refused:` close that keeps happening with a normal browser is worth a report; one from something that is not a normal browser can be ended by removing that member's web chat on the agent's Sharing tab.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/consoleProxy.ts` — `spliceGuest`, `Outbox`, `BEHIND`, `GUEST_KEEP_LIMIT`, `GUEST_CANCELS`, `GUEST_QUEUE_SLACK`, `GUEST_REFUSAL_BUDGET`, `GUEST_STALL_MS`, `MESSAGE_DEADLINE_MS`, `GUEST_HELD_LIMIT`, `GUEST_DRAIN_MS`, `ProtocolFault`, `GuestActivity`, `MAX_MESSAGE_FRAMES`, `CONSOLE_POLLS`, `MAX_GUEST_CONSOLES`, `GUEST_IDLE_TO_CLOSE_MS`, `GUEST_ROOM_EVERY_MS`, `GUEST_CONNECT_TIMEOUT_MS`, `FrameReader`, `WsFrame`; `src/api/consoleRoutes.ts` — `onActive`, `console.guest_oldest_closed`, `console.guest_too_many`, `console.guest_too_many_connecting`, `console.guest_connect_timeout`; `src/orchestrator/console/consoleAccess.ts` — `trackGuest`, `promiseRoom`, `RoomPromise`, `addGuestHeld`
+- **Code:** `src/api/console/consoleProxy.ts` — `spliceGuest`, `Outbox`, `BEHIND`, `GUEST_KEEP_LIMIT`, `GUEST_CANCELS`, `GUEST_QUEUE_SLACK`, `GUEST_REFUSAL_BUDGET`, `GUEST_STALL_MS`, `MESSAGE_DEADLINE_MS`, `GUEST_HELD_LIMIT`, `GUEST_DRAIN_MS`, `ProtocolFault`, `GuestActivity`, `MAX_MESSAGE_FRAMES`, `CONSOLE_POLLS`, `MAX_GUEST_CONSOLES`, `GUEST_IDLE_TO_CLOSE_MS`, `GUEST_ROOM_EVERY_MS`, `GUEST_CONNECT_TIMEOUT_MS`, `FrameReader`, `WsFrame`; `src/api/console/consoleRoutes.ts` — `onActive`, `console.guest_oldest_closed`, `console.guest_too_many`, `console.guest_too_many_connecting`, `console.guest_connect_timeout`; `src/orchestrator/console/consoleAccess.ts` — `trackGuest`, `promiseRoom`, `RoomPromise`, `addGuestHeld`
 
 ## Runners
 
@@ -4418,7 +4425,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the runner (often a laptop) is asleep, off or off the network. Older releases showed `{"error":"No debug gateway for this agent."}` or hung on "Loading…".
 - **Fix:** wake the runner. Its agents come back by themselves; nothing is marked failed.
 - **Fixed in:** `v2.123.0`
-- **Code:** `src/providers/localDockerProvider.ts` — `isn't answering`; `src/api/consoleRoutes.ts` — `No debug gateway`
+- **Code:** `src/providers/localDockerProvider.ts` — `isn't answering`; `src/api/console/consoleRoutes.ts` — `No debug gateway`
 
 ### The runner works from your terminal but the app says it is unreachable
 - **Check:** `env -i HOME=$HOME docker -H ssh://<user>@<runner> version` on the Hatchabot machine.
@@ -4453,14 +4460,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a runner could be removed as soon as no agent's record named it, but a held move still needs the machine it came from: Put back starts the agent's copy there.
 - **Fix:** upgrade: removing a machine is refused while a move to or from it is not over. If it is already gone, choose "Try again" once the machine it was going to answers: that finishes the move there. The copy left on the removed machine is then removed by hand (`docker rm -f` and `docker volume rm` the agent's container and volume there).
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/machineRoutes.ts` — `'/v1/hosts/:id'`; `src/orchestrator/machines/hosts.ts` — `inUse`; `src/orchestrator/transfer/moveHost.ts` — `recoverMoveHost`
+- **Code:** `src/api/machine/machineRoutes.ts` — `'/v1/hosts/:id'`; `src/orchestrator/machines/hosts.ts` — `inUse`; `src/orchestrator/transfer/moveHost.ts` — `recoverMoveHost`
 
 ### A pinned agent moved "on the runner's default image" lost its image after a restart undid the move
 - **Check:** the move was made with "use the runner's default image" (`--drop-pin`), Hatchabot restarted during it, the move shows "interrupted by a restart and undone", and the agent's Runtime tab no longer names its image.
 - **Cause:** the pin was dropped before the move was recorded, so the rollback after the restart put the agent back on its machine without it; its next rebuild used the default image and lost the extra packages.
 - **Fix:** upgrade: the pin is dropped by the move itself and put back whenever the move is undone. For an agent already affected, pin it to its image again (Runtime tab), then rebuild.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/orchestrator/transfer/moveHost.ts` — `keepPin`, `droppedImage`; `src/api/transferRoutes.ts` — `'/v1/agents/:id/move-host'`
+- **Code:** `src/orchestrator/transfer/moveHost.ts` — `keepPin`, `droppedImage`; `src/api/data/transferRoutes.ts` — `'/v1/agents/:id/move-host'`
 
 ### An agent moved while stopped is missing tools after its first start on the new machine
 - **Check:** the agent was STOPPED when it was moved; it keeps an `~/.openclaw/on-rebuild.sh`, and its Setup log has no `rebuild_hook.ran` (or `.failed`) after the move.
@@ -4544,7 +4551,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before this fix, removing a runner only deleted its record. Now it cleans up when the runner answers, and warns when it can't.
 - **Fix:** on that machine, `docker rm -f` those containers, then `docker volume rm <prefix>-embed-model <prefix>-embed-keys` and `docker network rm <prefix>-embed`.
 - **Fixed in:** `v2.153.0`
-- **Code:** `src/api/machineRoutes.ts` — `'/v1/hosts/:id'`; `src/orchestrator/machines/hosts.ts` — `remove`
+- **Code:** `src/api/machine/machineRoutes.ts` — `'/v1/hosts/:id'`; `src/orchestrator/machines/hosts.ts` — `remove`
 
 ### A runner was removed without a warning, but its `<prefix>-embed-keys` volume is back on it
 - **Check:** `docker volume ls` on that machine shows `<prefix>-embed-keys` (and no `<prefix>-embedder` container) after the removal said nothing was left there; the service log may show `embedder.keys_push_failed` for that host just after.
@@ -4600,7 +4607,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the form wrote its error into the AI tab's error line, which is hidden on that tab.
 - **Fix:** fill in all three fields, or upgrade. The form is now under Settings → Advanced → Other Hatchabot servers and shows its errors under it.
 - **Fixed in:** `v2.157.0`
-- **Code:** `web/app/images.js` — `addPeer`
+- **Code:** `web/app/moves.js` — `addPeer`
 
 ### A failed move says the copy on the other machine "couldn't be cleaned up", and Start is refused
 - **Check:** the agent's page or Alerts shows a held "Move to …" whose outcome says its copy there could not be removed; `hatchabot ops <agent>` lists the choices `remove-copy` and `copy-removed`; `docker ps` on the other machine may still list the agent's container.
@@ -4628,7 +4635,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** removing a runner checked it was empty, then waited on the runner (does it answer, what does it run) before deleting it; an agent placed there during that wait was left on a host that was gone.
 - **Fix:** delete the stranded agent and make it again on a machine that exists. Since the fix a runner being removed takes no new agent ("That host is being removed."), a move to it checks it is still there before it starts, and the removal looks again before it touches the runner and just before it deletes it, and stops if an agent arrived.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/api/machineRoutes.ts` — the `'/v1/hosts/:id'` delete route; `src/orchestrator/machines/hosts.ts` — `remove`, `beginRemoval`; `src/api/routes.ts` — `removingHosts`; `src/orchestrator/transfer/transfer.ts` — `importAgent`; `src/orchestrator/transfer/moveHost.ts` — `moveAgentToHost`
+- **Code:** `src/api/machine/machineRoutes.ts` — the `'/v1/hosts/:id'` delete route; `src/orchestrator/machines/hosts.ts` — `remove`, `beginRemoval`; `src/api/routes.ts` — `removingHosts`; `src/orchestrator/transfer/transfer.ts` — `importAgent`; `src/orchestrator/transfer/moveHost.ts` — `moveAgentToHost`
 ### A second runner on the same machine, at the default port, is reached on the first one's port
 - **Check:** `ssh -G <runner-host> | grep -E '^(port|user) '` on the Hatchabot machine shows the port (or user) of an address added earlier, and `~/.ssh/config` has a `Port` or `User` line under `# agentclaw-runner: <host>`.
 - **Cause:** the managed block is one per hostname, and it kept the port and user of the first address added for that machine; a later address with no port (or no user) inherited them.
@@ -4669,7 +4676,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** such a one-shot keeps its copy of the agent's archive (`/tmp/s.tgz`). The sweep that removes finished one-shots every 10 minutes visits only the runners Hatchabot knows, and removing a runner did not sweep it first.
 - **Fix:** `docker rm -f` it on that machine. Since the fix, removing a runner that answers removes its finished one-shots, and says so when it cannot.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/machineRoutes.ts` — `'/v1/hosts/:id'` (DELETE); `src/orchestrator/machines/hosts.ts` — `remove`; `src/providers/localDockerProvider.ts` — `sweepOneShots`
+- **Code:** `src/api/machine/machineRoutes.ts` — `'/v1/hosts/:id'` (DELETE); `src/orchestrator/machines/hosts.ts` — `remove`; `src/providers/localDockerProvider.ts` — `sweepOneShots`
 
 ### Adding two runners at once on a new install: one setup never finishes
 - **Check:** this machine had no runner key yet (`~/.ssh/agentclaw_runner` absent), and two runners were added at the same moment (two tabs, or the Hatchabot agent and the page); one of them stays on its first step, and `ps` shows an `ssh-keygen` for `agentclaw_runner` waiting.
@@ -5148,7 +5155,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.160.0 an agent or time of the wrong type was read as "neither", which clears every warning.
 - **Fix:** upgrade: such a request is refused (400) and clears nothing.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/usageRoutes.ts` — `/v1/usage/alerts/dismiss`
+- **Code:** `src/api/usage/usageRoutes.ts` — `/v1/usage/alerts/dismiss`
 
 ### A Recommended item's button does something other than what the item says (for example "Raise it" removes the budget)
 - **Check:** the item is marked as the Hatchabot agent's proposal, and the card it confirms (on the agent's chat) differs from the item's title.
@@ -5253,7 +5260,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the range was checked with `in`, which also accepts names every JavaScript object has, and the chart's slice loop then never ended. `GET /v1/costs?period=` had the same check and answered nonsense instead.
 - **Fix:** restart the service. Since v2.168.0 only the chart's own range names (and View by → Cost's own windows) are accepted, anything else is a 400, and the slice loop is bounded.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/orchestrator/usage/agentCosts.ts` — `isSpendRange`, `isCostPeriod`, `sliceStarts`; `src/api/usageRoutes.ts` — `'/v1/usage/spend'`, `'/v1/costs'`
+- **Code:** `src/orchestrator/usage/agentCosts.ts` — `isSpendRange`, `isCostPeriod`, `sliceStarts`; `src/api/usage/usageRoutes.ts` — `'/v1/usage/spend'`, `'/v1/costs'`
 
 ### A context cap removed or moved, but a hand edit of the provider vanished, or the old model still compacts early
 - **Check:** in the agent's console, `openclaw config get models.providers.<provider>`: a `baseUrl` or model row you added is gone after taking a context cap off, or after a source switch the old provider still has a row with `contextTokens`; the event log has `token.context_cap_failed`.
@@ -5380,7 +5387,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a task the gateway refused while the copy was being set up stays parked to be tried again, but before v2.168.0 only a setup tried again, and the copy was already running; a rebuild never did.
 - **Fix:** upgrade. From v2.170.0 the copy's Schedule tab lists the task as "waiting to be added" with the reason it was refused; **Try adding it now** adds it, and a Start, a wake or a rebuild tries again too (each once; one already there by name is not added again). On v2.168.0 and v2.169.0, Rebuild the copy. On an older version, add the task by hand on the copy's Schedule tab.
 - **Fixed in:** `v2.168.0` (a rebuild); `v2.170.0` (shown, Try again, Start and wake)
-- **Code:** `src/orchestrator/lifecycle/provision.ts` — `applyPendingSchedules`, `retryPendingSchedules`, `retryPendingSchedulesWhenUp`, `rebuildAgent`; `src/orchestrator/schedules/tasks.ts` — `waitingTasks`; `src/api/routes.ts` — `clearPinsWhenUp`; `src/api/scheduleRoutes.ts` — `'/v1/agents/:id/crons/waiting'`; `web/app/panels.js` — `cronWaitingRows`, `retryWaitingCrons`
+- **Code:** `src/orchestrator/lifecycle/provision.ts` — `applyPendingSchedules`, `retryPendingSchedules`, `retryPendingSchedulesWhenUp`, `rebuildAgent`; `src/orchestrator/schedules/tasks.ts` — `waitingTasks`; `src/api/routes.ts` — `clearPinsWhenUp`; `src/api/data/scheduleRoutes.ts` — `'/v1/agents/:id/crons/waiting'`; `web/app/panels.js` — `cronWaitingRows`, `retryWaitingCrons`
 
 ### Share, Clone or New child: "Couldn't read its scheduled tasks, so the copy would have none — nothing was exported"
 - **Check:** the agent's Scheduled tasks list does not load either, or `openclaw cron list --json` inside the agent fails.
@@ -5457,55 +5464,55 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the setup answers travelled in the request's address, and Node refuses a request whose address and headers together pass 16 KB. The page showed the empty answer as a bare "Import failed"; v2.166.0 only refused before sending, saying how many characters were over.
 - **Fix:** upgrade: the page sends the answers in the request body, ahead of the file (`application/vnd.hatchabot.import`), so every answer a template allows goes through. On an older version, shorten some answers and finish the rest in the agent's Overview after the import (Setup values). A script that still sends `?values=` keeps working within the address's limit.
 - **Fixed in:** `v2.170.0` (`v2.166.0` refused in words)
-- **Code:** `web/app/templates.js` — `IMPORT_WITH_VALUES`, `importAgentFile`; `src/api/routes.ts` — `IMPORT_WITH_VALUES`, `IMPORT_HEAD_MAX_BYTES` (the body parser); `src/api/transferRoutes.ts` — `'/v1/agents/import'`; `scripts/ui-clickthrough.mjs` — `importAnswersInBody`
+- **Code:** `web/app/templates.js` — `IMPORT_WITH_VALUES`, `importAgentFile`; `src/api/routes.ts` — `IMPORT_WITH_VALUES`, `IMPORT_HEAD_MAX_BYTES` (the body parser); `src/api/data/transferRoutes.ts` — `'/v1/agents/import'`; `scripts/ui-clickthrough.mjs` — `importAnswersInBody`
 ### An agent made from a template cannot be edited or snapshotted: "SOUL.md is over 256KB", though the template was small
 - **Check:** the template imported fine, but editing the agent's SOUL.md or AGENTS.md in the app says it is over 256KB, snapshots and Download copy refuse it, and the template file itself is a few KB. Its files use a setup field many times, and the answer given was long.
 - **Cause:** a template's files were held to the core-file limit as written, with their `{{placeholders}}`; the file as rendered with the answers was not. A 9 KB file with 1,000 placeholders and a 2,000-character answer became a 2 MB SOUL.md.
 - **Fix:** upgrade: the import, a Setup values edit and a push to derived children refuse a rendering over the limit before anything is made or written, naming the file. For the agent already made, give a shorter answer under Setup values, which renders the file again within the limit; or trim the master's file and share again.
 - **Fixed in:** `v2.166.0`
-- **Code:** `src/orchestrator/transfer/template.ts` — `renderedTooBig`, `importTemplate`; `src/api/definitionRoutes.ts` — the `'/v1/agents/:id/params'` and `'/v1/agents/:id/push-definition'` routes
+- **Code:** `src/orchestrator/transfer/template.ts` — `renderedTooBig`, `importTemplate`; `src/api/agents/definitionRoutes.ts` — the `'/v1/agents/:id/params'` and `'/v1/agents/:id/push-definition'` routes
 
 ### Setup values failed with "Write failed", and now SOUL.md has the new answer while AGENTS.md and the values panel have the old one
 - **Check:** the agent's Setup values edit answered "Write failed" (a full disk, a runner that went to sleep part way); its SOUL.md shows the new answer, its AGENTS.md (or the Setup values panel) the old one.
 - **Cause:** before v2.168.0 Setup values wrote SOUL.md, then AGENTS.md, and stopped at the first that failed: what was already written stayed, while the stored values were not changed.
 - **Fix:** upgrade: a file that cannot be written puts back the ones already written, and the error says "Nothing was changed" (or names a file it could not put back: restore the agent's `pre-params` snapshot). On an older version, apply the values again once the disk or machine is fine, or restore the `pre-params` snapshot.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/definitionRoutes.ts` — `'/v1/agents/:id/params'`
+- **Code:** `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/params'`
 
 ### Setup values change AGENTS.md but never SOUL.md (or the other way round) on an agent whose fields were declared on it
 - **Check:** the agent has no imported setup layer (its fields were declared on it, a master), the file still has its `{{placeholders}}` in the Definition editor, and applying a value changes only the other file. The first Setup values edit happened while the agent's machine was struggling.
 - **Cause:** before v2.168.0 the first edit seeded the agent's placeholder layer with `cat … || true`, which read a file that could not be read as missing. The layer was stored without that file, and every later edit left it alone.
 - **Fix:** upgrade: a file that cannot be read refuses the first edit ("… is there but could not be read. Nothing was changed."), and nothing is stored. On an agent already affected, save the file once in the Definition editor (the saved text becomes its layer), then apply the values again.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/definitionRoutes.ts` — `'/v1/agents/:id/params'`; `src/orchestrator/files/snapshots.ts` — `readCoreFile`
+- **Code:** `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/params'`; `src/orchestrator/files/snapshots.ts` — `readCoreFile`
 
 ### After Push definition, a child's Setup values no longer change its AGENTS.md (or SOUL.md)
 - **Check:** the master's setup layer has only one of SOUL.md and AGENTS.md (the other file is not there on the master), the child's file still has its own text, and since the push, applying a value on the child changes only the file the master has.
 - **Cause:** before v2.168.0 a push stored the master's layer as the child's whole layer. The file the master has none of was rightly left alone on the child, but its placeholder layer was dropped, so later Setup values had nothing to render it from.
 - **Fix:** upgrade: the child keeps its own layer for a file the master does not push. On a child already affected, save that file once in its Definition editor with its `{{placeholders}}` (the saved text becomes its layer), then apply the values again.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/definitionRoutes.ts` — `'/v1/agents/:id/push-definition'`
+- **Code:** `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/push-definition'`
 
 ### After merging a child's proposal, the master's AGENTS.md holds only that proposal
 - **Check:** the master's AGENTS.md is just a `<!-- distilled from <child>, <date> (proposal <id>) -->` block (no `(proposal …)` before v2.178.0) and the lesson under it; its Snapshots have no `pre-edit` from that merge, or one that is missing AGENTS.md. The master's machine was struggling (a runner asleep, Docker slow) at the time.
 - **Cause:** before v2.168.0 the merge read AGENTS.md with `head … || true`, so a file that was there but could not be read was taken as empty, and the merge wrote the proposal alone over the playbook.
 - **Fix:** upgrade: a read that fails refuses the merge ("Couldn't read the master's playbook: … Nothing was merged; the proposal is still waiting."). On an agent already affected, restore the newest snapshot that has the full AGENTS.md, merge the proposal again, and only then push to the children.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`; `src/orchestrator/files/snapshots.ts` — `readCoreFile`
+- **Code:** `src/api/chat/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`; `src/orchestrator/files/snapshots.ts` — `readCoreFile`
 
 ### After merging a proposal, the master's AGENTS.md cannot be edited, snapshotted, shared or pushed: "over 256KB"
 - **Check:** the merge said it worked, and since then the Definition editor, snapshots, Share and Push definition say AGENTS.md is over 256KB; it was just under the limit before the merge.
 - **Cause:** before v2.168.0 a merge checked the size of the AGENTS.md it read, not of the file with the proposal added.
 - **Fix:** upgrade: a merge whose result (or the master's setup layer with it) would pass the limit is refused, and the proposal stays waiting. For a master already over, trim its AGENTS.md through its chat or console until it is under 256KB.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/api/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`
+- **Code:** `src/api/chat/memoryRoutes.ts` — `'/v1/agents/:id/proposals/:pid/resolve'`; `src/orchestrator/memory/proposals.ts` — `merge`
 
 ### A task added while the agent was being moved or exported is missing from the moved copy
 - **Check:** the task was added (the Schedule tab, `hatchabot tasks`, or the Hatchabot agent) while a move, export or rebuild of that agent was under way; the agent's timeline has `cron.created` during the operation.
 - **Cause:** adding a task did not wait for the agent's other operations, unlike enabling, editing or deleting one, so it could land in the runtime that was going away.
 - **Fix:** upgrade: adding a task now says "Another operation is already running on this agent" until the operation ends. Add the task again on the copy that carries on.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/scheduleRoutes.ts` — `'/v1/agents/:id/crons'`
+- **Code:** `src/api/data/scheduleRoutes.ts` — `'/v1/agents/:id/crons'`
 
 ### A one-time task shows just "at" with no time
 - **Check:** `openclaw cron list --json` in the agent gives the task's `schedule.at` as a date string, not a number; often a task brought in from another OpenClaw.
@@ -5582,7 +5589,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the save sent the secret only to the agents running and free at that moment, once. Nothing asked the others again until their next start or rebuild, and saving the same secret again sent nothing.
 - **Fix:** upgrade. Every 10 minutes, running agents still owed it are asked again, one account at a time (a restart loses nothing: who is owed is on record). One whose import keeps failing is asked less often, from 10 minutes doubling up to once a day; its Setup log says why. An account it never held before goes into its AGENTS.md too, as after an attach. Saving the client again, changed or not, asks every one at once. A stopped one gets it at its next start. An account made with another client is not marked: only connecting it again mends it. A connection detached or deleted while it was being imported is taken off the agent again. An agent owed several accounts gets them in one go (one exec with a minute for each account, ten at most; each account with its own result, back-off and error, from what gog printed on stderr or else on stdout; an import whose output ends without a newline still counts as done), and its AGENTS.md is written once. A failed account is asked again at the first pass 10 minutes after the one that tried it.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/orchestrator/google/clientSecretDelivery.ts` — `pushClientSecret`, `deliverClientSecret`, `deliverSecretTo`, `clientSecretSweep`; `src/api/googleRoutes.ts` — `'/v1/connections'`; `src/orchestrator/google/connectionVault.ts` — `secretPending`; `src/store/store.ts` — `connectionsOwedClientSecret`, `connectionOwedClientSecret`; `src/orchestrator/google/googleConnections.ts` — `materializeConnections`
+- **Code:** `src/orchestrator/google/clientSecretDelivery.ts` — `pushClientSecret`, `deliverClientSecret`, `deliverSecretTo`, `clientSecretSweep`; `src/api/data/googleRoutes.ts` — `'/v1/connections'`; `src/orchestrator/google/connectionVault.ts` — `secretPending`; `src/store/store.ts` — `connectionsOwedClientSecret`, `connectionOwedClientSecret`; `src/orchestrator/google/googleConnections.ts` — `materializeConnections`
 
 ### A task's schedule reads "every 0m", or a slightly wrong number of minutes
 - **Check:** the task runs on an interval that is not whole minutes (`openclaw cron list --json` in the agent: `schedule.everyMs` such as 15000 or 90000).
@@ -5623,7 +5630,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a blank zone was dropped as "no change", and `cron edit` cannot remove a zone: it reads `--tz ''` as no zone given, and a new `--cron` keeps the old one.
 - **Fix:** upgrade. Emptying the box sets your own zone ("yours if blank", as for a new task); a blank `tz` in the API clears the task's zone, so it runs in the gateway's. The schedule is then sent without a zone through the gateway's `cron.update`.
 - **Fixed in:** `v2.171.0`
-- **Code:** `src/orchestrator/schedules/crons.ts` — `editCron`; `src/api/scheduleRoutes.ts` — `/v1/agents/:id/crons/:jobId`; `web/app/panels.js` — `addCronJob`
+- **Code:** `src/orchestrator/schedules/crons.ts` — `editCron`; `src/api/data/scheduleRoutes.ts` — `/v1/agents/:id/crons/:jobId`; `web/app/panels.js` — `addCronJob`
 
 ### Bring in from OpenClaw: a task for another recipient is missing, though the import counted it as carried
 - **Check:** the source OpenClaw had a task with the same name, schedule and prompt as one the agent already has, but sent to another chat (`delivery.to` in `openclaw cron list --json`); the import counted it as carried, the agent has only the one it had before, and the log says `cron.migrate_already_present` for it.
@@ -5651,7 +5658,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the note was saved before the rest of the request was checked or done.
 - **Fix:** set the note again. Since the fix, it is saved only once the rest of the request took, and with an edit that took even when turning the task on or off then failed.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/api/scheduleRoutes.ts` — `'/v1/agents/:id/crons/:jobId'` (PATCH); `src/orchestrator/schedules/tasks.ts` — `edit`
+- **Code:** `src/api/data/scheduleRoutes.ts` — `'/v1/agents/:id/crons/:jobId'` (PATCH); `src/orchestrator/schedules/tasks.ts` — `edit`
 
 ### A task made elsewhere that runs more often than every 15 seconds could not be renamed
 - **Check:** a scheduled task made by the agent (or with `openclaw cron add`) runs every few seconds. On the Schedule tab, Edit then Save changes says an interval of 0.25 min or more is needed, whatever you changed.
@@ -5667,7 +5674,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** at the public address the page's policy runs no inline script (since v2.191.0, HB-0812): the app's own code is all in files. Something between the browser and Hatchabot that adds an inline script to the page (a proxy's or CDN's script rewriting, such as a "rocket loader", an injected banner, analytics or e-mail obfuscation) is refused, and a rewriting that wraps the page's own script tags stops the app from starting. Where the refused script is the app's own, the release is missing a file (see "The page shows, but nothing on it works").
 - **Fix:** turn that rewriting or injection off for the Hatchabot address; the page needs nothing between it and the browser. A browser extension that writes scripts into pages is refused the same way, and is harmless to the app.
 - **Fixed in:** —
-- **Code:** `src/api/publicAccess.ts` — `publicCsp`; `src/api/pageRoutes.ts` — `versionMarkup`; `scripts/check-web.mjs` — `checkHandlers`
+- **Code:** `src/api/publicAccess.ts` — `publicCsp`; `src/api/machine/pageRoutes.ts` — `versionMarkup`; `scripts/check-web.mjs` — `checkHandlers`
 
 ### The https address the setup guide gave does not open
 - **Check:** `curl <the https address>/healthz`; Tailscale admin console → DNS → HTTPS certificates.
@@ -5716,7 +5723,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** deliberate since `v2.174.0`. Before it, whoever held only a member's password could change it from the internet, and the real person was locked out until the owner sent a reset link. The new password gave no more access, but the lockout was real.
 - **Fix:** change the password at the private address (at home), or ask whoever runs this Hatchabot for a reset link, which works at either address. Adding a second factor at the private address lets you change it at the public one too.
 - **Fixed in:** `v2.174.0`
-- **Code:** `src/api/publicRoutes.ts` — `PASSWORD_NEEDS_FACTOR`; `src/api/publicAccess.ts` — `noFactor`; `src/api/secondFactor.ts` — `passwordRefused`; `web/app/signin.js` — `loadSecondFactor`
+- **Code:** `src/api/publicRoutes.ts` — `PASSWORD_NEEDS_FACTOR`; `src/api/publicAccess.ts` — `noFactor`; `src/api/signIn/secondFactor.ts` — `passwordRefused`; `web/app/signin.js` — `loadSecondFactor`
 
 ### `hatchabot reach on --invited-only` fails with "unknown option --invited-only"
 - **Check:** the command stops before asking anything, with that error.
@@ -5730,14 +5737,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** turning on took itself back, but Tailscale refused to remove its entry. The server's warning and the command to remove it were dropped by the page, and so was the same warning from a status read.
 - **Fix:** run the command the warning gives: `tailscale funnel --https=<its port> off`, with the port the status shows. Hatchabot tries again each time the page reads the status. Upgrade to see the warning.
 - **Fixed in:** `v2.173.0`
-- **Code:** `web/app/signin.js` — `reachTurnOn`, `reachRender`; `src/api/reachRoutes.ts` — `funnelLeft`
+- **Code:** `web/app/signin.js` — `reachTurnOn`, `reachRender`; `src/api/machine/reachRoutes.ts` — `funnelLeft`
 
 ### At the public address, pictures, sound, video and PDFs in Files showed broken
 - **Check:** at the public address, with a second factor on the account, a picture in Files showed broken, or a player or reader stayed empty. Text files worked, and Open in a tab asked for the second factor.
 - **Cause:** a file there needs a fresh second factor, and a picture, player or reader cannot ask for one: its request was refused, which broke it.
 - **Fix:** press Open in a tab, give the second factor, then go back. Since the fix, a picture, sound or video whose load fails there asks the server whether the file may be read (a check that reads nothing of the file), which asks for the second factor when it has lapsed, and then loads once more. A PDF, and Open in a tab, are checked the same way first, and then the reader or the tab loads it from the server as before. The check asks what a download checks first: a file gone, or one over the size limit (`HATCHABOT_FILE_MAX_MB`), is said there, not shown as an empty reader. Its folder is not read, and the file is not downloaded twice. If it still cannot load, the page says so: open it in a tab or download it.
 - **Fixed in:** `v2.178.0`
-- **Code:** `web/app/sheet.js` — `v2OpenFile`; `web/app/signin.js` — `sfOpen`; `src/api/fileRoutes.ts` — `req.query.check`, `fsReadable`; `src/orchestrator/files/agentHome.ts` — `readable`
+- **Code:** `web/app/sheet.js` — `v2OpenFile`; `web/app/signin.js` — `sfOpen`; `src/api/data/fileRoutes.ts` — `req.query.check`, `fsReadable`; `src/orchestrator/files/agentHome.ts` — `readable`
 
 ## The Hatchabot agent
 
@@ -5760,7 +5767,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the agent's own turn failed or is busy.
 - **Fix:** wait for its current turn; if the source is limited, see "Several agents on one AI source stop answering".
 - **Fixed in:** `v2.15.3`
-- **Code:** `src/api/opsAgentRoutes.ts` — `Your Hatchabot agent did not answer`
+- **Code:** `src/api/ops/opsAgentRoutes.ts` — `Your Hatchabot agent did not answer`
 
 ### "The Hatchabot agent can't use a local model"
 - **Check:** the source chosen for it is a local model.
@@ -5781,7 +5788,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.168.0 the card showed the class's settings but sent only the class's id, so Confirm applied whatever the class said by then.
 - **Fix:** upgrade: the card sends the settings it showed, and a class changed since is refused ("The class … changed after this was shown: it now has …. Nothing was changed"); ask the Hatchabot agent again for a card with the class as it is. On an older version, check the class before confirming, or assign it on the agent's page.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/mgmt/restTools.ts` — `set_class`; `src/api/classRoutes.ts` — `'/v1/agents/:id/class'`
+- **Code:** `src/mgmt/restTools.ts` — `set_class`; `src/api/agents/classRoutes.ts` — `'/v1/agents/:id/class'`
 
 ### The Hatchabot agent's search_source finds nothing for a pattern like "a|b"
 - **Check:** the search used a regular expression without `regex: true`.
@@ -5858,14 +5865,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** on a subscription the model is reached through the Claude CLI, which answers in text; a tool call after a sentence was looked for among only the last 20 opening braces, so a call with many nested objects (a schedule, a list of rows) was never found and was shown as prose.
 - **Fix:** upgrade. The call is found by matching its braces, however deep it nests.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/cliChatModel.ts` — `parseToolAfterProse`, `closingBrace`
+- **Code:** `src/api/ops/cliChatModel.ts` — `parseToolAfterProse`, `closingBrace`
 
 ### On a Claude subscription, the Hatchabot agent acts as if it had said what you asked
 - **Check:** the AI source behind the Hatchabot agent is a setup-token or machine login, and it replies to your request as its own earlier words ("as I said…"), or repeats an action it thinks it proposed.
 - **Cause:** when the conversation was turned into the CLI's text prompt, a message of yours stored as content blocks was labelled "You:", the model's own voice.
 - **Fix:** upgrade. Each message is labelled by who sent it, in whatever form it is stored.
 - **Fixed in:** `v2.160.0`
-- **Code:** `src/api/cliChatModel.ts` — `renderConversation`
+- **Code:** `src/api/ops/cliChatModel.ts` — `renderConversation`
 
 ### The Hatchabot agent quotes a web page that is not the search result it named
 - **Check:** after many searches in one session (more than 60 results in all), the agent opens result N and reports a page about something else.
@@ -5907,28 +5914,28 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the tool did not read the answer of the model change, which says whether it reached the running agent, was written to a stopped one, waits for a rebuild, or was refused.
 - **Fix:** upgrade: a refused change now reads "⚠ Failed — its runtime did not take …", and the others say how it applies. The change is recorded either way: confirm a `rebuild_agent` card, or ask for the model again when the agent answers. Since `v2.178.0` the receipt also says when its class is still applying a change (whether it leaves the class is decided after), and the memory limits its container kept, a refusal included.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/mgmt/apiClient.ts` — `setModel`; `src/api/modelRoutes.ts` — `'/v1/agents/:id/model'`
+- **Code:** `src/mgmt/apiClient.ts` — `setModel`; `src/api/agents/modelRoutes.ts` — `'/v1/agents/:id/model'`
 
 ### The Hatchabot agent said ✅ for saving a conversation to memory, but nothing was saved
 - **Check:** the confirmed `checkpoint_memory` card shows ✅, but the agent's memory files did not change, and its AI source was failing then (out of credits, expired, or unreachable); or an archive through the Hatchabot agent says ✅ while the app showed "Archived, but couldn't save the conversation to memory first".
 - **Cause:** the save answers "not saved" (or "could not be checked") as a normal answer, and the tool did not read it, nor an archive's warning.
 - **Fix:** upgrade: a save that did not happen reads "⚠ Failed — Couldn't save to memory …", one that cannot be vouched for says so, and an archive passes on its warning. Fix the AI source and save again before a reset or an archive.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/mgmt/restTools.ts` — `checkpoint_memory`, `archive_agent`; `src/api/memoryRoutes.ts` — `'/v1/agents/:id/checkpoint'`; `src/orchestrator/memory/memoryTurns.ts` — `checkpoint`
+- **Code:** `src/mgmt/restTools.ts` — `checkpoint_memory`, `archive_agent`; `src/api/chat/memoryRoutes.ts` — `'/v1/agents/:id/checkpoint'`; `src/orchestrator/memory/memoryTurns.ts` — `checkpoint`
 
 ### The Hatchabot agent said ✅ for "try again" on a held move, but the agent is still waiting
 - **Check:** a confirmed `recover_operation` card shows ✅ with only the choice it made, while the agent's page (or Alerts) still shows the operation held ("… isn't answering") with its choices.
 - **Cause:** the recovery answers with the operation as it is now. The tool only followed one still under way, so a recovery that was held again (the other machine still not answering) or that ended failed was dropped and shown as done.
 - **Fix:** upgrade: the card now gives the outcome and, when it is held again, the choices waiting for you; one that failed reads "⚠ Failed — …". Choose again when the other machine answers, or put the agent back where it was.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/mgmt/broker.ts` — `followOperation`; `src/mgmt/restTools.ts` — `recover_operation`; `src/api/lifecycleRoutes.ts` — `'/v1/operations/:id/recover'`
+- **Code:** `src/mgmt/broker.ts` — `followOperation`; `src/mgmt/restTools.ts` — `recover_operation`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/operations/:id/recover'`
 
 ### A change the Hatchabot agent proposed is gone from Alerts before you answered it
 - **Check:** the card was proposed less than a day ago (a card waits that long), more than about fifty other cards were confirmed or cancelled since, and Alerts (or `list_proposals`) no longer shows it; the Hatchabot agent may also have proposed more than its limit of open cards.
 - **Cause:** the list held the newest fifty cards of the last day, waiting and answered together, so a busy day's answered cards pushed an older waiting one out, and it no longer counted as open.
 - **Fix:** upgrade: every waiting card is listed, and the answered ones are limited on their own. Until then, ask the Hatchabot agent to propose the change again.
 - **Fixed in:** `v2.168.0`
-- **Code:** `src/store/store.ts` — `listMgmtProposals`; `src/api/mgmtChat.ts` — `'/v1/proposals'`, `OPEN_PROPOSALS_CAP`
+- **Code:** `src/store/store.ts` — `listMgmtProposals`; `src/api/ops/mgmtChat.ts` — `'/v1/proposals'`, `OPEN_PROPOSALS_CAP`
 
 ### The Hatchabot agent said an agent started, but it was being rebuilt, or the rebuild failed
 - **Check:** you confirmed start_agent for a stopped agent that had a change waiting for its start (or needed a rebuild), and it said ✅ at once, while the agent's page showed it rebuilding or failed.
@@ -5956,14 +5963,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the manager checked the model against the vendor's catalogue, while Confirm checks the source's own list and the agent's runtime.
 - **Fix:** upgrade: the manager checks the change as Confirm will, and says the source's models when it is refused. To use a model the vendor offers, add it to the source's switchable list first.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/mgmt/broker.ts` — `set_model`; `src/api/modelRoutes.ts` — `'/v1/agents/:id/model-check'`; `src/orchestrator/lifecycle/modelRuntime.ts` — `modelChoiceProblem`
+- **Code:** `src/mgmt/broker.ts` — `set_model`; `src/api/agents/modelRoutes.ts` — `'/v1/agents/:id/model-check'`; `src/orchestrator/lifecycle/modelRuntime.ts` — `modelChoiceProblem`
 
 ### A set_class card said ✅, but the agent still answers on its old model, or took a swap allowance the card did not show
 - **Check:** the class's model is shown as waiting on the agent's page, or its container has the class's swap allowance (`docker inspect -f '{{.HostConfig.MemorySwap}}' <container>`), after a "Put … in the class" card from the Hatchabot agent was confirmed.
 - **Cause:** the receipt left out what the class change said had not taken (a model the runtime refused, memory limits the container kept, a rebuild still owed). The card also did not show the class's swap allowance, so a swap allowance changed after the card was shown still applied.
 - **Fix:** upgrade: the receipt says what did not take, the card shows the swap allowance, and a class whose swap allowance changed after the card was shown is refused. For an agent on its old model, Rebuild it or put it in the class again.
 - **Fixed in:** `v2.178.0`
-- **Code:** `src/mgmt/restTools.ts` — `set_class`; `src/api/classRoutes.ts` — `'/v1/agents/:id/class'`
+- **Code:** `src/mgmt/restTools.ts` — `set_class`; `src/api/agents/classRoutes.ts` — `'/v1/agents/:id/class'`
 
 ## Docker, disk and memory
 
@@ -6035,7 +6042,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** clearing kept the old container's count as the starting point, and the new container's count starts again from zero, so its hits were subtracted away until it passed the old one's total. v2.168.0 caught a count below the starting point; a new container that had already passed the old total when it was first read still showed only the hits beyond it.
 - **Fix:** upgrade; the starting point remembers when its container started, and a count from a container that started later is shown whole. On older versions, clear the peaks again after the rebuild.
 - **Fixed in:** `v2.168.0` (a count below the starting point), `v2.169.0` (any later container, by its start time)
-- **Code:** `src/orchestrator/machines/resources.ts` — `capHitsSince`; `src/api/machineRoutes.ts` — `'/v1/resources'`; `src/store/store.ts` — `rebaseMemoryCapHits`, `clearMemoryPeaks`; `src/providers/localDockerProvider.ts` — `stats`
+- **Code:** `src/orchestrator/machines/resources.ts` — `capHitsSince`; `src/api/machine/machineRoutes.ts` — `'/v1/resources'`; `src/store/store.ts` — `rebaseMemoryCapHits`, `clearMemoryPeaks`; `src/providers/localDockerProvider.ts` — `stats`
 
 ## Audit fixes in v2.158.2
 
@@ -6065,7 +6072,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a failed stop prevented parking the bot but still deleted its credentials and channel record.
 - **Fix:** upgrade. Removal now retains the connection and returns an error until it can confirm the runtime is stopped; retry when the runner answers.
 - **Fixed in:** `v2.158.2` (#32)
-- **Code:** `src/orchestrator/channels/chatBots.ts` — `stopForBotHandover`; `src/api/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind'`
+- **Code:** `src/orchestrator/channels/chatBots.ts` — `stopForBotHandover`; `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind'`
 
 ### An app recovery chooses the new release with the old settings
 - **Check:** Go back failed while restoring scheduled tasks, then Use the new release succeeded with the previous configuration values.
@@ -6144,21 +6151,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the Telegram attach route ran outside the agent's lifecycle lock; the second click passed the "already has a bot" check and its insert threw as a server error.
 - **Fix:** upgrade; nothing to repair. The second attach is refused in words now, as the Discord and Slack attach is.
 - **Fixed in:** `v2.165.0`
-- **Code:** `src/api/channelRoutes.ts` — the `/v1/agents/:id/telegram` route, `whileBusy`
+- **Code:** `src/api/chat/channelRoutes.ts` — the `/v1/agents/:id/telegram` route, `whileBusy`
 
 ### A new agent fails with "@bot already belongs to …" after a token was pasted for an earlier one
 - **Check:** the token pasted for the earlier agent (while it waited for a bot) was a spare bot's, listed under Settings → Messaging → Telegram → Bot pool; that bot now shows in use by the earlier agent, and the later agent failed to start on it.
 - **Cause:** the create-flow token paste did not refuse a pool bot's token; the pool row stayed unleased, so the pool leased the same bot to the next agent.
 - **Fix:** delete the failed agent (its lease goes back) and make it again; the earlier agent keeps the bot. Since the fix the paste is refused: "a spare bot in the pool".
 - **Fixed in:** `v2.165.0`
-- **Code:** `src/api/agentSecretRoutes.ts` — the `/v1/agents/:id/channel-token` route
+- **Code:** `src/api/agents/agentSecretRoutes.ts` — the `/v1/agents/:id/channel-token` route
 
 ### An agent on a runner says it has a folder it cannot see
 - **Check:** the agent runs on a runner (its tile says so); Settings → Data lists a folder; Test on it answers "runs on another machine … not mounted there"; the agent answers from nothing when asked about the folder.
 - **Cause:** a folder is a bind mount of this machine's disk, which a runner's docker cannot see. The mount was skipped there in silence while the agent's AGENTS.md said it had the data.
 - **Fix:** remove the folder from its Data tab (or move the agent to this machine). Since the fix a folder cannot be added to an agent on a runner, and an agent with folders cannot be moved to one (the move says which folders). The older shared-folders setting (`sharedPaths`, set through the API or CLI) still took one until v2.171.0.
 - **Fixed in:** `v2.165.0`; `v2.171.0` for `sharedPaths`
-- **Code:** `src/api/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `runs on another machine`; `src/orchestrator/transfer/moves.ts` — `folders_stay_here`; `src/orchestrator/lifecycle/agentEdits.ts` — `folder-runner`; `src/api/lifecycleRoutes.ts` — the `'/v1/agents/:id'` patch route; `src/providers/localDockerProvider.ts` — the `hostMounts` skip for a remote daemon
+- **Code:** `src/api/data/appRoutes.ts` — `'/v1/agents/:id/data-sources'`; `src/orchestrator/apps/dataSources.ts` — `runs on another machine`; `src/orchestrator/transfer/moves.ts` — `folders_stay_here`; `src/orchestrator/lifecycle/agentEdits.ts` — `folder-runner`; `src/api/agents/lifecycleRoutes.ts` — the `'/v1/agents/:id'` patch route; `src/providers/localDockerProvider.ts` — the `hostMounts` skip for a remote daemon
 
 ### A moved or restored agent lost its repos and folders
 - **Check:** the agent came from Download copy / Restore or Move to another Hatchabot before v2.165.0; its Data tab is empty; its AGENTS.md says "Data sources: None"; a clone is still on its volume under `~/.openclaw/<repo>` (Files → .openclaw).
@@ -6172,7 +6179,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** deleting the source parked its bot in this machine's pool by default, as any delete does; the copy was still talking on it.
 - **Fix:** on the new agent here, its Telegram tab → Change bot; then remove the parked bot from the pool. Since the fix, deleting a stopped agent whose copy was downloaded leaves the bot alone (`?recycleBot=1` on the delete parks it on purpose).
 - **Fixed in:** `v2.165.0`
-- **Code:** `src/api/lifecycleRoutes.ts` — the `'/v1/agents/:id'` delete route; `src/store/store.ts` — `setAgentExportedAt`; `src/orchestrator/lifecycle/agentRecords.ts` — `bot.not_parked`
+- **Code:** `src/api/agents/lifecycleRoutes.ts` — the `'/v1/agents/:id'` delete route; `src/store/store.ts` — `setAgentExportedAt`; `src/orchestrator/lifecycle/agentRecords.ts` — `bot.not_parked`
 
 ### A "pause" budget said the agent is paused, Start ran it, and it was stopped again minutes later in silence
 - **Check:** the agent was already stopped by hand when the budget reached 100%; the message said "start it in the app (it then runs on until the 1st)"; after Start, the next budget pass stopped it with no message; Settings → Budgets shows no pause for the month before the fix.
@@ -6207,14 +6214,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the body was `multipart/form-data`, which Hatchabot's server refused before the console proxy saw it.
 - **Fix:** upgrade. The proxy takes any body type; every other route keeps its 415.
 - **Fixed in:** `v2.165.0`
-- **Code:** `src/api/routes.ts` — the `'*'` content type parser for the console's `/v1/agents/:id/ui/` routes; `src/api/consoleRoutes.ts` — the `/v1/agents/:id/ui/*` route
+- **Code:** `src/api/routes.ts` — the `'*'` content type parser for the console's `/v1/agents/:id/ui/` routes; `src/api/console/consoleRoutes.ts` — the `/v1/agents/:id/ui/*` route
 
 ### Distill says "The agent produced no usable distillation" though the agent was writing
 - **Check:** the agent's gateway log shows a turn of over a minute for the distill prompt that was cut off.
 - **Cause:** the distill ran with the 60-second command timeout, while an ask has 280 seconds.
 - **Fix:** upgrade and try again; it now has the ask's time and is held like a consult.
 - **Fixed in:** `v2.165.0`
-- **Code:** `src/api/memoryRoutes.ts` — the `/v1/agents/:id/distill` route; `src/orchestrator/memory/proposals.ts` — `distill`, `askTimeoutMs`; `src/api/routes.ts` — `ASK_TIMEOUT_MS`
+- **Code:** `src/api/chat/memoryRoutes.ts` — the `/v1/agents/:id/distill` route; `src/orchestrator/memory/proposals.ts` — `distill`, `askTimeoutMs`; `src/api/routes.ts` — `ASK_TIMEOUT_MS`
 
 ### An agent with a long name on a runner with a long name never starts
 - **Check:** the runner's `docker logs` for the container, or the agent's timeline, says the container could not start with an invalid or too-long hostname.
@@ -6230,7 +6237,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the console proxy judged a guest's path split on `/`, but the agent's gateway reads it with `new URL()`, which takes `\` (or `%5c`) for `/`, drops tabs and newlines, resolves `..`, and reads a leading `//` as a host name. A path like `/assets/x\..\..\sessions/…/history` passed as a static file and reached an operator-only endpoint with the guest's read + write scopes.
 - **Fix:** upgrade. The proxy refuses any guest path the gateway would read differently from how it was judged, and forwards only the judged path.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/api/consoleProxy.ts` — `guestHttpPath`, `guestHttpAllowed`; `src/api/consoleRoutes.ts` — the `/v1/agents/:id/ui/*` route
+- **Code:** `src/api/console/consoleProxy.ts` — `guestHttpPath`, `guestHttpAllowed`; `src/api/console/consoleRoutes.ts` — the `/v1/agents/:id/ui/*` route
 
 ### A stopped agent started by itself after a move was held, and two copies answer its bot
 - **Check:** the agent's timeline shows a Rebuild (from Rebuild all, or an AI-source switch with rebuild) that started after "Move to another Hatchabot" or "Move to another machine" was held; Alerts still shows that move waiting for a choice.
@@ -6265,7 +6272,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** Start closed the budget's record whatever its kind, and archiving closed it as "gone". Only an open record gets its model put back on the 1st.
 - **Fix:** upgrade. Start now leaves a cheaper-model record open, and archiving puts the agent's own model back on its record. An agent already stuck this way is repaired once at the upgrade: while it still runs on the budget's cheaper model, its record is reopened, so its own model comes back on the 1st or as soon as the budget is raised (an archived agent's at once). An agent whose model you changed since is left as it is. Before upgrading: set the model back by hand in the agent's settings.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/orchestrator/usage/budgets.ts` — `runBudgets`; `src/store/store.ts` — `runOnce`; `src/api/lifecycleRoutes.ts` — `/v1/agents/:id/start`
+- **Code:** `src/orchestrator/usage/budgets.ts` — `runBudgets`; `src/store/store.ts` — `runOnce`; `src/api/agents/lifecycleRoutes.ts` — `/v1/agents/:id/start`
 
 ### Usage → Spend over time → 1 mo: each day's bar holds part of the next day (west of UTC)
 - **Check:** spend made in the evening shows under the next day's bar, and a day's bar does not match the budget's figure for that day.
@@ -6378,14 +6385,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** Clone never passed the original's AI source and machine, so the copy took the defaults.
 - **Fix:** upgrade. A clone now keeps both whenever you are allowed to use them. For an existing clone, switch its AI source in its settings.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/api/transferRoutes.ts` — `/v1/agents/:id/clone`
+- **Code:** `src/api/data/transferRoutes.ts` — `/v1/agents/:id/clone`
 
 ### An agent's timeline is full of "guest refused" lines with odd method names
 - **Check:** the agent's timeline has many `console.guest_refused` entries from one guest, each naming a different method, and older setup lines are gone.
 - **Cause:** each refused method name was recorded once a day, and the guest chooses the names, so made-up names could push the 200-line history out.
 - **Fix:** upgrade. Each guest now gets ten names a day per agent, and anything past that is one "(other methods)" line. If someone is doing this on purpose, take away that person's web chat.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/api/guestConsoleLog.ts` — `GuestConsoleLog`, `refusal`
+- **Code:** `src/api/console/guestConsoleLog.ts` — `GuestConsoleLog`, `refusal`
 
 ### Verify access shows a removed person as gone, but they still talk to the agent in a Slack channel or Discord server
 - **Check:** the person was removed and Access → Verify lists nobody for that chat app, yet the agent still answers them in a channel or server.
@@ -6413,7 +6420,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the route checked for a copy under way only after two awaits, so two requests could each start one. And a `docker load` that failed early left `docker save` stuck writing to its pipe.
 - **Fix:** upgrade. Until then, click once. `pkill -f 'docker save'` (or restarting the service) clears a stuck copy.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/api/machineRoutes.ts` — `/v1/hosts/:id/install-image`; `src/orchestrator/machines/imageInstalls.ts` — `imageCopies`; `src/orchestrator/machines/runnerSetup.ts` — `installRuntimeImage`
+- **Code:** `src/api/machine/machineRoutes.ts` — `/v1/hosts/:id/install-image`; `src/orchestrator/machines/imageInstalls.ts` — `imageCopies`; `src/orchestrator/machines/runnerSetup.ts` — `installRuntimeImage`
 
 ### "DuckDuckGo turns this machine away" or "Agents have no working web search" (was: DuckDuckGo "answered with no results")
 - **Check:** Settings → AI → Fleet search key → **Test search** shows the line. From the machine, `curl -s -o /dev/null -w '%{http_code}\n' -A 'Mozilla/5.0 (Hatchabot)' 'https://html.duckduckgo.com/html/?q=weather%20forecast'` prints `202`, and the page it sends asks you to "complete the following challenge". The manager's web search says the same instead of "No results."
@@ -6549,11 +6556,11 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/orchestrator/memory/transcript.ts` — `RENDER_SCRIPT`, `exportTranscript`
 
 ### A workspace adopted into a stopped agent said its tasks were "deferred", and they never came
-- **Check:** the adopt's answer had `crons.deferred` (adopted with the API or CLI into a stopped agent, or while the agent was busy: `adopt.repoint_busy` in its log); the agent has none of the old install's scheduled tasks, and its files still name the old paths.
+- **Check:** the adopt's API answer had `crons.deferred` (into a stopped agent; or, since 2.192.0, when its re-point was refused because the agent was busy or another change to its files was running: `adopt.repoint_busy` in its log; before 2.192.0 that case answered `crons` with all zeros); the agent has none of the old install's scheduled tasks, and its files still name the old paths. The web app and `hatchabot adopt` do not show `deferred`.
 - **Cause:** nothing kept the deferred work: the paths and tasks were re-pointed only during the adopt itself, and only when the agent was running and free.
-- **Fix:** upgrade, then start the agent: within 5 minutes the adopt finishes (`adopt.deferred_done` on its timeline), with the tasks carried disabled. If its gateway does not answer yet, it is looked at again within the hour (`adopt.deferred_waiting`), for up to a day of the agent running; tasks that still could not be brought over are told to you (`adopt.deferred_failed`): add them in its Tasks page. An adopt from before the upgrade was not remembered; adopt it again.
-- **Fixed in:** `v2.164.2`
-- **Code:** `src/orchestrator/transfer/adopts.ts` — `repointAdopted`, `finishDeferredAdopts`; `src/store/store.ts` — `setAdoptPending`, `listAdoptPending`
+- **Fix:** upgrade, then start the agent: within 5 minutes the adopt finishes (`adopt.deferred_done` on its timeline), with the tasks carried disabled. If its gateway does not answer yet, it is looked at again within the hour (`adopt.deferred_waiting`), for up to a day of the agent running; while the agent stays busy it is tried at each 5-minute pass (`adopt.repoint_busy`, said once), and a re-point that failed (`adopt.repoint_failed`, with its error) is tried again within the hour; tasks that still could not be brought over are told to you (`adopt.deferred_failed`): add them in its Tasks page. An adopt from before the upgrade was not remembered; adopt it again.
+- **Fixed in:** `v2.164.2`; in `v2.192.0` (HB-1466) an adopt whose re-point was refused says its tasks were put off, and is tried again at the next 5-minute pass, not an hour on.
+- **Code:** `src/orchestrator/transfer/adopts.ts` — `repointAdopted`, `repoint`, `finishDeferredAdopts`; `src/store/store.ts` — `setAdoptPending`, `listAdoptPending`
 
 ### A clone is missing notes from deep folders under memory/
 - **Check:** the source agent keeps notes four or more folders deep (`memory/projects/2026/q3/note.md`); the clone has none of them, and its list of files not copied doesn't name them either.
@@ -6572,9 +6579,9 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### A derived image was refused with "The heredoc <<EOF is never closed" for a line that only prints `<<EOF` in quotes
 - **Check:** the refused lines have `<<` inside quotes on a line that starts an instruction, for example `RUN echo "use <<EOF to start"`.
 - **Cause:** the image check read every `<<` as the start of a heredoc, quoted or not. BuildKit reads a quoted one as text.
-- **Fix:** upgrade, or move the text out of the RUN line (into a file the image copies). Since the fix, a `<<` inside quotes on a line that starts an instruction is text. On a line that continues another one (a `\` before it), every `<<` still counts, because that line may begin inside a quote.
-- **Fixed in:** `v2.164.2`
-- **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `quotedSpans`
+- **Fix:** upgrade, or move the text out of the RUN line (into a file the image copies). Since the fix, a `<<` inside quotes is text. Since v2.192.0 each instruction is read joined, as docker reads it, and every line is also judged as an instruction, whatever is read as a heredoc.
+- **Fixed in:** `v2.164.2`; read on the joined instruction in `v2.192.0` (HB-1032)
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `shellWords`, `heredocsOn`, `joinEachLine`
 
 ### Importing a template failed with an error about `trim`, or put odd text in the copy's SOUL.md
 - **Check:** the template has a setup field whose key is a built-in name such as `constructor` or `toString`, and the importer left it empty.
@@ -6637,14 +6644,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the push copied the master's fields only when it had some, and no fields are stored the same as never declared, so "none now" never reached the children.
 - **Fix:** push again after upgrading. Since the fix, a push gives each child the master's fields plus any `{{placeholder}}` the pushed text still uses, as derive does. The child keeps its own wording for one it already had.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/orchestrator/transfer/template.ts` — `pushedParameters`; `src/api/definitionRoutes.ts` — the `/v1/agents/:id/push-definition` route
+- **Code:** `src/orchestrator/transfer/template.ts` — `pushedParameters`; `src/api/agents/definitionRoutes.ts` — the `/v1/agents/:id/push-definition` route
 
 ### A failed push left a child with the master's new SOUL.md and its old AGENTS.md
 - **Check:** the push result names the child with "write failed", and the child's SOUL.md is the new text while AGENTS.md is the old.
 - **Cause:** the push wrote the two files one after the other, and nothing undid the first when the second failed.
 - **Fix:** push again, or restore the child's `pre-params` snapshot. Since the fix, a failed push puts back what it wrote. If that fails too, the result says to restore the snapshot.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/api/definitionRoutes.ts` — the `/v1/agents/:id/push-definition` route
+- **Code:** `src/api/agents/definitionRoutes.ts` — the `/v1/agents/:id/push-definition` route
 
 (B29/B30, the waiting app's secret values left in the store: encrypted, never read again, now swept at the next start. Not something a user sees, so no entry.)
 
@@ -6751,7 +6758,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the list read the newest 100 incidents and then split them into open and cleared, so 100 newer cleared ones pushed an older open one out.
 - **Fix:** upgrade. Since the fix, open incidents are read on their own.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/api/usageRoutes.ts` — the `/v1/token-incidents` route
+- **Code:** `src/api/usage/usageRoutes.ts` — the `/v1/token-incidents` route
 
 ### "Not logged in · Please run /login" keeps coming back on an older conversation of an agent with many conversations
 - **Check:** the agent has more than 500 conversations (`openclaw gateway call sessions.list`), and the one that fails is not among the newest 500.
@@ -6786,14 +6793,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the panel painted whichever read answered last, so a slow answer for the agent opened first wrote over the one opened since.
 - **Fix:** open the logs again. Since the fix, only the newest read paints.
 - **Fixed in:** `v2.164.2`
-- **Code:** `web/app/panels.js` — `loadLogs`, `loadSetupLog`
+- **Code:** `web/app/connections.js` — `loadLogs`, `loadSetupLog`
 
 ### The file editor closed by itself, and what you were typing was lost
 - **Check:** you saved a file, then opened another agent's (or another) file in the editor before the save finished; the editor closed while you typed.
 - **Cause:** the first save's answer closed whatever the editor showed when it came back.
 - **Fix:** open the file again and redo the edit. Since the fix, a save closes the editor only if it is still showing the file it saved. If the editor has moved on, the save is reported in a toast.
 - **Fixed in:** `v2.164.2`
-- **Code:** `web/app/panels.js` — `saveEditFile`, `loadEditFile`
+- **Code:** `web/app/connections.js` — `saveEditFile`, `loadEditFile`
 
 ### A problem report draft showed another draft's text after a save
 - **Check:** in Report a problem, you pressed Copy, Save as a file or Open on GitHub on one draft, then opened another draft before it finished; the second draft's title or text changed to the first's.
@@ -6842,7 +6849,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** web chat was checked before the wake, which takes seconds, and not again before the message was sent.
 - **Fix:** none needed; later messages are refused. Since the fix, it is checked again after the wake, and the message is refused (403).
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/api/webChat.ts` — `/v1/agents/:id/chat`
+- **Code:** `src/api/chat/webChat.ts` — `/v1/agents/:id/chat`
 
 ### Verify did not notice a Discord or Slack bot running another token
 - **Check:** the agent's Discord or Slack bot answers as a different bot than the one in Hatchabot, yet What it can reach shows the bot with no "a different bot token is running".
@@ -6863,7 +6870,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a credential whose stored value could not be read was skipped in silence; the clone was built without it.
 - **Fix:** add the variable to the clone under Advanced → Extra credentials. Since the fix, the clone's message names each one left out.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/api/transferRoutes.ts` — the `/v1/agents/:id/clone` route; `src/orchestrator/transfer/copies.ts` — `clone`; `web/app/templates.js` — `cloneAgent`
+- **Code:** `src/api/data/transferRoutes.ts` — the `/v1/agents/:id/clone` route; `src/orchestrator/transfer/copies.ts` — `clone`; `web/app/templates.js` — `cloneAgent`
 
 ### The bot census called a rebuilding agent's bot reclaimable
 - **Check:** `hatchabot bots` listed a bot as reclaimable while its agent was being built or rebuilt; with live checks, the census polled that bot.
@@ -6912,7 +6919,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** `docker run -v` creates a volume that is not there. Writing to a stopped agent's volume, uploading, or downloading made an empty one, so the loss looked like an agent that had forgotten everything. Only read-only looks and copies asked first.
 - **Fix:** upgrade, then find out why it went (a `docker volume prune`, a Docker reinstall, the agent recorded on the wrong machine). A rebuild makes a fresh, empty volume and seeds it. Removing a member, and unlinking your Discord from that agent, stays refused until the agent has its files back or is deleted, since another machine may still hold the allowlist. A restore from a backup is also refused while the volume is gone, because it has no way to go back; rebuild first, then restore.
 - **Fixed in:** `v2.172.0`
-- **Code:** `src/providers/localDockerProvider.ts` — `execShellOnVolume`, `writeToVolume`, `streamFromVolume`, `importWorkspace`; `src/orchestrator/members/members.ts` — `revokeMember`, `denyPairing`, `grantChannelAccess`; `src/orchestrator/transfer/adopt.ts` — `applyWorkspace`; `src/api/routes.ts` — `applyFilesCap`; `src/api/channelRoutes.ts` — `'/v1/account/discord'`; `src/orchestrator/lifecycle/modelRuntime.ts` — `applyModelNow`
+- **Code:** `src/providers/localDockerProvider.ts` — `execShellOnVolume`, `writeToVolume`, `streamFromVolume`, `importWorkspace`; `src/orchestrator/members/members.ts` — `revokeMember`, `denyPairing`, `grantChannelAccess`; `src/orchestrator/transfer/adopt.ts` — `applyWorkspace`; `src/api/routes.ts` — `applyFilesCap`; `src/api/chat/channelRoutes.ts` — `'/v1/account/discord'`; `src/orchestrator/lifecycle/modelRuntime.ts` — `applyModelNow`
 
 ### A restore or a move of a large agent was refused at about 1 GB compressed
 - **Check:** the restore said "Its current state could not be copied first", or the move "Couldn't read the agent's state", and the log shows `maxBuffer` for that agent.
@@ -6975,7 +6982,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a killed git leaves its lock, every later checkout fails on it, and a plain checkout back kept the files it had rewritten, so later runs refused them as local changes.
 - **Fix:** upgrade, then run it again. A deploy or upgrade now writes in its record which git it started, and removes the lock only when that git is gone, no other git is running in the checkout (a `git commit` waiting in its editor holds it for as long as the person takes), the lock is no older than the record and a couple of minutes old; it then puts every tracked file back (`.env` and `data/` are not touched). A tracked file that matches neither release, such as a hand edit made since the kill, is copied first and named: the copy is in `~/.local/state/hatchabot/upgrade-*.kept-<time>/`. A lock it cannot show is its own stays and is named: check no git is running there (`pgrep -a git`), then `rm <install>/.git/index.lock`. One left by a kill under an older release is that case. When only git was killed, the run puts the dependencies back at once and a later run clears the lock.
 - **Fixed in:** `v2.172.0`
-- **Code:** `scripts/deploy-release.sh` — `checkout_recorded`, `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`; `scripts/upgrade.sh` — `checkout_recorded`, `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`
+- **Code:** `scripts/deploy-release.sh` — `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`; `scripts/upgrade.sh` — `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`; `scripts/upgrade-helpers.sh` — `checkout_recorded`
 
 ### An install pinned to a version stays half upgraded although its channel timer runs
 - **Check:** `data/channel` holds a version (`v2.31.3`), a `hatchabot upgrade vX.Y.Z` was killed part-way, and `.swapping` in the install or `~/.local/state/hatchabot/upgrade-*.from` is there; `journalctl --user -u hatchabot-follow-channel` shows the timer doing nothing.
@@ -7046,21 +7053,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** verification waited for an unrelated shared certificate refresh before consulting a fresh cached key; the request and response body had no application deadline.
 - **Fix:** use a build with this fix. A fresh cached key is used immediately, and the complete certificate refresh has a ten-second deadline. An unavailable certificate service is reported as unavailable rather than a bad password.
 - **Fixed in:** `v2.185.1` (HB-0687).
-- **Code:** `src/api/identity.ts` — `IdentityVerifier`, `CERT_TIMEOUT_MS`, `IdentityUnavailableError`
+- **Code:** `src/api/signIn/identity.ts` — `IdentityVerifier`, `CERT_TIMEOUT_MS`, `IdentityUnavailableError`
 
 ### Invalid Google sign-in requests return a server error
 - **Check:** a malformed sign-in token, a non-text token or a null JSON header produces HTTP 500 instead of an authentication refusal.
 - **Cause:** the verifier assumed token and JSON field types and looked up signing keys on a plain object, including inherited property names.
 - **Fix:** use a build with this fix. Invalid token shapes are refused before use, and certificate lookup uses a map.
 - **Fixed in:** `v2.185.1` (HB-0688).
-- **Code:** `src/api/identity.ts` — `IdentityVerifier`, `IdentityError`
+- **Code:** `src/api/signIn/identity.ts` — `IdentityVerifier`, `IdentityError`
 
 ### An invitation is spent by a Google account that cannot sign in
 - **Check:** an invitation becomes used, but its recipient cannot sign in because their email is unverified or excluded by the installation's allowed-email setting.
 - **Cause:** invitation redemption verified the token without applying the email admission policy used by sign-in.
 - **Fix:** use a build with this fix. Both chat-app and web-chat invitations apply the sign-in admission policy before consuming the invitation. A previously spent invitation must be replaced by its owner.
 - **Fixed in:** `v2.185.1` (HB-0689).
-- **Code:** `src/api/identity.ts` — `admittedPrincipal`, `allowedEmailProblem`; `src/api/memberRoutes.ts` — `joiningAccount`
+- **Code:** `src/api/signIn/identity.ts` — `admittedPrincipal`, `allowedEmailProblem`; `src/api/chat/memberRoutes.ts` — `joiningAccount`
 
 ### Event-triggered tasks keep their old permission after the switch changes
 - **Check:** change the Event-triggered tasks switch while the agent is stopped, or when its runtime refuses a configuration command; the saved switch changes but the agent still uses the old permission.
@@ -7088,7 +7095,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** panel cleanup depended on receiving its server id; session changes and the dialog's native close did not consistently invalidate and clear it.
 - **Fix:** use a build with this fix. Closing or ending the session clears the picture and unsent text, stops the stream, and releases a panel whose opening response arrives late. Each new panel starts with typing hidden. Best-effort panel cleanup stays silent, so a delayed authentication refusal cannot reopen sign-in or a second-factor prompt.
 - **Fixed in:** `v2.185.1` (HB-0697).
-- **Code:** `web/app/channels.js` — `bpClose`, `bpClearView`, `bpOpen`; `web/app/templates.js` — `pageSessionEnded`
+- **Code:** `web/app/channels.js` — `bpClose`, `bpClearView`, `bpOpen`; `web/app/signin.js` — `pageSessionEnded`
 
 ### An agent's Browser row lists the previous agent's sites
 - **Check:** quickly move between agents while the first agent's browser status request is slow; the second agent's Advanced tab shows the first one's sites.
@@ -7102,7 +7109,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the page guarded only its session identity update, while the rest of a stale account success or error still updated the account settings.
 - **Fix:** use a build with this fix. The entire stale account response is ignored, including failures.
 - **Fixed in:** `v2.185.1` (HB-0699).
-- **Code:** `web/app/templates.js` — `loadMyAccount`
+- **Code:** `web/app/signin.js` — `loadMyAccount`
 
 
 ### The agent's browser can reach a local service through Docker's resolver address
@@ -7118,7 +7125,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** authorization was checked only when the HTTP request began, and the panel-open handler reused the agent snapshot from before a runner lookup.
 - **Fix:** use a build with this fix. The panel requires a signed-in browser session and checks that session, public access and the current agent/browser before further frames or input. Mutations and periodic checks close obsolete panels, and opening rechecks after waiting for the runner.
 - **Fixed in:** `v2.185.1` (HB-0700).
-- **Code:** `src/orchestrator/console/signInPanels.ts` — `panelSessionValid`, `panelAccessValid`, `revalidatePanels`, `signedOut`; `src/api/browserRoutes.ts` — `openPanel`
+- **Code:** `src/orchestrator/console/signInPanels.ts` — `panelSessionValid`, `panelAccessValid`, `revalidatePanels`, `signedOut`; `src/api/console/browserRoutes.ts` — `openPanel`
 
 
 ### An app update briefly runs both the old and replacement scheduled task
@@ -7141,7 +7148,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** restoring the parked bots awaited network calls without holding the agent's lifecycle lock.
 - **Fix:** use a build with this fix. Restore holds the lock through bot reclamation and its provisioning state change. Delete reports busy until restoration finishes.
 - **Fixed in:** `v2.185.1` (HB-0702).
-- **Code:** `src/api/lifecycleRoutes.ts` — `'/v1/agents/:id/restore'`; `src/orchestrator/lifecycle/agentRecords.ts` — `restore`, `markBusy`, `clearBusy`
+- **Code:** `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id/restore'`; `src/orchestrator/lifecycle/agentRecords.ts` — `restore`, `markBusy`
 
 ### Adopting a workspace replaces files while the agent is still running
 - **Check:** the runtime remains running after a stop request, or the record says stopped while the container is running, and Adopt begins copying files.
@@ -7190,7 +7197,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** move preflight retained an old agent snapshot across asynchronous image and Docker daemon checks, while settings remained writable during the move.
 - **Fix:** use a build with this fix. Move rechecks current ownership, runtime and configuration after preflight and daemon lookup, before stopping anything. Conflicting image and folder changes are refused while the move owns the agent.
 - **Fixed in:** `v2.185.1` (HB-0709).
-- **Code:** `src/api/transferRoutes.ts` — `'/v1/agents/:id/move-host'`; `src/orchestrator/transfer/moves.ts` — `preflightRefusal`; `src/orchestrator/transfer/moveHost.ts` — `moveAgentToHost`
+- **Code:** `src/api/data/transferRoutes.ts` — `'/v1/agents/:id/move-host'`; `src/orchestrator/transfer/moves.ts` — `preflightRefusal`; `src/orchestrator/transfer/moveHost.ts` — `moveAgentToHost`
 
 ### A later import replaces an already-open setup form
 - **Check:** an import or copy setup is open with answers typed when another template finishes loading. Its form replaces the first, whose operation then remains waiting.
@@ -7211,7 +7218,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** password usernames were treated as verified email addresses and could bind pending shares before the Google account signed in.
 - **Fix:** use a build with this fix. Email recipients and claims use Google identity accounts only. Pending shares mistakenly bound to a password account become available to the verified Google account at its next sign-in. Already accepted copies are not automatically removed.
 - **Fixed in:** `v2.185.1` (HB-0665).
-- **Code:** `src/api/accountsAuth.ts` — `registerAccountRoutes`; `src/store/store.ts` — `ownerForEmail`, `listAccounts`, `claimSharesForEmail`, `listInbox`, `getShareFor`
+- **Code:** `src/api/signIn/accountsAuth.ts` — `registerAccountRoutes`; `src/store/store.ts` — `ownerForEmail`, `listAccounts`, `claimSharesForEmail`, `listInbox`, `getShareFor`
 
 ### Older account hand-overs leave connections or spare bots under dev-owner
 - **Check:** after an older hand-over, the local host or hand-over record identifies the owner, but connections, spare pool bots or other owner-scoped rows remain under dev-owner. Another valid identity account may own a source or agent too.
@@ -7225,14 +7232,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** identity mode had no explicit owner setting before its first hand-over.
 - **Fix:** use a build with this fix and set `HATCHABOT_OWNER_EMAIL` to the owner's Google address before switching to identity mode. Restart and have that verified account sign in. Without an established owner or this setting, the data stays under dev-owner. Existing recorded ownership is preserved; changing the setting does not transfer it.
 - **Fixed in:** `v2.185.1` (HB-0625).
-- **Code:** `src/api/firstAccount.ts` — `firstAccountAdoption`; `src/store/store.ts` — `identityInstallOwner`, `installOwner`; `src/config/envCatalog.ts` — `HATCHABOT_OWNER_EMAIL`
+- **Code:** `src/api/signIn/firstAccount.ts` — `firstAccountAdoption`; `src/store/store.ts` — `identityInstallOwner`, `installOwner`; `src/config/envCatalog.ts` — `HATCHABOT_OWNER_EMAIL`
 
 ### An uploaded core file reverts on Apply values or produces an inconsistent snapshot
 - **Check:** upload SOUL.md or AGENTS.md through Files, then apply setup values. The uploaded text disappears, or a snapshot taken during the upload combines old and new files.
 - **Cause:** raw uploads bypassed the core-file queue and the saved template layer. Budget and documentation writers also used a separate queue.
 - **Fix:** use a build with this fix. Uploads, core edits, snapshots and AGENTS.md commits share one queue. A successful upload into the resolved workspace updates its template layer, including through a folder alias. Failed writes leave that layer unchanged; core uploads enforce the text and size limits.
 - **Fixed in:** `v2.185.1` (HB-0631).
-- **Code:** `src/orchestrator/files/coreFileTurns.ts` — `withCoreFilesTurn`, `withAgentsMdTurn`; `src/api/fileRoutes.ts` — `'/v1/agents/:id/fs/file'`; `src/orchestrator/files/agentHome.ts` — `upload`; `src/orchestrator/files/agentFiles.ts` — `putArgv`
+- **Code:** `src/orchestrator/files/coreFileTurns.ts` — `withCoreFilesTurn`, `withAgentsMdTurn`; `src/api/data/fileRoutes.ts` — `'/v1/agents/:id/fs/file'`; `src/orchestrator/files/agentHome.ts` — `upload`; `src/orchestrator/files/agentFiles.ts` — `putArgv`
 
 ### A memory limit changes back during a settings save
 - **Check:** save an agent's cap or swap while a limits sweep, machine-default change or Start is applying limits. The database shows the saved limit but Docker briefly or persistently has the earlier one.
@@ -7260,14 +7267,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the helper closed every open dialog before navigating to the management agent.
 - **Fix:** use a build with this fix. Image help waits for the security flow to finish and closes only its own AI-source dialog during normal navigation.
 - **Fixed in:** `v2.185.1` (HB-0524).
-- **Code:** `web/app/usage.js` — `askMgmtForImage`; `web/app/templates.js` — `pageSecondFactorBusy`
+- **Code:** `web/app/images.js` — `askMgmtForImage`; `web/app/signin.js` — `pageSecondFactorBusy`
 
 ### A delivered web-chat message is offered for resend when a runner's clock differs
 - **Check:** a send times out or loses its reply, then reopening the chat says the message may not have arrived even though the runner recorded it. The runner's clock differs from the browser or server, or the message is older than the displayed history.
 - **Cause:** delivery inference compared text counts and timestamps across machines and only the visible history.
 - **Fix:** use a build with this fix. New messages carry a unique receipt marker and use it for gateway idempotency. History checks pending markers before trimming the display; an incomplete read can prove receipt but cannot prove absence. Legacy messages retain the older fallback.
 - **Fixed in:** `v2.185.1` (HB-0643).
-- **Code:** `web/app/sheet.js` — `webChatMessageId`, `webChatOfferUnsure`, `openWebChatPanel`; `src/orchestrator/conversation/webChat.ts` — `webChatPrefix`, `historyScript`, `webChatHistory`; `src/api/webChat.ts` — `registerWebChatRoutes`
+- **Code:** `web/app/sheet.js` — `webChatMessageId`, `webChatOfferUnsure`, `openWebChatPanel`; `src/orchestrator/conversation/webChat.ts` — `webChatPrefix`, `historyScript`, `webChatHistory`; `src/api/chat/webChat.ts` — `registerWebChatRoutes`
 
 
 ## Browser voice and Telegram voice notes
@@ -7284,7 +7291,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the manager's network allowed its text provider and attached chat apps only. Credential readiness did not account for voice-provider endpoints.
 - **Fix:** Set up Talk explicitly authorizes the detected Google or OpenAI provider's fixed voice destinations. No caller-supplied hostname is accepted. The grant is tied to owner, runtime, machine and source; recheck and set up again after those change. Other voice providers require their own supported network integration. Test a real call after setup.
 - **Fixed in:** `v2.189.0` (HB-0798).
-- **Code:** `src/orchestrator/voice/voiceNetwork.ts` — `voiceNetworkReady`, `grantVoiceNetwork`, `voiceNetworkHosts`; `src/api/mgmtChat.ts` — `opsAllowedHosts`; `src/store/store.ts` — `getVoiceNetworkGrant`, `setVoiceNetworkGrant`
+- **Code:** `src/orchestrator/voice/voiceNetwork.ts` — `voiceNetworkReady`, `grantVoiceNetwork`, `voiceNetworkHosts`; `src/api/ops/mgmtChat.ts` — `opsAllowedHosts`; `src/store/store.ts` — `getVoiceNetworkGrant`, `setVoiceNetworkGrant`
 
 ### A voice readiness result belongs to an earlier configuration or account
 - **Check:** Talk settings, runtime, ownership or sign-in change during a delayed readiness check or setup request. An older result must not make the current card ready or authorize a different manager's network access.
@@ -7298,14 +7305,14 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** the shared key is injected when a runtime is built; existing containers retain their previous environment. A Google AI source's own key takes precedence. Earlier UI copy treated storage as proof of working voice.
 - **Fix:** rebuild the affected agent after changing the shared key, then try a short Telegram voice note. Check provider access and quota if transcription still fails. Browser Talk is configured separately under the agent's Advanced → Voice card; saving the shared key does not test that path.
 - **Fixed in:** `v2.186.0` (HB-0715); existing agents still require Rebuild.
-- **Code:** `web/app/settings.js` — `saveMediaKey`, `loadRuntimeCaps`; `src/orchestrator/lifecycle/provision.ts` — `MEDIA_KEY_REF`, `buildRuntimeSpec`
+- **Code:** `web/app/settings.js` — `saveMediaKey`; `web/app/images.js` — `loadRuntimeCaps`; `src/orchestrator/lifecycle/provision.ts` — `MEDIA_KEY_REF`, `buildRuntimeSpec`
 
 ### Browser Talk is configured, but no microphone input or spoken reply works
 - **Check:** open the agent's Advanced → Voice card as its owner and Recheck. Distinguish Configured from unavailable, unsupported, busy or not running. Use HTTPS or localhost, check microphone permission and input device, then explicitly start the microphone through Try voice. Follow the short real-device checks in docs/voice.md.
 - **Cause:** configuration readiness is a read-only runtime check, not a completed provider call. Browser permissions, network access, provider quota and audio output can still fail. An unavailable runtime is not proof of missing credentials, and guests do not receive Talk permission.
 - **Fix:** start the agent or wait for its operation, then recheck. Set up Talk binds the intended agent; Voice settings opens its OpenClaw provider controls. Resolve missing credentials or manager network permission, recheck and try the microphone from its conversation. Use a supported runtime if Talk is unsupported. End the call before changing agents; closing a console tab releases its frame. A provider may answer directly, so the same agent session does not guarantee every spoken answer goes through the text model.
 - **Fixed in:** `v2.186.0` for owner setup and readiness controls (HB-0716); real microphone, provider and playback acceptance is still required.
-- **Code:** `src/orchestrator/voice/voice.ts` — `readVoiceStatus`; `src/api/voiceRoutes.ts` — `'/v1/agents/:id/voice'`; `web/app/channels.js` — `v2LoadVoice`, `v2VoiceOpen`, `voiceBrowserNote`; `web/app/panels.js` — `openGateway`; `web/app/templates.js` — `pageSessionEnded`; `docs/voice.md`
+- **Code:** `src/orchestrator/voice/voice.ts` — `readVoiceStatus`; `src/api/console/voiceRoutes.ts` — `'/v1/agents/:id/voice'`; `web/app/channels.js` — `v2LoadVoice`, `v2VoiceOpen`, `voiceBrowserNote`; `web/app/console.js` — `openGateway`; `web/app/signin.js` — `pageSessionEnded`; `docs/voice.md`
 
 
 ### OpenAI browser Talk fails its audio handshake through the embedded console
@@ -7313,7 +7320,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** OpenClaw 2026.9.8 resolves its brokered SDP offer against the gateway origin, dropping Hatchabot's per-agent console prefix. A cached document can also retain the pre-fix console page if the proxy forwards gateway validators for rewritten HTML.
 - **Fix:** use the updated console and reopen its tab. A small owner-console script rewrites only that same-origin POST to the current agent's authenticated proxy, preserving its reservation header, SDP body and cancellation signal. Rewritten documents do not reuse gateway validators. Guests remain unable to use this owner-only path; external provider URLs are unchanged. Complete the manual audio checks in docs/voice.md before treating a real call as verified.
 - **Fixed in:** `v2.186.0` (HB-0717).
-- **Code:** `src/api/controlUiRebase.ts` — `TALK_PROXY_SCRIPT`, `withTalkProxy`; `src/api/consoleRoutes.ts` — `'/v1/agents/:id/ui/*'`; `test/controlUiRebase.test.ts`; `test/consoleGuests.test.ts`
+- **Code:** `src/api/console/controlUiRebase.ts` — `TALK_PROXY_SCRIPT`, `withTalkProxy`; `src/api/console/consoleRoutes.ts` — `'/v1/agents/:id/ui/*'`; `test/controlUiRebase.test.ts`; `test/consoleGuests.test.ts`
 
 
 ## Sharing, voice and browser audit follow-up
@@ -7379,7 +7386,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** Cached console frames stayed loaded while their voice controls became hidden.
 - **Fix:** Retire active or starting Talk through the pinned runtime controller before hiding the frame. Unload that frame if retirement is unavailable or fails; retain ordinary text-chat tabs.
 - **Fixed in:** `v2.186.0` (HB-0731); live voice/browser acceptance remains required where applicable.
-- **Code:** `web/index.html`; `src/api/controlUiRebase.ts`
+- **Code:** `web/index.html`; `src/api/console/controlUiRebase.ts`
 
 ### A closed console reopens, or a late approval reloads another agent
 - **Check:** Press Escape while a console is opening, or switch consoles while a manual or automatic approval is waiting.
@@ -7393,7 +7400,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** HTTP and socket handshakes retained earlier permissions across readiness and gateway waits; private stateless logout did not retire all pending access, and client cancellation did not cancel the upstream offer.
 - **Fix:** Revalidate permissions and runtime before forwarding and delivery, track pending browser sessions through logout, close obsolete sockets, propagate cancellation and handle truncated upstream responses.
 - **Fixed in:** `v2.186.0` (HB-0734); live voice/browser acceptance remains required where applicable.
-- **Code:** `src/api/consoleRoutes.ts` — `consoleSessionWatch`; `src/orchestrator/console/consoleGate.ts` — `consoleStillCurrent`, `pendingSession`, `signedOut`, `revalidateConsoleSockets`; `src/orchestrator/console/consoleSockets.ts`
+- **Code:** `src/api/console/consoleRoutes.ts` — `consoleSessionWatch`; `src/orchestrator/console/consoleGate.ts` — `consoleStillCurrent`, `pendingSession`, `signedOut`, `revalidateConsoleSockets`; `src/orchestrator/console/consoleSockets.ts`
 
 ### Browser device approval runs after its owner or runtime changes
 - **Check:** Approve a new console browser while its pending-device read is delayed, then change the agent owner, runtime or lifecycle.
@@ -7477,7 +7484,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** Chrome can advance the test's eight-second virtual deadline before native clipboard work finishes in real time. This does not establish a product invitation failure.
 - **Fix:** the scenario supplies a controlled clipboard response and restores the browser property afterward. It still clicks the real button, exercises the real copy helper and invitation guards, and checks the exact message and single request.
 - **Fixed in:** `v2.189.0` (HB-0480).
-- **Code:** `scripts/ui-clickthrough.mjs` — `accessPromises`; `web/app/panels.js` — `copyText`, `copyInviteTg`, `openInviteKnockWindow`
+- **Code:** `scripts/ui-clickthrough.mjs` — `accessPromises`; `web/app/core.js` — `copyText`; `web/app/panels.js` — `copyInviteTg`, `openInviteKnockWindow`
 
 ### The runner backup integration case exceeds five seconds in CI
 - **Check:** the backup-completeness suite reports only a five-second timeout in the runner archive/sleeping-runner case; the same case passes unchanged alone without a behavior assertion failure.
@@ -7512,7 +7519,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** busy answers were counted as bad tokens.
 - **Fix:** wait out the 15-minute window, or upgrade.
 - **Fixed in:** `v2.191.0` (HB-0993).
-- **Code:** `src/api/channelRoutes.ts` — the park route's token check
+- **Code:** `src/api/chat/channelRoutes.ts` — the park route's token check
 
 ### A removed spare bot comes back, or a bot is in neither the agent nor the spare list
 - **Symptom:** a spare Discord bot or Slack app you removed reappears (then "That parked bot has lost its token"), "take a spare" fails on a bot in use, or after two quick bot changes a bot is in neither the agent nor the spare list.
@@ -7520,7 +7527,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** a re-check or a swap that answered late wrote over a newer change.
 - **Fix:** delete the stale spare, or park the lost bot again from its token; or upgrade.
 - **Fixed in:** `v2.191.0` (HB-0987, HB-0988).
-- **Code:** `src/api/channelRoutes.ts` — the pool re-check and swap routes
+- **Code:** `src/api/chat/channelRoutes.ts` — the pool re-check and swap routes
 
 ### A Discord or Slack bot change said it worked, but the old bot is gone or still answers
 - **Symptom:** a swap to a spare bot reported success while the agent's machine was unreachable; the old bot is gone from the spares, or still answers.
@@ -7528,7 +7535,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the swap committed before it knew the agent had stopped.
 - **Fix:** park the old bot again from its token, or upgrade.
 - **Fixed in:** `v2.191.0` (HB-0997).
-- **Code:** `src/api/channelRoutes.ts` — the swap route
+- **Code:** `src/api/chat/channelRoutes.ts` — the swap route
 
 ### After a bot change or a rename, the agent stops answering in its servers or rooms
 - **Symptom:** after changing to a spare bot, the agent no longer answers in servers while "every server it is in" is selected; or rooms set to Off come back as "every server" after a rename or Sync name.
@@ -7536,7 +7543,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the swap dropped the rooms it could not list; a rename wrote its old copy of the settings.
 - **Fix:** Re-check, then Rebuild; or set the rooms again. Upgrading prevents both.
 - **Fixed in:** `v2.191.0` (HB-0998, HB-0890).
-- **Code:** `src/api/channelRoutes.ts` — the swap route; `src/orchestrator/channels/chatBots.ts` — the rename
+- **Code:** `src/api/chat/channelRoutes.ts` — the swap route; `src/orchestrator/channels/chatBots.ts` — the rename
 
 ### "Anyone can knock" is on, but new people get no knock card
 - **Symptom:** the switch shows on, and messages from people not yet in are still dropped.
@@ -7544,7 +7551,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the running bot's policy write failed and was ignored.
 - **Fix:** Rebuild the agent; or upgrade and turn it on again, which now says when the bot did not take it.
 - **Fixed in:** `v2.191.0` (HB-0995).
-- **Code:** `src/api/channelRoutes.ts` — the allow-knocks route; `src/orchestrator/members/members.ts` — `writeDmPolicy`
+- **Code:** `src/api/chat/channelRoutes.ts` — the allow-knocks route; `src/orchestrator/members/members.ts` — `writeDmPolicy`
 
 ### After Unlink Discord, an agent that was moving still answers that account
 - **Symptom:** an agent that was moving or rebuilding during Unlink Discord still answers your Discord account, and unlinking again finds nothing.
@@ -7552,7 +7559,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the unlink scrubbed the copy being moved away from, not the one the move kept.
 - **Fix:** remove the person from that agent's members, or upgrade.
 - **Fixed in:** `v2.191.0` (HB-1090).
-- **Code:** `src/api/channelRoutes.ts` — the Discord unlink route
+- **Code:** `src/api/chat/channelRoutes.ts` — the Discord unlink route
 
 ### Deleting or archiving an agent with many members takes minutes
 - **Symptom:** delete, archive or taking Telegram off an agent takes minutes, and other changes to it say it is busy.
@@ -7728,7 +7735,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the secret store refused the delete.
 - **Fix:** make the secret store writable, then Remove again.
 - **Fixed in:** `v2.191.0` (HB-0918).
-- **Code:** `src/orchestrator/settings/fleetKeys.ts` — `remove`; `src/api/machineSettingsRoutes.ts`
+- **Code:** `src/orchestrator/settings/fleetKeys.ts` — `remove`; `src/api/machine/machineSettingsRoutes.ts`
 
 ### A task's results never reach the owner after their first message
 - **Symptom:** a scheduled task that had nobody to report to stays quiet after the owner first writes to the agent.
@@ -7776,7 +7783,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the base was checked against the default repository's name only.
 - **Fix:** upgrade. Before, only the default repository works for derived images.
 - **Fixed in:** `v2.191.0` (HB-0882).
-- **Code:** `src/orchestrator/machines/derivedImage.ts` — `baseProblem`; `src/api/imageRoutes.ts` — `'/v1/images'`, `'/v1/images/:name/rebuild'`
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `baseProblem`; `src/api/machine/imageRoutes.ts` — `'/v1/images'`, `'/v1/images/:name/rebuild'`
 
 ### Every base image build says "A base image build is already running" after one hung
 - **Symptom:** after a base image build hung, every new build is refused with `A base image build is already running.` until the service restarts; or a build went on after Hatchabot stopped.
@@ -7816,7 +7823,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the default build moved every following agent onto an OpenClaw that can't read their data; only Promote checked this.
 - **Fix:** do as it says. Before upgrading, tick candidate.
 - **Fixed in:** `v2.191.0` (HB-1063).
-- **Code:** `src/api/imageRoutes.ts` — `'/v1/runtime/build'`; `src/orchestrator/machines/runtimeImages.ts` — `strandedFollowers`
+- **Code:** `src/api/machine/imageRoutes.ts` — `'/v1/runtime/build'`; `src/orchestrator/machines/runtimeImages.ts` — `strandedFollowers`
 
 ### Agents pinned to a -plus- or -lite image changed after someone rebuilt it
 - **Symptom:** agents pinned to a `-plus-…` or `-lite` image changed or broke after that candidate was rebuilt; after the fix the build answers `… is pinned by …; rebuilding it would change what they run.`
@@ -7824,7 +7831,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the pin check named only the standard tag, not the tag an extras or engine-free build writes.
 - **Fix:** unpin those agents first, or build another version.
 - **Fixed in:** `v2.191.0` (HB-1074).
-- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `baseBuildTag`; `src/api/imageRoutes.ts` — `'/v1/runtime/build'`
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `baseBuildTag`; `src/api/machine/imageRoutes.ts` — `'/v1/runtime/build'`
 
 ### A repo Test spins far past its time limit
 - **Symptom:** Settings → Data → Test on a repo spins far past 25 seconds, and a second Test says one is already running.
@@ -7984,7 +7991,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the upgrade ignored those settings and fetched the default image.
 - **Fix:** before upgrading, run `HATCHABOT_IMAGE=<image> HATCHABOT_IMAGE_REGISTRY=<mirror> ./scripts/build-runtime-image.sh`, or use Settings → Advanced → Runtime images. After upgrading nothing is needed.
 - **Fixed in:** `v2.191.0` (HB-0984).
-- **Code:** `scripts/upgrade.sh` — `env_named`, `HATCHABOT_UPGRADE_IMAGE`
+- **Code:** `scripts/upgrade.sh` — `HATCHABOT_UPGRADE_IMAGE`; `scripts/upgrade-helpers.sh` — `env_named`
 
 ### After a restart and a setup ran together, the service can't find a module
 - **Symptom:** after a restart and a setup ran together, the service crashes with `Cannot find module …`, or npm ci failed with ENOTEMPTY or EEXIST.
@@ -7992,7 +7999,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** no lock covered the check and the install.
 - **Fix:** before upgrading, run `./scripts/ensure-deps.sh` alone, then `./scripts/restart.sh`. After upgrading a second run prints `Waiting for another install of the dependencies in <folder> (pid N) to finish…`; if it says another run `has held … for half an hour` and no npm runs there, remove the lock folder it names.
 - **Fixed in:** `v2.191.0` (HB-1067).
-- **Code:** `scripts/ensure-deps.sh` — `holder_gone`, `release_lock`, `DEPS_LOCK`; `scripts/upgrade.sh` — `lock_left_over`, `proc_start_utc`
+- **Code:** `scripts/ensure-deps.sh` — `holder_gone`, `release_lock`, `DEPS_LOCK`; `scripts/upgrade-helpers.sh` — `lock_left_over`, `proc_start_utc`
 
 ### Text typed in the operator profile disappears when it saves
 - **Symptom:** in Settings → Operator profile, text typed after pressing Save disappears when "Saved — applying to N running agents…" appears, with no error.
@@ -8008,7 +8015,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the picker loaded the other file straight away.
 - **Fix:** before upgrading, save before switching; after upgrading, answer the question it asks.
 - **Fixed in:** `v2.191.0` (HB-0936).
-- **Code:** `web/app/panels.js` — `pickEditFile`, `loadEditFile`
+- **Code:** `web/app/connections.js` — `pickEditFile`, `loadEditFile`
 
 ### One agent's Telegram room shows another agent's group
 - **Symptom:** after Find rooms on one agent and a switch to another, the second agent's Telegram room shows a group of the first; saved, it answers in the first agent's group.
@@ -8032,7 +8039,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** a failed read ended the follow, and the list reload started it again at once.
 - **Fix:** reload the page once the server answers; after upgrading it waits up to 30 s between tries.
 - **Fixed in:** `v2.191.0` (HB-0996).
-- **Code:** `web/app/usage.js` — `pollDerivedBuild`
+- **Code:** `web/app/images.js` — `pollDerivedBuild`
 
 ### An adopt failed and the new agent and its bot are gone
 - **Symptom:** adopting a workspace with its bot fails with a read or copy error (for example "Failed to fetch"); the new agent is gone and the bot answers no one.
@@ -8144,7 +8151,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the old app was deleted before the new one was saved.
 - **Fix:** upgrade, then sign in with a backup code or at the private address and add the app again.
 - **Fixed in:** `v2.191.0` (HB-1089).
-- **Code:** `src/api/secondFactor.ts` — `'/v1/second-factor/totp/confirm'`
+- **Code:** `src/api/signIn/secondFactor.ts` — `'/v1/second-factor/totp/confirm'`
 
 ### At the public address, Sign out says it was not saved
 - **Symptom:** at the public address, Sign out answers `Not signed out: Hatchabot could not save the sign-out, so a copy of this sign-in could still be used. Try again in a moment. This browser is still signed in. Try Sign out again.`, or every public sign-in is refused at start.
@@ -8152,7 +8159,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the table of signed-out passes could not be written or read.
 - **Fix:** free disk space or repair the database, then sign out again; Hatchabot also tries again by itself and logs `public.pass_revoke_saved` once it is written.
 - **Fixed in:** `v2.191.0` (HB-0957).
-- **Code:** `src/api/publicAccess.ts` — `sessionCleared`, `readRevocations`, `unsaved`; `src/api/sessionCookie.ts` — `clearSessionCookies`, `SIGN_OUT_NOT_SAVED`
+- **Code:** `src/api/publicAccess.ts` — `sessionCleared`, `readRevocations`, `unsaved`; `src/api/signIn/sessionCookie.ts` — `clearSessionCookies`, `SIGN_OUT_NOT_SAVED`
 
 ### At the public address, a second factor is asked for again right after it was given
 - **Symptom:** at the public address, right after entering a second-factor code, the next sensitive action asks for it again ("second factor required").
@@ -8168,15 +8175,15 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** by design since this release (the owner's choice), a lockout is kept across a restart, so a restart no longer gives a guesser more tries.
 - **Fix:** wait it out, sign in at the private address, or recover the account. Recovery clears the account's own lockout; a 429 at the public address from the same address right after is that address's lock, which ends on its own, and the private address is not affected.
 - **Fixed in:** `v2.191.0` (HB-0836).
-- **Code:** `src/api/auth.ts` — `clearFailures`, `keep`, `lockMsFor`
+- **Code:** `src/api/signIn/auth.ts` — `clearFailures`, `keep`, `lockMsFor`
 
 ### A confirmed management card says "Interrupted"
-- **Symptom:** a card reads `⚠ Interrupted — …: Hatchabot restarted while it was carrying this out, so it may not have happened, or only in part. Check, and ask again if it is not done.`
+- **Symptom:** a card reads `⚠ Interrupted — …: Hatchabot restarted while it was carrying this out, so it may not have happened, or only in part. Check, and ask again if it is not done.` (since 2.192.0: `… Check, and if it is not done, File it again.`)
 - **Check:** look at the agent, setting or backup the card names.
 - **Cause:** Hatchabot restarted in the middle of the change.
-- **Fix:** if it did not happen, ask the management agent to file it again.
-- **Fixed in:** `v2.191.0` (HB-1053).
-- **Code:** `src/api/mgmtChat.ts` — `markInterruptedConfirms`
+- **Fix:** if it did not happen, press **File it again** on the card (since 2.192.0), then Confirm the new card, under Alerts or, for a cost or model change, under Usage → Recommended; before 2.192.0, ask the management agent to file it again.
+- **Fixed in:** `v2.191.0` (HB-1053); File it again in `v2.192.0`.
+- **Code:** `src/api/ops/mgmtChat.ts` — `markInterruptedConfirms`, `cardPlace`, `'/v1/proposals/:id/again'`; `src/api/routes.ts` — `tellInterruptedConfirms`; `web/app/cards.js` — `mgmtFailedCard`
 
 ### An agent stays stopped after a workspace adopt, and Start refuses it
 - **Symptom:** after adopting a workspace into an agent, the agent is stopped and Start answers `Adopting the workspace from <folder> was interrupted by a restart while it was being copied in, so its files may be half-replaced. It stays stopped until you choose.` (or the adopt itself answered `Copying the workspace in failed part way (<reason>) — the agent is left stopped because its files may be half-replaced, and it is not started until you choose on its page.`).
@@ -8192,7 +8199,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** Practice runs in a temporary state folder that is removed when it returns, and the usage pass reads only the agent's own transcripts.
 - **Fix:** upgrade; practice before the upgrade can't be counted. For the refusal, raise the budget or wait for the 1st.
 - **Fixed in:** `v2.191.0` (HB-0933).
-- **Code:** `src/orchestrator/skills/skillTrials.ts` — `skillTrialScript`, `spentOf`, `runSkillTrial`; `src/orchestrator/usage/practiceUsage.ts` — `recordPracticeUsage`, `practiceSummary`, `foldPractice`, `practicePausedLine`; `src/orchestrator/usage/budgets.ts` — `ownPauseDue`; `src/store/store.ts` — `addPracticeUsage`, `costBetween`, `tokenDeltas`; `src/api/usageRoutes.ts` — `'/v1/agents/:id/usage'`; `web/app/spend.js` — `usageHTML`
+- **Code:** `src/orchestrator/skills/skillTrials.ts` — `skillTrialScript`, `spentOf`, `runSkillTrial`; `src/orchestrator/usage/practiceUsage.ts` — `recordPracticeUsage`, `practiceSummary`, `foldPractice`, `practicePausedLine`; `src/orchestrator/usage/budgets.ts` — `ownPauseDue`; `src/store/store.ts` — `addPracticeUsage`, `costBetween`, `tokenDeltas`; `src/api/usage/usageRoutes.ts` — `'/v1/agents/:id/usage'`; `web/app/spend.js` — `usageHTML`
 
 ### A removed runner stays busy, and its image install's progress is gone
 - **Symptom:** after removing a runner while Install image was copying to it, the runner's disk and network stay busy for a long time, and the copy's status answers "Not found".
@@ -8200,7 +8207,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** removing a runner did not check for an image copy under way.
 - **Fix:** before upgrading, wait for the copy to end, or restart Hatchabot to end it, then remove the leftover image on the runner by hand. After upgrading, removal says `The runtime image is being installed on this host — wait for Install image to finish (its row shows how far it has come), then remove it.`
 - **Fixed in:** `v2.191.0` (HB-1025).
-- **Code:** `src/orchestrator/machines/hosts.ts` — `inUse`, `createHosts`; `src/orchestrator/machines/imageInstalls.ts` — `underWay`; `src/api/machineRoutes.ts` — `'/v1/hosts/:id/install-image'`
+- **Code:** `src/orchestrator/machines/hosts.ts` — `inUse`, `createHosts`; `src/orchestrator/machines/imageInstalls.ts` — `underWay`; `src/api/machine/machineRoutes.ts` — `'/v1/hosts/:id/install-image'`
 
 ### After Drain, an agent that moved away shows Stopped
 - **Symptom:** after draining a runner, an agent shows Stopped though it had just moved to another machine and still answers there; its budget pause is lost.
@@ -8216,7 +8223,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the lock against two Adds at once used the address as typed.
 - **Fix:** before and after upgrading, remove the row that has no agents on it.
 - **Fixed in:** `v2.191.0` (HB-1119).
-- **Code:** `src/orchestrator/machines/hosts.ts` — `endpointKey`, `add`; `src/api/machineRoutes.ts` — `'/v1/hosts'`
+- **Code:** `src/orchestrator/machines/hosts.ts` — `endpointKey`, `add`; `src/api/machine/machineRoutes.ts` — `'/v1/hosts'`
 
 ### An agent's rebuild can't read its data after a default base build
 - **Symptom:** after building a base image of an older OpenClaw as the default, an agent's next rebuild fails reading its data; or, after upgrading, the build ends `Built, but not made the default: OpenClaw <version> cannot read the data of agents that reached 2026.8 or newer while it built (…)` (or `Built, but not made the default: it has no memory search engine of its own and the shared service is off…`).
@@ -8224,7 +8231,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the build checked the agents it could strand only when it started, and it could retag an image HATCHABOT_IMAGE pinned.
 - **Fix:** before upgrading, promote a 2026.8 or newer image, or pin the agent to its current image. After upgrading, pin the agents it names, then promote the kept tag.
 - **Fixed in:** `v2.191.0` (HB-1187).
-- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `startBaseBuild`, `madeDefault`, `strandedFollowers`, `baseBuildRepo`; `src/api/imageRoutes.ts` — `'/v1/runtime/build'`
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `startBaseBuild`, `madeDefault`, `strandedFollowers`, `baseBuildRepo`; `src/api/machine/imageRoutes.ts` — `'/v1/runtime/build'`
 
 ### No agent console opens on one runner
 - **Symptom:** every agent console on one runner fails with "The agent's gateway did not answer.", while its agents run.
@@ -8264,7 +8271,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the spare taken for the attach was kept leased when the attach was refused.
 - **Fix:** before upgrading, add Telegram to that agent again (it takes the same bot), or remove the leased bot from the pool. After upgrading it does not happen.
 - **Fixed in:** `v2.191.0` (HB-1131).
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/agents/:id/telegram'`, `giveBack`; `src/channels/telegramPool.ts` — `returnUnused`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/telegram'`, `giveBack`; `src/channels/telegramPool.ts` — `returnUnused`
 
 ### A spare Discord bot taken for an agent shows no servers
 - **Symptom:** after taking a spare Discord bot (or Slack app), its card shows no servers or rooms, though the bot is in them.
@@ -8272,7 +8279,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** an empty listing replaced the servers the spare was known to be in.
 - **Fix:** before upgrading, press Re-check on the card, then Rebuild. After upgrading it does not happen.
 - **Fixed in:** `v2.191.0` (HB-1154).
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind'`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind'`
 
 ### "Too many token checks" after Discord or Slack could not be reached
 - **Symptom:** `Too many token checks — wait a few minutes and try again.` right after a few `Couldn't reach Discord. Check this machine's internet connection and try again.` (or Slack).
@@ -8288,7 +8295,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the door was opened only on an agent that was running when the setting changed.
 - **Fix:** before upgrading, turn it off and on again while the agent runs, or Rebuild. After upgrading the door opens once the agent is free; if the timeline then says `anyone may knock, but its <app> did not take the change once the agent was free again …`, Rebuild it once its machine answers.
 - **Fixed in:** `v2.191.0` (HB-1156).
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/agents/:id/allow-knocks'`, `refusedDoor`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/allow-knocks'`, `refusedDoor`
 
 ### Re-check says the Telegram token was refused, but the bot still answers
 - **Symptom:** Re-check on an agent's Telegram card says `Telegram refused the bot token. Add the bot again with a fresh token from @BotFather.` while the bot still replies in Telegram.
@@ -8296,7 +8303,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** Re-check read any answer that was not ok as a refusal.
 - **Fix:** before upgrading, wait and Re-check again; don't replace the token. After upgrading it says `Telegram did not answer properly just now (…), so the bot was not checked. Try again in a minute.`
 - **Fixed in:** `v2.191.0` (HB-1038).
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind/recheck'`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/channels/:kind/recheck'`
 
 ### Alerts stops opening or clearing token loops
 - **Symptom:** Alerts no longer opens or clears loops, and the log has `token.watch_failed` with `UNIQUE constraint failed: token_incidents.id`.
@@ -8312,7 +8319,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the card was hidden from the list as if Recommended showed it, though Recommended leaves archived agents out.
 - **Fix:** before upgrading, unarchive the agent or let the card expire. After upgrading nothing is needed.
 - **Fixed in:** `v2.191.0` (HB-1095).
-- **Code:** `src/orchestrator/usage/recommendations.ts` — `inRecommended`; `src/api/mgmtChat.ts`
+- **Code:** `src/orchestrator/usage/recommendations.ts` — `inRecommended`; `src/api/ops/mgmtChat.ts`
 
 ### A model change judged worse gets no switch-back card
 - **Symptom:** a model change the quality guard judged worse never gets a card offering to switch back.
@@ -8437,7 +8444,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 ### A derived image build, a move or an import fails with "would run as root, not node"
 - **Symptom:** a derived image's build or Rebuild fails with "The built image would run as root, not node: a line in it hides the USER node Hatchabot adds at the end (a heredoc that runs to the end, for example). Change the lines and Rebuild." The message shows on the Images tab, at the end of the build log, and in the owner's notice ("The derived image "<name>" FAILED to build: …"). Or a move to another machine, or an import, fails with "the image <tag> could not be built here: The built image would run as root, not node: …".
 - **Check:** the build log's last line is that message in brackets. The image agents use is still tagged and runs as node (`docker image inspect --format '{{.Config.User}}' hatchabot-runtime:derived-<name>` prints `node`). After a move, the agent is still where it was; after an import, no agent was made.
-- **Cause:** a line takes in the `USER node` that Hatchabot adds at the end: a heredoc whose closing word never comes, one opened through a variable (`${X:-<<}…`), or a trailing escape. The image would run as root and break every agent on it. For a move or an import, the lines come from the agent's image recipe: the other machine's derived image, or the downloaded file.
+- **Cause:** a line takes in the `USER node` that Hatchabot adds at the end: a heredoc whose closing word never comes (one named `<< "USER node"`, say: since BuildKit v0.22, Docker 28.2, `<<` with spaces after it opens a heredoc too), or a trailing escape. The image would run as root and break every agent on it. For a move or an import, the lines come from the agent's image recipe: the other machine's derived image, or the downloaded file.
 - **Fix:** write each heredoc out, with its closing word on a line of its own and no variable in `<<`, then Rebuild; agents run on the image they had meanwhile. For a move or an import, fix the lines where they come from, Rebuild there, and move or export again, or choose the default image.
 - **Fixed in:** `v2.191.0` (HB-1284, HB-1285).
 - **Code:** `src/orchestrator/machines/derivedImage.ts` — `buildDerivedImage`, `checkTag`, `useBuiltImage`, `ranAsProblem`; `src/orchestrator/machines/imageRecipe.ts` — `buildRecipeOn`
@@ -8496,7 +8503,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** its token could not be deleted from this machine's secret store; it stays listed so the token is not left behind.
 - **Fix:** fix what the message names (a full disk, the database), then forget it again.
 - **Fixed in:** `v2.191.0` (HB-1024).
-- **Code:** `src/orchestrator/transfer/moves.ts`; `src/api/transferRoutes.ts`
+- **Code:** `src/orchestrator/transfer/moves.ts`; `src/api/data/transferRoutes.ts`
 
 ### Taking over a bot is refused though Telegram is off in the hand-built OpenClaw
 - **Symptom:** adopting with "Take over its bot" is refused with "Telegram is switched off in your hand-built instance's config, but its account "<key>" for "<agent>" is still on …".
@@ -8544,7 +8551,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the account was read only on meta passes and visibility changes, and a meta pass drew the list before that read answered.
 - **Fix:** before upgrading, reload the window. After upgrading it follows the sign-in at its next poll.
 - **Fixed in:** `v2.191.0` (HB-0954).
-- **Code:** `web/app/cards.js` — `refreshNow`; `web/app/templates.js` — `loadMyAccount`, `pagePersonIs`
+- **Code:** `web/app/cards.js` — `refreshNow`; `web/app/signin.js` — `loadMyAccount`, `pagePersonIs`
 
 ### A budget box shows its old amount right after Save
 - **Symptom:** in Settings → AI sources → Budgets, a box shows its old amount right after Save, when another row was saved just before.
@@ -8560,7 +8567,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the turn-away cleared the knock cache before turning the request away, so a read during it saw the request still there and was kept.
 - **Fix:** before upgrading, wait half a minute. After upgrading nothing is needed.
 - **Fixed in:** `v2.191.0` (HB-1302).
-- **Code:** `src/api/channelRoutes.ts`; `src/orchestrator/channels/knocks.ts` — `forgetKnocks`, `cachedKnocks`
+- **Code:** `src/api/chat/channelRoutes.ts`; `src/orchestrator/channels/knocks.ts` — `forgetKnocks`, `cachedKnocks`
 
 ### An App's git address can't be read: "already exists" or "not a git repository"
 - **Symptom:** "Could not fetch <url>: fatal: destination path '…' already exists and is not an empty directory.", or after a clone was cut off every Inspect or Install of that address fails "Could not fetch <url>: …not a git repository" (or the same in the machine's own language, such as "Kein Git-Repository"); in a dev checkout, inspecting an App deleted a local branch or moved `main`.
@@ -8664,7 +8671,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the address the server started with won over the one written until a restart.
 - **Fix:** upgrade, or restart the service. If Use for links refuses with ".env already sets HATCHABOT_PUBLIC_URL=… — change it there if you meant to.", change or remove that line, then use it again. After upgrading, the page, invitations, reset links, the allowed origins and the cookie's Secure flag change at once (and, with no public-access address set, the passkey and the public door's origins). Only sign-in links (with HATCHABOT_SIGNIN_KEY_FILE set) keep the address the service started with, or answer 503 when it started with none, until a restart; Use for links answers `restartNeeded: true` then (HB-1314).
 - **Fixed in:** `v2.191.0` (HB-1008).
-- **Code:** `src/orchestrator/reach/appAddress.ts` — `createAppAddress`; `src/orchestrator/reach/tailscaleSetup.ts` — `useForLinks`; `src/api/signinLink.ts` — `signinLinkAudience`
+- **Code:** `src/orchestrator/reach/appAddress.ts` — `createAppAddress`; `src/orchestrator/reach/tailscaleSetup.ts` — `useForLinks`; `src/api/signIn/signinLink.ts` — `signinLinkAudience`
 
 ### An agent stays stopped after the 1st, when a budget paused it the month before
 - **Symptom:** an agent a budget paused last month is stopped after the 1st with no reason given. After upgrading its tile says "Paused — its budget's pause has ended, but it could not be started yet", with what it spent that month (a member who is not the machine's owner sees their own agent's spend, not the machine's).
@@ -8672,7 +8679,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** only this month's pauses were read, so last month's still-open pause was not shown, and Start did not end it.
 - **Fix:** start the agent, or upgrade.
 - **Fixed in:** `v2.191.0` (HB-1011).
-- **Code:** `src/orchestrator/usage/budgets.ts` — `endedPauseOwed`, `endedPauseLine`, `budgetView`; `src/orchestrator/lifecycle/agentList.ts`; `src/api/lifecycleRoutes.ts`
+- **Code:** `src/orchestrator/usage/budgets.ts` — `endedPauseOwed`, `endedPauseLine`, `budgetView`; `src/orchestrator/lifecycle/agentList.ts`; `src/api/agents/lifecycleRoutes.ts`
 
 ### After a restore, the manager's weekly token review is missing or has old wording
 - **Symptom:** after restoring an older backup, the manager's "Weekly token review" task is missing, or keeps the backup's wording, through every rebuild.
@@ -8808,7 +8815,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** applying a new default adds the models held agents still run, so their pins stay valid; before 2.191.0 nothing limited the result.
 - **Fix:** before upgrading, remove models from Also switchable until the list holds 16 with the default (not one a held agent stays on), or tick that agent to follow the default. After upgrading, do what the refusal says; models other accounts' agents keep are named apart.
 - **Fixed in:** `v2.191.0` (HB-0907).
-- **Code:** `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`, `menuFullError`, `SOURCE_MODELS_MAX`, `ModelHolders`; `src/api/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`
+- **Code:** `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`, `menuFullError`, `SOURCE_MODELS_MAX`, `ModelHolders`; `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id/apply-default-model'`
 
 ### The AgentClaw migration stopped part way and says whether to start AgentClaw again
 - **Symptom:** `migrate-rename-host.sh` failed after "6. systemd units" and printed "…To run AgentClaw until this is sorted out: systemctl --user start agentclaw.service agentclaw-backup.timer" while hatchabot.service was running. After upgrading it says "Do not start AgentClaw again: hatchabot.service is active, on the moved database, …" or "Do not start AgentClaw again yet: hatchabot.service is activating and may be starting on the moved database, …", or "AgentClaw's database is at … now, and its old path does not lead there yet."
@@ -9000,7 +9007,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the upgrade moved node_modules while a restart's ensure-deps was still installing into it.
 - **Fix:** before upgrading, `rm -rf node_modules && ./scripts/ensure-deps.sh`, then restart. After upgrading, wait for the other install, or remove the lock if no npm is running, then run the command it names (`hatchabot upgrade`, or `scripts/deploy-release.sh vX.Y.Z` for a deploy).
 - **Fixed in:** `v2.191.0` (HB-1212).
-- **Code:** `scripts/upgrade.sh` — `deps_lock`, `deps_unlock`, `restore_deps`, `rollback_bundle`, `rollback_or_redo`; `scripts/deploy-release.sh` — `deps_lock`, `restore_deps`; `scripts/ensure-deps.sh` — `DEPS_LOCK`
+- **Code:** `scripts/upgrade.sh` — `restore_deps`, `rollback_bundle`, `rollback_or_redo`; `scripts/deploy-release.sh` — `restore_deps`; `scripts/ensure-deps.sh` — `DEPS_LOCK`; `scripts/upgrade-helpers.sh` — `deps_lock`, `deps_unlock`
 
 ### Setup kept the default runtime image though HATCHABOT_IMAGE names another
 - **Symptom:** with HATCHABOT_IMAGE set, setup said "Runtime image already present — keeping the existing :latest." and the agents then fail to start (no such image) or run an older OpenClaw.
@@ -9024,7 +9031,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** `openclaw devices approve` failed for this browser's request (perhaps while another was approved), another approval took it first, or the waiting requests could not be read; the page took any approval, or an unreadable list, for this browser's.
 - **Fix:** before upgrading, close and reopen the console and press Approve; if it keeps failing, rebuild the agent. After upgrading the failure is said, and the button comes back on its own while this browser is still unpaired.
 - **Fixed in:** `v2.191.0` (HB-1134).
-- **Code:** `src/api/consoleRoutes.ts` — `'/v1/agents/:id/console/approve'`, `pendingConsoleRequests`; `web/app/console.js` — `autoApproveConsole`, `approveConsoleBrowser`, `consolePairingWatch`, `consoleNothingWaiting`
+- **Code:** `src/api/console/consoleRoutes.ts` — `'/v1/agents/:id/console/approve'`, `pendingConsoleRequests`; `web/app/console.js` — `autoApproveConsole`, `approveConsoleBrowser`, `consolePairingWatch`, `consoleNothingWaiting`
 
 ### Re-check says to delete a spare Telegram bot that works
 - **Symptom:** Re-check on a spare bot says "Telegram refused this token: the bot was deleted or its token reset at BotFather. Delete it here." for a bot that works.
@@ -9032,7 +9039,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** any getMe answer that was not a bot (a 429, a 5xx, an outage page) was read as a refused token.
 - **Fix:** before upgrading, don't delete the bot; re-check later. After upgrading an outage reads "Telegram did not answer properly just now (…), so the bot was not checked. Try again in a minute."
 - **Fixed in:** `v2.191.0` (HB-1260).
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/pool/:username/recheck'`, `telegramRefusedToken`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/pool/:username/recheck'`, `telegramRefusedToken`
 
 ### The bot inventory shows every bot dead at once
 - **Symptom:** Settings' bot inventory shows every bot ❌ with "Telegram rejects this token." at once, and spares get a Remove button.
@@ -9040,7 +9047,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** a 429 (the inventory asks about every bot in a burst) or an outage was read as a dead token.
 - **Fix:** before upgrading, remove nothing and reload later. After upgrading those bots show ❓ unknown.
 - **Fixed in:** `v2.191.0` (HB-1261).
-- **Code:** `src/api/channelRoutes.ts` — `'/v1/bot-inventory'`, `telegramRefusedToken`
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/bot-inventory'`, `telegramRefusedToken`
 
 ### ssh tunnels for runner agents that are gone hold ports on the main machine
 - **Symptom:** `ssh … -L 127.0.0.1:<port>:127.0.0.1:<port>` processes for agents or runners that are gone (or stopped), holding local ports until Hatchabot restarts. There is no error text.
@@ -9056,7 +9063,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the probe always looked for hatchabot-runtime:latest.
 - **Fix:** before upgrading, trust Install image's result over the image line. After upgrading the check reads the right image.
 - **Fixed in:** `v2.191.0` (HB-1108).
-- **Code:** `src/orchestrator/machines/hosts.ts` — `add`; `src/api/machineRoutes.ts` — `'/v1/hosts/:id/ping'`; `src/providers/resolveProvider.ts` — `pingRunner`
+- **Code:** `src/orchestrator/machines/hosts.ts` — `add`; `src/api/machine/machineRoutes.ts` — `'/v1/hosts/:id/ping'`; `src/providers/resolveProvider.ts` — `pingRunner`
 
 ### A base image built from the app never shows in the image list
 - **Symptom:** a base image built from the app (Runtime → Build) never appears in the image list, or a default build reports success but agents keep the old OpenClaw.
@@ -9064,7 +9071,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the build wrote to HATCHABOT_IMAGE_REPO while everything else read HATCHABOT_IMAGE's repository.
 - **Fix:** before upgrading, remove HATCHABOT_IMAGE_REPO from the service's environment (it is meant for scripts run by hand) and restart. After upgrading the app's builds ignore it.
 - **Fixed in:** `v2.191.0` (HB-1352).
-- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `baseBuildEnv`, `createRuntimeImages`; `src/api/imageRoutes.ts` — `'/v1/runtime/build'`
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `baseBuildEnv`, `createRuntimeImages`; `src/api/machine/imageRoutes.ts` — `'/v1/runtime/build'`
 
 ### Cancel on a management card keeps spinning for minutes
 - **Symptom:** Cancel on a card keeps spinning for minutes before the card goes.
@@ -9072,7 +9079,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** a cancel waited in the confirm queue behind that change.
 - **Fix:** wait for the other change to end, or upgrade.
 - **Fixed in:** `v2.191.0` (HB-0940).
-- **Code:** `src/api/mgmtChat.ts` — `resolveProposal`
+- **Code:** `src/api/ops/mgmtChat.ts` — `resolveProposal`
 
 ### The management agent says it filed a card, but no card shows
 - **Symptom:** the management agent says it filed a card, but none is on the home screen and Usage → Recommended does not show it either.
@@ -9080,7 +9087,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the card list hid every card Recommended could show, though Recommended hid the put-off one.
 - **Fix:** upgrade, or ask the agent to cancel it and file it again after Not now ends.
 - **Fixed in:** `v2.191.0` (HB-1269).
-- **Code:** `src/api/mgmtChat.ts` — `enrich`; `src/orchestrator/usage/recommendations.ts` — `inRecommended`, `buildRecommendations`
+- **Code:** `src/api/ops/mgmtChat.ts` — `enrich`; `src/orchestrator/usage/recommendations.ts` — `inRecommended`, `buildRecommendations`
 
 ### Right after changing my password at the public address I am asked to sign in again
 - **Symptom:** just after changing the password at the public address, the next click shows the public sign-in screen ({"error":"auth required","publicSignIn":true}).
@@ -9344,7 +9351,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** a name typed at the sign-in counted against the setup code's own count.
 - **Fix:** before upgrading, wait out the lock and type the code again; after upgrading, a typed name never counts against it.
 - **Fixed in:** `v2.191.0` (HB-1434).
-- **Code:** `src/api/auth.ts` — `accountKey`, `bound`; `src/api/accountsAuth.ts` — `SETUP_BUCKET`
+- **Code:** `src/api/signIn/auth.ts` — `accountKey`, `bound`; `src/api/signIn/accountsAuth.ts` — `SETUP_BUCKET`
 
 ### Hatchabot will not start: another server is running on this database
 - **Symptom:** the server does not start, and its log says `Another Hatchabot server is already running on this database (<path>), so this one did not start: two at once undo each other's work.`, or `Hatchabot cannot write its lock file (<path>.lock), so this one did not start`.
@@ -9400,7 +9407,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the CLI did not ask who is pinned to the tag it builds.
 - **Fix:** before upgrading, unpin them first or build another version; after upgrading the CLI refuses, as Settings does.
 - **Fixed in:** `v2.191.0` (HB-1428).
-- **Code:** `src/cli.ts` — the upgrade-image case; `src/api/imageRoutes.ts` — `buildRefusal`
+- **Code:** `src/cli.ts` — the upgrade-image case; `src/api/machine/imageRoutes.ts` — `buildRefusal`
 
 ### A move takes, or refuses, the runner's image of the pin's name
 - **Symptom:** after a move, a pinned agent runs another OpenClaw, or lacks packages or lines it had; or, after upgrading, a move says "has a different image of that name (the one there …)".
@@ -9433,3 +9440,263 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Fix:** build an image on the runner that matches this machine's (Settings → Advanced → Runtime images, or scripts/build-runtime-image.sh there), or use a default image that matches the published one.
 - **Fixed in:** `v2.191.0` (HB-1189).
 - **Code:** `src/orchestrator/machines/runnerSetup.ts` — `installRuntimeImage`; `src/orchestrator/machines/imageInstalls.ts` — `installedDiffers`; `src/orchestrator/machines/buildInputs.ts` — `inputsDiffer`; `web/app/settings.js` — `followImageCopy`
+
+## Fixes in v2.192.0
+
+The fixes made after 2.191.0, many of them the owner's decisions of 2026-11-24.
+
+### A tab left open across an upgrade half works
+- **Symptom:** after an upgrade, a tab that was already open half works: a button does nothing or a panel fails until the page is reloaded. From 2.192.0 such a tab shows a bar at the top: "Hatchabot was just upgraded. Reload to finish."
+- **Check:** a reload fixes it; in the browser's network tab, an `/app/<name>.js?v=…` with an old digest was answered with the current file (before 2.192.0).
+- **Cause:** the page names its scripts by their digest; the server held only the new release's scripts and answered an old digest with the new file, so one page ran two releases' code.
+- **Fix:** before upgrading, reload every open tab after an upgrade (the installed app: close and reopen it); after upgrading, press Reload on the bar.
+- **Fixed in:** `v2.192.0` (HB-0894).
+- **Code:** `src/api/machine/pageRoutes.ts` — `registerPageRoutes`, `pageScripts`, `upgraded`; `web/upgraded.js`
+
+### The "Hatchabot was just upgraded" bar comes back after every Reload
+- **Symptom:** the bar "Hatchabot was just upgraded. Reload to finish." shows again after each Reload, long after the upgrade.
+- **Check:** in the browser's network tab, the `/` request's `x-hatchabot-version` header against the version the machine runs (`hatchabot doctor`, or `curl -sI http://localhost:<port>/` on the machine): a different version, an `Age:` header or a CDN cache HIT means a cache in between serves an old page; if `/` is current, an `/app/<name>.js?v=<current digest>` answered with the bar's script means the cache ignores the query string.
+- **Cause:** a proxy or CDN between the browser and Hatchabot keeps what Hatchabot marks not to keep: `/` is sent no-cache with an ETag, the bar's script no-store, and each script is kept only under its own `?v=` digest.
+- **Fix:** purge the proxy's or CDN's cache, and make it respect the origin's headers, or bypass it for `/` and `/app/*`; never let it ignore the query string (in Cloudflare: caching level Standard, no "Cache Everything" rule on the app's address).
+- **Fixed in:** `v2.192.0` (HB-0894).
+- **Code:** `src/api/machine/pageRoutes.ts` — `registerPageRoutes`, `pageScripts`, `upgraded`; `web/upgraded.js`
+
+### Hatchabot does not start: upgraded.js is missing
+- **Symptom:** the service does not start, and its log says `…/web/upgraded.js is missing: this release's web folder is incomplete. Install the release again.`; an upgrade to such a copy rolls back.
+- **Check:** the file is missing from the install's `web/`.
+- **Cause:** a partial copy or checkout of the release.
+- **Fix:** put the release back whole (`hatchabot upgrade` to the release, or `hbt deploy vX.Y.Z` again). Before 2.192.0 such a copy started and answered each old page's scripts with an error.
+- **Fixed in:** `v2.192.0` (HB-0894).
+- **Code:** `src/api/machine/pageRoutes.ts` — `pageScripts`
+
+### The installed app opened offline after an upgrade does nothing
+- **Symptom:** the installed app, opened offline or on a flaky connection after an upgrade, shows a page where nothing works.
+- **Check:** in DevTools → Application → Cache Storage, `hatchabot-shell-v4` holds `/` but not every `/app/*.js?v=…` that page names.
+- **Cause:** the worker kept the page at install, but its scripts only once each was fetched; and two tabs on two releases each removed the other's scripts.
+- **Fix:** before upgrading, open the app once while online and reload; after upgrading nothing: the worker keeps the page and its scripts together, one change at a time.
+- **Fixed in:** `v2.192.0` (HB-0909).
+- **Code:** `web/sw.js` — `install`, `keepShell`, `oneAtATime`
+
+### Promote is off while HATCHABOT_IMAGE pins the fleet default
+- **Symptom:** Promote is refused with "Promote is off while HATCHABOT_IMAGE pins the fleet default to <pin>: …", or a candidate's notice says "Promote is off while HATCHABOT_IMAGE pins the fleet default to <pin>: to make it the default, set HATCHABOT_IMAGE in .env to its tag and restart Hatchabot."
+- **Check:** HATCHABOT_IMAGE in .env names a version tag (`…:2026.9.8`) or a digest (`…@sha256:…`).
+- **Cause:** that setting is a pin; Promote retags the default, so under a pin it retagged the pinned tag itself and moved every agent on it at its next rebuild.
+- **Fix:** set `HATCHABOT_IMAGE=<repo>:latest` (or remove it) and restart Hatchabot, then Promote; a candidate under a pin becomes the default by setting HATCHABOT_IMAGE to its tag and restarting, not by `docker tag`. Before upgrading, don't Promote under such a pin; if you did, see what the pinned tag points at now (`docker image inspect <pin>`) and rebuild its agents deliberately.
+- **Fixed in:** `v2.192.0` (HB-1256).
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `promoteRefusal`, `movesFleetDefault`, `startBaseBuild`; `src/api/machine/imageRoutes.ts` — `buildRefusal`; `web/app/images.js` — `promoteImage`; `src/cli.ts` — the upgrade-image case
+
+### The candidate gate warns on its practice turn
+- **Symptom:** the gate's results say ", 1 warned", with "⚠ one practice turn: its transcript is where Practice reads it, and it is counted once — Practice stays on OpenClaw 2026.9.8: …", and the closing line starts "Practice stays on OpenClaw".
+- **Check:** the words name the case: "counted twice" or "not in its state folder" means the release is wrong for Practice; "could not check" means nothing was learned.
+- **Cause:** the candidate's OpenClaw keeps a practice run's transcript somewhere other than its state folder, or also in the agent's own; or, for "could not check", the usage reader sees none of the agent's turns, another turn ran meanwhile, the run did not finish, the agent's own usage changed in the seconds after the run ended, the source runs under a CLI harness, `npm ci` was not run, or the practice check itself stopped.
+- **Fix:** nothing for the image, which still passes; Practice stays on PRACTICE_OPENCLAW and refuses itself on the candidate's release. For "could not check", do what the words say (`npm ci`, `--profile <a source OpenClaw runs itself>`, read the error the check stopped on, or run the gate again); a reader that sees none of the agent's turns on a new release means the usage sampler may not read that release's transcripts: look at that before promoting.
+- **Fixed in:** `v2.192.0` (HB-1418).
+- **Code:** `scripts/practice-check.ts`; `scripts/candidate-gate.sh`; `src/orchestrator/skills/skillTrials.ts` — `skillTrialScript`, `stateSpent`, `PRACTICE_OPENCLAW`; `src/orchestrator/usage/usage.ts` — `USAGE_READER_SCRIPT`
+
+### enable-compressed-swap.sh --zram is refused, or ends with compressed swap not on
+- **Symptom:** `Nothing changed: --zram needs every disk swap off, and /swapfile is on.`, or a run that ends `Compressed swap is not on (the line above says why), so there is nothing to set in Hatchabot yet: agents get no swap here.` with exit 1. Before 2.192.0, `--zram` beside a disk swap turned zswap off and Hatchabot gave agents no swap.
+- **Check:** `cat /proc/swaps` lists a swap that is not `/dev/zram*`; `sudo scripts/enable-compressed-swap.sh --status`.
+- **Cause:** zram turns zswap off, so a disk swap beside it is uncompressed, and Hatchabot gives agents no swap there.
+- **Fix:** run it without `--zram` (zswap compresses in front of the disk swap), or `sudo swapoff <swap>`, take its line out of `/etc/fstab`, and run it again with `--zram`; for the second message, fix what the line above it says, or `sudo scripts/enable-compressed-swap.sh --undo`.
+- **Fixed in:** `v2.192.0` (HB-1070).
+- **Code:** `scripts/enable-compressed-swap.sh` — `enable`, `status`
+
+### enable-compressed-swap.sh could not make zram0 again at a new size
+- **Symptom:** `/dev/zram0 could not be switched off to make it again at <size> (above: it needs as much free memory as it holds), so nothing was changed.`, or `Error: /dev/zram0 is off: it was switched off to be made again at <size>, but it could not be reset …` or `… and that stopped part-way (above).`
+- **Check:** `free -h` against `zramctl`; `cat /proc/swaps` (no /dev/zram0) and `cat /sys/block/zram0/disksize`.
+- **Cause:** switching zram off reads every page it holds back into memory, and zram refuses a reset while something holds the device.
+- **Fix:** for the first, stop an agent or two and run it again; for the others, `sudo swapon -p 100 /dev/zram0` puts it back as it was, or run the script again in a minute.
+- **Fixed in:** `v2.192.0` (HB-1112).
+- **Code:** `scripts/enable-compressed-swap.sh` — `enable`, `zram_reset`, `zram_left_off`
+
+### --zram-size is refused, or zram0 is 4 KiB
+- **Symptom:** `--zram-size takes a size such as 8G, 512M or 1.5G (K, M, G or T, counted in 1024s), or a number of bytes: "<size>" is not one, so nothing was changed.`; before 2.192.0, `zramctl` showed a 4K zram0 after `--zram-size 1.5G`, or every run at `8GiB` made zram0 again.
+- **Check:** `zramctl` shows the device's size.
+- **Cause:** the kernel reads a size such as `1.5G` as one byte; the script passed the size on as typed.
+- **Fix:** upgrade, then run it again with the size; before upgrading, give a whole size (`2G`) or bytes.
+- **Fixed in:** `v2.192.0` (HB-1112).
+- **Code:** `scripts/enable-compressed-swap.sh` — `zram_bytes`
+
+### enable-compressed-swap.sh --undo stopped part-way: zram0 could not be switched off or reset
+- **Symptom:** `Error: --undo stopped part-way: the boot unit hatchabot-compressed-swap.service is gone, but /dev/zram0 could not be switched off …` or `… is off, but it could not be reset (above: something still holds it). …`
+- **Check:** `cat /proc/swaps`; `cat /sys/block/zram0/disksize`.
+- **Cause:** switching zram0 off needs as much free memory as it holds, and zram refuses a reset while something holds the device.
+- **Fix:** free some memory (stop an agent or two), or wait a minute, then run `sudo scripts/enable-compressed-swap.sh --undo` again: it finishes a zram0 it made that is off but was never reset.
+- **Fixed in:** `v2.192.0` (HB-1112).
+- **Code:** `scripts/enable-compressed-swap.sh` — `undo`, `undo_left`, `ours_zram_off`, `zram_reset`
+
+### After enable-compressed-swap.sh --undo the swap file a later run made is still there
+- **Symptom:** after `--undo`, the `/swapfile` the script made, and its `/etc/fstab` line, are still there.
+- **Check:** `grep swapfile /etc/fstab`.
+- **Cause:** the state record kept only the first run's facts, so a swap file a later run made was not recorded.
+- **Fix:** upgrade first; on a machine already undone, `sudo swapoff /swapfile`, take its line out of `/etc/fstab`, then `sudo rm /swapfile`.
+- **Fixed in:** `v2.192.0` (HB-1113).
+- **Code:** `scripts/enable-compressed-swap.sh` — `enable`, `undo`
+
+### After a rollback and an upgrade again, a change made just before the rollback is not on the agent
+- **Symptom:** after a rollback and an upgrade again, a model chosen on an agent's page just before the rollback is not on the agent (it shows as waiting until a rebuild), or an agent that drifted from its class during a class edit is still in the class; the service log has `holds.dropped_after_rollback`, or `holds.rollback_drop_failed`, or a `noteKept` field.
+- **Check:** `journalctl --user -u hatchabot | grep -E 'holds.(dropped_after_rollback|rollback_drop_failed)'` lists the kinds (model-apply, class-detach, budget-pause) and the agents; with `rollback_drop_failed`, `df -h` and the database folder's permissions.
+- **Cause:** by design, a change the release left had still to make to an agent is let go at the next start rather than made days late. A `rollback_drop_failed` start went on without acting on them and lets go of them at the next start; a `noteKept` means holds of a newer release's kinds are still there, and the note waits for that release.
+- **Fix:** make it again: set the model again or Rebuild, or take the agent out of its class on its page. For `noteKept`, nothing.
+- **Fixed in:** `v2.192.0` (HB-0840).
+- **Code:** `src/store/rollbackMark.ts` — `takeRollbackMark`, `restampRollbackMark`, `HOLDS_AFTER_ROLLBACK`; `src/store/store.ts` — `dropAgentHoldsBefore`, `hideAgentHoldsBefore`, `agentHoldKindsBefore`; `scripts/restart.sh` — `onto_upgrade_target`; `scripts/upgrade-helpers.sh` — `mark_rolled_back`, `left_ran`
+
+### hatchabot doctor: "Tailscale serve still sends your tailnet to port 8080, not to port 8094, the one for it"
+- **Symptom:** after upgrading to 2.192.0, doctor warns with that text, or the setup guide's HTTPS step reads "One step left" with **Move it to port 8094**. Until it is moved, one person's wrong passwords over the tailnet lock everyone on it out of signing in for a while.
+- **Check:** `tailscale serve status` shows `proxy http://localhost:8080` (or 127.0.0.1:8080), not `http://127.0.0.1:8094`; the service log says why it was left, usually Tailscale's `Access denied: serve config denied` (the service's user is not Tailscale's operator).
+- **Cause:** before 2.192.0 serve was pointed at the app's own port; since then the visitor's address is read only on the listener for serve (127.0.0.1:8094). Hatchabot moves serve at each start once that listener is open, unless Tailscale refuses or a `tailscale serve` running in a terminal holds the entry.
+- **Fix:** run the command doctor prints, such as `tailscale serve --bg http://127.0.0.1:8094` (with `sudo` if access is denied), or press **Move it to port 8094** in the setup guide, or run `sudo tailscale set --operator=$USER` once and restart Hatchabot. A serve running in a terminal: stop it (Ctrl+C), then run the command. On a Mac moving it is still right, but every device shares one sign-in limit at either port for now.
+- **Fixed in:** `v2.192.0` (HB-1239)
+- **Code:** `src/ops/tailnet.ts` — `repointServe`, `serveLeftOnMainPort`, `tailnetInfo`, `serveCommand`; `src/doctor.ts`; `src/orchestrator/reach/tailscaleSetup.ts` — `serve`; `web/app/setup.js` — `tailnetStepBody`, `turnOnServe`
+
+### "Tailscale serve was left as it is: Hatchabot's listener for it … is not open"
+- **Symptom:** the service log says it at start; the setup guide's HTTPS step says "Not yet. Hatchabot's listener for Tailscale serve, 127.0.0.1:8094, is not open"; doctor says "Hatchabot's listener for tailscale serve, 127.0.0.1:8094, is not open"; or the tailnet address stops answering.
+- **Check:** the log line's reason, and `ss -ltnp | grep 8094` for another program on the port.
+- **Cause:** another program has the port, or `HATCHABOT_PROXY_PORT` is the same as another of Hatchabot's ports (the management door's or memory search's). Hatchabot never moves serve onto a listener that did not open.
+- **Fix:** set `HATCHABOT_PROXY_PORT` to a free port in `.env`, then restart Hatchabot; `hatchabot doctor` checks it.
+- **Fixed in:** `v2.192.0` (HB-1239)
+- **Code:** `src/api/proxyListener.ts` — `openProxyListener`; `src/ops/tailnet.ts` — `listenerDownWords`, `proxyPort`; `src/doctor.ts`
+
+### Everyone behind a reverse proxy on this machine is locked out together
+- **Symptom:** after upgrading, one person's (or a stranger's) wrong passwords lock out everyone who comes through Caddy or nginx.
+- **Check:** Alerts show "a proxy on this machine sends visitors to port 8080…" (while it was seen in the last hour), or the log has "A proxy on this machine sends visitors to port 8080 with X-Forwarded-For" (once a start); the proxy's config has `reverse_proxy 127.0.0.1:8080`. It is raised only for a proxy the listener would believe, and only once that start's move of tailscale serve left nothing on 8080, so a missing alert does not prove the config is right: check it.
+- **Cause:** X-Forwarded-For is believed only on 127.0.0.1:8094, so at 8080 every visitor counts as the machine itself. A proxy that runs as Hatchabot's own user is not believed at either port.
+- **Fix:** point the proxy at 127.0.0.1:8094 and reload it; run it as a user of its own. The alert goes about an hour after the last request through 8080.
+- **Fixed in:** `v2.192.0` (HB-1239)
+- **Code:** `src/api/proxyListener.ts` — `watchForwardedOnAppPort`, `forwardedOnAppPort`, `serveOffAppPort`; `src/api/signIn/auth.ts` — `throttleKeys`; `web/app/spend.js` — `v2MachineAlerts`
+
+### hatchabot doctor: "Tailscale (tailscaled) runs as your own user"
+- **Symptom:** doctor says "Tailscale (<name>) runs as your own user (uid <uid>), so Hatchabot does not believe the address serve adds for each device", or the log has "A connection to the listener for tailscale serve came from Hatchabot's own user"; every tailnet device shares one sign-in limit.
+- **Check:** `ps -o user= -C tailscaled` names Hatchabot's user.
+- **Cause:** the address serve adds is believed only from a program of another user; a tailscaled started by hand in userspace networking runs as you.
+- **Fix:** run tailscaled as root (its system service), or set `HATCHABOT_PROXY_TRUST_UIDS=<uid>` in `.env` and restart Hatchabot, knowing that every program of your user, an agent's container under rootless Docker included, can then choose its sign-in limit there.
+- **Fixed in:** `v2.192.0` (HB-1239)
+- **Code:** `src/ops/peerUser.ts` — `believePeer`, `procNetLookup`; `src/doctor.ts` — `hatchabotUid`
+
+### Every tailnet device shares one sign-in limit on a Mac
+- **Symptom:** on a Mac with tailscale serve, one tailnet device's wrong passwords lock the others out for a while; doctor says "On a Mac, Hatchabot cannot yet tell which user made a connection to its listener for tailscale serve when it is not your own", or its old-port line and the setup guide say "On a Mac every device on your tailnet shares one sign-in limit at either port for now".
+- **Check:** `hatchabot doctor`.
+- **Cause:** lsof, run as Hatchabot's user, sees only that user's programs, one after another, so a root Tailscale is never found, and Hatchabot asks it only when your uid is listed in `HATCHABOT_PROXY_TRUST_UIDS`.
+- **Fix:** none yet. Listing your uid in `HATCHABOT_PROXY_TRUST_UIDS` would believe the App Store app (which runs as you), but also every other program of yours, an agent's container under Docker Desktop included.
+- **Fixed in:** not yet; said since `v2.192.0` (HB-1460)
+- **Code:** `src/ops/peerUser.ts` — `uidFromLsof`, `machineLookup`; `src/doctor.ts`
+
+### hatchabot doctor: "Tailscale runs without a TUN device (userspace networking)"
+- **Symptom:** doctor warns with that text; nothing else shows, but lockouts do not reach the devices they should.
+- **Check:** `tailscale status --json` shows `"TUN": false`.
+- **Cause:** without a TUN device tailscaled dials 127.0.0.1 for any tailnet connection to this machine's own address, so a device that opens port 8094 at that address reaches the listener itself, and with a root tailscaled its own X-Forwarded-For is believed. Doctor checks it only while serve is set up.
+- **Fix:** run tailscaled with a TUN device: the system service's default; in the Tailscale container, `TS_USERSPACE=false` with `/dev/net/tun`.
+- **Fixed in:** `v2.192.0` (HB-1239, the warning)
+- **Code:** `src/ops/tailnet.ts` — `tailnetInfo`; `src/doctor.ts`
+
+### A person signed in here joined an agent by its chat app, but the agent is not on their home screen
+- **Symptom:** someone who has an account on this Hatchabot opened a Telegram (or other chat-app) invitation and joined; the agent is not on their home screen, and web chat cannot be given to them.
+- **Check:** they are signed in here, and the agent answers them in the chat app, but it has no tile on their home screen.
+- **Cause:** before 2.192.0 a chat-app invitation bound the seat to an account only through a Google sign-in; since then the page offers **Join as <name>** to someone signed in, and binds only when that is pressed.
+- **Fix:** upgrade, then ask the agent's owner for a new invitation, open it while signed in, and press **Join as <name>**.
+- **Fixed in:** `v2.192.0` (HB-1149)
+- **Code:** `src/api/chat/memberRoutes.ts`; `src/orchestrator/members/invite.ts`; `web/app/join.js` — `join`
+
+### "You are already on this agent, so this invite was not used."
+- **Symptom:** **Join as <name>** on an invitation answers with that text, or the join page says "You are already on <agent> as <name>: nothing to join."
+- **Check:** the agent is on your home screen.
+- **Cause:** the account signed in is already a member of that agent, so the invitation is kept for someone else.
+- **Fix:** nothing: use the agent. If the invitation was meant for someone else on this device, choose **Join with <app> only**, or sign out first.
+- **Fixed in:** `v2.192.0` (HB-1149)
+- **Code:** `src/orchestrator/members/invite.ts` — `ALREADY_MEMBER`; `src/api/chat/memberRoutes.ts`; `web/app/join.js`
+
+### A backup by hand, the restore drill or uninstall misses a setting after a comment that ends in a backslash
+- **Symptom:** a backup by hand says `✗ No usable HATCHABOT_SECRET_KEY — this run cannot identify this install, so it leaves the existing backup set … unchanged.`, or the restore drill says `✗ No backups directory at … (HATCHABOT_BACKUP_DIR)`, or `uninstall --purge` removes `data/hatchabot.sqlite` instead of the database the service opens; the service itself works.
+- **Check:** `systemctl --version | head -1` shows 254 or later, and `grep -n '\\$' .env` shows a comment line ending in `\` just above the setting missed.
+- **Cause:** the scripts read `.env` by systemd 253's rule, so the next line became part of the comment; systemd 254 and newer read it as a setting.
+- **Fix:** before upgrading, remove the trailing backslash from the comment; after upgrading, nothing.
+- **Fixed in:** `v2.192.0` (HB-1457).
+- **Code:** `scripts/restart.sh` — `env_named`, `systemd_major`; the same reader in `scripts/backup-volumes.sh`, `scripts/restore-drill.sh`, `scripts/uninstall.sh`, `scripts/setup-host.sh`, and `scripts/upgrade-helpers.sh` (for `scripts/upgrade.sh` and `scripts/deploy-release.sh`)
+
+### After an upgrade or deploy that rolled back, Hatchabot is down and nothing restarts it
+- **Symptom:** an upgrade or deploy rolled back (or the repair of one that was cut off ran), and afterwards the service does not answer; later timer ticks change nothing.
+- **Check:** the upgrade's output (or `journalctl --user -u hatchabot-follow-channel`, `-u hatchabot-follow-latest`) ended with `Service was restarted but isn't answering …` or, for a deploy, `Rolling back to vX…` and no health message; and there is no record left (`ls ~/.local/state/hatchabot/upgrade-*.from`, or no `.swapping` in a bundle install).
+- **Cause:** before 2.192.0 the restart back onto the release put back was not waited for (deploy-release.sh), or its record was removed when it did not come up (upgrade.sh), so nothing tried it again.
+- **Fix:** restart it: `scripts/restart.sh` in the install folder (production: `systemctl --user restart hatchabot`), and check `hatchabot doctor`. Then upgrade. From 2.192.0 the record stays (the entry "A release put back after an upgrade or deploy did not come up, and its record stays").
+- **Fixed in:** `v2.192.0` (HB-1456), when the release put back is v2.192.0 or later: an older release's own repair restarts it once and removes its record, as before.
+- **Code:** `scripts/upgrade.sh` — `restart_back`, `kept_check`, `back_down`, `stop_or_go`, `went_on`, `kept_end`; `scripts/deploy-release.sh` — `serving_wait`, `restarted_back`, `kept_check`; `scripts/restart.sh` — `HATCHABOT_RESTART_PROBE`
+
+### A release put back after an upgrade or deploy did not come up, and its record stays
+- **Symptom:** an upgrade, a deploy or a timer tick prints "… is back in …, but it did not come up (above). … stays: the next upgrade restarts it again if it is still not serving (1 of 3)." (a deploy: "… is back in …, but it is not serving … — check: journalctl … stays: the next deploy restarts it again if it is still not serving (1 of 3)."); later runs start with "… was put back in … by an earlier run, whose restart of it did not come up or was cut off."; after the third, "… has not come up after 3 tries to restart it, so upgrades stop restarting it (a rollback to it from another release still does). Once what stops it is fixed (hatchabot doctor), remove the record and restart it: rm "…"; …/scripts/restart.sh" (a deploy: "… so deploys stop restarting it …"). The timers say "This tick looks again at vX, which was not up, and only that." (channel) or "vX is back in … but was not serving; its deploy script looks again." (latest); the timer unit shows failed, and a run with nothing more to do ends with exit 6.
+- **Check:** the record named is there (`~/.local/state/hatchabot/upgrade-<n>.from` for a git install or a production checkout, `<install>/.swapping` for a bundle install) and holds `back` and `tries N` lines; the service does not answer (`hatchabot doctor`, `journalctl --user -u hatchabot -n 50`, on a Mac `data/server.log`).
+- **Cause:** the release put back cannot start where it is: a database a later release changed in a way it cannot run on (a step marked `additive: false`), a full disk, a broken `.env`, missing dependencies. The record is kept so the restart is not forgotten. Each later run asks once whether it serves, by the version its page names ("… is back in … and serving now, so … is removed."); if not, it tries to restart it and counts the try, and after three it stops. An upgrade or deploy to another release goes on ("Going on to vX, which may come up where vY does not: this upgrade's own record has taken the place of …"), so a newer release that can run is still tried; a run with nothing more to do counts no try against a release, and a pin stays. Naming the release put back by hand (`hatchabot upgrade vY`) pins it, ending 6.
+- **Fix:** find why it does not start (`hatchabot doctor`, the service log) and fix that, or move to a newer release that runs (`hatchabot upgrade vX.Y.Z`, or `scripts/deploy-release.sh vX.Y.Z`). Then restart it: `scripts/restart.sh` (production: `systemctl --user restart hatchabot`). The next run sees it serving and removes the record, or remove it yourself with the `rm` the message gives.
+- **Fixed in:** `v2.192.0` (HB-1456)
+- **Code:** `scripts/upgrade.sh` — `kept_check`, `back_down`, `kept_stop`, `stop_or_go`, `kept_end`, `went_on`; `scripts/deploy-release.sh` — `kept_check`, `back_down`, `kept_stop`, `went_on`; `scripts/restart.sh` — `HATCHABOT_RESTART_PROBE`; `scripts/follow-channel.sh` — `kept_record`; `scripts/follow-latest.sh` — `repair_cut`, `not_repaired`
+
+### A re-upgrade made a change from before an earlier rollback after naming an older release
+- **Symptom:** after naming an older release that then did not start (`hatchabot upgrade vX` ending "did not come up"), a later upgrade put on an agent a model, class change or budget pause from before an earlier rollback.
+- **Check:** earlier start logs have `holds.dropped_after_rollback` with `noteKept`, and `<database>.rolled-back` is gone.
+- **Cause:** the earlier rollback's note was overwritten when the older release was named, then deleted when it did not start.
+- **Fix:** before upgrading, write the earlier rollback's time back by hand: `printf '%s\n' <time> > <database>.rolled-back`; after upgrading, nothing.
+- **Fixed in:** `v2.192.0` (HB-1455).
+- **Code:** `scripts/upgrade-helpers.sh` (for `scripts/upgrade.sh` and `scripts/deploy-release.sh`) — `mark_rolled_back`, `unmark_rolled_back`; `scripts/restart.sh` — `mark_rolled_back`, `onto_upgrade_target`
+
+### Saving a derived image's lines is refused for a `USER=…` line inside a heredoc
+- **Symptom:** saving or rebuilding a derived image whose lines write a script or a file with a heredoc (`RUN cat > /usr/local/bin/x.sh <<'EOF'` … `EOF`) is refused with "USER is managed for you (root during your lines, node at the end)." or "A derived image cannot contain its own FROM — the base field sets it.", although the line named is only text the script or file holds.
+- **Check:** the line named is between a `RUN`, `COPY` or `ADD` line that opens a heredoc (`<<WORD`, `<<-WORD`, `<<'WORD'`) and the line `WORD` that closes it.
+- **Cause:** the lines' check judged every line as an instruction, a heredoc's text too.
+- **Fix:** upgrade: a `USER` line in a heredoc's text then builds. A `FROM` line is still refused, even there: where docker reads that line as an instruction instead, it would start a build on another image, and that image's own build steps would run before Hatchabot can check what was built. For a `FROM` line, and for a `USER` line before upgrading, write that line with `printf` instead of in the heredoc, e.g. `RUN printf '%s\n' 'FROM scratch' >> /etc/x.conf`, then Rebuild.
+- **Fixed in:** `v2.192.0` (HB-1032), for `USER` lines.
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `heredocText`, `joinInstructions`, `heredocsOn`, `useBuiltImage`
+
+### Two installs share one data folder
+- **Symptom:** the service log at start says "data.folder_shared: Another Hatchabot install's database is in this install's data folder <folder>: <database>, which its install marked at its start with <database>.uses-this-folder. …", or `hatchabot doctor` fails with the same words. Before that, an agent's memory search may stop working after the other install starts, because its key was overwritten.
+- **Check:** list the folder: there are two or more `<name>.uses-this-folder` files, each beside its database `<name>`. A database that is there only as a copy (copied in, not moved) counts too, until it or its mark is deleted. Only an install of v2.192.0 or later leaves a mark, once it has started.
+- **Cause:** an install keeps its other files beside its database, named for the folder, not for the database: `embed/` and `embed-hosts/` (the memory search service's keys), `models/`, `derived-builds/`, `release-manifests/`, `app-sources/`, `mgmt-cli-home/` and `limits-check.json`. Two installs whose `HATCHABOT_DB` is in one folder write the same files, and each overwrites the other's.
+- **Fix:** (1) stop the install the message came from (its start log and its `hatchabot doctor` name its own database); (2) move that database, keeping its name, to a folder of its own, with the files named after it (`<name>-wal`, `<name>-shm`, `<name>-journal`, `<name>.lock`, `<name>.rolled-back`, `<name>.rolled-back.prev` and `<name>.uses-this-folder`, whichever are there) and its folder `move-copies-<hash>` if there is one (the message gives its exact name; a move that was cut off left it, with an agent's tokens in it), and set `HATCHABOT_DB` in its `.env` to the new path; (3) copy into the new folder whichever of these the old one holds: `embed`, `embed-hosts`, `models`, `derived-builds`, `release-manifests`, `app-sources`, `mgmt-cli-home` and `limits-check.json`; (4) start it, and restart each install left in the old folder (each install's memory search keys are rebuilt from its own database at its next start); (5) Rebuild any agent whose memory search still fails. If no install uses the other database any more (a copy left behind, say), delete that database, or its `.uses-this-folder` mark, instead, and the warning stops.
+- **Fixed in:** `v2.192.0` (HB-1151): the start and the doctor say so. Nothing is moved for you, and the start is not refused.
+- **Code:** `src/store/folderMark.ts` — `markFolder`, `otherInstallsHere`, `sharedFolderWords`, `sharedFolderFix`, `moveCopyFolder`, `BESIDE_DATABASE`; `src/index.ts`; `src/doctor.ts` — `dbSharedWith`; `scripts/uninstall.sh` — `rm_db`
+
+### A derived image's line is refused with "Hatchabot judges every line as if an instruction began on it"
+- **Symptom:** saving, rebuilding, moving or importing a derived image is refused with a message such as "A derived image cannot contain its own FROM — the base field sets it. Hatchabot judges every line as if an instruction began on it, since its reading of heredocs and of lines that go on may not be docker's. Write line 2 another way, such as joined to the line before it, or have a RUN write that file's line with printf.", for a line that only writes text into a file or goes on from the line above.
+- **Check:** line N, ignoring the spaces before it, begins with `FROM`, with a `RUN` (or `ONBUILD RUN`) that has `--mount`, `--network`, `--security` or `--device`, or with a `LABEL` of `org.hatchabot.…` or `hatchabot.…`, or holds `--mount` or `--network`; and it sits in a heredoc or goes on from the line above.
+- **Cause:** docker can start an instruction at the start of any line, and where it reads a heredoc or a line that goes on differently from Hatchabot, that line is an instruction (BuildKit versions differ here: 0.22, in Docker 28.2, began opening a heredoc at `<< EOF`). A `FROM` there would start a build on another image before anything could be checked, so every line is judged as an instruction.
+- **Fix:** write line N another way: join it to the line before it; or have a RUN write that file's line with printf (`RUN printf '%s\n' 'from os import path' > /opt/x.py`); or, in a script, use `import os.path` rather than `from os import path`. Then save, or Rebuild. For a move or an import, change the lines where they come from, Rebuild there, and move or export again.
+- **Fixed in:** `v2.192.0` (HB-1032 review): such lines are refused before anything is built.
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `joinEachLine`, `runFlags`
+
+### A derived image's lines are refused with "The heredoc … is not named with a plain word"
+- **Symptom:** saving, rebuilding, moving or importing a derived image is refused with "The heredoc <<… is not named with a plain word. A heredoc's name must be a plain word such as EOF (letters, digits and _, quoted or not: <<EOF, <<'EOF').", or "The heredoc <<EOF has a line "EOF\" that ends with a \. A heredoc ends at a line that is its name alone, EOF, with nothing after it.", or "The heredoc <<… is never closed".
+- **Check:** on an instruction's line (not a heredoc's text), the word that begins with `<<` or `<<-` (digits may come before it, and spaces or tabs after `<<`) holds something other than letters, digits and `_`: `<<EOF;`, `<<EOF>/x`, `<<END-OF-TEXT`, `<<'CMD\'`, `<< '#x'`, `<<=` (as in `RUN x <<= 1`). A shift with a space after it on a RUN line, such as `$((1 << 2))`, counts too: BuildKit 0.22 and later open a heredoc named `2))` there.
+- **Cause:** docker names a heredoc by that whole word, with its quotes and escapes taken out, so `<<EOF;` ends only at a line `EOF;`. Hatchabot refuses any other name so that it knows where each heredoc ends, which decides the USER lines that are a heredoc's text.
+- **Fix:** use a plain word with a space after it, and quote the whole name to stop `$` being expanded (`<<'EOF'`); end the heredoc with a line that is its name alone; write a shift on a RUN line as `$((1<<2))` (a heredoc's text is not read for heredocs, so a shift there needs no change). Then save, or Rebuild. For a move or an import, change the lines where they come from, Rebuild there, and move or export again.
+- **Fixed in:** `v2.192.0` (HB-1032 review)
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `heredocsOn`, `shellWords`; `src/orchestrator/machines/imageRecipe.ts` — `recipeProblem`, `buildRecipeOn`
+
+### A derived image's lines are refused with "Line N ends with \\: docker reads that as an escaped \"
+- **Symptom:** "Line {n} ends with \\: docker reads that as an escaped \, not as a line that goes on. End it with one \ to go on to the next line, or with none."
+- **Check:** line N is outside a heredoc's text and not a comment, and it ends in two or more `\`, perhaps followed by spaces.
+- **Cause:** docker carries a line into the next only when it ends in a single `\`; after `\\` the next line is an instruction of its own. Hatchabot refuses `\\` so that the lines read the same both ways.
+- **Fix:** end the line with one `\` to go on to the next line, or quote a trailing `\` (`echo 'a\'`). Then save, or Rebuild.
+- **Fixed in:** `v2.192.0` (HB-1032 review)
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `CONTINUED`
+
+### An upgrade or a deploy stops at once with "needs scripts/upgrade-helpers.sh as its own release has it"
+- **Symptom:** `hatchabot upgrade`, the follow timers, or a deploy by hand ends at once (exit 2) with "This upgrade.sh needs scripts/upgrade-helpers.sh as its own release has it, and found it neither in … git nor beside it, so nothing was changed.", or the same words for `This deploy-release.sh`.
+- **Check:** `git -C <install> cat-file -e $(grep -m1 '^HELPERS_BLOB=' <install>/scripts/upgrade.sh | cut -d= -f2)` fails (for a deploy, in the production checkout), and `scripts/upgrade-helpers.sh` beside the script is missing or was edited.
+- **Cause:** since 2.192.0 the two scripts' common steps are in that one file, named by its git id, and a script reads it from git or from beside it only when the bytes are that file; the scripts folder is incomplete or edited by hand, or the production checkout has not fetched the release.
+- **Fix:** put the release's scripts folder back whole (`git -C <install> checkout <tag> -- scripts/`, or install the bundle again); for a deploy, `git -C <prod> fetch --tags origin`. Then run it again.
+- **Fixed in:** `v2.192.0` (HB-0636): the message is new, and nothing is changed when it shows.
+- **Code:** `scripts/upgrade.sh` — `HELPERS_BLOB`, `NO_HELPERS`; `scripts/deploy-release.sh` — `HELPERS_BLOB`; `scripts/upgrade-helpers.sh` — `upgrade_helpers_end`
+
+### Running scripts/upgrade.sh from its own folder says "Could not make a temporary copy of this script (a full disk?)"
+- **Symptom:** `bash upgrade.sh` in the install's scripts folder (or any relative path from outside the install) ends at once (exit 5) with "Could not make a temporary copy of this script (a full disk?): nothing was changed.", though the disk has room.
+- **Check:** `df -h /tmp` shows free space, and the script was started by a relative path from a folder other than the install.
+- **Cause:** before 2.192.0 the script moved to the install folder before it copied itself by the path it was started with, which from there named nothing.
+- **Fix:** before upgrading, run it from the install folder (`cd <install> && scripts/upgrade.sh`) or by its full path, or use `hatchabot upgrade`. After upgrading, any path works.
+- **Fixed in:** `v2.192.0` (HB-0636 review)
+- **Code:** `scripts/upgrade.sh` — `HERE`, `COPY_SHORT`
+
+### An agent's Use this for a model is refused, or its buttons stay greyed, just after another agent's settings were open
+- **Symptom:** in an agent's settings, Use this for a model is refused with `"<model>" isn’t one of this source’s models. Add it to the source’s switchable list first.`; or a button (Rename, Save, Add, Use this, Take snapshot, Add task) stays greyed out right after switching from another agent's settings, then comes on while this agent's own save is still running.
+- **Check:** it happens just after opening this agent while another agent's save was still running; for the model case, the AI source menu shows a source whose Use this was not pressed.
+- **Cause:** the settings' buttons are shared by every agent's forms, and before 2.192.0 a save gave its button back when it ended, whichever agent was shown by then.
+- **Fix:** before upgrading, apply the source change first, then pick the model, and let a save finish before opening another agent's settings. After upgrading nothing is needed.
+- **Fixed in:** `v2.192.0` (HB-1484)
+- **Code:** `web/app/connections.js` — `sheetSave`, `sheetPress`, `sheetButton`, `SHEET_BUTTONS`, `prepareEdit`, `switchModel`; `web/app/panels.js` — `addCronJob`, `prepareCrons`

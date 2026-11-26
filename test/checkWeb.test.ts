@@ -129,3 +129,113 @@ describe('check-web sees what splitting the page into scripts makes possible (HB
     expect(r.stderr).toMatch(/web\/app\/channels\.js:\d+: "chanDlg" is declared at the top of web\/app\/core\.js too/);
   });
 });
+
+describe("check-web holds the agent sheet's forms to their handles (HB-0644)", () => {
+  // One set of edit forms serves every agent. A save that looks at editAgentId in its async code reads
+  // whichever agent's forms are open by then, and one that draws its answer into them outside its
+  // handle draws into another agent's: HB-0584 sent one agent's folders to another, HB-0590 drew one
+  // agent's model menu for another. Each case puts such a save back in the real page.
+  it('a save that reads editAgentId fails it, named with its function', () => {
+    const r = check("    f.draw(() => { $('editAgent').textContent = name; });", "    if (editAgentId === f.id) $('editAgent').textContent = name;", { in: 'app/panels.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/web\/app\/panels\.js:\d+: renameAgent reads editAgentId in an async function/);
+  });
+  it('a save that takes its agent as it used to fails it, though it reads it before its await (the HB-0590 shape)', () => {
+    const r = check("  const f = sheetSave('editDesc').hold('descBtn');\n", "  const forId = editAgentId, f = forAgent(forId);\n  f.saved = () => {}; f.done = () => {};\n", { in: 'app/panels.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/saveDescription reads editAgentId in an async function/);
+  });
+  it('a new save that reads its agent and draws its answer by hand fails it twice (HB-0584 itself)', () => {
+    const r = check('async function removeEnvVar(id, name) {', "async function addThing() {\n  const id = editAgentId;\n  const u = await api(`/v1/agents/${id}/data-sources`, { method: 'POST', body: {} });\n  renderDataList(u.dataSources);\n}\nasync function removeEnvVar(id, name) {", { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: addThing reads editAgentId in an async function/);
+    expect(r.stderr).toMatch(/connections\.js:\d+: addThing calls renderDataList after an await, which draws into the edit forms/);
+  });
+  it("a class set whose model menu is drawn without its handle's draw fails it (HB-0590 itself)", () => {
+    const r = check('    f.draw(() => renderModelPickerForAgent(agents.find(x => x.id === id)));', '    renderModelPickerForAgent(agents.find(x => x.id === id));', { in: 'app/usage.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/usage\.js:\d+: assignClass calls renderModelPickerForAgent after an await, which draws into the edit forms/);
+  });
+  it("a variable removed whose list is drawn without its handle's draw fails it", () => {
+    const r = check('    f.draw(() => renderEnvList(updated.envVars));', '    renderEnvList(updated.envVars);', { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: removeEnvVar calls renderEnvList after an await, which draws into the edit forms/);
+  });
+  it("a fill for an agent named, after an await, fails it: prepareEdit told the answer's agent fills the forms under another's sheet", () => {
+    const r = check("    f.draw(() => { $('editAgent').textContent = name; });", '    prepareEdit(f.id, name);', { in: 'app/panels.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/panels\.js:\d+: renameAgent calls prepareEdit after an await, which draws into the edit forms/);
+  });
+  it('a handle taken after an await fails it: it is for the agent shown by then', () => {
+    const r = check("  const f = sheetSave('editDesc').hold('descBtn');", "  await refresh(false);\n  const f = sheetSave('editDesc').hold('descBtn');", { in: 'app/panels.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/panels\.js:\d+: saveDescription takes its handle \(sheetSave\) after an await/);
+  });
+  it("a handle taken in a promise's callback fails it", () => {
+    const r = check('async function removeEnvVar(id, name) {', "function removeLater(id) {\n  api('/v1/agents').then(() => { const f = sheetSave(); return api(`/v1/agents/${f.id}/env/${id}`, { method: 'DELETE' }); });\n}\nasync function removeEnvVar(id, name) {", { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: removeLater takes its handle \(sheetSave\) in a function that runs later/);
+  });
+  it('an error written in the shared box by hand after an await fails it', () => {
+    const r = check("    f.saved();\n    f.draw(() => { $('editAgent').textContent = name; });", "    f.saved();\n    $('editErr').textContent = '';", { in: 'app/panels.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/renameAgent touches the shared error box after an await/);
+  });
+  it("a model switch that gives its button back by hand fails it: under another agent's forms it cleared that agent's lock (HB-1484)", () => {
+    const r = check('  } catch (e) { f.fail(e); }\n  finally { f.done(); }\n}\n\nasync function switchProfile() {',
+      "  } catch (e) { f.fail(e); }\n  finally { $('modelBtn').disabled = false; }\n}\n\nasync function switchProfile() {", { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: switchModel turns modelBtn on or off after an await: by then the forms may be another agent's.* \(HB-1484\)/);
+  });
+  it("a button held that the list of shared buttons leaves out fails it: another agent's fill would not set it (HB-1484)", () => {
+    const r = check('renameBtn: null, descBtn: null, paramSaveBtn: null,', 'renameBtn: null, descBtn: null,', { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/values\.js:\d+: saveSetupFields holds paramSaveBtn, which SHEET_BUTTONS does not list/);
+  });
+  it("a button given back by its attribute, after an await, fails it as one turned on by hand does (HB-1484)", () => {
+    const r = check('  } catch (e) { f.fail(e); }\n  finally { f.done(); }\n}\n\nasync function switchProfile() {',
+      "  } catch (e) { f.fail(e); }\n  finally { $('modelBtn').removeAttribute('disabled'); }\n}\n\nasync function switchProfile() {", { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: switchModel turns modelBtn on or off after an await.* \(HB-1484\)/);
+  });
+  it("a hold taken after an await fails it: by then it holds the button of the agent shown (HB-1484)", () => {
+    const r = check("  f.hold('profileBtn');\n  try {\n    const saved = await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { aiProfileId: id } });\n",
+      "  try {\n    const saved = await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { aiProfileId: id } });\n    f.hold('profileBtn');\n", { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: switchProfile holds a button \(\.hold\) after an await: by then the forms may be another agent's.* \(HB-1484\)/);
+  });
+  it("a button set as its agent has it, after an await but outside the handle's draw, fails it (HB-1484)", () => {
+    const r = check('    f.draw(onEditProfileChange);', "    sheetButton('modelBtn', f.id);", { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: switchProfile sets a button as its agent has it \(sheetButton\) after an await.* \(HB-1484\)/);
+  });
+  it('a hold that no finally gives back fails it: an answer that throws leaves the button off until a reload (HB-1484)', () => {
+    const held = check('  } catch (e) { f.fail(e); }\n  finally { f.done(); }\n}\n\nasync function deleteSnapshot(', '  } catch (e) { f.fail(e); }\n}\n\nasync function deleteSnapshot(', { in: 'app/connections.js' });
+    expect(held.status).toBe(1);
+    expect(held.stderr).toMatch(/connections\.js:\d+: takeSnapshot holds a button \(\.hold\) that no finally of its own gives back \(f\.done\(\), in no branch of it\).* \(HB-1484\)/);
+    const pressed = check('  finally { pressed(cronAgentId === forId); }', '  pressed(cronAgentId === forId);', { in: 'app/panels.js' });
+    expect(pressed.status).toBe(1);
+    expect(pressed.stderr).toMatch(/panels\.js:\d+: addCronJob holds a button \(sheetPress\) that no finally of its own gives back \(pressed\(…\), in no branch of it\)/);
+  });
+  it('a hold given back only in a branch of its finally fails it: the old savePeers shape left the press counted (HB-1484)', () => {
+    const r = check('  finally { f.done(); } // on again only while its list is the one read (SHEET_BUTTONS)', '  finally { if (f.shown()) f.done(); }', { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: savePeers holds a button \(\.hold\) that no finally of its own gives back \(f\.done\(\), in no branch of it\)/);
+  });
+  it("a press of an edit-dialog button the list leaves out fails it, as a hold of one does (HB-1484)", () => {
+    const r = check("sheetPress('cronAddBtn', forId)", "sheetPress('botTokenBtn', forId)", { in: 'app/panels.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/panels\.js:\d+: addCronJob presses botTokenBtn, which SHEET_BUTTONS does not list/);
+  });
+  it("a function with a guard of its own for the share button turns no other button by hand (HB-1484)", () => {
+    const r = check("  $('tgShareBtn').disabled = false;\n  $('tgShareNote').textContent = SHARE_NOTE;", "  $('tgShareBtn').disabled = false;\n  $('renameBtn').disabled = false;\n  $('tgShareNote').textContent = SHARE_NOTE;", { in: 'app/panels.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/panels\.js:\d+: loadWebChatPeople turns renameBtn on or off after an await/);
+    expect(r.stderr).not.toMatch(/turns tgShareBtn/);
+  });
+  it('a fill that notes its baseline by hand fails it: only sheetFill does', () => {
+    const r = check("sheetFill(['editEmbedMode'], () => { $('editEmbedMode').value = a.embedMode || 'baked'; });", "{ $('editEmbedMode').value = a.embedMode || 'baked'; v2SheetBaseline('editEmbedMode'); }", { in: 'app/sheet.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/web\/app\/sheet\.js:\d+: v2EmbedPanes calls v2SheetBaseline: only sheetFill\(\) does/);
+  });
+});

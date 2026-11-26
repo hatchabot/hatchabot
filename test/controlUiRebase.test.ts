@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { runInNewContext } from 'node:vm';
 import { createHash } from 'node:crypto';
-import { isControlUiDocument, rebaseControlUi, TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH, withTalkProxy } from '../src/api/controlUiRebase.js';
-import { KATEX_SCRIPT_PATH, withControlUiMath } from '../src/api/controlUiMath.js';
+import { isControlUiDocument, rebaseControlUi, TALK_PROXY_SCRIPT, TALK_PROXY_SCRIPT_PATH, withTalkProxy } from '../src/api/console/controlUiRebase.js';
+import { KATEX_SCRIPT_PATH, withControlUiMath } from '../src/api/console/controlUiMath.js';
 
 describe('rebaseControlUi', () => {
   const P = '/v1/agents/abc/ui';

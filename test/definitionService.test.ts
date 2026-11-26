@@ -10,7 +10,7 @@ import type { ExecResult } from '../src/providers/provider.js';
 
 /**
  * The definition service (HB-0808 step 15, part C), driven as
- * src/api/definitionRoutes.ts drives it, with no HTTP server: a real store
+ * src/api/agents/definitionRoutes.ts drives it, with no HTTP server: a real store
  * on an in-memory database, the real core-files turns, and containers whose
  * core files are a Map the test reads and writes.
  */
@@ -114,6 +114,8 @@ describe('setup values', () => {
     expect(now.paramValues).toEqual({ town: 'Shelbyville' });
     expect(now.paramFiles).toMatchObject({ soul: '# The soul of {{town}}\n', agents: 'Rules for {{ town }}.\n' });
     expect(w.store.listSnapshots('m').map((s) => s.reason)).toEqual(['pre-params']);
+    // Named for why it was taken, not as one taken by hand.
+    expect(w.store.listSnapshots('m').map((s) => s.label)).toEqual(['before its setup values or definition changed']);
     expect(w.asked).toEqual(['turn m']);
     // A reset renders the defaults from the stored layer.
     expect(await apply(w, w.store.getAgent('m')!, { reset: true })).toMatchObject({ ok: true, body: { values: { town: 'Springfield' } } });
@@ -208,6 +210,8 @@ describe('a master\'s definition pushed to its children', () => {
     expect(child.paramFiles).toMatchObject({ soul: '# The soul of {{town}}\n' });
     expect(child.parameters?.map((p) => p.key)).toEqual(['town']);
     expect(w.store.listSnapshots('c').map((s) => s.reason)).toEqual(['pre-params']);
+    // A push takes it for the same reason, and its name is true of both.
+    expect(w.store.listSnapshots('c').map((s) => s.label)).toEqual(['before its setup values or definition changed']);
     expect(w.asked).toEqual(['turn c', 'sync c']);
   });
 

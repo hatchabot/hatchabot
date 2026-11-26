@@ -3,7 +3,7 @@ import type { ChatModel, ChatMessage, ChatResponse, ContentBlock, ToolSchema } f
 
 /**
  * The mgmt bot's OWN-KEY path onto the Messages API (the default path is the
- * control plane's proxy — see proxyModel.ts and api/mgmtLlm.ts, which has the
+ * control plane's proxy — see proxyModel.ts and api/ops/mgmtLlm.ts, which has the
  * server-side twin of this credential handling). Kept thin so llm.ts stays
  * testable without a network or an API key.
  *

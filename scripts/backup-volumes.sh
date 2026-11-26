@@ -67,6 +67,25 @@ done
 #    every start.
 # Each reading also says, as a record starting with a dot, the key .env itself
 # gives, whatever the environment has: compared with this run's below.
+# systemd_major FILE: the first number of `systemctl --version`, in
+# SYSTEMD_MAJOR, for the reader of systemd's rules (`systemd`, in node). From
+# v254 a line after a comment that ends in a backslash is a line of its own;
+# before, it went on the comment. Read always the old way, `# C:\data\` and
+# then a HATCHABOT_DB line named the database to systemd 254 and nothing here
+# (HB-1457). Asked once, and only of a FILE with a backslash at the end of a
+# line, the one place the two differ. With no systemctl to ask, empty: read as
+# v254 reads, as no systemd reads .env there (on Linux Hatchabot runs as a
+# systemd unit; a Mac's launchd job sources .env with bash, which reads that
+# line too), and that is the rule of every systemd since 2023 and of
+# Hatchabot's own readers. Never taken from the environment: one a caller
+# exported chose the rule, so it is unset here, before any reading. The same
+# in the seven scripts that read .env so (test/backupKeyLine.test.ts).
+unset SYSTEMD_MAJOR
+systemd_major() {
+  [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
+  LC_ALL=C grep -q -e '\\$' -e $'\\\\\r' "$1" 2>/dev/null || return 0
+  SYSTEMD_MAJOR="$( { systemctl --version 2>/dev/null || true; } | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p')"
+}
 FILE_HB_SET=""; FILE_HB=""; FILE_AC=""
 file_key() {
   case "${1%%=*}" in
@@ -83,19 +102,23 @@ if [ -f .env ]; then
       set +eu; unset HATCHABOT_SECRET_KEY AGENTCLAW_SECRET_KEY; set -a; . ./.env >/dev/null 2>&1; set +a
       "$NODE_BIN" -e 'for (const [k, v] of Object.entries(process.env)) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) process.stdout.write((/^(HATCHABOT|AGENTCLAW)_SECRET_KEY$/.test(k) ? "." + k + "=" + v + "\0" : "") + k + "=" + v + "\0");')
   else
+    systemd_major .env
     while IFS= read -r -d '' kv; do case "$kv" in .*) file_key "$kv" ;; *) export "$kv" ;; esac; done < <(node -e '
     // EnvironmentFile, state by state as systemd reads it (parse_env_file).
-    const systemd = (t) => {
+    const systemd = (t, ver) => {
+      // ver: the first number of `systemctl --version` (systemd_major). Before v254 a comment ending in a
+      // backslash went on over the next line; from v254, and with no systemctl to ask, that line is read.
+      const joins = Number(ver) > 0 && Number(ver) < 254;
       const out = {}; let st = "prekey", k = "", v = "", lw = -1;
       // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
       // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
       const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
-      for (const c of t + "\n") {
-        const nl = c === "\n" || c === "\r", ws = /\s/.test(c);
+      for (const c of t) {
+        const nl = c === "\n" || c === "\r", ws = c === " " || c === "\t" || nl;
         if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
         else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
-        else if (st === "commentesc") st = "comment";
-        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.trimEnd(); st = "prevalue"; } else k += c; }
+        else if (st === "commentesc") st = nl && !joins ? "prekey" : "comment";
+        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.replace(/[ \t]+$/, ""); st = "prevalue"; } else k += c; }
         else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
         else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
         else if (st === "esc") { st = "value"; if (!nl) v += c; }
@@ -103,13 +126,16 @@ if [ -f .env ]; then
         else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
         else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
       }
+      // The end of the file ends a value as a newline does, quoted or escaped as far as it went, as
+      // systemd keeps it: a quote never closed, or a backslash last, lost its key here.
+      if (["prevalue", "value", "esc", "single", "double", "doubleesc"].includes(st)) done();
       return out;
     };
-    for (const [k, v] of Object.entries(systemd(require("node:fs").readFileSync(".env", "utf8")))) {
+    for (const [k, v] of Object.entries(systemd(require("node:fs").readFileSync(".env", "utf8"), process.argv[1]))) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
       if (/^(HATCHABOT|AGENTCLAW)_SECRET_KEY$/.test(k)) process.stdout.write("." + k + "=" + v + "\0");
       if (process.env[k] === undefined) process.stdout.write(k + "=" + v + "\0");
-    }')
+    }' "${SYSTEMD_MAJOR:-}")
   fi
 fi
 

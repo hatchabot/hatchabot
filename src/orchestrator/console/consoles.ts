@@ -18,8 +18,8 @@ import { createSignInPanels, type SignInPanels, type SignInPanelsDeps } from './
  *
  * Built once per process (`registerRoutes` in src/api/routes.ts) and handed
  * to the route files on the shared context (`ctx.consoles`):
- * src/api/consoleRoutes.ts (the proxy, its WebSocket upgrade and the
- * console's own routes) and src/api/browserRoutes.ts. The registry calls it
+ * src/api/console/consoleRoutes.ts (the proxy, its WebSocket upgrade and the
+ * console's own routes) and src/api/console/browserRoutes.ts. The registry calls it
  * too: members and web chat bring the gateway in step (`consoleAccess`), and
  * a start, wake or rebuild sweeps the agent's browser (`browsersNow`).
  * Nothing here knows about HTTP. `stop()` ends the three sweeps.

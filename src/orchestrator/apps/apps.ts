@@ -17,6 +17,7 @@ import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { z } from 'zod';
 import type { ExecResult, RuntimeProvider } from '../../providers/provider.js';
 import { SimulatedCrash } from '../lifecycle/operations.js';
+import { keyedLock } from '../../util/queues.js';
 
 export const MANIFEST_FILE = 'hatchabot.json';
 export const APPS_ROOT = '/home/node/.openclaw/apps';
@@ -153,14 +154,9 @@ export const mirrorDir = (cacheDir: string, url: string): string =>
  * fetch from a mirror whose clone had not finished (HB-0946). Each read waits
  * for the one before it, however that one ended.
  */
-const mirrorTurns = new Map<string, Promise<unknown>>();
+const mirrorTurns = keyedLock();
 function inMirrorTurn<T>(dir: string, fn: () => Promise<T>): Promise<T> {
-  const prev = mirrorTurns.get(dir) ?? Promise.resolve();
-  const run = prev.then(fn, fn);
-  const tail = run.catch(() => {});
-  mirrorTurns.set(dir, tail);
-  void tail.then(() => { if (mirrorTurns.get(dir) === tail) mirrorTurns.delete(dir); });
-  return run;
+  return mirrorTurns.run(dir, fn);
 }
 
 /**

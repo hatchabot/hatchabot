@@ -14,7 +14,7 @@ import { BrowserPanels } from './browserPanel.js';
  * the browser session, at the public address the pass), and closes a panel
  * once that no longer holds (`revalidatePanels`): after each request that
  * changed something, when its browser signs out (`signedOut`), and every 30
- * seconds. The routes (src/api/browserRoutes.ts) read the request and word
+ * seconds. The routes (src/api/console/browserRoutes.ts) read the request and word
  * the answer.
  */
 export interface SignInPanels {

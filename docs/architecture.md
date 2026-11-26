@@ -37,7 +37,7 @@ one file into many).
 | Module | Size | Role |
 |---|---|---|
 | `src/orchestrator/` | 50k lines, 185 files in 28 folders | Use cases, a service per feature: lifecycle (provision, rebuild, create, edits), sources, usage and budgets, schedules, backups, transfer, apps, members, channels, console, machines, memory, Google and the rest |
-| `src/api/` | 20k lines, 68 files | HTTP: a route file per feature, auth, the console proxy, public access, and `routes.ts`, which builds the services and registers the route files |
+| `src/api/` | 21k lines, 69 files in 8 folders | HTTP: a route file per feature, in the folder of its area (sign-in, console, agents, chat, data, usage, machine, ops), with auth and the console proxy; at the top `routes.ts`, which builds the services and registers the route files, its context, and what every folder shares: public access, trust, the request log |
 | `src/store/` | 7k lines, 2 files | One `Store` class: 89 tables and about 500 methods; the schema's numbered steps (`schemaVersion.ts`) |
 | `src/providers/` | 5.1k lines | The `RuntimeProvider` interface; local Docker, mock, runner resolution |
 | `src/mgmt/` | 3.2k lines | Management chat broker, its tools, and the coverage ledger |
@@ -48,7 +48,7 @@ one file into many).
 ## Other parts
 
 - **Web client:** `web/index.html`, 3k lines of markup and styles, and
-  since HB-0811 its code in 23 classic scripts in `web/app/` (about
+  since HB-0811 its code in 24 classic scripts in `web/app/` (about
   850 global functions and about 320 `innerHTML` writes). No framework, no
   modules, no build. Elements name their event actions in data attributes
   (`data-on-click`, through `onAction()`); there are no inline handlers
@@ -70,8 +70,10 @@ outward. Routes contain no SQL: all data access goes through `Store`.
 ## Design rules enforced by tests
 
 - Agent state changes go through `src/domain/stateMachine.ts`.
-- One operation per agent at a time (`src/orchestrator/lifecycle/busy.ts`), plus
-  per-agent and per-class queues.
+- One operation per agent at a time: its reservation, with what it is for
+  (`src/orchestrator/lifecycle/reservations.ts`; the busy flag,
+  `src/orchestrator/lifecycle/busy.ts`, is its facade), plus
+  per-agent and per-class queues (each a `keyedLock`, `src/util/queues.ts`).
 - Every route is classified public or private
   (`src/api/publicRoutes.ts`).
 - Every route that changes something has an entry in the manager's coverage
@@ -84,8 +86,9 @@ outward. Routes contain no SQL: all data access goes through `Store`.
   - imports point only down the direction above (`test/layers.test.ts`);
   - `src/api/routes.ts` registers no route and `src/api/` casts no request
     body, both held at zero (`test/sizeRatchets.test.ts`);
-  - every Map or Set that outlives a request is listed below ("In-memory
-    state, sorted") as a lock or a cache (`test/inMemoryState.test.ts`),
+  - every Map or Set that outlives a request, and every keyed lock
+    (`keyedLock`), is listed below ("In-memory state, sorted") as a lock or
+    a cache (`test/inMemoryState.test.ts`),
     and what a restart may not lose is in the store, with tests that
     restart in the middle
     (`test/holdsAcrossRestart.test.ts`);
@@ -98,7 +101,9 @@ outward. Routes contain no SQL: all data access goes through `Store`.
 
 Every Map and Set that outlives a request, in the routes' closure, the
 services and the modules (a fixed list of words, such as `RESERVED_ENV_EXACT`,
-is not state and is not here). Each is one of three kinds:
+is not state and is not here), and every keyed lock (`keyedLock`, a Map of
+turns of its own: each is a row under the name it is kept as). Each is one
+of three kinds:
 
 - **Lock**: it orders, guards or carries work inside this process (a queue,
   a flag, a count of what is under way, a live connection, a value one step
@@ -120,15 +125,36 @@ at the start:
 | `embedToIndex` (`src/orchestrator/lifecycle/provision.ts`) | A build that changed the memory search engine and was resumed after a restart skipped its re-index: memory search stayed paused. | Stored when the build's container is accepted: `agent_holds`, `embed-reindex`, until the re-index step has ended. |
 | `skipPoolOnce` (`src/orchestrator/lifecycle/provision.ts`) | A new agent whose owner declined a pool bot, cut off before its setup had parked it for a token: its Retry leased a pool bot. | Stored with the agent's row: `agent_holds`, `skip-pool`, until the step is parked or has its bot. |
 
+A hold that would change an agent is taken up by the process after the one
+that kept it, or not at all. A release from before `agent_holds` (v2.190.0 and older) neither
+serves nor clears the table, nor does a release a kind of hold is newer
+than, so a rollback leaves its time beside the database
+(`<database>.rolled-back`, written by `scripts/upgrade.sh`,
+`scripts/deploy-release.sh` and `scripts/restart.sh`, and only when the
+release being left really started: `left_ran`) and the next start of
+a release that reads the note lets go of the holds kept before it that would
+change an agent if served (a model to put on, a class to leave, a budget's
+pause), before anything reads one; facts, refusals, watches with their own
+clocks and harmless work stay, and so does every hold kept after it
+(`HOLDS_AFTER_ROLLBACK` in `src/store/rollbackMark.ts` places each kind,
+HB-0840). Each release lets go only of the kinds it knows, so the note
+stays while a hold of a kind it does not know, kept before the note, is
+there: the later release that knows it lets go of it. The release being left runs on until the restart back stops it,
+so a note written while a process ran gets the time that process stops
+(`restampRollbackMark`). A new kind of hold is placed there, drop or keep;
+one is retired only by deleting its rows, at each start, or it stays placed:
+its rows left unknown keep the note for good (test/rollbackMark.test.ts
+holds every released kind, HB-1455).
+
 The sign-in lockout (failed sign-ins, and the lockouts that double) is in
 the store as well, by the owner's choice (HB-0836): `failures` and
-`strikes` (`src/api/auth.ts`) are this process's copy of counts kept in
+`strikes` (`src/api/signIn/auth.ts`) are this process's copy of counts kept in
 `rate_hits`, the consult limit's table, and read back at the start, so a
 restart no longer gives a locked-out guesser ten more tries. A count is
 kept once it refuses, written once as its limit's misses, so a flood of
 made-up names, each missed once, writes nothing, and each bucket kept costs
-a window's misses; a forwarded-for address, which a loopback peer can make
-up, is never kept (the account's count and the public address's carry the
+a window's misses; a forwarded-for address, which a peer that reaches the
+listener for `tailscale serve` can make up, is never kept (the account's count and the public address's carry the
 rule). A name typed at sign-in that is nobody's account is kept like an
 account's while the store holds fewer than 500 name counts, and past that in
 memory only (HB-1240): an account's count is always kept, so no flood of
@@ -239,7 +265,7 @@ or Set of its own. Its one timer, the drill schedule's fifteen-minute check
 (`restoreDrills.ts`), ends with `stop()`; a schedule missed by a restart is
 checked again a quarter of an hour after the start. A snapshot taken or
 restored waits in the agent's core-files turn, which is `agentsMdTurns`
-(the agent files service's, below) under the name `coreFileTurns`. Whether a backup or
+(the agent files service's, below). Whether a backup or
 a drill is running is a plain variable in `backupFiles.ts` and `drills.ts`
 (`runState`), not a Map: a Back up now or a drill cut off by a restart is
 failed at the start (its `backup-run` or `restore-drill` operation), and
@@ -278,8 +304,8 @@ sweep (every 30 seconds, also under the tests, as before) and the browsers'
 sweep (every minute, `HATCHABOT_BROWSER_SWEEP_MS`; off under the tests, as
 before). The first two also end when the app closes, as they did; the
 browsers' was never cleared before. What a guest's console visits leave in
-the timeline (`#last`, `#names`, `api/guestConsoleLog.ts`, below) is kept by
-the console's routes (`src/api/consoleRoutes.ts`). `ConsoleAccess`
+the timeline (`#last`, `#names`, `api/console/guestConsoleLog.ts`, below) is kept by
+the console's routes (`src/api/console/consoleRoutes.ts`). `ConsoleAccess`
 (`consoleAccess.ts`, below) is built by the gate, one per process; its own
 sweep of guests' consoles ends by itself once none is open.
 
@@ -366,16 +392,11 @@ import are the store's (`getPendingSchedules`), added by provision.ts.
 | `connectionsDeleting` | `connectionVault.ts` | lock | Nothing: the connections whose delete is under way, which an attach refuses. The removal is recorded on every agent that holds it before anything is deleted, and a start, wake or rebuild finishes it. |
 | `accessVerifies` | `accessChecks.ts` | lock | Nothing: one Verify now per agent at a time. |
 | `secretRetries` | `clientSecretDelivery.ts` | cache | The back-off of an agent whose import of a new client secret keeps failing: tried once more, sooner. What is owed is in the store (`connectionsOwedClientSecret`). |
+| `grantChain` | `googleConnections.ts` | lock | Nothing: the installation's Google grant turn (`withGoogleGrantTurn`), a `keyedLock` with one key: a link's code exchange and save, and a revoke with the judging before it, one at a time across every account, so a revoke never ends another account's consent made while it was on its way. A link cut off is begun again with Connect, and a revoke cut off is the vault's pass's to try again. |
 
 Not Maps: the client-secret pass under way (`secretPassRunning`) and the
 vault's pass under way (`cleanupPassRunning`, `connectionVault.ts`) are
-plain flags, one pass at a time. The installation's Google grant turn
-(`grantChain`, `withGoogleGrantTurn`, `googleConnections.ts`) is one
-promise chain: a link's code exchange and save, and a revoke with the
-judging before it, one at a time across every account, so a revoke never
-ends another account's consent made while it was on its way. A restart
-loses nothing: a link cut off is begun again with Connect, and a revoke
-cut off is the vault's pass's to try again. The consent round-trip's states are one
+plain flags, one pass at a time. The consent round-trip's states are one
 `OAuthStateJar` (`#jar`, `googleConnections.ts`, below), made as the
 service is built: a consent under way when the process ends is begun again
 with Connect. The pass's timer (every ten minutes, `unref()`'d, off under
@@ -453,7 +474,7 @@ timer, as before.
 | State | Where | Kind | What a restart loses |
 | --- | --- | --- | --- |
 | `adoptRan`, `adoptLastTry` | `adopts.ts` | cache | A deferred adopt gets one early look and its day again. The adopts themselves are in the store (`adopt_pending`). |
-| `adoptWaitSaid` | `adopts.ts` | cache | What was said once is said once more: a waiting adopt. (It was a module-level Set of routes.ts; now one per service, and the service is built once.) |
+| `adoptWaitSaid`, `adoptRefused` | `adopts.ts` | cache | What was said once is said once more: a waiting adopt, a run of refused re-points; and the first pass after a refusal looks at its gateway again before the re-point. (`adoptWaitSaid` was a module-level Set of routes.ts; now one per service, and the service is built once.) |
 
 No timer, so no `stop()`. A move, a move to another Hatchabot and a full
 copy's import are operations on disk (`operations.ts`), settled at the start
@@ -465,8 +486,7 @@ anything is made and put back when its import fails.
 
 | State | Where | Kind | What a restart loses |
 | --- | --- | --- | --- |
-| `agentsMdTurns` | `coreFileTurns.ts` | lock | Nothing: one write of an agent's files at a time (its core-files turn, `coreFileTurns`, and its AGENTS.md turn are this one queue). What waits in it ends with the process; a change cut off part-way is an operation on disk, or a snapshot taken first. |
-| `turnWaits` | `coreFileTurns.ts` | lock | Nothing: the two-minute deadlines of the changes waiting for their turn, which `stop()` brings forward (each is refused, as its deadline would refuse it, and never runs). |
+| `agentsMdTurns` | `coreFileTurns.ts` | lock | Nothing: one write of an agent's files at a time (its core-files turn, `withCoreFilesTurn`, and its AGENTS.md turn, `withAgentsMdTurn`, are this one queue, a `keyedLock`). What waits in it ends with the process; a change cut off part-way is an operation on disk, or a snapshot taken first. It holds the two-minute deadlines of the changes waiting for their core-files turn too, which `stop()` brings forward (each is refused, as its deadline would refuse it, and never runs). |
 
 It has no other timer: each deadline is a change's own, started when it asks
 for its turn and cleared when the turn comes (`CORE_FILES_WAIT_MS`, not
@@ -631,7 +651,7 @@ Beside these: the flags that keep one pass of a sweep at a time. All locks.
 
 | State | Where | Kind | What a restart loses |
 | --- | --- | --- | --- |
-| `busy`, `freed` | `lifecycle/busy.ts` | lock | The busy flags and who waits for one. A long operation under a flag is on disk and settled at the start; a short one leaves the record for reconcile. |
+| `reservations`, `freed` | `lifecycle/reservations.ts` (its facade `lifecycle/busy.ts`: the busy flag) | lock | Each agent's one reservation, with its holder (only that holder's release lets it go, HB-1385) and what it was taken for (its purpose, named at every take, HB-1465), and who waits for one to be let go. The work it guarded ends with the process, and what that work left is made up for at the start by what its purpose is: a long change is an operation on disk, settled by `resumeOperations` and left alone by reconcile meanwhile; a start, stop, sleep, wake, pause, download or a manager agent's restart for its tools (`src/index.ts`) leaves the record for reconcile to judge by the container; what is owed after one is in the store (an AGENTS.md sync and a budget's pause in `agent_holds`, a bot handover's rebuild on the agent's record, template tasks still to add, an adopt's re-point); a write to its files, tasks, apps, settings or people is one change that ends where it stood, with its own snapshot or record. Cut off, some leave an agent that ran stopped until its owner starts it (see the backlog): a bot handover (Telegram's detach or swap, a Discord or Slack bot's swap or detach, `stopForBotHandover`), with only its rebuild owed at that Start (HB-0830), a download, and a manager agent's restart for its tools. None is kept in the database: `test/reservations.test.ts` restarts in the middle of one of each (a Stop, an Archive, an AGENTS.md sync, a file save before its rename). |
 | `filesReplacing`, `watchers` | `lifecycle/operations.ts` | lock | Nothing: a snapshot compares the count before and after one read; a wait for an operation's row. |
 | `embedDecision`, `renderedFrom` | `lifecycle/provision.ts` | lock | Nothing: what one build hands its own next step, until its container is accepted. A build cut off before that is run again and decides again. |
 | `gitAccessTurns` | `lifecycle/provision.ts` | lock | Nothing: a key not scrubbed is a removal in the store. |
@@ -662,6 +682,7 @@ Beside these: the flags that keep one pass of a sweep at a time. All locks.
 
 | State | Where | Kind | What a restart loses |
 | --- | --- | --- | --- |
+| `keyedLock` | `util/queues.ts` | lock | Nothing of its own: each lock it makes is a row in these tables under the name it is kept as (`agentsMdTurns`, `rowLocks`, `envLocks` and the rest), holding each key's turns (forgotten once idle) and the deadlines of the waiters with a wait limit (brought forward by its `stop()`). What waits in one ends with the process. |
 | `#modelGens` | `store/store.ts` | lock | Nothing: write counts that two steps of one request compare. |
 | `#pending`, `#changedAt` | `channels/telegramManual.ts` | cache | Nothing: a pasted token is held on disk and read back at the start. |
 | `#nameTurns` | `channels/telegramPool.ts` | lock | Nothing: one name write per pool bot at a time; a name still owed is in the pool's table (`desired_name`) and the sweep writes it. |
@@ -673,18 +694,26 @@ Beside these: the flags that keep one pass of a sweep at a time. All locks.
 | `providers`, `remoteProviders` | `index.ts` | cache | Nothing. |
 | `modelTurns`, `envLocks` | `embedder/embedder.ts`, `config/envFile.ts` | lock | Nothing: a half-made model copy is cleared at the next fetch. |
 | `buckets`, `byteBuckets`, `inflightBy` | `embedder/door.ts` (the embedding door's own process, in its container) | cache, cache, lock | Nothing at a restart of Hatchabot: the door runs on. Its own restart gives each key a full minute's calls and bytes again, and ends the calls in flight. A key's buckets are dropped once they are full again, looked at once a minute, and its count of calls in flight at zero, so a deleted agent or guest leaves nothing behind (HB-1022). |
-| `failures`, `strikes` | `api/auth.ts` | cache | A count below its limit starts again (the rest of one window's tries). A count that refuses (a lockout) and its strikes are in the store as well (`rate_hits`) and read back at the start, under the same bound (HB-0836). The bound is 10,000 counts: past it, this machine's own side's address counts below their limit and names typed there that are nobody's account go first, then that side's address lockouts (a peer on the machine can forge forwarded-for addresses); every count at the public address (all held to the public ceiling), the ceiling itself, accounts' counts and the shared ones go last. So no flood from the machine's side lets an account's lockout, a public address's lockout or the public ceiling go (HB-1389). Only a count at the public address gets a strike (a forwarded-for address that reads like one is an address on this side), and the strikes are held to the same bound (HB-1389 review). |
-| `pending` | `api/auth.ts` | lock | Nothing: guesses being checked. |
+| `failures`, `strikes` | `api/signIn/auth.ts` | cache | A count below its limit starts again (the rest of one window's tries). A count that refuses (a lockout) and its strikes are in the store as well (`rate_hits`) and read back at the start, under the same bound (HB-0836). The bound is 10,000 counts: past it, this machine's own side's address counts below their limit and names typed there that are nobody's account go first, then that side's address lockouts (a peer on the machine can forge forwarded-for addresses); every count at the public address (all held to the public ceiling), the ceiling itself, accounts' counts and the shared ones go last. So no flood from the machine's side lets an account's lockout, a public address's lockout or the public ceiling go (HB-1389). Only a count at the public address gets a strike (a forwarded-for address that reads like one is an address on this side), and the strikes are held to the same bound (HB-1389 review). |
+| `pending` | `api/signIn/auth.ts` | lock | Nothing: guesses being checked. |
 | `revoked`, `unsaved` | `api/publicAccess.ts` | cache, lock | Nothing: the signed-out passes are in the store and read back at the start. A sign-out whose record could not be written was refused (503) and is written again until saved (HB-0957); one still not saved at a restart is lost, and its copies work again. |
 | `noticePairs`, `noticeDay`, `announced`, `perAddress` | `api/publicAccess.ts` | cache | The limits on new-device notices and the per-minute ceiling start again; a sign-in is announced once more (HB-0836). |
-| `sockets`, `upgraded`, `publicSockets`, `#waiting`, `unanswered`, `running` | `api/publicAccess.ts`, `api/trust.ts`, `api/consoleProxy.ts` | lock | The open connections, and what each console socket still waits for. |
-| `challenges` | `api/secondFactor.ts` | lock | A passkey ceremony under way is begun again. |
-| `#certs`, `cache`, `files` | `api/identity.ts`, `api/controlUiMath.ts`, `api/pageRoutes.ts` | cache | Nothing. |
-| `confirmers`, `opsBrokers`, `confirming` | `api/mgmtChat.ts` | cache, cache, lock | Nothing: a card is in the store. |
+| `sockets`, `upgraded`, `publicSockets`, `proxySockets`, `decided`, `#waiting`, `unanswered`, `running` | `api/publicAccess.ts`, `api/trust.ts`, `api/proxyListener.ts`, `api/console/consoleProxy.ts` | lock | The open connections, and what each console socket still waits for; for each connection to the listener for a proxy, whether its peer's user is believed, and whether a "cannot tell" is being asked again (HB-1239). |
+| `challenges` | `api/signIn/secondFactor.ts` | lock | A passkey ceremony under way is begun again. |
+| `#certs`, `cache`, `files` | `api/signIn/identity.ts`, `api/console/controlUiMath.ts`, `api/machine/pageRoutes.ts` | cache | Nothing. |
+| `confirmers`, `opsBrokers`, `confirming` | `api/ops/mgmtChat.ts` | cache, cache, lock | Nothing: a card is in the store. |
 | `#map` | `mgmt/pendingStore.ts` | cache | Nothing where it is backed by the store (the web's cards); a chat confirmation of two minutes is asked again. |
-| `refused`, `allowed` | `api/firstAccount.ts` | cache | Nothing: asked of the store again. |
-| `#last`, `#names` | `api/guestConsoleLog.ts` | cache | A guest's console visit is written to the timeline once more. |
+| `refused`, `allowed` | `api/signIn/firstAccount.ts` | cache | Nothing: asked of the store again. |
+| `#last`, `#names` | `api/console/guestConsoleLog.ts` | cache | A guest's console visit is written to the timeline once more. |
 | `drifted` | `ops/opsDrift.ts` | cache | Why the manager's key is suspended, found again at the next check within ten minutes. The suspension is in the store. |
 | `tunnelsBy` | `ops/opsServer.ts` | lock | The manager's open tunnels. |
 | `results`, `hits`, `#sent` | `ops/opsWeb.ts`, `ops/push.ts` | cache | Search results kept for a follow-up, and the hourly counts of searches and pushes, which start again. |
 | `chains`, `queued` | `ops/notify.ts` | lock | A note still waiting for the manager's turn is not given. The outcome it was about is on the home screen. |
+
+Two turns stay plain promise chains, not keyed locks: the rewrite of the
+ssh config (`configWrites`, `machines/runnerSetup.ts`) and the memory search
+service's start, stop, restart, removal and health tick (`#busy`, through
+`#serial`, `embedder/embedder.ts`). Each has one key, no Map and nothing to forget, and
+its tail is caught where it is kept. `grantChain` has one key too, but it is
+a `keyedLock` beside the two Google turns keyed by agent and by owner
+(`connectionChains`, `vaultChains`), so the three are one kind.

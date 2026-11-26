@@ -17,7 +17,7 @@ import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
  * The memory service (HB-0808 step 13, part 2c), driven as
- * src/api/memoryRoutes.ts drives it, with no HTTP server: a real store on an
+ * src/api/chat/memoryRoutes.ts drives it, with no HTTP server: a real store on an
  * in-memory database, the real consult service for the one turn per agent,
  * and a container with a few files that answers turns as the test says.
  */

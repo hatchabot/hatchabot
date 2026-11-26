@@ -3,12 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
 import { Jar, PUBLIC_HOST, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { internalHeaders } from '../src/api/principal.js';
-import { setupCode } from '../src/api/accountsAuth.js';
+import { setupCode } from '../src/api/signIn/accountsAuth.js';
 import { approximateSource, isPublic, publicClientAddress, publicReplayHeaders } from '../src/api/trust.js';
-import { noteFailure, throttled, _loginThrottleKeys } from '../src/api/auth.js';
+import { noteFailure, throttled, _loginThrottleKeys } from '../src/api/signIn/auth.js';
 import type { Store } from '../src/store/store.js';
-import { totp } from '../src/api/totp.js';
+import { totp } from '../src/api/signIn/totp.js';
 import { privCookie } from './helpers/publicWorld.js';
+import { servedRequest, viaServe } from './helpers/viaServe.js';
 
 /**
  * Trust classes (docs/public-access.md, safeguard d): what arrives on the
@@ -331,7 +332,7 @@ describe('each lock on its own (a marked socket, no listener)', () => {
   const privateReq = (headers: Record<string, string> = {}) => ({ ip: '127.0.0.1', headers, socket: {}, raw: { socket: {} } }) as never;
 
   it('"on this machine" is false for a public request with no forwarding headers at all', async () => {
-    const { onThisMachine } = await import('../src/api/accountsAuth.js');
+    const { onThisMachine } = await import('../src/api/signIn/accountsAuth.js');
     expect(onThisMachine(privateReq())).toBe(true);
     expect(onThisMachine(await publicReq())).toBe(false);
   });
@@ -355,7 +356,7 @@ describe('each lock on its own (a marked socket, no listener)', () => {
     expect(isPublic(privateReq({ 'x-hatchabot-public-replay': 'é'.repeat(64) }))).toBe(false);
   });
   it('a public request is HTTPS whatever X-Forwarded-Proto says', async () => {
-    const { requestIsHttps } = await import('../src/api/sessionCookie.js');
+    const { requestIsHttps } = await import('../src/api/signIn/sessionCookie.js');
     expect(requestIsHttps(privateReq(), {})).toBe(false);
     expect(requestIsHttps(await publicReq(), {})).toBe(true);
     expect(requestIsHttps(await publicReq({ 'x-forwarded-proto': 'http' }), {})).toBe(true);
@@ -408,7 +409,7 @@ describe('who a public request acts as', () => {
     expect(r.json.secondFactor).toBe('enrol-link'); // told where to get a link, not sent to a page that would refuse them
     expect((await h.pub('/v1/second-factor', { jar })).status).toBe(200);
     expect((await h.pub('/v1/cli-tokens', { jar, body: {} })).status).toBe(403);
-    const { base32Decode, totp } = await import('../src/api/totp.js');
+    const { base32Decode, totp } = await import('../src/api/signIn/totp.js');
     // The password is what a thief would have: it does not enrol a phone here.
     const stolen = await h.pub('/v1/second-factor/totp', { jar, body: { current: m.password } });
     expect(stolen.status).toBe(403);
@@ -426,9 +427,11 @@ describe('who a public request acts as', () => {
   });
 });
 
-/** A miss, or a look, at the private address from a loopback peer naming `from` as the client: a bucket of its own for each address and name. */
-const peer = (from: string) => ({ ip: '127.0.0.1', headers: { 'x-forwarded-for': from }, server: {}, log: { warn() {} } }) as never;
+/** A miss, or a look, at the private address through tailscale serve's listener naming `from` as the client: a bucket of its own for each address and name. */
+const peer = (from: string) => servedRequest(from);
 const miss = (from: string, who: string | undefined, scope?: 'link' | '2fa') => noteFailure(peer(from), who, scope);
+/** A made-up address of its own for each i. */
+const made = (i: number) => `198.18.${(i >> 8) & 255}.${i & 255}`;
 const asked = (from: string, who: string, scope?: 'link' | '2fa') => throttled(peer(from), who, scope);
 
 describe('the sign-in counts kept across a restart stay few (HB-0836)', () => {
@@ -438,13 +441,13 @@ describe('the sign-in counts kept across a restart stay few (HB-0836)', () => {
   it('only a count that refuses is kept, and the table is pruned by an index, once a minute at most', async () => {
     h = await publicApp({ env: { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '3' } });
     // A flood of made-up addresses and names, each missed once: nothing kept, so nothing to read back.
-    for (let i = 0; i < 2000; i++) miss(`203.0.113.${i % 250}-${i}`, `made-up-user-${i}`);
+    for (let i = 0; i < 2000; i++) miss(made(i), `made-up-user-${i}`);
     expect(kept(h.store)).toBe(0);
     // A name at its limit: kept, as many misses as it took. Its forwarded-for address is not: a loopback peer makes those up.
     for (let i = 0; i < 3; i++) miss('198.51.100.60', 'victim');
     expect(kept(h.store)).toBe(3);
     // Made-up addresses each locked out by their link and second-factor misses: none kept either.
-    for (let i = 0; i < 200; i++) for (const scope of ['link', '2fa'] as const) for (let j = 0; j < 3; j++) miss(`203.0.113.${i % 250}-${i}`, undefined, scope);
+    for (let i = 0; i < 200; i++) for (const scope of ['link', '2fa'] as const) for (let j = 0; j < 3; j++) miss(made(i), undefined, scope);
     expect(kept(h.store)).toBe(3);
     // Misses past the limit (a burst let through together): no more kept, and written once, not at each.
     const set = vi.spyOn(h.store, 'setRateCount');
@@ -481,8 +484,8 @@ describe('the sign-in counts kept across a restart stay few (HB-0836)', () => {
 describe('sign-in lockouts for made-up names (HB-1240)', () => {
   const ENV = { HATCHABOT_LOGIN_FAILS_PER_WINDOW: '2' };
   /** /v1/login at the private address, from a client of its own each time (so only the name's count is shared). */
-  const login = (app: PublicApp, username: string, password: string, from: string) =>
-    app.app.inject({ method: 'POST', url: '/v1/login', payload: { username, password }, headers: { 'x-forwarded-for': from } });
+  const login = async (app: PublicApp, username: string, password: string, from: string) =>
+    (await viaServe(app.app)).inject({ method: 'POST', url: '/v1/login', payload: { username, password }, headers: { 'x-forwarded-for': from } });
   const restart = async (app: PublicApp): Promise<PublicApp> => {
     const store = app.store;
     await app.close();

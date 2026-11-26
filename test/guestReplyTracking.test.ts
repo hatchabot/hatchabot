@@ -13,7 +13,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Duplex } from 'node:stream';
-import { CONSOLE_POLLS, encodeFrame, FrameReader, GUEST_REPLY_WAIT_MS, GUEST_REWRITTEN_REPLIES, GuestReplies, MAX_GUEST_ID_LENGTH, MAX_GUEST_PENDING, spliceGuest } from '../src/api/consoleProxy.js';
+import { CONSOLE_POLLS, encodeFrame, FrameReader, GUEST_REPLY_WAIT_MS, GUEST_REWRITTEN_REPLIES, GuestReplies, MAX_GUEST_ID_LENGTH, MAX_GUEST_PENDING, spliceGuest } from '../src/api/console/consoleProxy.js';
 
 function socket() {
   const sent: Buffer[] = [];

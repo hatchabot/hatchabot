@@ -223,7 +223,7 @@ These close that, on every install and in every sign-in mode:
   echo any `Origin` back as allowed; relayed, a page elsewhere could have
   read the console's answers. Hatchabot itself allows no other origin.
 - **The session cookie is `__Host-hatchabot_session` over HTTPS**
-  (`src/api/sessionCookie.ts`). The browser accepts a `__Host-` cookie only
+  (`src/api/signIn/sessionCookie.ts`). The browser accepts a `__Host-` cookie only
   from this exact host, `Secure`, `Path=/`, with no `Domain`, so a neighbour
   cannot plant one; when a request carries it, it is the only session cookie
   read. Over plain HTTP (a home LAN) the prefix is impossible and the name

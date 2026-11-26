@@ -159,7 +159,7 @@ export function createSetupValues(deps: SetupValuesDeps): SetupValues {
       try {
         // The files turn first, the busy flag once it is ours: waiting behind a
         // snapshot does not make the agent busy for everything else.
-        const res = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, async () => {
+        const res = await withCoreFilesTurn(agent.id, () => whileBusy(agent.id, 'setup-values', async () => {
           // As it is at its turn, not as read before the wait: a file saved
           // or values applied meanwhile stored the layer it renders from, and
           // the old one written over them undid them.

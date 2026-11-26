@@ -2,11 +2,11 @@ import Database from 'better-sqlite3';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { Store } from '../../src/store/store.js';
-import { registerAuth, _resetLoginThrottle } from '../../src/api/auth.js';
-import { hashPassword } from '../../src/api/accountsAuth.js';
+import { registerAuth, _resetLoginThrottle } from '../../src/api/signIn/auth.js';
+import { hashPassword } from '../../src/api/signIn/accountsAuth.js';
 import { registerRoutes } from '../../src/api/routes.js';
 import { MockProvider } from '../../src/providers/mockProvider.js';
-import { totp, base32Decode } from '../../src/api/totp.js';
+import { totp, base32Decode } from '../../src/api/signIn/totp.js';
 import type { PublicProbes } from '../../src/api/publicAccess.js';
 import { freePort, portTaken } from './ports.js';
 

@@ -19,24 +19,32 @@ function source(name: string): string {
   if (!m) throw new Error(`no function ${name} in web/index.html`);
   return m[0];
 }
+/** A top-level `const name = …;` of the page (to the first line that ends with ";"), as a var of the context. */
+function constant(name: string): string {
+  const m = new RegExp(`^const ${name} = [\\s\\S]*?;$`, 'm').exec(js);
+  if (!m) throw new Error(`no const ${name} in web/index.html`);
+  return m[0].replace(/^const /, 'var ');
+}
 /** The page's own onAction (its event-action attributes), with esc as the sandboxes stub it. */
 const onAction = vm.runInNewContext(`(${source('onAction')})`, { esc: (v: unknown) => String(v ?? '') });
 
 type El = {
   value: string; textContent: string; innerHTML: string; hidden: boolean; disabled: boolean; checked: boolean; title: string;
   style: Record<string, string>; dataset: Record<string, string>; isConnected: boolean; childElementCount: number;
+  options: Array<{ value: string; defaultSelected: boolean }>;
   focus(): void; querySelectorAll(sel: string): unknown[]; contains(el: unknown): boolean;
 };
 function element(): El {
   let inner = '';
   const el: El = {
     value: '', textContent: '', hidden: false, disabled: false, checked: false, title: '', style: {}, dataset: {}, isConnected: true,
-    childElementCount: 0, focus() {}, querySelectorAll: () => [], contains: () => false,
+    childElementCount: 0, options: [], focus() {}, querySelectorAll: () => [], contains: () => false,
     get innerHTML() { return inner; },
     set innerHTML(v: string) {
       inner = v;
-      // A <select>'s value follows its selected option, as a browser's does.
+      // A <select>'s options are what it holds, and its value follows its selected option, as a browser's does.
       const options = [...v.matchAll(/<option value="([^"]*)"([^>]*)>/g)];
+      el.options = options.map((o) => ({ value: o[1]!, defaultSelected: /selected/.test(o[2]!) }));
       if (options.length) el.value = (options.find((o) => /selected/.test(o[2]!)) ?? options[0]!)[1]!;
     },
   };
@@ -73,22 +81,25 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
     agents: AGENTS.map((a) => ({ ...a })), profiles: PROFILES, agentClasses: [], appConfig: { authMode: 'accounts' },
     api: async (url: string, init?: { method?: string; body?: Record<string, unknown> }) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, prompt: () => '', toast: noop, refresh: async () => {},
-    editDlg: { open: false, close: () => closed.push('edit') }, v2AgentDlg: { open: false }, v2AgentId: null, editParamsFills: 0, searchTests: new Set(), inviteDlg: { open: false, showModal() { this.open = true; } }, proposalsDlg: { showModal: noop },
+    editDlg: { open: false, close: () => closed.push('edit') }, v2AgentDlg: { open: false }, v2AgentId: null, editParamsFills: 0, inviteDlg: { open: false, showModal() { this.open = true; } }, proposalsDlg: { showModal: noop },
+    peersLoadedFor: null, peersCurrent: null, // what the shared buttons' locks ask (SHEET_BUTTONS)
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), onAction, ago: () => 'just now',
     sourceOptionLabel: (p: { name: string }) => p.name, localClashWarning: () => '', confirmRebuild: () => true,
     showEditTab: noop, populateImagePicker: async () => {}, embedModeText: () => '', renderSetupValues: noop, renderBotWho: noop,
     renderEditMembers: async () => {}, renderParamList: noop, renderDataList: noop, renderEnvList: noop, renderClassList: noop,
     v2ChannelKinds: () => ['telegram'], location: { origin: 'https://hatchabot.example' }, navigator: {}, document: { querySelectorAll: () => [] },
     editAgentId: 'a1', editLoaded: null, editLoadGen: 0, editReverting: new Set(), EDIT_REVERTING: 'Reverting…',
-    v2SheetSaving: () => noop, v2SheetBaseline: noop, V2_SHEET_FORMS: [], // the sheet's record of unsaved edits (HB-0475): not what these check
+    v2SheetSaving: () => noop, v2SheetBaseline: noop, V2_SHEET_FORMS: [], sheetReads: new Map(), // the sheet's record of unsaved edits (HB-0475): not what these check
     onRepoPublic: noop, onParamTypeChange: noop, v2CtlDrawn: () => '',
     invWebFor: null, invShare: null, proposalsMasterId: null, proposalsGen: 0,
     sharingEpoch: 0, sharingView: 0, sharingReads: new WeakMap(), pagePerson: 'synthetic-owner', pagePersonAway: false, pageSignedOut: false,
     spendRange: 'week', spendAgents: [], spendChartSeq: 0, spendChartHTML: (d: unknown) => JSON.stringify(d),
     ...extra,
   });
-  // Whose forms an answer is drawn in, and where it is said: the page's own helpers (forAgent, agentPrefix).
-  for (const n of ['agentPrefix', 'forAgent', 'inviteCurrent', 'sharingRead', ...names]) vm.runInContext(source(n), c);
+  // Whose forms an answer is drawn in, and where it is said: the page's own helpers (forAgent, agentPrefix, and the saves, reads and fills
+  // built on it), and the forms' shared buttons, held by a press and given back to its own agent's forms (HB-1484).
+  for (const n of ['agentPrefix', 'forAgent', 'sheetSave', 'sheetRead', 'sheetFill', 'sheetPress', 'sheetButton', 'sourceAsSaved', 'inviteCurrent', 'sharingRead', ...names]) vm.runInContext(source(n), c);
+  for (const n of ['sheetPresses', 'MODEL_WAITS_ON_SOURCE', 'SHEET_BUTTONS', 'SHEET_HINTS']) vm.runInContext(constant(n), c);
   vm.runInContext("const v2Find = id => agents.find(a => a.id === id); const v2Mine = a => !a.role || a.role === 'owner';", c);
   return { c: c as Record<string, any>, $, calls, closed };
 }
@@ -141,6 +152,71 @@ describe('the AI tab: one press acts on the agent it was pressed for (audit #047
     expect($('editProfile').value).toBe('p1');
     expect($('modelBtn').disabled).toBe(false);
     expect($('modelBtn').title).toBe('');
+  });
+
+  it("A's model switch answered after B's source was changed and not applied: B's model button still waits on Use this (HB-1484)", async () => {
+    const { c, $ } = page(['prepareEdit', 'renderModelPicker', 'renderModelPickerForAgent', 'renderModelPickerForProfile', 'onEditProfileChange', 'switchModel']);
+    c.prepareEdit('a1', 'Homework Helper');
+    const answered = gate();
+    c.api = async () => answered.p;
+    const pending = c.switchModel();
+    expect($('modelBtn').disabled).toBe(true); // A's Use this is out
+    c.prepareEdit('a2', 'Soccer Schedule');
+    expect($('modelBtn').disabled).toBe(false); // B's own: nothing of B's is out
+    $('editProfile').value = 'p2'; c.onEditProfileChange();
+    answered.open({ live: true, model: 'claude-sonnet-5' }); await pending;
+    expect([$('modelBtn').disabled, $('modelBtn').title]).toEqual([true, 'Apply the source change first (Use this, above), then pick a model.']);
+    $('editProfile').value = 'p1'; c.onEditProfileChange(); // back on its own source
+    expect([$('modelBtn').disabled, $('modelBtn').title]).toEqual([false, '']);
+  });
+
+  it("Use this for p2, then p3 picked while it saved: after the answer the model button still waits on Use this, with p3's models (HB-1484)", async () => {
+    const third = { id: 'p3', name: 'Third source', vendor: 'anthropic', model: 'claude-haiku-5', models: [] };
+    const { c, $ } = page(['prepareEdit', 'renderModelPicker', 'renderModelPickerForAgent', 'renderModelPickerForProfile', 'onEditProfileChange', 'switchProfile'],
+      { profiles: [...PROFILES, third] });
+    c.prepareEdit('a1', 'Homework Helper');
+    $('editProfile').value = 'p2'; c.onEditProfileChange();
+    const saved = gate();
+    c.api = async (_url: string, init: Init) => init.method === 'PATCH' ? saved.p : {};
+    let asked = 0; c.confirm = () => ++asked === 1; // Use this: yes; rebuild now: no, so the sheet stays open
+    c.refresh = async () => { Object.assign(c.agents.find((a: { id: string }) => a.id === 'a1'), { aiProfileId: 'p2', profileModels: ['claude-opus-5-5'], profileDefaultModel: 'claude-opus-5-5' }); };
+    const pending = c.switchProfile();
+    $('editProfile').value = 'p3'; c.onEditProfileChange();
+    saved.open({}); await pending;
+    expect([$('modelBtn').disabled, $('modelBtn').title]).toEqual([true, 'Apply the source change first (Use this, above), then pick a model.']);
+    expect($('editModel').innerHTML).toContain('claude-haiku-5'); // the source shown, not the one applied
+    $('editProfile').value = 'p2'; c.onEditProfileChange(); // back on the source it now runs
+    expect([$('modelBtn').disabled, $('modelBtn').title]).toEqual([false, '']);
+    expect($('editModel').innerHTML).toContain('claude-opus-5-5');
+  });
+
+  it("Use this saved and the poll after it failed: the model button is on, with the new source's models, not waiting on the poll (HB-1484)", async () => {
+    for (const answer of [
+      { id: 'a1', aiProfileId: 'p2', profileModels: ['claude-opus-5-5'], profileDefaultModel: 'claude-opus-5-5' }, // the agent as saved
+      {}, // an answer without it: what was sent
+    ]) {
+      const { c, $ } = page(['prepareEdit', 'renderModelPicker', 'renderModelPickerForAgent', 'renderModelPickerForProfile', 'onEditProfileChange', 'switchProfile']);
+      c.prepareEdit('a1', 'Homework Helper');
+      $('editProfile').value = 'p2'; c.onEditProfileChange();
+      c.api = async (_url: string, init: Init) => init.method === 'PATCH' ? answer : {};
+      let asked = 0; c.confirm = () => ++asked === 1; // Use this: yes; rebuild now: no, so the sheet stays open
+      c.refresh = async () => {}; // the poll failed: the page's list is as it was
+      await c.switchProfile();
+      expect([$('modelBtn').disabled, $('modelBtn').title], JSON.stringify(answer)).toEqual([false, '']);
+      expect(c.agents[0].aiProfileId).toBe('p2');
+      if ('profileModels' in answer) expect($('editModel').innerHTML).toContain('claude-opus-5-5 — default');
+    }
+  });
+
+  it("an agent whose source the menu does not list: the menu's first is its own, as drawn, and another waits on Use this", () => {
+    const { c, $ } = page(['prepareEdit', 'renderModelPicker', 'renderModelPickerForAgent', 'renderModelPickerForProfile', 'onEditProfileChange']);
+    c.agents[0].aiProfileId = 'p-not-shared';
+    c.prepareEdit('a1', 'Homework Helper');
+    expect([$('editProfile').value, $('modelBtn').disabled, $('modelBtn').title]).toEqual(['p1', false, '']);
+    $('editProfile').value = 'p2'; c.onEditProfileChange();
+    expect($('modelBtn').disabled).toBe(true);
+    $('editProfile').value = 'p1'; c.onEditProfileChange();
+    expect([$('modelBtn').disabled, $('modelBtn').title]).toEqual([false, '']);
   });
 });
 

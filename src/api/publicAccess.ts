@@ -5,10 +5,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
 import { addressBucket, approximateSource, isPublic, markPublicSocket, publicClientAddress } from './trust.js';
 import { guestMay, publicRuleFor, type PublicRule } from './publicRoutes.js';
-import { cookieFromHeader, readSessionCookie, sessionValue } from './sessionCookie.js';
+import { cookieFromHeader, readSessionCookie, sessionValue } from './signIn/sessionCookie.js';
 import { safeEqual } from '../util/safeEqual.js';
 import type { ConsoleSocketsApi } from '../orchestrator/console/consoleSockets.js';
 import { adminAccounts, evaluateSafeguards, failingSafeguards, hostOf, publicConfig, usableFactors, type PublicConfig, type SafeguardCheck } from './safeguards.js';
+import { proxyPort } from './proxyListener.js';
 
 /**
  * Public access: the gate in front of everything that arrives on the public
@@ -345,7 +346,7 @@ export function registerPublicAccess(app: FastifyInstance, opts: PublicAccessOpt
       admins: admins(),
       invitedOnly: cfg.invitedOnly,
       ownerHeader: process.env.HATCHABOT_ALLOW_OWNER_HEADER === '1',
-      ports: { main: mainPort(), public: cfg.port, ops: Number(process.env.HATCHABOT_OPS_PORT ?? 8091), embed: Number(process.env.HATCHABOT_EMBED_PORT ?? 8093) },
+      ports: { main: mainPort(), public: cfg.port, ops: Number(process.env.HATCHABOT_OPS_PORT ?? 8091), embed: Number(process.env.HATCHABOT_EMBED_PORT ?? 8093), proxy: proxyPort() },
       autoUpgrade,
       funnelOnPrivatePort,
       publicOn: cfg.on,

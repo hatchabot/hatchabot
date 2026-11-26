@@ -30,6 +30,16 @@ describe('the register', () => {
     expect(rows.sort()).toEqual(tests.map((t) => t.name).sort());
   });
 
+  // Review of HB-1418: the candidate gate's practice turn runs the usage reader (usage.ts), which its area missed.
+  it('the candidate gate is due again when anything its practice turn runs changes: practice-check.ts and every file of src it imports', () => {
+    const gate = tests.find((t) => t.name === 'candidate-gate')!;
+    const paths = gate.area.filter((a): a is string => typeof a === 'string');
+    const covered = (file: string) => paths.some((a) => file === a || file.startsWith(a.replace(/\/?$/, '/')));
+    const imports = [...readFileSync('scripts/practice-check.ts', 'utf8').matchAll(/from '\.\.\/(src\/[^']+)\.js'/g)].map((m) => `${m[1]}.ts`);
+    expect(imports).toContain('src/orchestrator/usage/usage.ts');
+    for (const file of ['scripts/practice-check.ts', 'scripts/candidate-gate.sh', ...imports]) expect(covered(file), file).toBe(true);
+  });
+
   it('the record parses, and every test it names is in the register', () => {
     const runs = readRuns(readFileSync('docs/live-test-runs.md', 'utf8'));
     expect(runs.length).toBeGreaterThan(0);
@@ -422,7 +432,7 @@ describe('review of 2026-10-09: when a test is due', () => {
 
   it('in the real route files, a change inside each test\'s route is found', () => {
     // The apps', the browser's, the machines', the event trail's, the moves' and the ask's routes moved to their own files with HB-0808.
-    for (const [route, test, file] of [['/v1/agents/:id/move-host', 'runner-scenarios', 'src/api/transferRoutes.ts'], ['/v1/hosts/:id/install-image', 'runner-scenarios', 'src/api/machineRoutes.ts'], ['/v1/agents/:id/events', 'runner-scenarios', 'src/api/healthRoutes.ts'], ['/v1/agents/:id/clone', 'transfer', 'src/api/transferRoutes.ts'], ['/v1/agents/:id/app/rollback', 'apps', 'src/api/appRoutes.ts'], ['/v1/agents/:id/browser', 'browser', 'src/api/browserRoutes.ts'], ['/v1/agents/:id/ask', 'regress-autonomous', 'src/api/memoryRoutes.ts']] as const) {
+    for (const [route, test, file] of [['/v1/agents/:id/move-host', 'runner-scenarios', 'src/api/data/transferRoutes.ts'], ['/v1/hosts/:id/install-image', 'runner-scenarios', 'src/api/machine/machineRoutes.ts'], ['/v1/agents/:id/events', 'runner-scenarios', 'src/api/machine/healthRoutes.ts'], ['/v1/agents/:id/clone', 'transfer', 'src/api/data/transferRoutes.ts'], ['/v1/agents/:id/app/rollback', 'apps', 'src/api/data/appRoutes.ts'], ['/v1/agents/:id/browser', 'browser', 'src/api/console/browserRoutes.ts'], ['/v1/agents/:id/ask', 'regress-autonomous', 'src/api/chat/memoryRoutes.ts']] as const) {
       const src = readFileSync(file, 'utf8');
       // A git that serves the real file on both sides and a one-line change three lines below the route's path.
       const fake = (line: number) => (...a: string[]) => (a[0] === 'show'

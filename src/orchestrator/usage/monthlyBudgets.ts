@@ -179,7 +179,7 @@ export function createMonthlyBudgets(deps: MonthlyBudgetsDeps): MonthlyBudgets {
           if (now.state !== 'RUNNING' && !(now.state === 'STOPPED' && now.hibernatedAt)) return false;
           // The record changes under the lock too, judged again once it is
           // held: a Start or an Archive must not land between the two (#10).
-          return whileBusy(a.id, async () => {
+          return whileBusy(a.id, 'budget-pause', async () => {
             const held = store.getAgent(a.id);
             if (!held?.runtimeRef || (held.state !== 'RUNNING' && !(held.state === 'STOPPED' && held.hibernatedAt))) return false;
             // A successful stop reply or an asleep label is not proof the

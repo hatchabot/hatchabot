@@ -52,11 +52,11 @@ export const LIVE_TESTS = [
     needs: 'a runner (Settings → Hosts); pass -- --runner "<name>", and --old-image <a pre-2026.8 image on it> once it is current',
     proves: 'moves and rebuilds between this machine and a runner across OpenClaw versions; each machine\'s memory search; Install image',
     area: ['src/orchestrator/transfer/moveHost.ts', 'src/orchestrator/transfer/transfer.ts', 'src/orchestrator/machines/runnerSetup.ts', 'src/orchestrator/machines/hosts.ts', 'src/orchestrator/machines/imageInstalls.ts', 'src/orchestrator/lifecycle/provision.ts', 'src/embedder', 'src/orchestrator/memorySearch/memorySearch.ts', 'src/providers', 'src/openclaw/configWriter.ts', 'scripts/runner-scenarios.mjs',
-      { path: ROUTES, near: /'\/v1\/agents\/:id\/(rebuild|events)'/ }, { path: 'src/api/embedderRoutes.ts', near: /'\/v1\/(embedder|embed-)/ }, { path: 'src/api/machineRoutes.ts', near: /'\/v1\/hosts/ }, { path: 'src/api/healthRoutes.ts', near: /'\/v1\/agents\/:id\/events'/ },
+      { path: ROUTES, near: /'\/v1\/agents\/:id\/(rebuild|events)'/ }, { path: 'src/api/machine/embedderRoutes.ts', near: /'\/v1\/(embedder|embed-)/ }, { path: 'src/api/machine/machineRoutes.ts', near: /'\/v1\/hosts/ }, { path: 'src/api/machine/healthRoutes.ts', near: /'\/v1\/agents\/:id\/events'/ },
       // Move-host's route and its rules moved to the moves, import and export service (HB-0808 step 12).
-      'src/orchestrator/transfer/moves.ts', { path: 'src/api/transferRoutes.ts', near: /'\/v1\/agents\/:id\/move-host'/ },
+      'src/orchestrator/transfer/moves.ts', { path: 'src/api/data/transferRoutes.ts', near: /'\/v1\/agents\/:id\/move-host'/ },
       // Rebuild's route moved with the agent lifecycle (HB-0808 step 11).
-      { path: 'src/api/lifecycleRoutes.ts', near: /'\/v1\/agents\/:id\/rebuild'/ }, { path: STORE, near: /host|embed/i }],
+      { path: 'src/api/agents/lifecycleRoutes.ts', near: /'\/v1\/agents\/:id\/rebuild'/ }, { path: STORE, near: /host|embed/i }],
   },
   {
     name: 'transfer', cmd: ['node', 'scripts/transfer-scenarios.mjs'], against: 'install', minutes: '10–15', aiTurns: false,
@@ -64,20 +64,20 @@ export const LIVE_TESTS = [
     proves: 'clone, a template shared with its memory and imported, and download → delete → restore: each copy runs web-only and still finds its notes by meaning',
     // Clone, export, download, import and restore are the moves, import and export service's (HB-0808 step 12).
     area: ['src/orchestrator/transfer/transfer.ts', 'src/orchestrator/transfer/template.ts', 'src/orchestrator/lifecycle/provision.ts', 'src/orchestrator/transfer/copies.ts', 'scripts/transfer-scenarios.mjs', LIB,
-      { path: 'src/api/transferRoutes.ts', near: /'\/v1\/agents\/(:id\/)?(clone|export|backup|import|restore)'/ }, { path: CLI, near: /case '(clone|share|export|import|download|backup|restore)'/ }],
+      { path: 'src/api/data/transferRoutes.ts', near: /'\/v1\/agents\/(:id\/)?(clone|export|backup|import|restore)'/ }, { path: CLI, near: /case '(clone|share|export|import|download|backup|restore)'/ }],
   },
   {
     name: 'apps', cmd: ['node', 'scripts/app-scenarios.mjs'], against: 'install', minutes: '10–15', aiTurns: false,
     needs: 'room for 1 agent under the account\'s agent limit',
     proves: 'an app installs into an agent (its tests run there), its scheduled command runs by itself, updates keep its config, a release with failing tests is refused, rollback and stop work',
     area: ['src/orchestrator/apps/apps.ts', 'src/orchestrator/apps/agentApps.ts', 'scripts/app-scenarios.mjs', LIB,
-      { path: 'src/api/appRoutes.ts', near: /'\/v1\/(agents\/:id\/app|apps)\b/ }, { path: CLI, near: /case '(app|data)'/ }],
+      { path: 'src/api/data/appRoutes.ts', near: /'\/v1\/(agents\/:id\/app|apps)\b/ }, { path: CLI, near: /case '(app|data)'/ }],
   },
   {
     name: 'console', cmd: ['node', 'scripts/console-scenarios.mjs'], against: 'install', minutes: '2–5', aiTurns: false,
     needs: 'HATCHABOT_PUBLIC_URL (the HTTPS address other devices use); room for 1 agent',
     proves: 'the app\'s own page at the public address runs whole under its policy, which runs no inline script (signed out, with Google\'s sign-in in identity mode, and signed in; HB-0812); a real browser opens an agent\'s console there: a secure context, its app starts, its live connection to the agent opens and carries messages',
-    area: ['src/api/publicAccess.ts', 'src/api/pageRoutes.ts', 'web/sw.js', 'src/api/consoleProxy.ts', 'src/api/controlUiRebase.ts', 'src/api/controlUiMath.ts', 'web/control-ui-math.js', 'web/control-ui-math-source.js', 'web/control-ui-math.css', 'src/api/consoleRoutes.ts', 'src/orchestrator/console/consoleGate.ts', 'src/orchestrator/console/consoleSockets.ts', 'src/orchestrator/console/consoleAccess.ts', 'src/orchestrator/voice/voice.ts', 'src/orchestrator/voice/agentVoice.ts', 'src/api/voiceRoutes.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs', LIB,
+    area: ['src/api/publicAccess.ts', 'src/api/machine/pageRoutes.ts', 'web/sw.js', 'src/api/console/consoleProxy.ts', 'src/api/console/controlUiRebase.ts', 'src/api/console/controlUiMath.ts', 'web/control-ui-math.js', 'web/control-ui-math-source.js', 'web/control-ui-math.css', 'src/api/console/consoleRoutes.ts', 'src/orchestrator/console/consoleGate.ts', 'src/orchestrator/console/consoleSockets.ts', 'src/orchestrator/console/consoleAccess.ts', 'src/orchestrator/voice/voice.ts', 'src/orchestrator/voice/agentVoice.ts', 'src/api/console/voiceRoutes.ts', 'src/openclaw/configWriter.ts', 'scripts/console-scenarios.mjs', LIB,
       { path: ROUTES, near: /\/voice|readVoiceStatus/ }, { path: 'web/index.html', near: /voice|Voice|openGateway|pageSessionEnded|<script|<meta/ }, { path: 'web/app/', near: /voice|Voice|openGateway|pageSessionEnded|HATCHABOT_VERSION|hatchabot-version|accounts\.google/ }],
   },
   {
@@ -85,7 +85,7 @@ export const LIVE_TESTS = [
     needs: 'room for 1 agent; internet from the agents',
     proves: 'an agent\'s own browser: off by default, switched on it opens and reads a real page, holds none of the agent\'s files, refuses scripts and private addresses, can be signed in to a site through the sign-in panel (the agent then carries on signed in), keeps that sign-in through a restart with Keep its logins on and loses it after Forget logins, follows an agent restart, and is removed when switched off, its kept logins with it',
     area: ['src/orchestrator/console/browser.ts', 'src/orchestrator/console/agentBrowsers.ts', 'src/orchestrator/console/signInPanels.ts', 'src/orchestrator/console/browserPanel.ts', 'src/orchestrator/console/browserLogins.ts', 'docker/Dockerfile.browser', 'src/providers/localDockerProvider.ts', 'src/openclaw/configWriter.ts', 'scripts/browser-scenarios.mjs', LIB,
-      { path: ROUTES, near: /browser/i }, { path: 'src/orchestrator/lifecycle/agentEdits.ts', near: /browser/i }, { path: 'src/api/browserRoutes.ts', near: /browser/i }, { path: 'src/orchestrator/lifecycle/rebuildQueue.ts', near: /browser/i }, { path: 'src/orchestrator/lifecycle/provision.ts', near: /browser/i }, { path: CLI, near: /case '(start|stop)'/ }],
+      { path: ROUTES, near: /browser/i }, { path: 'src/orchestrator/lifecycle/agentEdits.ts', near: /browser/i }, { path: 'src/api/console/browserRoutes.ts', near: /browser/i }, { path: 'src/orchestrator/lifecycle/rebuildQueue.ts', near: /browser/i }, { path: 'src/orchestrator/lifecycle/provision.ts', near: /browser/i }, { path: CLI, near: /case '(start|stop)'/ }],
   },
   {
     name: 'google-plain-request', cmd: ['node_modules/.bin/tsx', 'scripts/google-scenarios.mjs'], against: 'install', minutes: '3–5', aiTurns: 'one',
@@ -97,15 +97,17 @@ export const LIVE_TESTS = [
     name: 'skills', cmd: ['node', 'scripts/skills-scenarios.mjs'], against: 'install', minutes: '10–18', aiTurns: 'two',
     needs: 'room for 1 web-only agent and a configured AI source; no Google account or external browser service',
     proves: 'selection reaches the runtime, customized instructions survive disable/re-enable and explicit replacement/rollback, a plain Code Mode task invokes its skill fixture, and isolated practice observes skill and sample reads, its tokens in the agent\'s usage exactly once',
-    area: ['src/openclaw/skills.ts', 'src/openclaw/workspace.ts', 'src/openclaw/configWriter.ts', 'src/orchestrator/skills/skillsStatus.ts', 'src/orchestrator/skills/skillFiles.ts', 'src/orchestrator/skills/skillTrials.ts', 'src/orchestrator/skills/skills.ts', 'src/api/skillRoutes.ts', 'src/orchestrator/lifecycle/provision.ts', 'scripts/skills-scenarios.mjs', LIB,
-      'src/orchestrator/usage/practiceUsage.ts', { path: 'src/api/usageRoutes.ts', near: /practice/i },
+    area: ['src/openclaw/skills.ts', 'src/openclaw/workspace.ts', 'src/openclaw/configWriter.ts', 'src/orchestrator/skills/skillsStatus.ts', 'src/orchestrator/skills/skillFiles.ts', 'src/orchestrator/skills/skillTrials.ts', 'src/orchestrator/skills/skills.ts', 'src/api/data/skillRoutes.ts', 'src/orchestrator/lifecycle/provision.ts', 'scripts/skills-scenarios.mjs', LIB,
+      'src/orchestrator/usage/practiceUsage.ts', { path: 'src/api/usage/usageRoutes.ts', near: /practice/i },
       { path: ROUTES, near: /\/skills|readSkillsStatus/ }, { path: STORE, near: /curatedSkills|curated_skills/i }],
   },
   {
-    name: 'candidate-gate', cmd: ['bash', 'scripts/candidate-gate.sh'], defaultArgs: ['hatchabot-runtime:latest'], against: 'install', minutes: '5–10', aiTurns: 'one',
+    name: 'candidate-gate', cmd: ['bash', 'scripts/candidate-gate.sh'], defaultArgs: ['hatchabot-runtime:latest'], against: 'install', minutes: '5–10', aiTurns: 'two',
     needs: 'the image to check (default: this machine\'s default image)',
-    proves: 'an agent on that image builds, answers, and keeps its memory search and tools',
-    area: ['docker', 'scripts/build-runtime-image.sh', 'scripts/runtime-pins.mjs', 'scripts/candidate-gate.sh', 'src/openclaw', 'src/orchestrator/lifecycle/provision.ts'],
+    proves: 'an agent on that image builds, answers, and keeps its memory search and tools; and whether one practice turn on its OpenClaw keeps its transcript where Practice reads it and is counted once, so Practice may move to that release (HB-1418; only a warning when not)',
+    // The practice turn: the practice script, the usage reader it counts the agent's own calls with, and its check (HB-1418).
+    area: ['docker', 'scripts/build-runtime-image.sh', 'scripts/runtime-pins.mjs', 'scripts/candidate-gate.sh', 'src/openclaw', 'src/orchestrator/lifecycle/provision.ts',
+      'src/orchestrator/skills/skillTrials.ts', 'src/orchestrator/usage/usage.ts', 'scripts/practice-check.ts'],
   },
   {
     name: 'regress-autonomous', cmd: ['bash', 'scripts/regress-autonomous.sh'], against: 'install', minutes: '10–15', aiTurns: 'about eight',
@@ -114,9 +116,9 @@ export const LIVE_TESTS = [
     // The CLI's `tasks` drives the cron routes (scheduleRoutes.ts) and the service's tasks (HB-0808).
     // Its create, list and delete are the agent lifecycle service's records and list (HB-0808 step 11).
     // Its `ask` is the memory service's turn (memoryTurns.ts) behind POST /v1/agents/:id/ask (memoryRoutes.ts, HB-0808 step 13).
-    area: ['src/openclaw', 'src/orchestrator/lifecycle/provision.ts', 'src/orchestrator/schedules/crons.ts', 'src/orchestrator/transfer/cronImport.ts', 'src/api/scheduleRoutes.ts', 'src/orchestrator/schedules/tasks.ts', 'src/cli.ts', 'scripts/regress-autonomous.sh',
-      'src/orchestrator/lifecycle/agentRecords.ts', 'src/orchestrator/lifecycle/agentList.ts', { path: 'src/api/lifecycleRoutes.ts', near: /'\/v1\/agents(\/:id)?'/ },
-      'src/orchestrator/memory/memoryTurns.ts', { path: 'src/api/memoryRoutes.ts', near: /'\/v1\/agents\/:id\/ask'/ }],
+    area: ['src/openclaw', 'src/orchestrator/lifecycle/provision.ts', 'src/orchestrator/schedules/crons.ts', 'src/orchestrator/transfer/cronImport.ts', 'src/api/data/scheduleRoutes.ts', 'src/orchestrator/schedules/tasks.ts', 'src/cli.ts', 'scripts/regress-autonomous.sh',
+      'src/orchestrator/lifecycle/agentRecords.ts', 'src/orchestrator/lifecycle/agentList.ts', { path: 'src/api/agents/lifecycleRoutes.ts', near: /'\/v1\/agents(\/:id)?'/ },
+      'src/orchestrator/memory/memoryTurns.ts', { path: 'src/api/chat/memoryRoutes.ts', near: /'\/v1\/agents\/:id\/ask'/ }],
   },
   {
     name: 'restore-drill', cmd: ['bash', 'scripts/restore-drill.sh'], against: 'install', minutes: '10–60', aiTurns: false,
@@ -135,7 +137,7 @@ export const LIVE_TESTS = [
     needs: 'nothing (a throwaway control plane on its own ports); -- --with-telegram also takes over a bot from .env.smoke',
     proves: 'switching to Hatchabot: an OpenClaw agent is found and adopted web-only, its workspace and tasks arrive, its console answers, its data folder mounts',
     // The adopt routes and the deferred adopts are the moves, import and export service's (HB-0808 step 12).
-    area: ['src/orchestrator/transfer/adopt.ts', 'src/orchestrator/transfer/cronImport.ts', 'src/orchestrator/transfer/adopts.ts', 'src/api/adoptRoutes.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
+    area: ['src/orchestrator/transfer/adopt.ts', 'src/orchestrator/transfer/cronImport.ts', 'src/orchestrator/transfer/adopts.ts', 'src/api/data/adoptRoutes.ts', 'scripts/smoke.sh', 'scripts/smoke-adopt-full.ts'],
   },
   {
     name: 'clean-install', cmd: ['bash', 'scripts/clean-install-test.sh'], against: 'checkout', endsOnRelease: true, minutes: '20–40', aiTurns: 'about eight',

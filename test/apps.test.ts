@@ -10,7 +10,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
-import { newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
+import { filesReplacingCount, newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 import { resolvePendingValues, stashPendingSecrets } from '../src/orchestrator/apps/appPending.js';
 import {
   AppError, checkCodeSize, codeSizeBound, fieldsToAsk, gitOnHost, hostGit, installRelease, manifestAt, mergeConfig, mirrorDir, parseManifest, parseSource, releaseTar, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, taskTransitionPending, type AgentFacts,
@@ -734,6 +734,36 @@ describe('the app routes', { timeout: INTEGRATION_TIMEOUT }, () => {
     expect(gone.json()).toMatchObject({ removed: true });
     expect(store.getAgentApp('a1')).toBeUndefined();
     expect(provider.calls.some((c) => c.what.startsWith('["cron","rm"'))).toBe(true);
+  });
+
+  it('an update and a roll back replace its files: each counts once, inside its take; one its take finds changed, or with nothing new, counts nothing (HB-1465)', async () => {
+    // The release is fetched before the take: what changes meanwhile is judged in it (appStillAsWas).
+    let fetching: (() => void) | undefined;
+    const git = (async (args: string[], cwd?: string) => { if (args.includes('archive')) fetching?.(); return hostGit(args, cwd); }) as typeof hostGit;
+    const { f, store } = await app(git);
+    const dir = repo();
+    const commit = (msg: string) => {
+      writeFileSync(join(dir, 'demo', `${msg}.py`), 'X = 1\n');
+      execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test', '-c', 'user.email=test@example.org', '-C', dir, 'add', '-A']);
+      execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test', '-c', 'user.email=test@example.org', '-C', dir, 'commit', '-qm', msg]);
+    };
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app', headers: as, payload: { source: dir, values: { mailbox: 'demo@example.org' } } })).statusCode).toBe(200);
+    const c0 = filesReplacingCount('a1');
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} })).json()).toMatchObject({ unchanged: true });
+    expect(filesReplacingCount('a1')).toBe(c0);
+    commit('second');
+    // Stopped while the release was fetched: refused in its take.
+    fetching = () => { fetching = undefined; store.setAgentState('a1', 'STOPPED'); };
+    const stale = await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error).toBe('Demo changed while the release was fetched (it is stopped). Try again.');
+    expect(filesReplacingCount('a1')).toBe(c0);
+    store.setAgentState('a1', 'RUNNING');
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app/update', headers: as, payload: {} })).statusCode).toBe(200);
+    expect(filesReplacingCount('a1')).toBe(c0 + 1);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/app/rollback', headers: as })).statusCode).toBe(200);
+    expect(filesReplacingCount('a1')).toBe(c0 + 2);
+    expect(store.listOperations(['a1']).filter((o) => o.kind === 'app-update' || o.kind === 'app-rollback').map((o) => o.kind).sort()).toEqual(['app-rollback', 'app-update']);
   });
 
   it('values that are not an object of settings are refused on install, pending and update (HB-0064)', async () => {

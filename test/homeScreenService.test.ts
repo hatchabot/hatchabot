@@ -8,8 +8,8 @@ import type { Agent } from '../src/domain/types.js';
 
 /**
  * The home screen service and the model changes service (HB-0808 step 15,
- * part C), driven as src/api/homeScreenRoutes.ts and
- * src/api/modelChangeRoutes.ts drive them, with no HTTP server: a real store
+ * part C), driven as src/api/agents/homeScreenRoutes.ts and
+ * src/api/usage/modelChangeRoutes.ts drive them, with no HTTP server: a real store
  * on an in-memory database and a management AI the test answers for.
  */
 const OWNER = 'user-owner';

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import { registerRoutes } from '../src/api/routes.js';
-import type { IdentityVerifier } from '../src/api/identity.js';
+import type { IdentityVerifier } from '../src/api/signIn/identity.js';
 import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { checkInvite, createInvite } from '../src/orchestrator/members/invite.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';

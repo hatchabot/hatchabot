@@ -27,7 +27,7 @@ import { createCronTriggers, type CronTriggers } from './triggers.js';
  * /v1/agents/:id, still in the registry, calls `triggers`. `stop()` ends the
  * sweeps' timers. Nothing here knows about HTTP: who may ask, whether the
  * agent is running and free, and the words of an answer are the route
- * file's (src/api/scheduleRoutes.ts). A template's tasks parked at import
+ * file's (src/api/data/scheduleRoutes.ts). A template's tasks parked at import
  * are provision.ts's (`applyPendingSchedules`); `tasks` only lists them and
  * tries them again.
  */

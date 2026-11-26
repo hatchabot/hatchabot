@@ -10,12 +10,15 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { homedir, hostname, networkInterfaces } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { applyLegacyEnv, defaultBackupsDir, defaultDbPath } from './envCompat.js';
+import { otherInstallsHere, sharedFolderFix, sharedFolderWords } from './store/folderMark.js';
 import { activeValues, envValue, inlineComments } from './config/envFile.js';
 import { foreignSet, ownerMark, readSetStatus } from './orchestrator/backups/backupFiles.js';
 import { setAgeDays } from './orchestrator/backups/recoveryReadiness.js';
-import { funnelOff, funnelStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
+import { funnelOff, funnelStatus, serveLeftOnMainPort, serveStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
+import { proxyPort, proxyPortClash, serveCommand } from './api/proxyListener.js';
+import { tailscaleProcesses, trustedUids, type TailscaleProcess } from './ops/peerUser.js';
 import { envFilePath, publicIntentIsStale, readPublicIntent } from './ops/publicIntent.js';
 import { adminAccounts, evaluateSafeguards, hostOf, publicConfig, type SafeguardCheck } from './api/safeguards.js';
 import { autoUpgradeStatus } from './ops/autoUpgrade.js';
@@ -33,7 +36,9 @@ export interface DoctorFacts {
     inlineComments?: string[] };
   db: { path: string; present: boolean; sizeMb?: number;
     /** Its schema number against this release's (store/schemaVersion.ts). undefined: it could not be read. */
-    schema?: SchemaStanding };
+    schema?: SchemaStanding;
+    /** Other installs' databases in its folder, each marked by its install at start (store/folderMark.ts, HB-1151). */
+    sharedWith?: { folder: string; others: string[] } };
   service: { manager: 'systemd' | 'launchd' | 'none'; active?: boolean; enabled?: boolean;
     /** Linux: the RUNNING service process is not in the docker group, though the user is. */
     dockerDenied?: boolean };
@@ -54,7 +59,26 @@ export interface DoctorFacts {
    * that never answers holds the nightly run for good (HB-1208).
    */
   timeLimit?: boolean;
-  tailscale?: { installed: boolean; up?: boolean; dns?: string; serving?: boolean; reachable?: boolean; url?: string; appOnly?: boolean };
+  /**
+   * `oldPort`: serve still lands on the app's own port (`mainPort`), not on the listener for it (`proxyPort`, HB-1239);
+   * `repoint`: what to run for each place that does (a handler a terminal's `tailscale serve` holds is said, not run).
+   */
+  tailscale?: { installed: boolean; up?: boolean; dns?: string; serving?: boolean; reachable?: boolean; url?: string; appOnly?: boolean;
+    oldPort?: boolean; mainPort?: number; proxyPort?: number; repoint?: string[];
+    /** tailscaled without a TUN device (tailnetInfo's `userspace`). */
+    userspace?: true; mac?: true };
+  /**
+   * The listener for `tailscale serve` (HATCHABOT_PROXY_PORT, HB-1239) answers as Hatchabot. Asked only
+   * while the app itself answers. `other`: something answered there that is not Hatchabot. `clash`: its
+   * port is the app's own or the public listener's, so it refuses to open (and asking it would reach that one).
+   */
+  proxyListener?: { port: number; ok: boolean; other?: true; error?: string; clash?: string };
+  /**
+   * Tailscale's processes and the users they run as, while serve is on: one of Hatchabot's own user (`own`,
+   * this doctor's uid) makes serve's connections as that user, and its header is not believed (HB-1239).
+   * `mac`: on a Mac no other user's is believed either (lsof sees only this user's programs: the review of HB-1239).
+   */
+  tailscaleUser?: { own: number; trusted: number[]; procs: TailscaleProcess[]; mac?: true };
   containers?: { running: number; total: number;
     /** RUNNING agent containers still on docker's shared bridge network (made before v1.16's isolation). */
     sharedNetwork?: number };
@@ -174,6 +198,7 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   }
   out.push(f.db.present ? { level: 'ok', text: `Database ${f.db.path}${f.db.sizeMb !== undefined ? ` (${f.db.sizeMb.toFixed(1)} MB)` : ''}` } : { level: 'warn', text: `Database not created yet at ${f.db.path}`, fix: 'It appears on first start' });
   if (f.db.present && f.db.schema) out.push(schemaLine(f.db.schema));
+  if (f.db.sharedWith?.others.length) out.push({ level: 'fail', text: sharedFolderWords(f.db.sharedWith.folder, f.db.sharedWith.others), fix: sharedFolderFix(f.db.path) });
   if (f.service.manager === 'none') out.push({ level: 'warn', text: 'No background service installed — Hatchabot will not start with the machine', fix: './scripts/install-service.sh' });
   else if (!f.service.active) out.push({ level: 'fail', text: `Service is installed (${f.service.manager}) but not running`, fix: f.service.manager === 'systemd' ? 'systemctl --user start hatchabot; journalctl --user -u hatchabot -n 50' : './scripts/restart.sh' });
   else if (f.service.dockerDenied) out.push({ level: 'fail', text: 'Service running, but it cannot use Docker — it started before your user joined the docker group, so agents fail to start (your terminal has the group, which is why the rest looks fine)', fix: 'sudo systemctl restart user@$(id -u)   (or reboot)' });
@@ -221,6 +246,62 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
       : !t.up ? { level: 'warn', text: 'Tailscale installed but not connected', fix: 'sudo tailscale up (or open the Tailscale app)' }
       : t.serving && t.reachable ? { level: 'ok', text: `Tailscale up, serving ${t.url}` }
       : { level: 'ok', text: `Tailscale up${t.dns ? ` (${t.dns})` : ''}${t.serving ? ' — serving, but the address did not answer yet' : ' — HTTPS not turned on (setup guide → Turn on HTTPS)'}` });
+    // Pointed at the app's own port, as before 2.192.0 (HB-1239): Hatchabot moves it at each start where Tailscale lets it.
+    if (t.oldPort) {
+      const steps = t.repoint?.length ? t.repoint : [serveCommand(t.proxyPort ?? 8094)];
+      out.push({
+        level: 'warn',
+        // On a Mac the listener does not yet believe serve either (docs/tailscale.md): moving it is no promise there.
+        text: t.mac
+          ? `Tailscale serve still sends your tailnet to port ${t.mainPort ?? 8080}, not to port ${t.proxyPort ?? 8094}, the one for it. On a Mac every device on your tailnet shares one sign-in limit at either port for now, unless Tailscale runs as your own user and your uid is in HATCHABOT_PROXY_TRUST_UIDS (docs/tailscale.md)`
+          : `Tailscale serve still sends your tailnet to port ${t.mainPort ?? 8080}, not to port ${t.proxyPort ?? 8094}, the one for it: every device on your tailnet shares one sign-in limit there, so one person's wrong passwords lock the others out`,
+        // The command only once the listener answers as Hatchabot: never onto one that is not open.
+        fix: f.proxyListener?.ok === true
+          ? `Run: ${steps.join('   then: ')}   (with sudo if Tailscale says access denied; restarting Hatchabot does it too when Tailscale lets it)`
+          : f.proxyListener
+            ? 'First Hatchabot\'s listener for it has to open (the next line); then restarting Hatchabot moves serve itself'
+            : 'Start Hatchabot first (it does not answer: see above); at its start it moves serve itself where Tailscale lets it, and then hatchabot doctor gives the command where it does not',
+      });
+    }
+  }
+  // Without a TUN device tailscaled reaches this machine's own address on 127.0.0.1, as root: any tailnet
+  // device can then open the listener for serve itself and name its own address there (the review of HB-1239).
+  if (f.tailscale?.serving && f.tailscale.userspace) {
+    out.push({
+      level: 'warn',
+      text: `Tailscale runs without a TUN device (userspace networking), so a tailnet connection to this machine's own address reaches 127.0.0.1 from tailscaled: any device on your tailnet can open Hatchabot's listener for tailscale serve, port ${f.tailscale.proxyPort ?? 8094}, itself and name its own address there`,
+      fix: 'Run tailscaled with a TUN device: the tailscaled system service\'s default; in the Tailscale container, TS_USERSPACE=false with /dev/net/tun',
+    });
+  }
+  // Serve's header is believed only from another user than Hatchabot's own (HB-1239): a Tailscale of its own user is not.
+  // On a Mac, no other user's either: lsof sees only this user's programs, one after another (the review of HB-1239).
+  const tu = f.tailscaleUser;
+  const mine = tu?.procs.find((p) => p.uid === tu.own);
+  if (tu && mine && !tu.trusted.includes(tu.own)) {
+    out.push({
+      level: 'warn',
+      text: `Tailscale (${mine.name}) runs as your own user (uid ${tu.own}), so Hatchabot does not believe the address serve adds for each device: every device on your tailnet shares one sign-in limit`,
+      fix: tu.mac
+        ? `On a Mac, running Tailscale as root (the Standalone app) does not help yet: Hatchabot cannot tell there which user a connection is from when it is not yours, so it believes none. HATCHABOT_PROXY_TRUST_UIDS=${tu.own} in .env would believe this app, but also every other program of yours, an agent's container under Docker Desktop included, which could then choose its sign-in limit there`
+        : `Run Tailscale as root (the tailscaled system service). Or set HATCHABOT_PROXY_TRUST_UIDS=${tu.own} in .env and restart Hatchabot; then every program of your user, an agent's container under rootless Docker included, can choose its sign-in limit there`,
+    });
+  } else if (tu?.mac && !mine) {
+    out.push({
+      level: 'warn',
+      text: 'On a Mac, Hatchabot cannot yet tell which user made a connection to its listener for tailscale serve when it is not your own, so it does not believe the address serve adds for each device: every device on your tailnet shares one sign-in limit',
+      fix: 'Nothing to change for now; until then one person\'s wrong passwords on your tailnet lock the others out for a while',
+    });
+  }
+  // The listener for tailscale serve (HB-1239): Hatchabot moves serve onto it only once it is open.
+  if (f.proxyListener && !f.proxyListener.ok) {
+    const pl = f.proxyListener;
+    const onIt = !!f.tailscale?.serving && !f.tailscale.oldPort;
+    out.push({
+      level: onIt ? 'fail' : 'warn',
+      text: `Hatchabot's listener for tailscale serve, 127.0.0.1:${pl.port}, is not open${pl.other ? ' (another program answers there)' : ''}: ${onIt ? 'Tailscale serve sends your tailnet there, so your tailnet address does not answer' : 'Hatchabot leaves Tailscale serve as it is until it opens'}`,
+      fix: pl.clash ? `${pl.clash} Set HATCHABOT_PROXY_PORT to a free port in .env, then restart Hatchabot`
+        : `See why in the service log ("Tailscale serve was left as it is"). If another program has port ${pl.port}, set HATCHABOT_PROXY_PORT to a free port in .env, then restart Hatchabot`,
+    });
   }
   if (f.swap) out.push(swapLine(f.swap));
   if (f.swap?.lastCheck) out.push(limitsCheckLine(f.swap.lastCheck));
@@ -242,6 +323,12 @@ export function schemaLine(s: SchemaStanding): DoctorLine {
   if (!s.refused) return { level: 'warn', text: `Database schema ${s.db}${by} is newer than this release's ${s.code}: ${stepsText(past)} only add${past.length === 1 ? 's' : ''} to it, so this release runs, and what was added goes unused`, fix: `${schemaInstallAdvice(s)} to use it` };
   const why = s.notAdditive?.length ? `${stepsText(s.notAdditive)} changed it in a way this release cannot work with` : `nothing in it records what ${stepsText(s.unrecorded?.length ? s.unrecorded : past)} did`;
   return { level: 'fail', text: `Database schema ${s.db}${by} is newer than this release's ${s.code}, and ${why}: Hatchabot does not start on it`, fix: `${schemaInstallAdvice(s)}; or restore a backup of the database made before that upgrade (docs/troubleshooting.md)` };
+}
+
+/** Other installs' databases in the database's folder, as their marks say (HB-1151); undefined when there are none. */
+export function dbSharedWith(dbPath: string): NonNullable<DoctorFacts['db']['sharedWith']> | undefined {
+  const others = otherInstallsHere(dbPath);
+  return others.length ? { folder: dirname(resolve(dbPath)), others } : undefined;
 }
 
 /** The database's schema standing, read without changing it; undefined when it cannot be read. */
@@ -417,7 +504,9 @@ export async function publicAccessFacts(env: Record<string, string>, dbPath: str
     } catch { /* unreadable: nobody is known to have a second factor, which fails the safeguard */ }
   }
   const fs = await (probe.funnel ?? funnelStatus)().catch(() => ({ readable: false, entries: [] }));
-  let funnel = fs.readable ? { toPublicPort: fs.entries.some((e) => targetsPort(e, cfg.port)), toPrivatePort: fs.entries.some((e) => targetsPort(e, mainPort)) } : undefined;
+  // The listener tailscale serve is pointed at is private too (HB-1239).
+  const proxy = proxyPort(env as NodeJS.ProcessEnv);
+  let funnel = fs.readable ? { toPublicPort: fs.entries.some((e) => targetsPort(e, cfg.port)), toPrivatePort: fs.entries.some((e) => targetsPort(e, mainPort) || targetsPort(e, proxy)) } : undefined;
   // A switch to "on" that has not finished. While it is fresh it may be in
   // progress in the running app: nothing is touched. Stale, or absent: a
   // Funnel entry on the public port with public access off is a leftover,
@@ -438,7 +527,7 @@ export async function publicAccessFacts(env: Record<string, string>, dbPath: str
     admins,
     invitedOnly: cfg.invitedOnly,
     ownerHeader: env.HATCHABOT_ALLOW_OWNER_HEADER === '1',
-    ports: { main: mainPort, public: cfg.port, ops: Number(env.HATCHABOT_OPS_PORT ?? 8091), embed: Number(env.HATCHABOT_EMBED_PORT ?? 8093) },
+    ports: { main: mainPort, public: cfg.port, ops: Number(env.HATCHABOT_OPS_PORT ?? 8091), embed: Number(env.HATCHABOT_EMBED_PORT ?? 8093), proxy },
     autoUpgrade: await (probe.autoUpgrade ?? autoUpgradeStatus)().catch(() => ({ ok: false, why: 'Automatic upgrades could not be checked.' })),
     funnelOnPrivatePort: funnel?.toPrivatePort,
     publicOn: cfg.on,
@@ -677,7 +766,15 @@ export async function probeControlPlane(url: string, certFile?: string, bind?: s
     return { url, ok: false, error: String((err as Error).cause ?? (err as Error).message).slice(0, 80) };
   }
 }
-/** The version a served page names (`HATCHABOT_VERSION="X"`, versionMarkup in src/api/pageRoutes.ts). */
+/** The listener for tailscale serve answers as Hatchabot (HB-1239): plain HTTP on loopback, whatever the app's own port speaks. */
+export async function probeProxyListener(port: number, env: NodeJS.ProcessEnv = process.env): Promise<NonNullable<DoctorFacts['proxyListener']>> {
+  // A port the listener refuses: asking there would reach the app or the public listener, and look fine.
+  const clash = proxyPortClash(port, env);
+  if (clash) return { port, ok: false, clash };
+  const r = await probeControlPlane(`http://127.0.0.1:${port}`);
+  return { port, ok: r.ok, ...(r.other ? { other: true as const } : {}), ...(!r.ok && r.error ? { error: r.error } : {}) };
+}
+/** The version a served page names (`HATCHABOT_VERSION="X"`, versionMarkup in src/api/machine/pageRoutes.ts). */
 export const versionMarker = (html: string) => /HATCHABOT_VERSION="([^"]+)"/.exec(html)?.[1];
 /** A version doctor shows: a semantic version's characters (pageRoutes' versionWord), forty at most. */
 const VERSION_WORD = /^[\w.+-]{1,40}$/;
@@ -861,6 +958,15 @@ export function backupFacts(bdir: string, now: number, mark: string | undefined)
  * one was chosen (--url, HATCHABOT_URL, the CLI's saved one); without it, the
  * listener the service's .env describes.
  */
+/**
+ * The uid Hatchabot runs as, for the line on who Tailscale runs as: doctor's own, except under
+ * `sudo hatchabot doctor`, where it is root's and the user who ran sudo is Hatchabot's (SUDO_UID).
+ */
+export function hatchabotUid(uid: number | undefined, env: NodeJS.ProcessEnv): number | undefined {
+  const sudo = env.SUDO_UID;
+  return uid === 0 && sudo !== undefined && /^[1-9]\d*$/.test(sudo) ? Number(sudo) : uid;
+}
+
 export async function gatherFacts(urlIn?: string, envIn?: Record<string, string>): Promise<DoctorFacts> {
   // The service's settings come from its .env alone, as the service reads
   // them: the shell's PORT, image, prefix, network, database or backup
@@ -907,14 +1013,28 @@ export async function gatherFacts(urlIn?: string, envIn?: Record<string, string>
   // Homebrew's path and `serve`. A plain `tailscale` on PATH missed the Mac
   // app entirely and told a working install it had no Tailscale (2026-09-22).
   const port = servicePort(env);
-  const ti = await tailnetInfo(port).catch(() => ({ installed: false }) as Awaited<ReturnType<typeof tailnetInfo>>);
-  const tailscale: DoctorFacts['tailscale'] = { installed: ti.installed, appOnly: ti.appOnly, up: ti.up, dns: ti.dns, serving: ti.serving, reachable: ti.reachable, url: ti.url };
+  // Serve lands on the listener for it (HATCHABOT_PROXY_PORT), or still on PORT, as before HB-1239.
+  const proxy = proxyPort(env);
+  const ti = await tailnetInfo(proxy, port).catch(() => ({ installed: false }) as Awaited<ReturnType<typeof tailnetInfo>>);
+  const repoint = ti.oldPort
+    ? await serveStatus().then((st) => serveLeftOnMainPort(st.handlers, port, proxy).map((l) => l.command ?? `${l.where}: ${l.why}`)).catch(() => [])
+    : undefined;
+  const tailscale: DoctorFacts['tailscale'] = { installed: ti.installed, appOnly: ti.appOnly, up: ti.up, dns: ti.dns, serving: ti.serving, reachable: ti.reachable, url: ti.url,
+    ...(ti.oldPort ? { oldPort: true, mainPort: port, proxyPort: proxy, repoint } : {}),
+    ...(ti.userspace ? { userspace: true as const, proxyPort: proxy } : {}),
+    ...(process.platform === 'darwin' ? { mac: true as const } : {}) };
+  // Asked only while the app answers: a stopped service has no listener either, and says so above.
+  const proxyListener = controlPlane.ok ? await probeProxyListener(proxy, env).catch(() => undefined) : undefined;
+  // Who Tailscale runs as, while serve is on; never this machine's processes from a test.
+  const own = hatchabotUid(process.getuid?.(), process.env);
+  const tailscaleUser = ti.serving && own !== undefined && !process.env.VITEST
+    ? { own, trusted: trustedUids(env), procs: await tailscaleProcesses().catch(() => []), ...(process.platform === 'darwin' ? { mac: true as const } : {}) } : undefined;
   return {
     nodeVersion: process.version, dockerCli, dockerDaemon, runtimeImage,
     envFile: { present: existsSync('.env'), secretKey: !!env.HATCHABOT_SECRET_KEY, password: !!env.HATCHABOT_PASSWORD, authMode: env.HATCHABOT_AUTH ?? 'password', publicUrl: env.HATCHABOT_PUBLIC_URL || undefined,
       inlineComments: (() => { try { return inlineComments(readFileSync('.env', 'utf8')); } catch { return []; } })() },
-    db: { path: dbPath, present: existsSync(dbPath), sizeMb: existsSync(dbPath) ? statSync(dbPath).size / 1e6 : undefined, schema: await schemaFacts(dbPath) },
-    service, controlPlane, diskFreeGb, backups, tailscale,
+    db: { path: dbPath, present: existsSync(dbPath), sizeMb: existsSync(dbPath) ? statSync(dbPath).size / 1e6 : undefined, schema: await schemaFacts(dbPath), sharedWith: dbSharedWith(dbPath) },
+    service, controlPlane, diskFreeGb, backups, tailscale, proxyListener, tailscaleUser,
     timeLimit: !!sh('sh', ['-c', 'command -v timeout || command -v gtimeout']),
     containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length, sharedNetwork },
     // A doctor that cannot read the image file still reports the rest.

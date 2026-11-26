@@ -6,8 +6,9 @@ import { ProviderError } from '../src/providers/provider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { isPrivateModelUrl } from '../src/orchestrator/sources/aiSources.js';
-import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
+import { _resetLoginThrottle, registerAuth } from '../src/api/signIn/auth.js';
 import { installErrorHandler } from '../src/api/errorHandler.js';
+import { viaServe } from './helpers/viaServe.js';
 import { computePosture } from '../src/orchestrator/health/posture.js';
 import { markBusy, clearBusy } from '../src/orchestrator/lifecycle/busy.js';
 
@@ -68,11 +69,12 @@ describe('login throttle', () => {
     const store = new Store(new Database(':memory:'));
     const f = Fastify();
     await registerAuth(f, { secret: Buffer.alloc(32, 9), mode: 'accounts', store });
-    await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'correct-horse' } });
+    await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'robin', password: 'correct-horse' } });
     return f;
   }
-  const attempt = (f: any, username: string, from: string) =>
-    f.inject({ method: 'POST', url: '/v1/login', payload: { username, password: 'wrong-guess' }, headers: { 'x-forwarded-for': from } });
+  // Through tailscale serve's listener, the only one where the forwarded address is the client's (HB-1239).
+  const attempt = async (f: any, username: string, from: string) =>
+    (await viaServe(f)).inject({ method: 'POST', url: '/v1/login', payload: { username, password: 'wrong-guess' }, headers: { 'x-forwarded-for': from } });
 
   it('behind a proxy, one client cannot lock everyone out', async () => {
     process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW = '3';
@@ -85,8 +87,8 @@ describe('login throttle', () => {
   it('the account under attack is throttled even from a new address each time', async () => {
     process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW = '3';
     const f = await accounts();
-    for (let i = 0; i < 3; i++) await attempt(f, 'chris', `100.64.1.${i}`);
-    expect((await attempt(f, 'chris', '100.64.1.99')).statusCode).toBe(429);
+    for (let i = 0; i < 3; i++) await attempt(f, 'robin', `100.64.1.${i}`);
+    expect((await attempt(f, 'robin', '100.64.1.99')).statusCode).toBe(429);
     expect((await attempt(f, 'someone-else', '100.64.1.99')).statusCode).toBe(401);
   });
 });
@@ -100,7 +102,7 @@ describe('a rehost-scoped token', () => {
     f.post('/v1/agents/preflight', async () => ({ ok: true }));
     f.get('/v1/cli-tokens', async () => []);
     f.post('/v1/agents', async () => ({}));
-    store.insertLocalAccount({ id: 'acct-1', username: 'chris', pwHash: 'x', pwSalt: 'y', hostOwner: true, disabled: false, createdAt: 'now' } as never);
+    store.insertLocalAccount({ id: 'acct-1', username: 'robin', pwHash: 'x', pwSalt: 'y', hostOwner: true, disabled: false, createdAt: 'now' } as never);
     const scoped = store.createCliToken('acct-1', 'peer', 90, 'rehost').token;
     const full = store.createCliToken('acct-1', 'cli').token;
     const as = (token: string, method: 'GET' | 'POST', url: string) => f.inject({ method, url, headers: { authorization: `Bearer ${token}` }, payload: method === 'POST' ? {} : undefined });
@@ -117,11 +119,11 @@ describe('a member of someone else\'s agent', () => {
   it('sees what it can do, not where the owner\'s files are, its env names or its port', async () => {
     const b = await box();
     b.agent('shared', { gatewayPort: 19176, gatewayToken: 'tok' });
-    b.store.setAgentSharedPaths('shared', ['/home/chris/condo-documents']);
+    b.store.setAgentSharedPaths('shared', ['/home/robin/condo-documents']);
     b.store.insertMembership({ id: 'm1', agentId: 'shared', userId: 'member', role: 'user', status: 'active' } as never);
     b.store.insertAgentEnv({ id: 'e1', agentId: 'shared', name: 'STRIPE_KEY', secretRef: 'agent-env/e1', createdAt: 'now' } as never);
     const mine = (await b.f.inject({ method: 'GET', url: '/v1/agents/shared', headers: H })).json();
-    expect(mine.dataSources[0].hostPath).toBe('/home/chris/condo-documents');
+    expect(mine.dataSources[0].hostPath).toBe('/home/robin/condo-documents');
     expect(mine.envVars.map((e: any) => e.name)).toEqual(['STRIPE_KEY']);
     const theirs = (await b.f.inject({ method: 'GET', url: '/v1/agents/shared', headers: { 'x-hatchabot-owner': 'member' } })).json();
     expect(theirs.role).toBe('user');

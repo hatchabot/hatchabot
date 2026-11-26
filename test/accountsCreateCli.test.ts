@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { registerAuth } from '../src/api/auth.js';
+import { registerAuth } from '../src/api/signIn/auth.js';
 import { Store } from '../src/store/store.js';
 
 /**

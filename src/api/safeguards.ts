@@ -96,7 +96,8 @@ export interface SafeguardFacts {
   invitedOnly: boolean;
   /** HATCHABOT_ALLOW_OWNER_HEADER=1: a header chooses the owner. Tests only. */
   ownerHeader: boolean;
-  ports: { main: number; public: number; ops: number; embed: number };
+  /** `proxy`: the listener `tailscale serve` is pointed at (src/api/proxyListener.ts), private as the app's own port. */
+  ports: { main: number; public: number; ops: number; embed: number; proxy?: number };
   autoUpgrade: { ok: boolean; why?: string };
   /** `tailscale funnel` is pointed at the PRIVATE port (someone ran it by hand). undefined: could not be read. */
   funnelOnPrivatePort?: boolean;
@@ -152,15 +153,16 @@ export function evaluateSafeguards(f: SafeguardFacts): SafeguardCheck[] {
       : 'The "Only invited people" switch is off.',
     ...(f.invitedOnly ? {} : { fix: 'Settings → Reach it from anywhere → Only invited people (HATCHABOT_PUBLIC_INVITED_ONLY=1).' }),
   });
-  const clash = [f.ports.main, f.ports.ops, f.ports.embed].includes(f.ports.public);
+  const clash = [f.ports.main, f.ports.ops, f.ports.embed, ...(f.ports.proxy !== undefined ? [f.ports.proxy] : [])].includes(f.ports.public);
+  const serveText = f.ports.proxy !== undefined ? `, tailscale serve's ${f.ports.proxy}` : '';
   const unreadable = !!f.publicOn && f.funnelOnPrivatePort === undefined;
   const listenerOk = !clash && !f.ownerHeader && f.funnelOnPrivatePort !== true && !unreadable;
   out.push({
     id: 'separate-listener', letter: 'd', title: 'Public traffic on its own port, never trusted as local',
     ok: listenerOk,
     detail: f.ownerHeader ? 'HATCHABOT_ALLOW_OWNER_HEADER=1 lets a request header choose the owner. Never with public access.'
-      : clash ? `The public port ${f.ports.public} is also used for something else (app ${f.ports.main}, management door ${f.ports.ops}, memory search ${f.ports.embed}).`
-      : f.funnelOnPrivatePort === true ? `Tailscale Funnel is pointed at the private port ${f.ports.main}: internet traffic would arrive looking like this machine.`
+      : clash ? `The public port ${f.ports.public} is also used for something else (app ${f.ports.main}, management door ${f.ports.ops}, memory search ${f.ports.embed}${serveText}).`
+      : f.funnelOnPrivatePort === true ? `Tailscale Funnel is pointed at a private port (the app's ${f.ports.main}${f.ports.proxy !== undefined ? ` or tailscale serve's ${f.ports.proxy}` : ''}): internet traffic would arrive looking like this machine.`
       : unreadable ? 'Public access is on, but Tailscale Funnel\'s configuration cannot be read, so where it points cannot be confirmed.'
       : `The public listener is 127.0.0.1:${f.ports.public}; everything arriving there is treated as a stranger whatever its headers say.${f.funnelOnPrivatePort === undefined ? ' (Funnel\'s current target could not be read.)' : ''}`,
     ...(listenerOk ? {} : { fix: f.ownerHeader ? 'Remove HATCHABOT_ALLOW_OWNER_HEADER from .env.' : clash ? 'Choose another HATCHABOT_PUBLIC_PORT.' : unreadable ? 'Check that the tailscale command works for this user (tailscale funnel status), or turn public access off.' : `Run: tailscale funnel reset   (then turn public access on from Hatchabot, which points Funnel at port ${f.ports.public} only).` }),

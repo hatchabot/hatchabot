@@ -14,6 +14,8 @@ import Fastify, { type FastifyServerOptions } from 'fastify';
 import { Store } from './store/store.js';
 import { SchemaTooNewError } from './store/schemaVersion.js';
 import { holdInstanceLock, InstanceLockedError, InstanceLockUnwritableError } from './store/instanceLock.js';
+import { restampRollbackMark, takeRollbackMark, type RollbackTaken } from './store/rollbackMark.js';
+import { folderMarkPath, markFolder, sharedFolderFix, sharedFolderWords } from './store/folderMark.js';
 import { LocalSecretStore } from './secrets/localSecretStore.js';
 import { MockProvider } from './providers/mockProvider.js';
 import { LocalDockerProvider, setVolumeEventSink } from './providers/localDockerProvider.js';
@@ -23,14 +25,16 @@ import { TelegramPoolProvisioner } from './channels/telegramPool.js';
 import { TelegramManualProvisioner, verifyBotToken } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
-import { markInterruptedConfirms } from './api/mgmtChat.js';
-import { authIsEnabled, authModeFromEnv, bindHostFor, noSignInRefusal, registerAuth } from './api/auth.js';
-import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
+import { markInterruptedConfirms, type InterruptedConfirm } from './api/ops/mgmtChat.js';
+import { authIsEnabled, authModeFromEnv, bindHostFor, noSignInRefusal, registerAuth } from './api/signIn/auth.js';
+import { openProxyListener, proxyPort, serveOffAppPort, watchForwardedOnAppPort } from './api/proxyListener.js';
+import { listenerDownWords, repointServe, serveStatus, type ServeHandler } from './ops/tailnet.js';
+import { identityConfigFromEnv, IdentityVerifier } from './api/signIn/identity.js';
 import { reconcileAgents, reconcileEventLog, startReconcileLoop } from './orchestrator/lifecycle/reconcile.js';
 import { markInterrupted, runtimeEventLog, setOperationJournal } from './orchestrator/lifecycle/operations.js';
 import { runPostureSweep } from './orchestrator/health/posture.js';
 import { LOCAL_OWNER } from './api/principal.js';
-import { firstAccountAdoption } from './api/firstAccount.js';
+import { firstAccountAdoption } from './api/signIn/firstAccount.js';
 import type { RuntimeProvider } from './providers/provider.js';
 import { syncEnvFile } from './config/envFile.js';
 
@@ -84,6 +88,19 @@ const store = (() => {
     console.error(err.message);
     process.exit(1);
   }
+})();
+// A rollback since the last start (scripts/upgrade.sh, deploy-release.sh and
+// restart.sh write its time beside the database): the holds kept before it
+// that would change an agent if served are let go, before anything reads
+// one. The release gone back to may have neither served nor cleared them,
+// and taken up now they would act days late (HB-0840; which kinds:
+// HOLDS_AFTER_ROLLBACK in src/store/rollbackMark.ts). Logged once `app` is built.
+// Never a reason not to start: a drop the database refuses leaves the note
+// for the next start (it says so), and anything else is said and passed by.
+// This start, for a note written while it runs (restampRollbackMark, at the stop).
+const startedAt = new Date();
+const rolledBack: RollbackTaken | undefined = (() => {
+  try { return takeRollbackMark(store, DB_PATH); } catch (err) { return { dropped: [], failed: String((err as Error)?.message ?? err) }; }
 })();
 const secrets = new LocalSecretStore(db, LocalSecretStore.keyFromEnv());
 // The log callback is deferred on purpose: `app` is built further down, and
@@ -152,6 +169,27 @@ const tls =
 const serverOptions: FastifyServerOptions = { logger: { serializers: { req: requestLogSerializer as never } } };
 if (tls) (serverOptions as FastifyServerOptions & { https: unknown }).https = tls;
 const app = Fastify(serverOptions);
+// The holds a rollback let go of (takeRollbackMark, above).
+if (rolledBack) {
+  const kinds: Record<string, number> = {};
+  for (const h of rolledBack.dropped) kinds[h.kind] = (kinds[h.kind] ?? 0) + 1;
+  const { before, unread, failed, leftBehind, keptFor } = rolledBack;
+  // Kept on purpose: a later release's kinds of hold are there, and the release that knows them lets go of them.
+  const noteKept = keptFor ? `holds of kinds this release does not know (${keptFor.join(', ')}) were kept before the rollback: the note stays for the release that knows them` : undefined;
+  app.log.warn({ before, dropped: rolledBack.dropped.length, kinds, agents: rolledBack.dropped.map((h) => h.agentId).filter((id, i, all) => all.indexOf(id) === i), ...(unread ? { unread } : {}), ...(failed ? { failed } : {}), ...(leftBehind ? { leftBehind } : {}), ...(noteKept ? { noteKept } : {}) }, failed ? 'holds.rollback_drop_failed' : 'holds.dropped_after_rollback');
+}
+// Another install's database in this one's folder: both write the same files
+// beside them, its memory search keys among them (HB-1151). Said, never a
+// reason not to start; a folder the mark cannot be written in neither.
+try {
+  const marked = markFolder(DB_PATH);
+  const folder = dirname(resolve(DB_PATH));
+  if (marked.others.length) app.log.warn({ folder, others: marked.others }, `data.folder_shared: ${sharedFolderWords(folder, marked.others)}. ${sharedFolderFix(DB_PATH)}`);
+  if (marked.unwritten) {
+    app.log.warn({ mark: folderMarkPath(DB_PATH), error: marked.unwritten },
+      `data.folder_mark_unwritten: Hatchabot could not write ${folderMarkPath(DB_PATH)} (${marked.unwritten}), so another install whose database is in this folder is not told that this one's is too`);
+  }
+} catch (err) { app.log.warn({ err: String(err) }, 'data.folder_mark_failed'); }
 installErrorHandler(app);
 
 // Mend any state drift from reboots/crashes before serving a single request —
@@ -177,7 +215,8 @@ setOperationJournal((e, d) => app.log.info(d, e));
 setVolumeEventSink(runtimeEventLog(store, (e, d) => app.log.warn(d, e)));
 markInterrupted(store);
 // A confirmed card whose change the restart cut off says so (HB-1053).
-try { markInterruptedConfirms(store); } catch (err) { app.log.warn({ error: String(err) }, 'mgmt.interrupted_confirms_unmarked'); }
+let interruptedConfirms: InterruptedConfirm[] = [];
+try { interruptedConfirms = markInterruptedConfirms(store); } catch (err) { app.log.warn({ error: String(err) }, 'mgmt.interrupted_confirms_unmarked'); }
 // Reconcile's findings about an agent go to its timeline as well as the
 // journal (they were journal-only: "found stopped" never reached Activity).
 const reconcileLog = reconcileEventLog(store, (e, d) => app.log.info(d, e));
@@ -240,6 +279,9 @@ if (sweptRefs.length) app.log.warn({ refs: sweptRefs }, 'deleted orphaned bot-to
 // agent's removal, an import's rollback, a source's removal).
 const sweptAgentRefs = store.sweepOrphanAgentSecrets();
 if (sweptAgentRefs.length) app.log.warn({ count: sweptAgentRefs.length }, 'deleted orphaned agent secrets');
+// A reverse proxy still pointed at this port, not at the listener for it: said once a start, and under
+// Alerts. Counted once the move of serve below has left nothing on this port (serveOffAppPort).
+const appPortWatch = watchForwardedOnAppPort(app, { main: PORT, proxy: proxyPort() });
 const adoptForFirstAccount = firstAccountAdoption(store, app.log, Date.now,
   authModeFromEnv() === 'identity'
     ? { identityOwner: () => store.identityInstallOwner(process.env.HATCHABOT_OWNER_EMAIL) }
@@ -293,6 +335,12 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
     } catch (err) {
       app.log.error({ err }, 'shutdown checkpoint failed');
     }
+    // A rollback's note written while this process ran gets the time it
+    // stops, after every hold it kept (HB-0840).
+    try {
+      const stamp = restampRollbackMark(DB_PATH, startedAt);
+      if (stamp) app.log.warn({ at: stamp }, 'holds.rollback_note_restamped');
+    } catch { /* the note stays as the script wrote it */ }
     instanceLock.release(); // last: the database is closed
     process.exit(0);
   });
@@ -302,7 +350,7 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
 // credential behind it. From this machine it needs nothing; from anywhere else
 // it needs this code, which is why it goes to the log and nowhere else.
 if (authModeFromEnv() === 'accounts' && store.countLocalAccounts() === 0) {
-  const { setupCode } = await import('./api/accountsAuth.js');
+  const { setupCode } = await import('./api/signIn/accountsAuth.js');
   app.log.warn(
     { setupCode: setupCode() },
     'first-run setup code — needed only to create the first account from another machine',
@@ -344,6 +392,8 @@ startReconcileLoop(store, providerForHost, reconcileLog, undefined, bootReconcil
 // moved to the secret store before any request or install can touch the rows.
 await routes.stashOldPendingSecrets().catch((err) => app.log.error({ err: String(err) }, 'app_pending.secrets_migration_failed'));
 void routes.resumeOperations().catch((err) => app.log.error({ err: String(err) }, 'operations.resume_failed'));
+// Each owner whose confirmed changes the restart cut off (above) hears it from their management agent too (HB-1053).
+void routes.tellInterruptedConfirms(interruptedConfirms).catch((err) => app.log.warn({ err: String(err) }, 'mgmt.interrupted_note_failed'));
 routes.startOperationRetryLoop();
 
 // Finish any bot rename that didn't land. Renaming happens at the worst moment
@@ -408,6 +458,30 @@ postureDaily.unref();
   }
 }
 await app.listen({ port: PORT, host: bindHost });
+// The proxy's own listener (HB-1239): `tailscale serve` is pointed at it, and
+// only there is a request's X-Forwarded-For believed, so each tailnet device
+// has its own sign-in limit while a loopback peer on PORT (an agent's
+// container, under a rootless daemon or Docker Desktop) cannot choose one.
+// An install whose serve still lands on PORT is pointed here at each start;
+// where Tailscale refuses (a Linux user who is not its operator), the log,
+// hatchabot doctor and the setup guide say what to run. Never onto a
+// listener that did not open: then serve is left as it is, and moved back
+// by nothing (the owner's call, 2026-11-24).
+{
+  const proxy = await openProxyListener(app, proxyPort());
+  if (!proxy.listening) {
+    // What that means for the tailnet depends on where serve sends it: said as it is.
+    const say = (handlers: ServeHandler[]) => app.log.error({ error: proxy.error }, listenerDownWords(handlers, PORT, proxy.port, proxy.error));
+    void serveStatus().then((st) => say(st.handlers)).catch(() => say([]));
+  } else {
+    void repointServe(PORT, proxy).then((r) => {
+      if (r.moved.length) app.log.warn({ moved: r.moved, port: proxy.port }, 'tailscale.serve_repointed: tailscale serve now sends the tailnet to the listener for it');
+      if (r.left.length) app.log.error({ left: r.left, error: r.error }, `Tailscale serve still sends your tailnet to port ${PORT}, where every device on it shares one sign-in limit: run the command shown`);
+      else if (r.error) app.log.warn({ error: r.error }, `tailscale.serve_repoint_failed: ${r.error}`);
+      if (serveOffAppPort(r)) appPortWatch.arm();
+    }).catch((err: unknown) => app.log.warn({ err: String(err) }, 'tailscale.serve_repoint_failed'));
+  }
+}
 // Public access (docs/public-access.md): off unless HATCHABOT_PUBLIC_ACCESS says
 // otherwise. When it is on, the public listener opens on loopback for
 // Tailscale Funnel, and serves only while every safeguard holds: with one
@@ -464,7 +538,7 @@ if (store.listOpsAgents().length) {
         // Under the busy flag: the boot reconcile and a hand-run action must
         // not look at the container in the gap between the stop and the
         // start and mark it stopped (30th audit).
-        await whileBusy(a.id, async () => {
+        await whileBusy(a.id, 'ops-tools-restart', async () => {
           await provider.stop(a.runtimeRef!);
           await provider.start(a.runtimeRef!);
         });

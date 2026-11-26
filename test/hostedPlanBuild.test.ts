@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { claudePlanAllowed } from '../src/config/claudePlan.js';
-import { usableForMgmt } from '../src/api/mgmtLlm.js';
+import { usableForMgmt } from '../src/api/ops/mgmtLlm.js';
 import type { AIProfile } from '../src/domain/types.js';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';

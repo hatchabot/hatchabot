@@ -1,4 +1,4 @@
-// web/app/signin.js: the second factor (passkeys and codes), the sign-in screen, Google sign-in, accounts and recovery codes.
+// web/app/signin.js: the second factor (passkeys and codes), reaching it from anywhere and new-device notices, the page's config (loadConfig), the sign-in screen, Google sign-in, accounts and recovery codes, the page's sign-in state across accounts (pageSignedIn, pageSessionEnded, pageHold and the rest), your account (loadMyAccount) and its linked Discord and Telegram.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -1069,21 +1069,219 @@ document.addEventListener('keydown', (e) => {
 loginDlg?.addEventListener('cancel', (e) => e.preventDefault());
 loginDlg?.addEventListener('keydown', (e) => { if (e.key === 'Escape') e.preventDefault(); });
 
-let toastTimer;
-/** Adopt's scheduled tasks that did not come across, said: unread ones read as none (review of 2026-10-22). */
-function adoptTasksMissed(c) {
-  if (!c) return '';
-  const parts = [];
-  if (c.failed) parts.push(`${c.failed} scheduled task${c.failed > 1 ? 's' : ''} could not be carried`);
-  if (c.error) parts.push(`its scheduled tasks were not all read: ${c.error}`);
-  return parts.length ? ` · ${parts.join('; ')}.` : '';
+// The caller's own account (email + linked Telegram). Drives the "That's me"
+// button on pairing cards and the Telegram line under Settings → You.
+let myAccount = {};
+/**
+ * What only the machine's owner can use, hidden from anyone else: every save
+ * there would be refused (HB-0443). Only on a known "no": a failed read of the
+ * account leaves them showing, and the server guards them either way.
+ */
+function paintMachineOwnerOnly() {
+  for (const id of ['extraKeysHead', 'mediaKeyDrawer', 'searchKeyDrawer', 'addRunnerBlock', 'botInvDrawer']) $(id).hidden = myAccount.hostOwner === false;
 }
-function toast(msg, ms, cls) {
-  const t = $('toast');
-  t.textContent = msg;
-  t.className = 'toast show' + (cls ? ` ${cls}` : '');
-  clearTimeout(toastTimer);
-  // Long messages (errors, mostly) get reading time; a tap dismisses early.
-  toastTimer = setTimeout(() => t.classList.remove('show'), ms ?? Math.max(2600, msg.length * 60));
-  t.onclick = () => { clearTimeout(toastTimer); t.classList.remove('show'); };
+/**
+ * Who this page is for. Sign out reloads, but a session that ends by a 401 and a
+ * sign-in do not, so the page itself outlives the person (HB-0446). When the session
+ * ends the chat leaves the page at once; what it held waits, out of sight, until the
+ * next account is read. The same account gets it back. Another finds nothing of the
+ * last one's, here or in what the page held for them. Read again on each meta refresh,
+ * which also catches another tab having signed in as someone else.
+ */
+let pagePerson = null, pagePersonAway = false, pagePersonRead = 0, pageCleared = false, pageSignedOut = false;
+function pageSessionEnded() {
+  sfDrop(); // a request waiting on a prompt for this session is not sent under the next one
+  sharingForget();
+  bpClose(); // pictures and unsent sign-in text must not remain under the sign-in screen
+  v2VoiceForget();
+  v2SkillsForget();
+  if ($('consoleDlg').open) closeConsole(); // voice input and console sessions end with this sign-in
+  pageSignedOut = true;
+  pagePersonAway = true; pageCleared = false;
+  window.__sfEnrolShown = false; // whoever comes next is taken to add a factor if they need one
+  pagePersonRead++; // a read begun in that session does not say who comes next
+  pageSecretsPutAway();
+  webChatPutAway();
+}
+function pagePersonIs(ownerId) {
+  if (!ownerId) return;
+  const another = pagePerson ? pagePerson !== ownerId : pagePersonAway;
+  const changed = !!pagePerson && pagePerson !== ownerId; // this page showed someone else (not: it never knew who)
+  pagePerson = ownerId; pagePersonAway = false; pageSignedOut = false; // a read that works: signed in (here, or in another tab)
+  if (sfPending?.for && sfPending.for !== ownerId) sfDrop(); // raised for someone else
+  const cleared = pageCleared; pageCleared = false;
+  if (another) {
+    webChatForget();
+    if (!cleared) pageClearLast(ownerId);
+  }
+  pageSecretsBack(ownerId);
+  if (changed) { pageReloadWanted = true; pageReloadWhenQuiet(); }
+}
+/**
+ * Another account than the one this page showed: the page loads again, so nothing of the last person's is left in
+ * it, in a field or in what the page held for them (HB-0491). pageClearLast has already taken off what it knows of,
+ * which covers the wait. Not while a second-factor step is under way, which a reload would lose: a sign-in still
+ * finishing (and the recovery code it shows), the second-factor prompt (a passkey's included) and the request it was
+ * asked for, an authenticator app being added, a passkey being made, a request for new codes, backup codes or a
+ * recovery code on the screen or waiting for their person. Each of those asks again when it ends.
+ */
+let pageReloadWanted = false, pageReloadTimer = 0, pageSignIns = 0, pageHolds = 0;
+/** location.reload(), on its own: the click-through check cannot follow a reload, so it puts a counter here. */
+function pageReload() { location.reload(); }
+/** A sign-in form at work, from its first request to the end of pageSignedIn (with what it shows); the sign-in screen itself is loginDlg.open. */
+function pageSignInEnded() { pageSignIns--; pageReloadWhenQuiet(); }
+async function pageSigningIn(fn) { pageSignIns++; try { return await fn(); } finally { pageSignInEnded(); } }
+/** A request whose answer must be seen (new codes, a setup, a passkey being made, what a prompt was for): held until it settles. */
+async function pageHold(fn) { pageHolds++; try { return await fn(); } finally { pageHolds--; pageReloadWhenQuiet(); } }
+function pageSecondFactorBusy() {
+  return pageSignIns > 0 || pageHolds > 0 || loginDlg.open || sfDlg.open || (aiDlg.open && !$('sfTotpBox').hidden)
+    || backupDlg.open || recoveryDlg.open || pageSecretsAway.length > 0;
+}
+function pageReloadWhenQuiet() {
+  if (!pageReloadWanted || pageReloadTimer) return;
+  // A task later: what the same task goes on to open (backup codes, once an app is confirmed) is under way by then.
+  pageReloadTimer = setTimeout(() => {
+    pageReloadTimer = 0;
+    if (!pageReloadWanted || pageSecondFactorBusy()) return;
+    pageReloadWanted = false;
+    pageReload();
+  }, 0);
+}
+// Settings closed (an app's setup left open there is let go), or a dialog shut by Escape.
+document.addEventListener('DOMContentLoaded', () => {
+  for (const id of ['sfDlg', 'aiDlg']) $(id)?.addEventListener('close', () => pageReloadWhenQuiet());
+});
+/**
+ * A one-time secret on the screen, backup codes or a recovery code, is its person's to read until they say they have
+ * saved it (HB-0500). When the session ends it leaves the page, so it is not left under the sign-in for whoever is at the
+ * keyboard, and waits with whose it is. A read that names that person shows it again; a read that names anyone else, and
+ * it is gone, and what waited on it goes on. Whose: what the server said, and only that. One shown without an owner is
+ * nobody's: it is not given back to anyone (a read never claims it for whoever happens to be signed in by then).
+ */
+const pageSecretOwner = new Map();
+let pageSecretsAway = [];
+/**
+ * A secret that answered after this page was read to be someone else's (a request in flight while another tab signed in
+ * as another account): not shown to them. The page is about to load again for them anyway (HB-0491).
+ */
+function pageSecretNotHere(ownerId) {
+  if (!ownerId || !pagePerson || pagePersonAway || ownerId === pagePerson) return false;
+  toast('New codes were made for the account signed in before, and are not shown to this one. Sign in as it and make new ones in Settings → You.', 10000);
+  return true;
+}
+/** Answered after the session ended, before a read names who is here now: not shown, but waiting for its person, as one open then does. */
+function pageSecretLater(whose, show) {
+  const waiting = new Promise((res) => { pageSecretsAway.push({ whose: whose || '', back: () => show().then(res), drop: () => res() }); });
+  // Signed in, but not read yet (a first factor added at the public address): read now, so they come back at once.
+  if (!loginDlg.open && !pageSignIns) loadMyAccount().catch(() => {});
+  return waiting;
+}
+function pageSecretShown(dlg, ownerId) {
+  pageSecretOwner.set(dlg, ownerId || '');
+}
+function pageSecretsPutAway() {
+  if (backupDlg.open) {
+    const codes = $('backupCodes').textContent.split('\n'), whose = pageSecretOwner.get(backupDlg), done = backupResolve;
+    backupResolve = null;
+    $('backupCodes').textContent = ''; backupDlg.close();
+    pageSecretsAway.push({ whose, back: () => showBackupCodes(codes, whose).then(done), drop: () => done?.() });
+  }
+  if (recoveryDlg.open) {
+    const code = $('recoveryCode').textContent, lede = $('recoveryLede').innerHTML, whose = pageSecretOwner.get(recoveryDlg), done = recoveryResolve;
+    recoveryResolve = null;
+    $('recoveryCode').textContent = ''; recoveryDlg.close();
+    pageSecretsAway.push({ whose, back: () => showRecoveryCode(code, lede, whose).then(done), drop: () => done?.() });
+  }
+}
+function pageSecretsBack(ownerId) {
+  const away = pageSecretsAway;
+  pageSecretsAway = [];
+  for (const s of away) (s.whose && s.whose === ownerId ? s.back : s.drop)();
+}
+/** `next`: who has just been read, whose own one-time secret on the screen stays. */
+function pageClearLast(next = '') {
+  sharingForget();
+  v2VoiceForget();
+  v2SkillsForget();
+  v2Close();
+  bpClose();
+  if ($('consoleDlg').open) closeConsole();
+  consoleTabs = [];
+  pairingsDrop(); // who knocked on the last person's agents, with their names and the buttons to let them in
+  const theirs = (dlg) => !!next && dlg.open && pageSecretOwner.get(dlg) === next;
+  if (backupDlg.open && !theirs(backupDlg)) closeBackupCodes(); // off the page too, and what waits on them goes on
+  sfCloseTotp(); $('sfCurPw').value = ''; // Access is drawn again for whoever comes next: not a setup or a password of the last person's
+  const keep = [backupDlg, recoveryDlg].filter(theirs).map((d) => `:not(#${d.id})`).join('');
+  document.querySelectorAll(`dialog[open]:not(#loginDlg):not(#sfDlg)${keep}`).forEach((d) => d.close());
+  recoveryCodeClosed(); // its code off the page, and what waits on it goes on, now (unless it is theirs, and open)
+  aiRowsDrawn = {}; moveSourceState = null; applyModelState = null; migrateState = null;
+  reportCur = null; reportGen++; reportLoading = null; // a draft still loading does not paint
+  $('reportDrafts').replaceChildren();
+  for (const id of ['reportTitle', 'reportWhat', 'reportRTitle', 'reportBody']) $(id).value = '';
+  // What the last person typed and did not save: every password box (keys, tokens, client secrets, current passwords),
+  // every free-text box and form, back to what the page drew. Not the sign-in or the prompt, which are this person's (HB-0498, HB-0491).
+  for (const el of document.querySelectorAll('input, textarea')) {
+    if (el.closest('#loginDlg, #sfDlg') || /^(checkbox|radio|hidden|button|submit|reset|file|range|color)$/i.test(el.type)) continue;
+    el.value = el.type === 'password' ? '' : el.defaultValue;
+  }
+}
+/**
+ * A sign-in landed. Who it is comes first, so nothing of another account's is drawn for them, and what the path shows next is not closed.
+ * `show`: what this sign-in brought to be read once (a recovery code), shown here so a reload for another account waits for it (HB-0491).
+ */
+async function pageSignedIn(show) {
+  try {
+    await loadMyAccount();
+    // Not told who: no second factor yet (Access is open for them to add one), or the read failed. What was open for the last person goes now,
+    // because the read that later succeeds must not close what this one has opened by then: their backup codes, a recovery code. Drafts wait for that read.
+    if (pagePersonAway && !pageCleared) {
+      pageClearLast();
+      pageCleared = true;
+      if (window.__sfEnrolShown && !aiDlg.open) void openAiDlg('access'); // drawn for them, not what the last person left
+    }
+    await refresh(true);
+  } finally {
+    show?.(); // before the sign-in ends (pageSignInEnded): a reload waits for it
+  }
+}
+async function loadMyAccount() {
+  const read = ++pagePersonRead;
+  try {
+    const account = await api('/v1/account');
+    if (read !== pagePersonRead) return;
+    myAccount = account;
+    pagePersonIs(myAccount.ownerId);
+  } catch { if (read !== pagePersonRead) return; myAccount = {}; }
+  paintMachineOwnerOnly();
+  loadRebuildPolicy(); // the cards' wording depends on it
+  const el = $('tgLinkStatus');
+  if (el) el.innerHTML = myAccount.telegramUserId
+    ? `✓ Linked (Telegram id <code class="pii">${esc(myAccount.telegramUserId)}</code>) — agents you create admit you automatically.
+       <button class="hbtn" ${onAction('click', 'unlinkTelegram')}>Unlink</button>`
+    : `Not linked — message one of your agents on Telegram and choose <b>That's me — link</b> on the request card.
+       Linked, every agent you create admits your Telegram without pairing again.`;
+  const dc = $('dcLinkStatus');
+  if (dc) dc.innerHTML = myAccount.discordUserId
+    ? `✓ Linked (Discord id <code class="pii">${esc(myAccount.discordUserId)}</code>) — every Discord bot you attach admits you from its first build.
+       <button class="hbtn" ${onAction('click', 'unlinkDiscord')}>Unlink</button>`
+    : `Not linked — send one of your agents a direct message on Discord and choose <b>That's me</b> on the request card.
+       Linked, every Discord bot you attach admits you without pairing again.`;
+}
+
+async function unlinkDiscord() {
+  if (!confirm('Unlink your Discord from this login?\n\nYour agents forget your Discord identity: each asks again ("That\'s me") the next time you message it, and stops admitting it at its next rebuild.')) return;
+  try {
+    await api('/v1/account/discord', { method: 'DELETE' });
+    toast('Unlinked.');
+    loadMyAccount();
+  } catch (e) { toast(e.message); }
+}
+
+async function unlinkTelegram() {
+  if (!confirm('Unlink your Telegram from this login?\n\nExisting agents keep working — only agents created afterwards stop admitting this Telegram automatically.')) return;
+  try {
+    await api('/v1/account/telegram', { method: 'DELETE' });
+    toast('Unlinked.');
+    loadMyAccount();
+  } catch (e) { toast(e.message); }
 }

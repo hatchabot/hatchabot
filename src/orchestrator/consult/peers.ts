@@ -2,6 +2,7 @@ import type { Agent } from '../../domain/types.js';
 import type { SecretStore } from '../../secrets/secretStore.js';
 import { Store } from '../../store/store.js';
 import { refused, said, type Answer } from './answers.js';
+import { keyedLock } from '../../util/queues.js';
 
 /** One agent's peers as the owner sees them: those it may consult, and every agent it could. */
 export interface PeersView {
@@ -68,7 +69,7 @@ export function createPeers(deps: PeersDeps): Peers {
    * repairing it — the agent's consults all failed (concurrency review,
    * 2026-10-09). A token whose secret no longer matches is minted again.
    */
-  const callTokenMints = new Map<string, Promise<void>>();
+  const callTokenMints = keyedLock();
   /** Still the owner's, and not deleted or being deleted: asked again after every wait (HB-0965). */
   const stillTheirs = (agentId: string, ownerId: string): boolean => store.getAgent(agentId)?.ownerId === ownerId && !agentGone(agentId);
   const ensureAgentCallToken = (agentId: string, ownerId: string): Promise<void> => {
@@ -86,10 +87,7 @@ export function createPeers(deps: PeersDeps): Peers {
       if (!stillTheirs(agentId, ownerId)) { await secrets.delete(ref).catch(() => {}); return; }
       store.createAgentCallToken(agentId, ownerId, token);
     };
-    const next = (callTokenMints.get(agentId) ?? Promise.resolve()).catch(() => {}).then(run);
-    const settled = next.catch(() => {}).finally(() => { if (callTokenMints.get(agentId) === settled) callTokenMints.delete(agentId); });
-    callTokenMints.set(agentId, settled);
-    return next;
+    return callTokenMints.run(agentId, run);
   };
 
   const view: Peers['view'] = (agent, ownerId) => {

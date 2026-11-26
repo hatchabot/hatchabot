@@ -10,7 +10,7 @@ import { readPage } from '../scripts/page-source.mjs';
  * nothing can creep back.
  */
 const CEILING = {
-  /** Routes registered in src/api/routes.ts. A new route goes in a feature file, like src/api/inspectRoutes.ts. */
+  /** Routes registered in src/api/routes.ts. A new route goes in a feature file, like src/api/agents/inspectRoutes.ts. */
   routesInRoutesTs: 0,
   /** `req.body as` casts in src/api/. Parse the body with a zod schema instead (HB-0814). */
   bodyCastsInApi: 0,
@@ -31,8 +31,10 @@ function countInlineHandlers(text: string): number {
   return text.match(/\bon[a-z]+=\\?["']/g)?.length ?? 0;
 }
 
-function apiFiles(): string[] {
-  return readdirSync('src/api').filter((f) => f.endsWith('.ts')).map((f) => join('src/api', f));
+/** Every .ts file under src/api/, its folders included (HB-0874). */
+function apiFiles(dir = 'src/api'): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? apiFiles(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : []);
 }
 
 const HOW = 'A ceiling in test/sizeRatchets.test.ts.';
@@ -44,9 +46,16 @@ describe('size ratchets', () => {
     expect(countInlineHandlers(`<button onclick="go()">x</button> '<i onchange=\\"f()\\">' el.onclick = f; json="x"`)).toBe(2);
   });
 
+  it('reads every file src/api/routes.ts imports, in the folders of src/api/ too (HB-0874)', () => {
+    const scanned = new Set(apiFiles());
+    const imported = [...read('src/api/routes.ts').matchAll(/from '\.\/([\w/]+)\.js'/g)].map((m) => join('src/api', `${m[1]}.ts`));
+    expect(imported.length).toBeGreaterThan(30);
+    expect(imported.filter((f) => !scanned.has(f))).toEqual([]);
+  });
+
   it('src/api/routes.ts registers no more routes than its ceiling', () => {
     const n = countRoutes(read('src/api/routes.ts'));
-    expect(n, `${HOW} Put a new route in a feature file (registerXRoutes(app, ctx: RouteContext), the pattern of src/api/inspectRoutes.ts), not in registerRoutes.`)
+    expect(n, `${HOW} Put a new route in a feature file (registerXRoutes(app, ctx: RouteContext), the pattern of src/api/agents/inspectRoutes.ts), not in registerRoutes.`)
       .toBeLessThanOrEqual(CEILING.routesInRoutesTs);
     expect(n, `${HOW} Routes moved out: lower routesInRoutesTs to ${n}.`).toBe(CEILING.routesInRoutesTs);
   });

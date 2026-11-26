@@ -469,7 +469,7 @@ describe('scripts/follow-channel.sh with the real upgrade.sh (audit #042)', () =
     const env = scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: join(app, 'scripts', 'restart.sh'), HATCHABOT_UPGRADE_IMAGE: '0' });
     const git = (...args: string[]) => execFileSync(REAL_GIT, args, { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git('init', '-q', '-b', 'main');
-    for (const f of ['follow-channel.sh', 'follow-tries.sh', 'upgrade.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    for (const f of ['follow-channel.sh', 'follow-tries.sh', 'upgrade.sh', 'upgrade-helpers.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     // stable names v1.1.0 when asked first, and v1.2.0 from the next question on (promoted meanwhile).
     writeFileSync(join(app, 'scripts', 'release-target.sh'), `#!/usr/bin/env bash\necho "$1" >> ${JSON.stringify(asked)}\nif [ "$(wc -l < ${JSON.stringify(asked)})" -le 1 ]; then echo v1.1.0; else echo v1.2.0; fi\n`, { mode: 0o755 });
     // v1.2.0 does not come up; the others do.
@@ -506,7 +506,7 @@ describe('scripts/follow-channel.sh, a pinned upgrade killed part-way, with the 
     const env = scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: 'true', HATCHABOT_UPGRADE_IMAGE: '0' });
     const git = (...args: string[]) => execFileSync(REAL_GIT, args, { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git('init', '-q', '-b', 'main');
-    for (const f of ['follow-channel.sh', 'follow-tries.sh', 'upgrade.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    for (const f of ['follow-channel.sh', 'follow-tries.sh', 'upgrade.sh', 'upgrade-helpers.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     writeFileSync(join(app, 'scripts', 'release-target.sh'), '#!/usr/bin/env bash\necho "asked, though pinned" >&2\nexit 9\n', { mode: 0o755 });
     writeFileSync(join(app, '.gitignore'), 'node_modules/\nnode_modules.prev/\ndata/\n');
     for (const v of ['1.0.0', '1.1.0']) { writeFileSync(join(app, 'package.json'), JSON.stringify({ version: v })); git('add', '-A'); git('commit', '-qm', `v${v}`); git('tag', `v${v}`); }
@@ -543,7 +543,7 @@ describe('scripts/follow-channel.sh, an upgrade killed part-way and no network, 
     const env = scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: join(bin, 'restart'), HATCHABOT_UPGRADE_IMAGE: '0' });
     const git = (...args: string[]) => execFileSync(REAL_GIT, args, { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git('init', '-q', '-b', 'main');
-    for (const f of ['follow-channel.sh', 'follow-tries.sh', 'upgrade.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    for (const f of ['follow-channel.sh', 'follow-tries.sh', 'upgrade.sh', 'upgrade-helpers.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     writeFileSync(join(app, 'scripts', 'release-target.sh'), '#!/usr/bin/env bash\necho "no network" >&2\nexit 9\n', { mode: 0o755 });
     writeFileSync(join(app, '.gitignore'), 'node_modules/\nnode_modules.prev/\ndata/\n');
     for (const v of ['1.0.0', '1.1.0']) { writeFileSync(join(app, 'package.json'), JSON.stringify({ version: v })); git('add', '-A'); git('commit', '-qm', `v${v}`); git('tag', `v${v}`); }
@@ -580,7 +580,7 @@ describe('scripts/follow-channel.sh, a pin left by a kill on a clone, with the r
     const env = scriptEnv(home, `${bin}:/usr/bin:/bin`, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: 'true', HATCHABOT_UPGRADE_IMAGE: '0', ...extra });
     const git = (...args: string[]) => execFileSync(REAL_GIT, args, { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git('init', '-q', '-b', 'main');
-    for (const f of ['follow-channel.sh', 'follow-tries.sh', 'upgrade.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
+    for (const f of ['follow-channel.sh', 'follow-tries.sh', 'upgrade.sh', 'upgrade-helpers.sh']) writeFileSync(join(app, 'scripts', f), readFileSync(join('scripts', f)), { mode: 0o755 });
     writeFileSync(join(app, 'scripts', 'release-target.sh'), `#!/usr/bin/env bash\necho "$1" >> '${root}/asked.log'\necho v1.0.0\n`, { mode: 0o755 });
     writeFileSync(join(app, '.gitignore'), 'node_modules/\nnode_modules.prev/\ndata/\n');
     for (const v of ['1.0.0', '1.1.0']) { writeFileSync(join(app, 'package.json'), JSON.stringify({ version: v })); git('add', '-A'); git('commit', '-qm', `v${v}`); git('tag', `v${v}`); }
@@ -644,7 +644,8 @@ function prodWorld(v11: Record<string, string> = {}, [oldTag, newTag] = ['v1.0.0
   const log = join(root, 'calls.log');
   writeFileSync(join(bin, 'systemctl'), `#!/usr/bin/env bash\necho "systemctl $*" >> ${JSON.stringify(log)}\nexit "\${FAKE_SYSTEMCTL_RC:-0}"\n`, { mode: 0o755 });
   writeFileSync(join(bin, 'npm'), `#!/usr/bin/env bash\necho "npm $*" >> ${JSON.stringify(log)}\nexit 0\n`, { mode: 0o755 });
-  writeFileSync(join(bin, 'curl'), '#!/usr/bin/env bash\necho \'<script>window.HATCHABOT_VERSION="1.1.0"</script>\'\n', { mode: 0o755 });
+  // The service serves the release checked out: the new one once deployed, the old one once put back.
+  writeFileSync(join(bin, 'curl'), '#!/usr/bin/env bash\nv="$(sed -n \'s/.*"version":"\\([^"]*\\)".*/\\1/p\' package.json)"\necho "<script>window.HATCHABOT_VERSION=\\"$v\\"</script>"\n', { mode: 0o755 });
   symlinkSync(process.execPath, join(bin, 'node'));
   const env = scriptEnv(home, `${bin}:/usr/bin:/bin`);
   const git = (cwd: string, ...args: string[]) => execFileSync(REAL_GIT, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env }).trim();
@@ -653,6 +654,7 @@ function prodWorld(v11: Record<string, string> = {}, [oldTag, newTag] = ['v1.0.0
   writeFileSync(join(src, '.gitignore'), 'node_modules/\nnode_modules.prev/\n');
   writeFileSync(join(src, 'package.json'), '{"name":"x","version":"1.0.0"}\n');
   writeFileSync(join(src, 'scripts', 'deploy-release.sh'), readFileSync('scripts/deploy-release.sh'), { mode: 0o755 });
+  writeFileSync(join(src, 'scripts', 'upgrade-helpers.sh'), readFileSync('scripts/upgrade-helpers.sh'), { mode: 0o644 });
   git(src, 'add', '-A'); git(src, 'commit', '-q', '-m', 'v1'); git(src, 'tag', oldTag);
   writeFileSync(join(src, 'package.json'), '{"name":"x","version":"1.1.0"}\n');
   // The new release's ensure-deps: recorded, and it fails when FAKE_DEPS_RC says so.
@@ -712,6 +714,284 @@ describe('scripts/deploy-release.sh (review, 2026-10-09)', () => {
     // The old one did not restart either, so the rollback did not finish: what to run next is said, and the record stays (review of HB-1212).
     expect(r.stdout).toContain('Then run scripts/deploy-release.sh v1.1.0: it puts v1.0.0 back first, from its record.');
     expect(readdirSync(join(w.home, '.local', 'state', 'hatchabot')).filter((n) => n.endsWith('.from'))).toHaveLength(1);
+  });
+
+  it('a rollback writes its time beside the database before the old release is restarted; a deploy that serves writes none (HB-0840)', () => {
+    const w = prodWorld();
+    writeFileSync(join(w.prod, '.git', 'info', 'exclude'), 'data/\n');
+    mkdirSync(join(w.prod, 'data'));
+    const mark = join(w.prod, 'data', 'hatchabot.sqlite.rolled-back');
+    // The service restarts each time, and says whether the note was there.
+    writeFileSync(join(w.bin, 'systemctl'), `#!/usr/bin/env bash\nif [ -e ${JSON.stringify(mark)} ]; then echo "systemctl marked"; else echo "systemctl unmarked"; fi >> ${JSON.stringify(w.log)}\n`, { mode: 0o755 });
+    // v1.1.0 never answers with its version: rolled back.
+    writeFileSync(join(w.bin, 'curl'), '#!/usr/bin/env bash\necho \'<script>window.HATCHABOT_VERSION="1.0.0"</script>\'\n', { mode: 0o755 });
+    writeFileSync(join(w.bin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const r = w.deploy();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.at()).toBe('v1.0.0');
+    expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toEqual(['systemctl unmarked', 'systemctl marked']);
+    expect(readFileSync(mark, 'utf8')).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$/);
+
+    // Serving the tag writes none; going back to an older tag by name writes it before the restart.
+    rmSync(mark); writeFileSync(w.log, '');
+    writeFileSync(join(w.bin, 'curl'), '#!/usr/bin/env bash\necho \'<script>window.HATCHABOT_VERSION="1.1.0"</script>\'\n', { mode: 0o755 });
+    expect(w.deploy().status).toBe(0);
+    expect(existsSync(mark)).toBe(false);
+    writeFileSync(join(w.bin, 'curl'), '#!/usr/bin/env bash\necho \'<script>window.HATCHABOT_VERSION="1.0.0"</script>\'\n', { mode: 0o755 });
+    const back = spawnSync('bash', [join(w.prod, 'scripts', 'deploy-release.sh'), 'v1.0.0'], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+    expect(back.status, back.stdout + back.stderr).toBe(0);
+    expect(w.at()).toBe('v1.0.0');
+    expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toEqual(['systemctl unmarked', 'systemctl marked']);
+    expect(existsSync(mark)).toBe(true);
+  });
+
+  it('the note only when the tag being left really started: a restart onto it that failed, and a repair of a record that never says `started`, write none (review of HB-0840)', () => {
+    const w = prodWorld();
+    writeFileSync(join(w.prod, '.git', 'info', 'exclude'), 'data/\n');
+    mkdirSync(join(w.prod, 'data'));
+    const mark = join(w.prod, 'data', 'hatchabot.sqlite.rolled-back');
+    // The first restart (onto the tag) fails; every one after works.
+    const count = join(w.root, 'systemctl-count');
+    const failFirst = () => { rmSync(count, { force: true }); writeFileSync(join(w.bin, 'systemctl'), `#!/usr/bin/env bash\nn="$(cat ${JSON.stringify(count)} 2>/dev/null || echo 0)"; echo $((n + 1)) > ${JSON.stringify(count)}\necho "systemctl $*" >> ${JSON.stringify(w.log)}\n[ "$n" != 0 ]\n`, { mode: 0o755 }); };
+    failFirst();
+    const r = w.deploy();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.at()).toBe('v1.0.0');
+    expect(lines(w.log).filter((l) => l.startsWith('systemctl'))).toHaveLength(2);
+    expect(existsSync(mark)).toBe(false);
+    // Named back to an older tag, whose restart failed the same way: the note
+    // written before it goes, as the release gone back to never stopped.
+    writeFileSync(join(w.bin, 'systemctl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    expect(w.deploy().status).toBe(0);
+    failFirst();
+    const back = spawnSync('bash', [join(w.prod, 'scripts', 'deploy-release.sh'), 'v1.0.0'], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+    expect(back.status, back.stdout + back.stderr).toBe(1);
+    expect(w.at()).toBe('v1.1.0');
+    expect(existsSync(mark)).toBe(false);
+    // A record a cut-off run left: written down by the repair only when it says `started`.
+    const sum = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+    const record = join(w.home, '.local', 'state', 'hatchabot', `upgrade-${sum}.from`);
+    writeFileSync(join(w.bin, 'systemctl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    for (const [said, marked] of [['says-started\nrestarted\n', false], ['says-started\nrestarted\nstarted\n', true], ['restarted\n', true]] as const) {
+      w.git(w.prod, 'checkout', '-q', 'v1.0.0');
+      rmSync(mark, { force: true });
+      writeFileSync(record, `from v1.0.0\nto v1.1.0\npins-recorded\n${said}`);
+      const repaired = w.deploy();
+      expect(repaired.stdout, said).toContain('was cut off part-way — putting v1.0.0 back first');
+      expect(repaired.status, repaired.stdout + repaired.stderr).toBe(0);
+      expect(existsSync(mark), said).toBe(marked);
+    }
+  });
+
+  it('an older tag named whose restart fails: the note there before is put back as it was; cut off there, the repair puts it back (HB-1455)', () => {
+    const KEPT = '2026-11-01T10:00:00Z\n';
+    const setUp = () => {
+      const w = prodWorld();
+      writeFileSync(join(w.prod, '.git', 'info', 'exclude'), 'data/\n');
+      mkdirSync(join(w.prod, 'data'));
+      expect(w.deploy().status).toBe(0); // on v1.1.0
+      const mark = join(w.prod, 'data', 'hatchabot.sqlite.rolled-back');
+      writeFileSync(mark, KEPT); // kept for a later release's holds
+      return { w, mark, back: (extra: Record<string, string> = {}) => spawnSync('bash', [join(w.prod, 'scripts', 'deploy-release.sh'), 'v1.0.0'], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod, ...extra } }) };
+    };
+    // The restart onto v1.0.0 fails; the one back works.
+    const { w, mark, back } = setUp();
+    const count = join(w.root, 'systemctl-count');
+    writeFileSync(join(w.bin, 'systemctl'), `#!/usr/bin/env bash\nn="$(cat ${JSON.stringify(count)} 2>/dev/null || echo 0)"; echo $((n + 1)) > ${JSON.stringify(count)}\n[ "$n" != 0 ]\n`, { mode: 0o755 });
+    const r = back();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.at()).toBe('v1.1.0');
+    expect(readFileSync(mark, 'utf8')).toBe(KEPT);
+    expect(existsSync(`${mark}.prev`)).toBe(false);
+    // Killed at that restart, before the service manager was asked: the next deploy's repair puts it back.
+    const c = setUp();
+    writeFileSync(join(c.w.bin, 'systemctl'), '#!/usr/bin/env bash\nkill -9 "$PPID"\nexit 1\n', { mode: 0o755 });
+    expect(c.back().signal).toBe('SIGKILL');
+    expect(readFileSync(c.mark, 'utf8')).not.toBe(KEPT);
+    writeFileSync(join(c.w.bin, 'systemctl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const repaired = c.w.deploy();
+    expect(repaired.stdout).toContain('was cut off part-way — putting v1.1.0 back first');
+    expect(repaired.status, repaired.stdout + repaired.stderr).toBe(0);
+    expect(readFileSync(c.mark, 'utf8')).toBe(KEPT);
+  });
+
+  describe('a restart back that does not come up keeps the record, and the next deploy restarts it again (HB-1456)', () => {
+    const KEPT = '2026-11-01T10:00:00Z\n';
+    /**
+     * prod whose service serves the release checked out, unless `down` is
+     * there: empty for every release, else the one version it names; no real
+     * waits between tries. `named(tag)` deploys a tag by hand, as follow-latest.sh runs it.
+     */
+    const setUp = () => {
+      const w = prodWorld();
+      writeFileSync(join(w.prod, '.git', 'info', 'exclude'), 'data/\n');
+      mkdirSync(join(w.prod, 'data'));
+      const down = join(w.root, 'down');
+      writeFileSync(join(w.bin, 'curl'), `#!/usr/bin/env bash\nv="$(sed -n 's/.*"version":"\\([^"]*\\)".*/\\1/p' package.json)"\nif [ -e ${JSON.stringify(down)} ]; then d="$(cat ${JSON.stringify(down)})"; [ -n "$d" ] && [ "$d" != "$v" ] || exit 7; fi\necho "<script>window.HATCHABOT_VERSION=\\"$v\\"</script>"\n`, { mode: 0o755 });
+      writeFileSync(join(w.bin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      const sum = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.prod], { encoding: 'utf8' }).trim();
+      const named = (tag: string, extra: Record<string, string> = {}) => spawnSync('bash', [join(w.prod, 'scripts', 'deploy-release.sh'), tag], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod, HATCHABOT_FOLLOW_KNOWS_5: '1', ...extra } });
+      const restarts = () => lines(w.log).filter((l) => l.startsWith('systemctl')).length;
+      return { w, down, named, restarts, mark: join(w.prod, 'data', 'hatchabot.sqlite.rolled-back'), record: join(w.home, '.local', 'state', 'hatchabot', `upgrade-${sum}.from`) };
+    };
+
+    it('the rollback\'s: said, with the record\'s name, and exit 1; the next deploy asks first, leaves one serving since as it is, and writes no note again', () => {
+      const { w, down, restarts, mark, record } = setUp();
+      writeFileSync(down, '');
+      const r = w.deploy();
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(w.at()).toBe('v1.0.0');
+      expect(r.stdout).toContain(`v1.0.0 is back in ${w.prod}, but it is not serving 1.0.0 — check: journalctl --user -u hatchabot -n 50. ${record} stays: the next deploy restarts it again if it is still not serving (1 of 3).`);
+      expect(r.stdout).not.toContain('Then run');
+      expect(readFileSync(record, 'utf8')).toMatch(/\nrestarted\nstarted\n(git .*\n)*back\ntries 1\n$/);
+      expect(readFileSync(mark, 'utf8')).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$/); // v1.1.0 started
+      // v1.0.0 came up, slow to start, and has kept holds since the note was taken.
+      writeFileSync(mark, KEPT); rmSync(down);
+      const before = restarts();
+      const next = w.deploy();
+      expect(next.stdout).toContain(`v1.0.0 was put back in ${w.prod} by an earlier run, whose restart of it did not come up or was cut off.`);
+      expect(next.stdout).toContain(`v1.0.0 is back in ${w.prod} and serving now, so ${record} is removed.`);
+      expect(next.status, next.stdout + next.stderr).toBe(0);
+      expect(w.at()).toBe('v1.1.0');
+      expect(restarts() - before).toBe(1); // onto v1.1.0 alone: v1.0.0, serving, was not restarted
+      expect(readFileSync(mark, 'utf8')).toBe(KEPT);
+      expect(existsSync(record)).toBe(false);
+    });
+
+    it('a version it cannot read (no node to read package.json with) is said as that, never as an empty one (review of HB-1456)', () => {
+      const { w, record } = setUp();
+      rmSync(join(w.bin, 'node')); writeFileSync(join(w.bin, 'node'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      const r = w.deploy();
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(r.stdout).toContain('Service restarted but is not serving the version in its package.json (which could not be read) — check: journalctl --user -u hatchabot -n 50');
+      expect(r.stdout).toContain(`v1.0.0 is back in ${w.prod}, but it is not serving the version in its package.json (which could not be read) — check: journalctl --user -u hatchabot -n 50. ${record} stays`);
+      expect(r.stdout).not.toMatch(/serving +—/);
+    });
+
+    it('a release put back that does not serve stops no deploy of another tag: restarted once more, then the deploy goes on (review of HB-1456)', () => {
+      const { w, down, record } = setUp();
+      writeFileSync(down, '');
+      expect(w.deploy().status).toBe(1);
+      writeFileSync(down, '1.0.0'); // v1.1.0 serves now; v1.0.0 still does not
+      const r = w.deploy();
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toContain('(2 of 3)');
+      expect(r.stdout).toContain(`Going on to v1.1.0, which may come up where v1.0.0 does not: this deploy's own record has taken the place of ${record}.`);
+      expect(r.stdout).toContain('Serving 1.1.0.');
+      expect(w.at()).toBe('v1.1.0');
+      expect(existsSync(record)).toBe(false);
+    });
+
+    it('a deploy of the tag put back has nothing more to do: 6 to follow-latest.sh, 3 to any other caller; given up after three restarts, said with how to clear it (review of HB-1456)', () => {
+      const { w, down, named, restarts, record } = setUp();
+      writeFileSync(down, '');
+      expect(w.deploy().status).toBe(1);
+      const two = named('v1.0.0');
+      expect(two.status, two.stdout + two.stderr).toBe(3);
+      expect(two.stdout).toContain('(2 of 3)');
+      const given = `v1.0.0 is back in ${w.prod}, but it has not come up after 3 tries to restart it, so deploys stop restarting it (a rollback to it from another release still does). Once what stops it is fixed (journalctl --user -u hatchabot -n 50 says why), remove the record and restart it: rm "${record}"; systemctl --user restart hatchabot`;
+      const three = named('v1.0.0', { HATCHABOT_FOLLOW_KNOWS_6: '1' });
+      expect(three.status, three.stdout + three.stderr).toBe(6);
+      expect(three.stdout).toContain(given);
+      const before = restarts();
+      const four = named('v1.0.0', { HATCHABOT_FOLLOW_KNOWS_6: '1' });
+      expect(four.status, four.stdout + four.stderr).toBe(6);
+      expect(four.stdout).toContain(given);
+      expect(restarts()).toBe(before); // asked, not restarted
+      expect(w.at()).toBe('v1.0.0');
+      expect(readFileSync(record, 'utf8')).toMatch(/\ntries 3\n(git .*\n)*$/); // each repair checks out v1.0.0 again (its git)
+    });
+
+    it('a note the rollback of an older tag named wrote, once that tag had started, is not taken back by the repair after it (review of HB-1456)', () => {
+      const { w, down, named, mark, record } = setUp();
+      expect(w.deploy().status).toBe(0); // on v1.1.0
+      writeFileSync(mark, KEPT);
+      writeFileSync(down, ''); // v1.0.0 starts, and does not serve; v1.1.0's restart back does not either
+      const back = named('v1.0.0');
+      expect(back.status, back.stdout + back.stderr).toBe(1);
+      expect(w.at()).toBe('v1.1.0');
+      const rollback = readFileSync(mark, 'utf8');
+      expect(rollback).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$/);
+      expect(rollback).not.toBe(KEPT);
+      expect(existsSync(`${mark}.prev`)).toBe(false);
+      rmSync(down);
+      const next = w.deploy();
+      expect(next.status, next.stdout + next.stderr).toBe(0);
+      expect(readFileSync(mark, 'utf8')).toBe(rollback);
+      expect(existsSync(record)).toBe(false);
+    });
+
+    it('follow-latest.sh: past a release put back that does not serve, the newest tag is deployed, not counted as a try it never had; that release the newest, nothing is counted (review of HB-1456)', () => {
+      const { w, down, named, record } = setUp();
+      for (const f of ['follow-latest.sh', 'follow-tries.sh']) writeFileSync(join(w.root, f), readFileSync(join('scripts', f)), { mode: 0o755 });
+      const state = join(w.home, '.local', 'state', 'hatchabot');
+      const tick = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+      writeFileSync(down, '');
+      expect(w.deploy().status).toBe(1); // by hand: v1.0.0 put back, not serving
+      writeFileSync(down, '1.0.0'); // v1.1.0 would serve
+      const on = tick();
+      expect(on.status, on.stdout + on.stderr).toBe(0);
+      expect(on.stdout).toContain('Going on to v1.1.0');
+      expect(on.stdout).not.toMatch(/of 8\)/);
+      expect(w.at()).toBe('v1.1.0');
+      expect(existsSync(record)).toBe(false);
+      // Now v1.1.0, the newest, is put back and not serving: repaired, and nothing counted against it.
+      writeFileSync(down, '');
+      expect(named('v1.0.0').status).toBe(1);
+      for (let i = 0; i < 2; i++) {
+        const r = tick();
+        expect(r.status, r.stdout + r.stderr).toBe(1);
+        expect(r.stdout).toContain(`v1.1.0 is in ${w.prod} again but not serving (above), and there was nothing more to do. This does not count against v1.1.0.`);
+        expect(readdirSync(state).filter((n) => n.startsWith('follow-latest-'))).toEqual([]);
+      }
+      expect(existsSync(record)).toBe(true);
+    });
+
+    it('follow-latest.sh: the newest tag set aside, with a release put back that does not serve: the tick says it sees to that one, not a deploy cut off, and never that it is tried again past the cap (review of HB-1456)', () => {
+      const { w, down, record } = setUp();
+      for (const f of ['follow-latest.sh', 'follow-tries.sh']) writeFileSync(join(w.root, f), readFileSync(join('scripts', f)), { mode: 0o755 });
+      const tick = () => spawnSync('bash', [join(w.root, 'follow-latest.sh')], { encoding: 'utf8', env: { ...w.env, HATCHABOT_PROD_DIR: w.prod } });
+      writeFileSync(down, '');
+      expect(w.deploy().status).toBe(1); // v1.0.0 put back, not serving
+      writeFileSync(join(w.home, '.local', 'state', 'hatchabot', 'follow-latest-failed'), 'v1.1.0\n');
+      for (const n of [2, 3, 3]) {
+        const r = tick();
+        expect(r.status, r.stdout + r.stderr).toBe(1);
+        expect(r.stdout).toContain('v1.1.0 was set aside, so it is not tried again; the next tag will be. This tick sees to the release put back, and only that.');
+        expect(r.stdout).toContain(`v1.0.0 is back in ${w.prod} but was not serving; its deploy script looks again.`);
+        expect(r.stdout).toContain(n < 3 ? `(${n} of 3)` : 'after 3 tries to restart it, so deploys stop restarting it');
+        expect(r.stdout).not.toContain('was cut off part-way');
+        expect(r.stdout).not.toContain('it will be tried again');
+      }
+      expect(w.at()).toBe('v1.0.0');
+      expect(existsSync(record)).toBe(true);
+    });
+
+    it('the repair\'s: waited for, the record kept when it does not come up, a restart the service manager refused too; a deploy of that tag ends 6', () => {
+      for (const systemctlRc of ['0', '1']) {
+        const { w, down, named, mark, record } = setUp();
+        mkdirSync(dirname(record), { recursive: true });
+        w.git(w.prod, 'checkout', '-q', 'v1.1.0');
+        writeFileSync(record, 'from v1.0.0\nto v1.1.0\npins-recorded\nsays-started\nrestarted\nstarted\n'); // cut off once v1.1.0 was started
+        writeFileSync(down, '');
+        const r = named('v1.0.0', { FAKE_SYSTEMCTL_RC: systemctlRc, HATCHABOT_FOLLOW_KNOWS_6: '1' });
+        expect(r.status, r.stdout + r.stderr).toBe(6);
+        expect(w.at()).toBe('v1.0.0');
+        expect(r.stdout).toContain(systemctlRc === '0'
+          ? `v1.0.0 is back in ${w.prod}, but it is not serving 1.0.0 — check: journalctl --user -u hatchabot -n 50. ${record} stays: the next deploy restarts it again if it is still not serving (1 of 3).`
+          : `Could not restart hatchabot onto v1.0.0 (above), and it is not serving 1.0.0. ${record} stays: the next deploy restarts it again if it is still not serving (1 of 3).`);
+        expect(readFileSync(record, 'utf8'), systemctlRc).toMatch(systemctlRc === '0' ? /\nstarted\n(git .*\n)*back\ntries 1\n$/ : /\nstarted\n(git .*\n)*tries 1\n$/);
+        expect(existsSync(mark)).toBe(true);
+        writeFileSync(mark, KEPT); rmSync(down);
+        const next = w.deploy();
+        expect(next.status, next.stdout + next.stderr).toBe(0);
+        expect(w.at()).toBe('v1.1.0');
+        expect(existsSync(record)).toBe(false);
+        // Once the service manager restarted it back (`back`), no note again; with none it may not have, and the note is written again.
+        if (systemctlRc === '0') expect(readFileSync(mark, 'utf8')).toBe(KEPT);
+        else expect(readFileSync(mark, 'utf8')).not.toBe(KEPT);
+      }
+    });
   });
 
   it('a service that takes the connection and never answers: each request ends, the wait ends, and it rolls back (HB-0553)', () => {
@@ -1043,7 +1323,8 @@ exec ${JSON.stringify(REAL_GIT)} "$@"
       expect(lines(k.record)[0]).toBe('from v1.0.0');
       expect(lines(k.record)[1]).toBe('to v1.1.0');
       expect(lines(k.record)[2]).toBe('pins-recorded');
-      expect(lines(k.record)[3]).toMatch(/^git \d+ /);
+      expect(lines(k.record)[3]).toBe('says-started');
+      expect(lines(k.record)[4]).toMatch(/^git \d+ /);
       k.age();
       const r = w.deploy({ FAKE_DEPS_RC: '1' });
       expect(r.status, r.stdout + r.stderr).toBe(3);
@@ -1533,6 +1814,8 @@ describe('scripts/follow-latest.sh runs only a release the workflow published (#
       `GH=${JSON.stringify(gh)}`,
       'out=""; fmt=""; url=""',
       'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; -w) fmt="$2"; shift ;; -H|--max-time|--max-filesize|--retry) shift ;; http*) url="$1" ;; esac; shift; done',
+      // The service's own health page, on this machine (not GitHub): it serves the release checked out.
+      'case "$url" in http://127.0.0.1:*) v="$(sed -n \'s/.*"version":"\\([^"]*\\)".*/\\1/p\' package.json)"; echo "<script>window.HATCHABOT_VERSION=\\"$v\\"</script>"; exit 0 ;; esac',
       'echo "$url" >> "$GH/urls.log"',
       '[ -e "$GH/offline" ] && { echo "curl: (6) Could not resolve host" >&2; exit 6; }',
       'case "$url" in */releases/tags/*) src="$GH/release.json" ;; */release-manifest.json) src="$GH/manifest.json" ;; *) src=/nonexistent ;; esac',

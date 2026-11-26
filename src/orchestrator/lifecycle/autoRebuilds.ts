@@ -16,7 +16,7 @@ import { MAX_REBUILD_CONCURRENCY } from './rebuildQueue.js';
  * same queue a Rebuild button uses), and the two settings an owner sets in
  * .env: the policy and how many rebuild at once. Part of the agent lifecycle
  * service (agentLifecycle.ts). Who may change a setting, and the words of a
- * refusal, are the routes' (src/api/lifecycleRoutes.ts). `stop()` ends the
+ * refusal, are the routes' (src/api/agents/lifecycleRoutes.ts). `stop()` ends the
  * sweep's interval.
  */
 export interface AutoRebuilds {

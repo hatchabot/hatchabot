@@ -3,7 +3,7 @@ import { Duplex } from 'node:stream';
 import {
   FrameReader, GUEST_METHODS, GuestReplies, LOCAL_BROWSER_ADDRESS, encodeFrame, forwardedClientAddress, guestHttpAllowed, guestHttpPath,
   guestRequestVerdict, scrubForGuest, spliceGuest, stripClientIdentity, withConsoleIdentity,
-} from '../src/api/consoleProxy.js';
+} from '../src/api/console/consoleProxy.js';
 
 /**
  * The console proxy's guest half (consoleProxy.ts): what reaches the gateway
@@ -229,6 +229,45 @@ describe('a guest socket, spliced', () => {
     }
   });
 
+  /**
+   * Each frame a guest's console refuses, by what both sides are told: the
+   * browser's faults close with 1008 and "refused: …", the agent's with 1011
+   * and "gateway: …" (the reasons docs/troubleshooting.md lists). Nothing of
+   * the frame refused reaches the other side, only the close. Written for
+   * HB-0645, so a change of how frames are read keeps each one.
+   */
+  it('each frame it refuses closes both sides with its code and reason, and none of it is passed on', async () => {
+    const req = (id: string) => Buffer.from(JSON.stringify({ type: 'req', id, method: 'chat.history', params: {} }));
+    const part = (opcode: number, payload: Buffer, mask: boolean) => { const f = encodeFrame(opcode, payload, mask); f[0] = f[0]! & 0x7f; return f; };
+    const rsv = (f: Buffer) => { f[0] = f[0]! | 0x20; return f; };
+    const cases: Array<[string, 'browser' | 'gateway', Buffer[], number, string]> = [
+      ['unmasked', 'browser', [encodeFrame(0x1, req('1'), false)], 1008, 'refused: unmasked client frame'],
+      ['masked', 'gateway', [encodeFrame(0x1, Buffer.from('{}'), true)], 1011, 'gateway: masked server frame'],
+      ['an extension bit', 'browser', [rsv(encodeFrame(0x1, req('1'), true))], 1008, 'refused: unexpected extension bits'],
+      ['an extension bit', 'gateway', [rsv(encodeFrame(0x1, Buffer.from('{}'), false))], 1011, 'gateway: unexpected extension bits'],
+      ['a continuation with no message begun', 'browser', [encodeFrame(0x0, req('1'), true)], 1008, 'refused: continuation without a start'],
+      ['a continuation with no message begun', 'gateway', [encodeFrame(0x0, Buffer.from('{}'), false)], 1011, 'gateway: continuation without a start'],
+      ['a new message inside one not finished', 'browser', [part(0x1, Buffer.from('{'), true), encodeFrame(0x1, req('1'), true)], 1008, 'refused: interleaved message'],
+      ['a new message inside one not finished', 'gateway', [part(0x1, Buffer.from('{'), false), encodeFrame(0x1, Buffer.from('{}'), false)], 1011, 'gateway: interleaved message'],
+      ['one frame over the largest message', 'browser', [encodeFrame(0x1, Buffer.alloc(1100, 0x20), true).subarray(0, 12)], 1008, 'refused: frame too large'],
+      ['one frame over the largest message', 'gateway', [encodeFrame(0x1, Buffer.alloc(1100, 0x20), false).subarray(0, 12)], 1011, 'gateway: frame too large'],
+      ['frames each under the largest message, together over it', 'browser', [part(0x1, Buffer.alloc(600, 0x20), true), encodeFrame(0x0, Buffer.alloc(600, 0x20), true)], 1008, 'refused: message too large'],
+      ['frames each under the largest message, together over it', 'gateway', [part(0x1, Buffer.alloc(600, 0x20), false), encodeFrame(0x0, Buffer.alloc(600, 0x20), false)], 1011, 'gateway: message too large'],
+      ['a binary message', 'browser', [encodeFrame(0x2, req('1'), true)], 1008, 'refused: binary message'],
+    ];
+    for (const [what, from, wire, code, reason] of cases) {
+      const browser = fakeSocket(), gateway = fakeSocket();
+      spliceGuest(browser.s, gateway.s, { identity: GUEST, maxMessage: 1024 });
+      for (const b of wire) (from === 'browser' ? browser : gateway).feed(b);
+      await tick();
+      for (const [to, side] of [['browser', browser], ['gateway', gateway]] as const) {
+        const got = new FrameReader(1 << 20).push(Buffer.concat(side.sent));
+        expect(got.map((f) => f.opcode), `${what} from the ${from}: all the ${to} gets is the close`).toEqual([0x8]);
+        expect({ code: got[0]!.payload.readUInt16BE(0), reason: got[0]!.payload.subarray(2).toString() }, `${what} from the ${from}, as the ${to} is told`).toEqual({ code, reason });
+      }
+    }
+  });
+
   it('control frames pass straight through', async () => {
     const browser = fakeSocket(), gateway = fakeSocket();
     spliceGuest(browser.s, gateway.s, { identity: GUEST });
@@ -240,7 +279,7 @@ describe('a guest socket, spliced', () => {
 
 describe('the guest hello advertises only what a guest may use (2026-09-30)', () => {
   it('drops methods like sessions.github.options, so the chat hides Publish PR instead of erroring', async () => {
-    const { scrubForGuest, GUEST_METHODS } = await import('../src/api/consoleProxy.js');
+    const { scrubForGuest, GUEST_METHODS } = await import('../src/api/console/consoleProxy.js');
     const allowed = [...GUEST_METHODS][0]!;
     const hello = { type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', features: { methods: [allowed, 'sessions.github.options', 'cron.list', 'config.get'], events: ['chat'] } } };
     const out = scrubForGuest(hello, GUEST, new GuestReplies()) as any;
@@ -260,7 +299,7 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
   };
 
   it('agents.list: only their agent, their conversation as its main one, no permission mode to call "Full Access"', async () => {
-    const { guestAgentsList } = await import('../src/api/consoleProxy.js');
+    const { guestAgentsList } = await import('../src/api/console/consoleProxy.js');
     const out = guestAgentsList(list, scope) as any;
     expect(out.agents).toEqual([{ id: 'recipe', name: 'recipe', workspace: '/w/recipe' }]);
     expect(out.defaultId).toBe('recipe');
@@ -276,7 +315,7 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
   });
 
   it('never exposes another agent when the scoped agent is absent from the gateway roster', async () => {
-    const { guestAgentsList } = await import('../src/api/consoleProxy.js');
+    const { guestAgentsList } = await import('../src/api/console/consoleProxy.js');
     const out = guestAgentsList({ defaultId: 'other-agent', mainKey: 'owner-main', agents: [
       { id: 'other-agent', name: 'Private agent name', workspace: '/private/workspace', defaultPermissionMode: 'full' },
     ] }, scope) as any;
@@ -285,7 +324,7 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
   });
 
   it("the hello's session defaults: their agent and their conversation", async () => {
-    const { guestSessionDefaults } = await import('../src/api/consoleProxy.js');
+    const { guestSessionDefaults } = await import('../src/api/console/consoleProxy.js');
     const d = { defaultAgentId: 'main', mainKey: 'main', mainSessionKey: 'agent:main:main', scope: 'per-sender' };
     expect(guestSessionDefaults(d, scope)).toEqual({ defaultAgentId: 'recipe', mainKey: 'guest:0123456789abcdef', mainSessionKey: scope.sessionKey, scope: 'per-sender' });
     expect(guestSessionDefaults(d, {})).toBe(d);
@@ -316,7 +355,7 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
   });
 
   it('control-ui-config.json: no community invite; the terminal flag is left alone (the app reloads itself when it differs from the page)', async () => {
-    const { guestControlUiConfig } = await import('../src/api/consoleProxy.js');
+    const { guestControlUiConfig } = await import('../src/api/console/consoleProxy.js');
     const out = JSON.parse(guestControlUiConfig(JSON.stringify({ basePath: '', communityInvite: true, terminalEnabled: true, cliAgentsEnabled: true }))!);
     expect(out).toEqual({ basePath: '', communityInvite: false, terminalEnabled: true, cliAgentsEnabled: true });
     expect(guestControlUiConfig('not json')).toBeUndefined();
@@ -324,7 +363,7 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
   });
 
   it("the guest's document loads the view script before any of the app's own scripts", async () => {
-    const { withGuestView, GUEST_VIEW_SCRIPT_PATH } = await import('../src/api/consoleProxy.js');
+    const { withGuestView, GUEST_VIEW_SCRIPT_PATH } = await import('../src/api/console/consoleProxy.js');
     const html = '<html><head><meta charset="UTF-8" /><script>theme()</script><script type="module" src="/p/ui/assets/app.js"></script></head><body></body></html>';
     const out = withGuestView(html, '/p/ui/');
     const tag = `<script src="/p/ui${GUEST_VIEW_SCRIPT_PATH}"></script>`;
@@ -339,7 +378,7 @@ describe("what a guest's Control UI is told (2026-09-30)", () => {
   });
 
   it('the view script prunes the sidebar to what a guest can open — and keeps their pinned conversations', async () => {
-    const { GUEST_VIEW_SCRIPT, GUEST_SIDEBAR_ROUTES } = await import('../src/api/consoleProxy.js');
+    const { GUEST_VIEW_SCRIPT, GUEST_SIDEBAR_ROUTES } = await import('../src/api/console/consoleProxy.js');
     const vm = await import('node:vm');
     const run = (stored: Record<string, string>, pathname = '/v1/agents/a1/ui/chat') => {
       const store = new Map(Object.entries(stored));

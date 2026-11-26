@@ -1,4 +1,4 @@
-// web/app/panels.js: Recommended, memory search, resources, an agent's panels (web chat, core files, scheduled tasks), invitations, Telegram links, copying, opening the console (openGateway).
+// web/app/panels.js: Recommended, health on an agent's Overview, resources, an agent's panels (members, web chat, the people it knows, its bot, its name and description, scheduled tasks), invitations and Telegram links, rebuilding and deleting an agent, removing a member.
 // One of the page's classic scripts (HB-0811). web/index.html loads them in
 // order and they share one global scope; code that runs at load may reach only
 // what this file and the ones before it declare (scripts/check-web.mjs).
@@ -104,6 +104,16 @@ async function recNotNow(id, btn) {
 /** From an Alerts line: the agent's Usage tab, with that item marked. */
 function v2OpenRec(agentId, recId) { v2RecFocus = recId; openV2Agent(agentId, 'usage'); }
 
+// ---- health, inline on an agent's Overview -----------------------------------------------
+function v2InlineHealth(id, name) {
+  const slot = $('v2HealthSlot'); if (!slot) return;
+  healthAgentId = id;
+  $('healthAgent').textContent = name;
+  slot.append($('healthDlgBody'));
+  slot.hidden = false;
+  void loadHealth();
+}
+
 let healthAgentId = null;
 const HEALTH_BADGE = {
   healthy: ['var(--ok)', 'Responding'],
@@ -122,38 +132,6 @@ async function loadHealth() {
     const h = await api(`/v1/agents/${id}/health?doctor=1`);
     if (current()) renderHealth(h);
   } catch (e) { if (current()) $('healthBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
-}
-
-// Memory search across the fleet (Settings → Hosts, under the service): what new agents get, and moving the rest.
-async function loadEmbedFleet() {
-  const row = $('embedFleetRow'), el = $('embedFleetBody');
-  if (!row || !myAccount.hostOwner) return;
-  try {
-    const r = await api('/v1/embed-default');
-    row.hidden = false;
-    const rest = r.total - r.shared;
-    el.innerHTML = `<span>${r.shared} of ${r.total} agent${r.total === 1 ? '' : 's'} on the shared service${r.pending ? ` <span class="sub">· ${r.pending} waiting for a rebuild</span>` : ''}</span>
-      <label style="margin:0;display:inline-flex;align-items:center;gap:6px">New agents use
-        <select style="width:auto" ${onAction('change', 'setEmbedDefault', [{ $: 'value' }])}><option value="baked"${r.default === 'baked' ? ' selected' : ''}>their own engine</option><option value="shared"${r.default === 'shared' ? ' selected' : ''}>the shared service</option></select></label>
-      ${rest ? `<button ${onAction('click', 'embedMoveAll', ["shared", "now"])}>Move the rest now (idle ones)</button><button ${onAction('click', 'embedMoveAll', ["shared", "quiet"])}>Move the rest overnight</button>` : ''}
-      ${r.shared ? `<button ${onAction('click', 'embedMoveAll', ["baked", "quiet"])}>Move all back to their own engine</button>` : ''}
-      <span class="sub">A move applies as a rebuild — memory kept, the index rebuilt — never while an agent is mid-conversation. Overnight means the quiet hours of the rebuild policy.</span>`;
-  } catch (e) { row.hidden = true; }
-}
-async function setEmbedDefault(mode) {
-  try { await api('/v1/embed-default', { method: 'PUT', body: { default: mode } }); toast(mode === 'shared' ? 'New agents will use the shared service' : 'New agents will use their own engine'); }
-  catch (e) { toast(e.message, 12000); }
-  loadEmbedFleet();
-}
-async function embedMoveAll(mode, when) {
-  const what = mode === 'shared' ? 'the shared memory search service' : 'their own engine';
-  if (!confirm(`Move every agent on this machine to ${what}?\n\n${when === 'now' ? 'Idle ones rebuild now, as many at once as Rebuild-at-once allows; any mid-conversation wait for the quiet hours.' : 'They rebuild in the quiet hours, never mid-conversation.'} Memory is kept; each re-indexes its memory search afterwards.`)) return;
-  try {
-    const r = await api('/v1/embed/move-all', { method: 'POST', body: { mode, when } });
-    toast(`${r.switched} switched — ${r.queued} rebuilding now, ${r.deferred} in the quiet hours.`
-      + (r.engineFree > 0 ? ` ${r.engineFree} left on the shared service: their image has no engine of its own.` : ''), 12000);
-  } catch (e) { toast(e.message, 12000); }
-  loadEmbedFleet();
 }
 
 // Resources: docker stats per host, one call each; polled while the view is open.
@@ -281,8 +259,8 @@ function renderHealth(h) {
 async function renderEditMembers() {
   const el = $('tgMemberList');
   if (!el) return;
-  const forId = editAgentId;
-  const current = sharingRead(el, forId);
+  // Read for the agent the forms are filled for; drawn only while they are still its, and this sharing read the latest.
+  const r = sheetRead(el), forId = r.id;
   el.textContent = 'Loading members…';
   // Your Hatchabot agent runs your machine: no invites, no members (2026-09-30).
   const opsAgent = !!agents.find(x => x.id === forId)?.ops;
@@ -296,7 +274,7 @@ async function renderEditMembers() {
   try {
     void loadWebChatPeople(forId);
     const ms = await api(`/v1/agents/${forId}/members`);
-    if (!current()) return;
+    if (!r.mine()) return;
     members[forId] = ms;
     el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
       const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 12))}</span>`;
@@ -314,7 +292,7 @@ async function renderEditMembers() {
         ? `<span class="sub" title="${esc(apps.map((k, i) => `${names[i]} id ${ids[k]}`).join(' · '))}">✓ linked on ${esc(names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0])}</span>`
         : webOnlyMember || m.role === 'owner' && !m.channelUserId && !v2ChannelKinds(agents.find(x => x.id === forId) || {}).length ? ''
         : `<span class="sub" style="color:var(--warn)">hasn't messaged yet</span>
-           <button ${onAction('click', 'reopenDoor', [`${editAgentId}`, `${m.userId ?? ''}`, `${(m.displayName || 'They') ?? ''}`])}
+           <button ${onAction('click', 'reopenDoor', [`${forId}`, `${m.userId ?? ''}`, `${(m.displayName || 'They') ?? ''}`])}
                    title="Hold the door open for 30 minutes on the app they joined with, so their next message is let through. If we don't know that app, you give their @handle and only they are let in">Let them in again</button>`;
       // Web chat (2026-09-29): a badge, and the switch — offered only to someone who signs in here.
       const web = m.role === 'owner' ? ''
@@ -322,11 +300,11 @@ async function renderEditMembers() {
             <button ${onAction('click', 'setWebChat', [`${forId}`, `${m.userId ?? ''}`, `${m.displayName || 'them'}`, false])} title="They can no longer chat with it on this page">Turn off web chat</button>`
         : m.account && appConfig.authMode !== 'password' ? `<button ${onAction('click', 'setWebChat', [`${forId}`, `${m.userId ?? ''}`, `${m.displayName || 'them'}`, true])} title="Let them chat with it on this page, signed in">Allow web chat…</button>` : '';
       const kickBtn = m.role === 'owner' ? '' :
-        `<button class="danger" ${onAction('click', 'kickAndList', [`${editAgentId}`, `${m.userId ?? ''}`, `${(m.displayName || m.userId) ?? ''}`])}>Remove</button>`;
+        `<button class="danger" ${onAction('click', 'kickAndList', [`${forId}`, `${m.userId ?? ''}`, `${(m.displayName || m.userId) ?? ''}`])}>Remove</button>`;
       return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${web}${kickBtn}</div>`;
     }).join('') || '<div class="sub">Just you so far — Invite… below to add someone.</div>';
-  } catch (e) { if (current()) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
-  if (current()) void renderKnownPeople();
+  } catch (e) { r.draw(() => { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }); }
+  r.draw(() => void renderKnownPeople());
 }
 
 /**
@@ -383,13 +361,15 @@ async function renderKnownPeople() {
   el.innerHTML = '';
   // The list is the agent's it was read for, drawn only while the forms are still its own; its
   // Add buttons add to that agent (another's forms opened meanwhile are not where they go).
-  const forId = editAgentId, current = sharingRead(el, forId);
+  const r = sheetRead(el), forId = r.id;
   try {
     const people = await api(`/v1/agents/${forId}/known-people`);
-    if (!people.length || !current()) return;
-    el.innerHTML = `<div class="sub" style="margin-bottom:4px">Already uses another of your agents — add without an invite:</div>`
-      + people.map(p => `<div class="pair"><span class="grow"><b class="pii">${esc(p.name)}</b></span>
-        <button ${onAction('click', 'addKnownPerson', [`${forId ?? ''}`, `${p.userId ?? ''}`, `${p.name ?? ''}`])}>Add</button></div>`).join('');
+    if (!people.length) return;
+    r.draw(() => {
+      el.innerHTML = `<div class="sub" style="margin-bottom:4px">Already uses another of your agents — add without an invite:</div>`
+        + people.map(p => `<div class="pair"><span class="grow"><b class="pii">${esc(p.name)}</b></span>
+          <button ${onAction('click', 'addKnownPerson', [`${forId ?? ''}`, `${p.userId ?? ''}`, `${p.name ?? ''}`])}>Add</button></div>`).join('');
+    });
   } catch { /* a server that doesn't offer it yet, or no agents: show nothing */ }
 }
 
@@ -411,18 +391,20 @@ function renderBotWho(a) {
 
 async function showBotToken() {
   const btn = $('botTokenBtn'), input = $('editBotToken');
-  if (input.value) {
+  // Shown: copied. Not yet: read for the agent the forms are filled for, and put in its box only while it is still its.
+  const r = input.value ? null : sheetRead('botToken');
+  if (!r) {
     toast(await copyText(input.value) ? 'Token copied' : 'Select and copy manually');
     return;
   }
-  const forId = editAgentId;
   try {
-    const t = await api(`/v1/agents/${forId}/bot-token`);
-    if (editAgentId !== forId) return; // another agent's box now
-    input.value = t.botToken;
-    v2SheetBaseline(input); // shown, not typed
-    btn.textContent = 'Copy';
-    if (t.pooled) toast('Pool bot — recycles automatically when the agent is deleted');
+    const t = await api(`/v1/agents/${r.id}/bot-token`);
+    const shown = r.fill([input], () => { // shown, not typed
+      input.value = t.botToken;
+      btn.textContent = 'Copy';
+      return true;
+    });
+    if (shown && t.pooled) toast('Pool bot — recycles automatically when the agent is deleted');
   } catch (e) { toast(e.message); }
 }
 
@@ -431,148 +413,27 @@ async function renameAgent() {
   if (!name) { $('editErr').textContent = 'Give it a name.'; return; }
   // The agent renamed is the one Rename was pressed for: another agent's sheet opened while
   // it saved keeps its own header and the name being typed in it (HB-0475).
-  const forId = editAgentId, f = forAgent(forId), saved = v2SheetSaving('editName');
-  $('renameBtn').disabled = true;
+  const f = sheetSave('editName').hold('renameBtn');
   try {
-    await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { name } });
-    saved(forId);
+    await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { name } });
+    f.saved();
     f.draw(() => { $('editAgent').textContent = name; });
     f.say('Renamed');
     await refresh(false);
   } catch (e) { f.fail(e); }
-  finally { $('renameBtn').disabled = false; }
+  finally { f.done(); }
 }
 
 async function saveDescription() {
   const persona = $('editDesc').value.trim();
-  const forId = editAgentId, f = forAgent(forId), saved = v2SheetSaving('editDesc');
-  $('descBtn').disabled = true;
+  const f = sheetSave('editDesc').hold('descBtn');
   try {
-    await api(`/v1/agents/${forId}`, { method: 'PATCH', body: { persona } });
-    saved(forId);
+    await api(`/v1/agents/${f.id}`, { method: 'PATCH', body: { persona } });
+    f.saved();
     f.say(persona ? 'Description saved' : 'Description cleared');
     await refresh(false); // repaint the card's one-liner
   } catch (e) { f.fail(e); }
-  finally { $('descBtn').disabled = false; }
-}
-
-/**
- * Which agent and file the editor's text really is. Save stays off until the
- * current agent's current file has loaded: a failed load (a MEMORY.md over
- * the size limit) used to leave an empty editor whose Save wrote over the
- * file, and a slow answer for the agent opened before could land in the next
- * one's editor and be saved into it (night review, 2026-09-27).
- */
-let editLoaded = null;
-// Each read numbered: SOUL.md, then MEMORY.md, then SOUL.md again matched the
-// first read's agent and file once more, and its late answer replaced what was
-// typed since — and Save wrote that older text (audit #048).
-let editLoadGen = 0;
-/**
- * Another file picked in the editor: an edit of the one shown that is not
- * saved yet is asked about first, and kept, with its file still chosen,
- * unless it is let go. Picking one went straight to loadEditFile, which put
- * the other file over it without a word (HB-0936).
- */
-function pickEditFile() {
-  const sel = $('editFile'), box = $('editContent');
-  const shown = v2SheetNotes.get(sel), drawn = v2SheetNotes.get(box);
-  if (shown !== undefined && shown !== sel.value && drawn !== undefined && box.value !== drawn
-      && !confirm(`Your changes to ${shown} are not saved. Open ${sel.value} and lose them?`)) {
-    sel.value = shown;
-    return;
-  }
-  return loadEditFile();
-}
-async function loadEditFile() {
-  if (!editAgentId) return;
-  const forId = editAgentId, file = $('editFile').value, gen = ++editLoadGen;
-  const stale = () => gen !== editLoadGen || editAgentId !== forId || $('editFile').value !== file;
-  editLoaded = null;
-  $('editErr').textContent = '';
-  $('editSaveBtn').disabled = true;
-  $('editContent').value = 'Loading…';
-  v2SheetBaseline('editContent'); // each value put in here is the page's, not typed
-  try {
-    const f = await api(`/v1/agents/${forId}/files/${file}`);
-    if (stale()) return;
-    $('editContent').value = f.content;
-    v2SheetBaseline('editFile', 'editContent'); // the file chosen, as it is on the agent: nothing unsaved
-    if (editReverting.has(forId)) { $('editErr').textContent = EDIT_REVERTING; return; }
-    editLoaded = { agentId: forId, file };
-    $('editSaveBtn').disabled = false;
-  } catch (e) {
-    if (stale()) return;
-    $('editContent').value = '';
-    v2SheetBaseline('editFile', 'editContent'); // the file chosen stays, with nothing in it to save
-    $('editErr').textContent = `${e.message} — nothing to save until it loads.`;
-  }
-}
-
-async function saveEditFile() {
-  const file = $('editFile').value;
-  if (!editLoaded || editLoaded.agentId !== editAgentId || editLoaded.file !== file) {
-    $('editErr').textContent = 'This file has not loaded, so there is nothing to save.';
-    return;
-  }
-  // The editor this save is for: closed, and another agent or file opened in
-  // it while it saved, its answer is said in a toast and leaves the new one
-  // (with whatever is typed there) as it is (review, 2026-10-22).
-  const loaded = editLoaded, f = forAgent(loaded.agentId), saved = v2SheetSaving('editContent');
-  $('editSaveBtn').disabled = true;
-  try {
-    await api(`/v1/agents/${loaded.agentId}/files/${file}`, {
-      method: 'PUT', body: { content: $('editContent').value },
-    });
-    f.say(`${file} saved`);
-    if (editLoaded === loaded) { saved(loaded.agentId); editDlg.close(); }
-  } catch (e) {
-    if (editLoaded === loaded) f.fail(e);
-    else f.say(`${file} was not saved: ${e.message}`, 8000);
-  }
-  finally { $('editSaveBtn').disabled = !editLoaded; }
-}
-
-async function openLogs(id, name) {
-  logsAgentId = id;
-  $('logsAgent').textContent = name;
-  logsDlg.showModal();
-  await loadLogs();
-}
-
-let setupLogAgentId = null;
-async function openSetupLog(id, name) {
-  setupLogAgentId = id;
-  $('setupLogAgent').textContent = name;
-  setupLogDlg.showModal();
-  await loadSetupLog();
-}
-// Each read numbered: a slow answer for the agent opened before paints
-// nothing over the one opened since (review, 2026-10-22).
-let setupLogGen = 0, logsGen = 0;
-async function loadSetupLog() {
-  if (!setupLogAgentId) return;
-  const gen = ++setupLogGen;
-  try {
-    const r = await api(`/v1/agents/${setupLogAgentId}/events?limit=80`);
-    if (gen !== setupLogGen) return;
-    const when = (iso) => { const d = new Date(iso); return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`; };
-    $('setupLogBody').innerHTML = r.events.length
-      ? r.events.map(e => `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--line)"><span class="sub" style="flex:none;font-variant-numeric:tabular-nums">${esc(when(e.at))}</span><span>${esc(e.label)}${e.note ? ` <span class="sub">— ${esc(String(e.note).slice(0, 200))}</span>` : ''}</span></div>`).join('')
-      : '<div class="sub">Nothing recorded yet.</div>';
-  } catch (e) { if (gen === setupLogGen) $('setupLogBody').textContent = e.message; }
-}
-
-async function loadLogs() {
-  if (!logsAgentId) return;
-  const gen = ++logsGen;
-  $('logsText').textContent = 'Loading…';
-  try {
-    const l = await api(`/v1/agents/${logsAgentId}/logs?lines=120`);
-    if (gen !== logsGen) return;
-    $('logsText').textContent = l.text || '(no recent output)';
-    $('logsText').scrollTop = $('logsText').scrollHeight;
-  } catch (e) { if (gen === logsGen) $('logsText').textContent = e.message; }
+  finally { f.done(); }
 }
 
 let cronAgentId = null, cronRead = 0, cronTriggerWrite = 0;
@@ -589,29 +450,32 @@ function cronScheduleLabel(c) {
   return c.scheduleKind || 'schedule';
 }
 function prepareCrons(id, name) {
-  cronRead++; // a response from an earlier opening must not fill this one
-  cronTriggerWrite++;
-  // Another agent's: a task typed for the one before is not carried to it, nor added there
-  // (HB-0591, as the edit forms' boxes), and an Edit begun there ends: its Save would change
-  // the other agent's task (a leftover edit once deleted an unrelated task, 10th audit).
-  if (id !== cronAgentId) { clearCronForm(); cancelCronEdit(); }
-  // The same agent again keeps what was typed, and an Edit under way stays one while the sheet
-  // is open (closing it ends the edit: endCronEdit), with its button, its note and what it put
-  // in the form, until Cancel or Save: ended by the tab drawn again (Overview and back), Save
-  // added the task being edited as a second one.
-  cronAgentId = id;
-  $('cronTriggers').checked = !!(agents.find(x => x.id === id) || {}).cronTriggers;
-  $('cronAgent').textContent = name;
-  $('cronErr').textContent = '';
-  $('cronList').innerHTML = 'Loading…';
-  v2SheetBaseline('cronBody'); // the form as it stands for this open: a draft kept, nothing new typed
+  sheetFill(['cronBody'], () => { // the form as it stands for this open: a draft kept, nothing new typed
+    cronRead++; // a response from an earlier opening must not fill this one
+    cronTriggerWrite++;
+    // Another agent's: a task typed for the one before is not carried to it, nor added there
+    // (HB-0591, as the edit forms' boxes), and an Edit begun there ends: its Save would change
+    // the other agent's task (a leftover edit once deleted an unrelated task, 10th audit).
+    if (id !== cronAgentId) { clearCronForm(); cancelCronEdit(); }
+    // The same agent again keeps what was typed, and an Edit under way stays one while the sheet
+    // is open (closing it ends the edit: endCronEdit), with its button, its note and what it put
+    // in the form, until Cancel or Save: ended by the tab drawn again (Overview and back), Save
+    // added the task being edited as a second one.
+    cronAgentId = id;
+    sheetButton('cronAddBtn', id); // its own: off only while its own save is out (addCronJob, HB-1484)
+    $('cronTriggers').checked = !!(agents.find(x => x.id === id) || {}).cronTriggers;
+    $('cronAgent').textContent = name;
+    $('cronErr').textContent = '';
+    $('cronList').innerHTML = 'Loading…';
+  });
 }
 function cancelCronEdit() {
-  cronEditingId = null; cronEditFilled = null;
-  $('cronAddBtn').textContent = 'Add task';
-  $('cronEditNote').style.display = 'none';
-  $('cronNote').checked = false;
-  v2SheetBaseline('cronNote');
+  sheetFill(['cronNote'], () => {
+    cronEditingId = null; cronEditFilled = null;
+    $('cronAddBtn').textContent = 'Add task';
+    $('cronEditNote').style.display = 'none';
+    $('cronNote').checked = false;
+  });
 }
 async function loadCrons() {
   if (!cronAgentId) return;
@@ -651,10 +515,9 @@ function cronFormDraft() {
  */
 function endCronEdit() {
   if (!cronEditingId) return;
-  cancelCronEdit(); clearCronForm();
-  v2SheetBaseline('cronBody');
+  sheetFill(['cronBody'], () => { cancelCronEdit(); clearCronForm(); });
 }
-/** The task form empty, as for a new task: every box, and the kind back to a schedule. Its caller notes it (v2SheetBaseline). */
+/** The task form empty, as for a new task: every box, and the kind back to a schedule. Its caller notes it (sheetFill). */
 function clearCronForm() {
   for (const box of ['cronName', 'cronMsg', 'cronExpr', 'cronEvery', 'cronTz']) $(box).value = '';
   $('cronMode').value = 'cron'; cronModeChanged();
@@ -712,16 +575,17 @@ function editCronJob(id) {
   if (!c.scheduleExpr && !c.everyMs) { toast('This is a one-shot task — edit it by asking the agent, or delete and re-add.'); return; }
   cronEditingId = id; // the form is filled by this press, with no event: while it is armed, a state redraw waits (HB-0444)
   const filled = cronEditFilled = cronFormOf(c);
-  $('cronName').value = filled.name;
-  $('cronMode').value = filled.mode;
-  cronModeChanged();
-  $('cronEvery').value = filled.every;
-  $('cronExpr').value = filled.cron;
-  $('cronTz').value = filled.tz;
-  $('cronMsg').value = filled.message;
-  $('cronNote').checked = filled.notify;
-  cronNoteFormState();
-  v2SheetBaseline('cronBody'); // the task as saved; while Edit is armed, cronEditingId holds the redraw
+  sheetFill(['cronBody'], () => { // the task as saved; while Edit is armed, cronEditingId holds the redraw
+    $('cronName').value = filled.name;
+    $('cronMode').value = filled.mode;
+    cronModeChanged();
+    $('cronEvery').value = filled.every;
+    $('cronExpr').value = filled.cron;
+    $('cronTz').value = filled.tz;
+    $('cronMsg').value = filled.message;
+    $('cronNote').checked = filled.notify;
+    cronNoteFormState();
+  });
   $('cronAddBtn').textContent = 'Save changes';
   const note = $('cronEditNote');
   note.style.display = '';
@@ -761,7 +625,10 @@ async function addCronJob() {
   const forId = cronAgentId, editId = editing ? editing.id : null;
   const notify = $('cronNote').checked && !$('cronNote').disabled;
   const submitted = cronFormDraft();
-  $('cronAddBtn').disabled = true; $('cronErr').textContent = '';
+  // Off while it is out, and given back to its own agent's form only: another agent's Schedule
+  // form, opened meanwhile, has its own (prepareCrons), and may have its own save out (HB-1484).
+  const pressed = sheetPress('cronAddBtn', forId);
+  $('cronErr').textContent = '';
   try {
     if (editing) {
       // Changed in place, sending only what changed. It used to be re-created,
@@ -797,13 +664,12 @@ async function addCronJob() {
     // its earlier value while the request waited.
     if (cronEditingId === editId) {
       if (JSON.stringify(cronFormDraft()) === JSON.stringify(submitted)) {
-        cancelCronEdit(); clearCronForm(); // its interval and zone too: left, they went into the next task unseen
-        v2SheetBaseline('cronBody');
+        sheetFill(['cronBody'], () => { cancelCronEdit(); clearCronForm(); }); // its interval and zone too: left, they went into the next task unseen
       } else if (editing && cronEditFilled === filled) cronEditFilled = submitted;
     }
     await loadCrons();
   } catch (e) { if (cronAgentId === forId) $('cronErr').textContent = e.message; else toast(e.message, 9000); }
-  finally { $('cronAddBtn').disabled = false; }
+  finally { pressed(cronAgentId === forId); }
 }
 /** How a task's runs are going, from the scheduler's own state: a task that
  *  fails every day looked exactly like a healthy one (night review). */
@@ -1049,35 +915,6 @@ async function shareWebChatWith() {
   }
 }
 
-// Robust clipboard copy. navigator.clipboard exists ONLY in a secure context
-// (https or localhost); over plain http — e.g. http://<tailscale-host>:8080 —
-// it's undefined, so we fall back to a hidden-textarea execCommand copy that
-// works there too. Returns whether the copy succeeded.
-async function copyText(text) {
-  if (!text) return false;
-  if (navigator.clipboard && window.isSecureContext) {
-    try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
-    // Append INSIDE the open modal, not to <body>. showModal() puts the dialog
-    // in the top layer and makes the rest of the document inert, so a textarea
-    // parented to <body> can't take selection — select() no-ops and the copy
-    // silently fails. That's why the invite dialog's buttons did nothing.
-    const dialogs = [...document.querySelectorAll('dialog[open]')];
-    const host = dialogs[dialogs.length - 1] ?? document.body;
-    host.appendChild(ta);
-    ta.select();
-    ta.setSelectionRange(0, text.length);
-    const ok = document.execCommand('copy');
-    host.removeChild(ta);
-    return ok;
-  } catch { return false; }
-}
-
 async function copyInvite() {
   const ok = await copyText($('invLink').textContent);
   toast(ok ? 'Web link copied' : 'Select the link and copy it manually');
@@ -1117,6 +954,21 @@ async function shareInviteTg() {
   catch { return; /* user cancelled the share sheet, or it's unavailable — no door opened */ }
   const door = await openInviteKnockWindow(inv);
   if (door) toast(`Shared.${door}`, 9000);
+}
+
+/** Agents this account can rebuild right now (owned, live-or-stopped, not moved away). */
+// Word the update prompt from the two OpenClaw versions, so a same-version
+// image rebuild (e.g. new base tooling) isn't mislabelled as a version upgrade.
+function updateBlurb(a) {
+  const from = a.openclawVersion, to = a.latestOpenclawVersion;
+  if (from && to && from !== to)
+    return `OpenClaw ${esc(from)} → ${esc(to)} is ready. Rebuild applies it — memory is kept.`;
+  return `A newer runtime image is ready${to ? ` (same OpenClaw ${esc(to)})` : ''}. Rebuild applies it — memory is kept.`;
+}
+
+/** Rebuild reasons other than the newer image (which has its own ⬆ Update row). */
+function rebuildOtherReasons(a) {
+  return (a.rebuild?.reasons ?? []).filter(r => !/newer runtime image|^the fleet default (moved to|image was rebuilt)/.test(r));
 }
 
 /**
@@ -1274,144 +1126,4 @@ async function kick(agentId, userId, label) {
     pairTick = 0; // refetch members on next poll
     await refresh(false);
   } catch (e) { toast(e.message); }
-}
-
-/** Only named console destinations are accepted; authentication stays in the existing fragment. */
-function consoleViewUrl(id, slug, view, existing = '') {
-  const fragment = existing.includes('#') ? existing.slice(existing.indexOf('#')) : '';
-  const session = encodeURIComponent(`agent:${slug}:main`);
-  return view === 'voice-settings' ? `/v1/agents/${id}/ui/settings/talk${fragment}`
-    : `/v1/agents/${id}/ui/chat?session=${session}${fragment}`;
-}
-async function openGateway(id, slug, view) {
-  if (view !== undefined && view !== 'voice-settings' && view !== 'chat') return toast('That console view is not available.');
-  const epoch = voiceEpoch, person = pagePerson;
-  const viewAllowed = () => !view || (epoch === voiceEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut && !!v2Find(id) && v2Mine(v2Find(id)));
-  if (!viewAllowed()) return;
-  if (view) slug = v2Find(id).slug;
-  // OpenClaw's own Control UI: an ADMIN console with a terminal, not a chat
-  // window — whoever opens it has shell inside the agent's container. Hence
-  // owner-only, and hence the ⋯ menu rather than the card's main row.
-  //
-  // It requires a browser SECURE CONTEXT: it uses WebCrypto for device
-  // identity, which browsers expose only over https:// or localhost. Tailscale
-  // encrypting the wire doesn't count — the browser judges by the URL scheme
-  // alone. Without it the tab loads and then reports a bare "Could not
-  // connect", which is a genuinely baffling thing to hand someone, so say it
-  // up front instead.
-  if (!window.isSecureContext) {
-    // WebCrypto (device identity) is exposed only in a secure context, which
-    // the browser judges by the page's URL scheme — you're on plain http.
-    const httpsHere = location.protocol === 'http:' && location.hostname !== 'localhost'
-      ? `https://${location.host}` : null;
-    toast(
-      "OpenClaw's console needs a secure context — this tab is on plain http. " +
-      (httpsHere
-        ? `Reopen Hatchabot at ${httpsHere} (the https version of this address) and it'll work.`
-        : 'Open Hatchabot at its https Tailscale address (or http://localhost on the host itself), then try again.'),
-      16000,
-    );
-    return;
-  }
-  // Plain opens keep the cached place. An explicit destination must navigate even an existing tab.
-  if (consoleSwitchTo(id, view)) return;
-  consoleOpening++;
-  consoleTabFor(id, slug);
-  // A newer pick (another tab, the switcher) or closing this tab supersedes
-  // this open while it waits on the network: it then stops, rather than take
-  // the panel back when its answer lands.
-  const ticket = ++consoleTicket;
-  const current = () => $('consoleDlg').open && ticket === consoleTicket && consoleTabs.some(t => t.id === id && t.frame) && viewAllowed();
-  // The panel opens NOW, with a spinner: the access and gateway reads below,
-  // and then the console's own load, took seconds on a slow link, during
-  // which a tap on the icon seemed to do nothing (Chris, 2026-10-23).
-  const opening = (agents || []).find(x => x.id === id);
-  if (!$('consoleDlg').open) {
-    $('consoleTitle').textContent = opening?.name || slug;
-    $('consoleGearBtn').style.display = 'none';
-    $('consoleApproveBtn').hidden = true;
-    $('consoleProps').hidden = true;
-    consoleCoverSay('Opening the console…');
-    $('consoleDlg').showModal();
-  } else consoleCoverSay('Opening the console…');
-  try {
-    // A sleeping agent is woken first, with the cover saying so — the proxy's
-    // own wake used to time out before the gateway answered (2026-09-26).
-    const sleeper = (agents || []).find(x => x.id === id);
-    if (sleeper?.hibernatedAt && sleeper.state === 'STOPPED') {
-      $('consoleTitle').textContent = sleeper.name;
-      consoleCoverSay('Waking it up — about a minute…');
-      $('consoleFrame').src = 'about:blank';
-      if (!$('consoleDlg').open) $('consoleDlg').showModal();
-      try { await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} }); }
-      catch (e) { if (current()) $('consoleCover').lastElementChild.textContent = `Could not wake it: ${e.message}`; return; }
-      for (let i = 0; i < 150; i++) {
-        await new Promise((r) => setTimeout(r, 1000));
-        if (!current() || !$('consoleDlg').open) return;
-        // "reachable" is the gateway answering at all; its own ok can be false with a plugin warning.
-        try { const h = await api(`/v1/agents/${id}/health`); if (h.reachable || h.healthy || h.ok) break; } catch { /* not yet */ }
-      }
-      $('consoleCover').lastElementChild.textContent = 'Connecting this browser…';
-      await refresh(false);
-    }
-    // A rebuilt agent's console knows people by name (the console with
-    // identities): no token rides in the address — Hatchabot's proxy says who
-    // you are. One not rebuilt yet still takes the token, as before.
-    let access = null;
-    try { access = await api(`/v1/agents/${id}/console/access`); } catch { access = null; }
-    if (!current()) return;
-    const g = access?.console === 'identity' ? null : await api(`/v1/agents/${id}/gateway`);
-    // Proxied same-origin through the control plane so the gateway port can
-    // stay bound to the host's loopback. Pass ONLY the token: the Control UI
-    // derives its gateway from the page it was served from, and handing it an
-    // explicit gatewayUrl instead parks it behind a "Change Gateway URL"
-    // confirmation that also withholds the token.
-    //
-    // Open straight on the agent's own conversation. Each container also holds
-    // OpenClaw's built-in default agent, "main" — unused, with its own empty
-    // workspace — and the console's bare address lands there, which looked
-    // like the agent had forgotten everything said on Telegram. Telegram DMs
-    // live in `agent:<slug>:main` (OpenClaw's agent id is always the slug).
-    if (!current()) return;
-    const url = consoleViewUrl(id, slug, view, g ? `#token=${encodeURIComponent(g.token)}` : '');
-    // In the app, not a new tab: the proxy now permits framing by this origin
-    // (and still refuses every other one).
-    const a = (agents || []).find(x => x.id === id);
-    $('consoleTitle').textContent = a?.name || slug;
-    consoleGuest = false;
-    $('consoleGearBtn').style.display = '';
-    renderConsoleChannels(a);
-    const fr = $('consoleFrame');
-    // The spinner stays until the console's page has loaded (or 15 s): a blank
-    // frame for several seconds looked like nothing had happened.
-    consoleCoverSay('Opening the console…');
-    // Shown: what its chat shows is read then, not while it is covered (HB-1147).
-    const loaded = () => { if (consoleAgentId === id && $('consoleCover').lastElementChild.textContent === 'Opening the console…') { $('consoleCover').hidden = true; markConsoleSeen(id); } };
-    fr.addEventListener('load', loaded, { once: true });
-    setTimeout(loaded, 15000);
-    fr.src = url;
-    const tab = consoleTabs.find(t => t.id === id); if (tab) tab.url = url;
-    $('consoleApproveBtn').hidden = true;
-    if (!$('consoleDlg').open) $('consoleDlg').showModal();
-    // A new browser has to be approved once. OpenClaw's own instruction ("run
-    // this on the Gateway host") means a shell inside the container, which is
-    // no use from a laptop — so look for the request and offer to approve it.
-    consoleAgentId = id;
-    consoleUrl = url;
-    renderConsoleTabs();
-    consoleMark(id);
-    void autoApproveConsole(id);
-  } catch (e) {
-    if (!current()) return;
-    // The panel is open with the spinner: say what went wrong there, not only in a toast.
-    consoleCoverSay(`Could not open it: ${e.message}`);
-    toast(e.message);
-  }
-  finally { consoleOpening--; }
-}
-/** Show the console's cover (the spinner and a line of text) over the frame. */
-function consoleCoverSay(text) {
-  const c = $('consoleCover');
-  c.lastElementChild.textContent = text;
-  c.hidden = false;
 }

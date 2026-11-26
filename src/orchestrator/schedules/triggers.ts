@@ -1,4 +1,4 @@
-import { inQueue } from '../../util/queues.js';
+import { keyedLock } from '../../util/queues.js';
 import { isBusy } from '../lifecycle/busy.js';
 import type { SchedulesDeps } from './schedules.js';
 
@@ -23,8 +23,8 @@ export function createCronTriggers(deps: SchedulesDeps): CronTriggers {
   /** Concurrent toggles apply the latest saved permission in order. A failed
    * write leaves a durable rebuild obligation, so Start/wake cannot reuse
    * the old permission after the caller was told the change was saved. */
-  const triggerApplies = new Map<string, Promise<unknown>>();
-  const applyCronTriggers = (agentId: string, ownObligation?: string): Promise<string | undefined> => inQueue(triggerApplies, agentId, async () => {
+  const triggerApplies = keyedLock();
+  const applyCronTriggers = (agentId: string, ownObligation?: string): Promise<string | undefined> => triggerApplies.run(agentId, async () => {
     const a = store.getAgent(agentId);
     if (!a || agentGone(agentId)) return undefined;
     let live = false;

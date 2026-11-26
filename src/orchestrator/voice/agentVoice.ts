@@ -28,7 +28,7 @@ export interface VoiceCaller {
  * Browser voice (HB-0808 step 13, docs/voice.md): whether a running agent's
  * Talk is ready, and binding Talk to it with the provider its runtime
  * already has. Built once in `registerRoutes` and on the route context as
- * `ctx.voice`; its routes are in src/api/voiceRoutes.ts, which checks who
+ * `ctx.voice`; its routes are in src/api/console/voiceRoutes.ts, which checks who
  * asks and the body. Nothing here knows HTTP: a refusal is a result with its
  * status and words.
  *
@@ -109,7 +109,7 @@ export function createAgentVoice(deps: AgentVoiceDeps): AgentVoice {
         if (voiceWaiting(fresh, locked) || fresh.state !== 'RUNNING' || !fresh.runtimeRef || voiceContext(fresh) !== before || !sameProvider)
           throw new TurnRefused(409, 'The agent changed while setting up Talk. Reopen voice settings and try again.');
       };
-      const result = await whileBusy(agent.id, async () => {
+      const result = await whileBusy(agent.id, 'voice', async () => {
         stillCurrent();
         const configured = await configureVoice(provider, agent.runtimeRef!, agent.slug, stillCurrent);
         stillCurrent();

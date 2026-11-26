@@ -90,6 +90,10 @@ with no keyword overlap matched the right memory line.
   # pin one agent to hatchabot-runtime:2026.7.1-2-emb1, verify memory search
   docker tag hatchabot-runtime:2026.7.1-2-emb1 hatchabot-runtime:latest    # promote
   ```
+  With `HATCHABOT_IMAGE` pinned to a version tag or a digest, that `docker tag`
+  moves only `:latest`, not the fleet default, and Promote is off: set
+  `HATCHABOT_IMAGE` in `.env` to the candidate's tag and restart Hatchabot
+  instead (HB-1256).
 - Build the same OpenClaw **without** the engine (about 390 MB lighter; needs
   the shared memory search service running):
   ```

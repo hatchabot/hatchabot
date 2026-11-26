@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Agent, Channel } from '../../domain/types.js';
 import type { Store } from '../../store/store.js';
 import { CHANNEL_ACCOUNT } from '../../openclaw/configWriter.js';
-import { clearBusy, markBusy, whileBusy } from '../lifecycle/busy.js';
+import { markBusy, whileBusy } from '../lifecycle/busy.js';
 import { claimFirstContact } from './claim.js';
 import { AdmitError, grantChannelAccess, removeUnboundChannelAccess, revokeMember } from './members.js';
 import type { MemberRefusal, MembersDeps } from './membersAndInvites.js';
@@ -184,7 +184,7 @@ export function createRoster(deps: MembersDeps): Roster {
     // held: mid-move the scrub hit the volume the move had already
     // exported (the copy kept them), a rebuild's seed or a restore's
     // import put them back (concurrency review, 2026-10-09).
-    await whileBusy(agent.id, async () => {
+    await whileBusy(agent.id, 'member-remove', async () => {
       const now = store.getAgent(agent.id) ?? agent;
       await revokeMember(
         { store, provider: providerFor(now.hostId), log: trace(agent.id) },
@@ -269,7 +269,7 @@ export function createRoster(deps: MembersDeps): Roster {
     const channelsBefore = JSON.stringify(store.listChannelsForAgent(agent.id));
     const attempted: typeof grants = [];
     let committed = false;
-    markBusy(agent.id);
+    const release = markBusy(agent.id, 'member-grant');
     try {
       for (const g of grants) {
         attempted.push(g);
@@ -331,7 +331,7 @@ export function createRoster(deps: MembersDeps): Roster {
       if (err instanceof AdmitError) return invalid(err.userMessage);
       throw err;
     } finally {
-      clearBusy(agent.id);
+      release();
     }
   };
 

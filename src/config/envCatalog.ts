@@ -45,6 +45,8 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('basics', 'HATCHABOT_AUTH', 'password', 'How people sign in: accounts, password or identity. The installer writes accounts.'),
   s('basics', 'HATCHABOT_PASSWORD', null, 'The shared password in password mode. Single-quote it if it has spaces or symbols (no apostrophes).'),
   s('basics', 'PORT', '8080', 'The web app\'s port.'),
+  s('basics', 'HATCHABOT_PROXY_PORT', '8094', 'The port `tailscale serve` (or another proxy on this machine) is pointed at, on 127.0.0.1 only. Only there is the visitor\'s address (X-Forwarded-For) believed, so each device has its own sign-in limit, and only from a program of a user other than Hatchabot\'s own.'),
+  s('basics', 'HATCHABOT_PROXY_TRUST_UIDS', null, 'Users (uids, comma-separated) whose connections to HATCHABOT_PROXY_PORT are believed too: a Tailscale that runs as Hatchabot\'s own user (the Mac App Store app, a userspace tailscaled). Listing Hatchabot\'s own uid lets every program of that user, its agents\' containers under rootless Docker or Docker Desktop included, choose its sign-in limit there. On a Mac only that user\'s programs can be found, so only its own uid does anything there.'),
   s('basics', 'HATCHABOT_PUBLIC_URL', null, 'The address other people reach this machine at, for invite links and Google sign-in, e.g. https://<machine>.<tailnet>.ts.net. Unset: localhost.'),
   s('basics', 'HATCHABOT_BIND', null, 'Listen address. Unset: 0.0.0.0 when sign-in is on, 127.0.0.1 when it is off.'),
   s('basics', 'HATCHABOT_TLS_CERT', null, 'Serve HTTPS directly: the certificate (PEM, absolute path). Set both this and HATCHABOT_TLS_KEY, or neither.'),
@@ -138,7 +140,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('memory', 'HATCHABOT_EMBED_MODEL', null, 'That server\'s model name.'),
 
   // Docker and runtime
-  s('runtime', 'HATCHABOT_IMAGE', 'hatchabot-runtime:latest', 'The image agents run on.'),
+  s('runtime', 'HATCHABOT_IMAGE', 'hatchabot-runtime:latest', 'The image agents run on. A version tag or a digest here is a pin: it stays the fleet default, and Promote is off until this names a repository\'s :latest (HB-1256).'),
   s('runtime', 'HATCHABOT_IMAGE_REGISTRY', 'ghcr.io/hatchabot/runtime', 'Where published runtime images are pulled from.'),
   s('runtime', 'HATCHABOT_PREFIX', 'hatchabot', 'Name prefix for containers and volumes. Change only to run two installations on one machine.'),
   s('runtime', 'HATCHABOT_AGENT_NETWORK', 'hatchabot-agents', 'The Docker network agents run on (isolated from each other). bridge = the old shared network.'),
@@ -212,9 +214,9 @@ export const ENV_INTERNAL: string[] = [
   'HATCHABOT_URL', 'HATCHABOT_TOKEN', 'HATCHABOT_REFRESH_TOKEN', 'HATCHABOT_BOT_TOKEN', 'HATCHABOT_CWD', 'HATCHABOT_DEV_DIR', 'HATCHABOT_CLI',
   // installer, upgrade and release scripts
   'HATCHABOT_CHANNEL', 'HATCHABOT_DIR', 'HATCHABOT_DRY_RUN', 'HATCHABOT_YES', 'HATCHABOT_SETUP_ENV', 'HATCHABOT_SETUP_PASSWORD',
-  'HATCHABOT_SETUP_PORT', 'HATCHABOT_SETUP_SIGNIN', 'HATCHABOT_UPGRADE_COPY', 'HATCHABOT_UPGRADE_DIR', 'HATCHABOT_UPGRADE_IMAGE', 'HATCHABOT_UPGRADE_BY_TIMER', 'HATCHABOT_UPGRADE_TARGET', 'HATCHABOT_UPGRADE_REPAIR_ONLY', 'HATCHABOT_FOLLOW_KNOWS_5',
-  'HATCHABOT_INSTALL_CMD', 'HATCHABOT_RESTART_CMD', 'HATCHABOT_DEPS_WAIT_SECS', 'HATCHABOT_PROD_DIR', 'HATCHABOT_SERVICE', 'HATCHABOT_HEALTH_URL',
-  'HATCHABOT_REPO', 'HATCHABOT_IMAGE_REPO', 'HATCHABOT_PROMOTE_TRAILERS', 'HATCHABOT_PROMOTE_BACK', 'HATCHABOT_LAND_DIRECT', 'HATCHABOT_PROMOTE_IGNORE_CI', 'HATCHABOT_PROMOTE_IGNORE_LIVE', 'HATCHABOT_PROMOTE_IGNORE_PENDING', 'HATCHABOT_PROMOTE_IGNORE_WAITING', 'HATCHABOT_DISPATCH_POLL', 'HATCHABOT_CI_APPEAR_SECS', 'HATCHABOT_CI_WAIT_SECS', 'HATCHABOT_DEV_SLUG', 'HATCHABOT_PUBLIC_REMOTE', 'HATCHABOT_SECRETS_TOKEN_FILE', 'HATCHABOT_LAND_POLL_SECS', 'HATCHABOT_DRILL_DB', 'HATCHABOT_DRILL_KEYFILE', 'HATCHABOT_DRILL_TRIGGER', 'HATCHABOT_ENV_FILE',
+  'HATCHABOT_SETUP_PORT', 'HATCHABOT_SETUP_SIGNIN', 'HATCHABOT_UPGRADE_COPY', 'HATCHABOT_UPGRADE_DIR', 'HATCHABOT_UPGRADE_IMAGE', 'HATCHABOT_UPGRADE_BY_TIMER', 'HATCHABOT_UPGRADE_TARGET', 'HATCHABOT_UPGRADE_REPAIR_ONLY', 'HATCHABOT_FOLLOW_KNOWS_5', 'HATCHABOT_FOLLOW_KNOWS_6',
+  'HATCHABOT_INSTALL_CMD', 'HATCHABOT_RESTART_CMD', 'HATCHABOT_RESTART_RECORD', 'HATCHABOT_RESTART_BACK', 'HATCHABOT_RESTART_PROBE', 'HATCHABOT_DEPS_WAIT_SECS', 'HATCHABOT_PROD_DIR', 'HATCHABOT_SERVICE', 'HATCHABOT_HEALTH_URL',
+  'HATCHABOT_REPO', 'HATCHABOT_IMAGE_REPO', 'HATCHABOT_PROMOTE_TRAILERS', 'HATCHABOT_PROMOTE_BACK', 'HATCHABOT_LAND_DIRECT', 'HATCHABOT_PROMOTE_IGNORE_CI', 'HATCHABOT_PROMOTE_IGNORE_LIVE', 'HATCHABOT_PROMOTE_IGNORE_PENDING', 'HATCHABOT_PROMOTE_IGNORE_WAITING', 'HATCHABOT_PROMOTE_PUBLISHER_COPY_MATCHES', 'HATCHABOT_DISPATCH_POLL', 'HATCHABOT_CI_APPEAR_SECS', 'HATCHABOT_CI_WAIT_SECS', 'HATCHABOT_DEV_SLUG', 'HATCHABOT_PUBLIC_REMOTE', 'HATCHABOT_SECRETS_TOKEN_FILE', 'HATCHABOT_LAND_POLL_SECS', 'HATCHABOT_DRILL_DB', 'HATCHABOT_DRILL_KEYFILE', 'HATCHABOT_DRILL_TRIGGER', 'HATCHABOT_ENV_FILE',
   // the app's own run of a script (backup-volumes.sh: "Back up now")
   'HATCHABOT_BACKUP_BY_APP',
   // the release bundle (install.sh, upgrade.sh, build-bundle.sh, sqlite-driver.sh, with-docker.sh)

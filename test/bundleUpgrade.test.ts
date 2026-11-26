@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -8,6 +8,9 @@ import { dirname, join, resolve } from 'node:path';
 // These run upgrade.sh several times a test: 1-3 s alone, past vitest's 5 s
 // when the self-hosted runner shares the machine (PR #76, 2026-11-05).
 vi.setConfig({ testTimeout: 30_000 });
+// Every folder a test makes goes after it: left, they filled /tmp by the thousand.
+const dirs: string[] = [];
+afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
 /**
  * scripts/upgrade.sh on a BUNDLE install (install.sh, docs/install-bundle.md):
@@ -18,6 +21,7 @@ vi.setConfig({ testTimeout: 30_000 });
  */
 
 const driver = resolve('node_modules/better-sqlite3');
+const REAL_RM = spawnSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).stdout.trim();
 
 /** A fake bundle tree for `tag`: its restart.sh exits with `restartRc` (or is `restart`, given). */
 function bundleTree(root: string, tag: string, restartRc = 0, docs = false, restart?: string): string {
@@ -27,7 +31,7 @@ function bundleTree(root: string, tag: string, restartRc = 0, docs = false, rest
   mkdirSync(join(dir, 'node_modules'), { recursive: true });
   symlinkSync(process.execPath, join(dir, '.node', 'bin', 'node'));
   symlinkSync(driver, join(dir, 'node_modules', 'better-sqlite3'));
-  for (const s of ['upgrade.sh', 'follow-channel.sh', 'follow-tries.sh', 'release-target.sh', 'release-manifest.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
+  for (const s of ['upgrade.sh', 'upgrade-helpers.sh', 'follow-channel.sh', 'follow-tries.sh', 'release-target.sh', 'release-manifest.sh']) writeFileSync(join(dir, 'scripts', s), readFileSync(join('scripts', s)), { mode: 0o755 });
   writeFileSync(join(dir, 'scripts', 'restart.sh'), restart ?? `#!/usr/bin/env bash\nexit ${restartRc}\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'VERSION'), tag);
   writeFileSync(join(dir, 'BUNDLE.json'), JSON.stringify({ version: tag.slice(1), tag, platform: 'linux-arm64' }) + '\n');
@@ -39,7 +43,7 @@ function bundleTree(root: string, tag: string, restartRc = 0, docs = false, rest
 
 /** The release assets for `tag` under base/tag/: the tarball and its .sha256. */
 function publish(base: string, tag: string, opts: { restartRc?: number; badHash?: boolean; docs?: boolean; restart?: string } = {}): void {
-  const work = mkdtempSync(join(tmpdir(), 'hb-bundle-src-'));
+  const work = mkdtempSync(join(tmpdir(), 'hb-bundle-src-')); dirs.push(work);
   bundleTree(work, tag, opts.restartRc ?? 0, opts.docs, opts.restart);
   const name = `hatchabot-${tag}-linux-arm64.tar.gz`;
   mkdirSync(join(base, tag), { recursive: true });
@@ -60,7 +64,7 @@ function publish(base: string, tag: string, opts: { restartRc?: number; badHash?
 }
 
 function world() {
-  const root = mkdtempSync(join(tmpdir(), 'hb-bundle-up-'));
+  const root = mkdtempSync(join(tmpdir(), 'hb-bundle-up-')); dirs.push(root);
   const home = join(root, 'home'), base = join(root, 'releases');
   mkdirSync(join(home, 'tmp'), { recursive: true });
   const install = bundleTree(join(root, 'srv'), 'v2.0.0');
@@ -102,6 +106,237 @@ describe('scripts/upgrade.sh on a bundle install', () => {
     expect(JSON.parse(read(join(w.install, 'BUNDLE.json'))).tag).toBe('v2.0.0');
     expect(read(join(w.install, '.env'))).toBe('HATCHABOT_SECRET_KEY=made-up\n');
     expect(existsSync(join(w.install, 'data', 'hatchabot.sqlite'))).toBe(true);
+  });
+
+  it('a rollback writes its time beside the database before the old release is restarted; an upgrade that comes up writes none (HB-0840)', () => {
+    const w = world();
+    const mark = join(w.install, 'data', 'hatchabot.sqlite.rolled-back');
+    // The old release's restart: it says whether the note was there when it ran.
+    writeFileSync(join(w.install, 'scripts', 'restart.sh'), `#!/usr/bin/env bash\n[ -e ${JSON.stringify(mark)} ] && echo marked > ${JSON.stringify(join(w.root, 'old-restart'))}\nexit 0\n`, { mode: 0o755 });
+    // The new release's restart.sh: the service manager restarted it (the record
+    // told, as restart.sh tells it), and it did not answer.
+    publish(w.base, 'v2.0.1', { restart: '#!/usr/bin/env bash\n[ -z "${HATCHABOT_RESTART_RECORD:-}" ] || echo started >> "$HATCHABOT_RESTART_RECORD"\nexit 1\n' });
+    const r = upgrade(w, 'v2.0.1');
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(read(mark)).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$/);
+    expect(read(join(w.root, 'old-restart'))).toBe('marked\n');
+
+    // One that failed before the service manager restarted anything: v2.0.0 never stopped, and nothing is written (review of HB-0840).
+    const early = world();
+    publish(early.base, 'v2.0.1', { restartRc: 1 });
+    const e = upgrade(early, 'v2.0.1');
+    expect(e.status, e.stdout + e.stderr).toBe(1);
+    expect(read(join(early.install, 'VERSION'))).toBe('v2.0.0');
+    expect(existsSync(join(early.install, 'data', 'hatchabot.sqlite.rolled-back'))).toBe(false);
+
+    const v = world();
+    publish(v.base, 'v2.0.1');
+    expect(upgrade(v, 'v2.0.1').status).toBe(0);
+    expect(existsSync(join(v.install, 'data', 'hatchabot.sqlite.rolled-back'))).toBe(false);
+    // Named back to an older release: a rollback too.
+    publish(v.base, 'v2.0.0');
+    const back = upgrade(v, 'v2.0.0');
+    expect(back.status, back.stdout + back.stderr).toBe(0);
+    expect(read(join(v.install, 'VERSION'))).toBe('v2.0.0');
+    expect(existsSync(join(v.install, 'data', 'hatchabot.sqlite.rolled-back'))).toBe(true);
+  });
+
+  it('an older release named that never starts: the note there before is put back as it was, not removed (HB-1455)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    expect(upgrade(w, 'v2.0.1').status).toBe(0);
+    // A note kept for a later release's holds; v2.0.0's restart fails before the service manager restarted anything.
+    const mark = join(w.install, 'data', 'hatchabot.sqlite.rolled-back');
+    writeFileSync(mark, '2026-11-01T10:00:00Z\n');
+    publish(w.base, 'v2.0.0', { restartRc: 1 });
+    const back = upgrade(w, 'v2.0.0');
+    expect(back.status, back.stdout + back.stderr).toBe(1);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.1');
+    expect(read(mark)).toBe('2026-11-01T10:00:00Z\n');
+    expect(existsSync(`${mark}.prev`)).toBe(false);
+  });
+
+  /**
+   * v2.0.0's restart.sh: it tells the record as restart.sh does, and comes up
+   * only once `up` is there; asked only whether it serves
+   * (HATCHABOT_RESTART_PROBE), it restarts nothing and logs `probe`.
+   */
+  const comesUpWhen = (w: ReturnType<typeof world>) => {
+    const up = join(w.root, 'up'), calls = join(w.root, 'old-restarts');
+    writeFileSync(join(w.install, 'scripts', 'restart.sh'), `#!/usr/bin/env bash\nif [ -n "\${HATCHABOT_RESTART_PROBE:-}" ]; then echo probe >> ${JSON.stringify(calls)}; [ -e ${JSON.stringify(up)} ]; exit; fi\necho "back=\${HATCHABOT_RESTART_BACK:-}" >> ${JSON.stringify(calls)}\n[ -z "\${HATCHABOT_RESTART_RECORD:-}" ] || echo back >> "$HATCHABOT_RESTART_RECORD"\n[ -e ${JSON.stringify(up)} ]\n`, { mode: 0o755 });
+    return { up: () => writeFileSync(up, ''), calls: () => read(calls).split('\n').filter(Boolean) };
+  };
+  const PUT_BACK = 'from v2.0.0\npins-recorded\nsays-started\nrestarted\nput-back\nback\n';
+  /** v2.0.1's restart.sh: the service manager restarted it (the record told), and it did not answer. */
+  const STARTS_DOWN = '#!/usr/bin/env bash\n[ -z "${HATCHABOT_RESTART_RECORD:-}" ] || echo started >> "$HATCHABOT_RESTART_RECORD"\nexit 1\n';
+  const timer = (w: ReturnType<typeof world>) => upgrade(w, 'stable', '', { HATCHABOT_UPGRADE_REPAIR_ONLY: '1', HATCHABOT_UPGRADE_BY_TIMER: '1' });
+  const KEPT = '2026-11-01T10:00:00Z\n';
+
+  it('a rollback whose restart back does not come up keeps a record in .swapping and says so; the next run restarts it again, and writes no note (HB-1456)', () => {
+    const w = world();
+    const old = comesUpWhen(w);
+    const mark = join(w.install, 'data', 'hatchabot.sqlite.rolled-back'), sw = join(w.install, '.swapping');
+    publish(w.base, 'v2.0.1', { restart: STARTS_DOWN });
+    const r = upgrade(w, 'v2.0.1');
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain(`v2.0.0 is back in ${w.install}, but it did not come up (above). ${sw} stays: the next upgrade restarts it again if it is still not serving (1 of 3).`);
+    expect(r.stdout).not.toContain('Then run');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(read(sw)).toBe(`${PUT_BACK}tries 1\n`);
+    expect(read(mark)).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$/); // v2.0.1 started
+    // v2.0.0 has kept holds since the note was taken: the next run asks, restarts it, and writes no note over them.
+    writeFileSync(mark, KEPT);
+    const again = timer(w);
+    expect(again.status, again.stdout + again.stderr).toBe(6);
+    expect(again.stdout).toContain(`v2.0.0 was put back in ${w.install} by an earlier run, whose restart of it did not come up or was cut off.`);
+    expect(again.stdout).toContain('(2 of 3)');
+    expect(read(sw)).toBe(`${PUT_BACK}tries 1\nback\ntries 2\n`);
+    // Come up since, slow to start: asked, it is left serving, not restarted, and its record goes.
+    old.up();
+    const up = timer(w);
+    expect(up.status, up.stdout + up.stderr).toBe(0);
+    expect(up.stdout).toContain(`v2.0.0 is back in ${w.install} and serving now, so ${sw} is removed.`);
+    expect(existsSync(sw)).toBe(false);
+    expect(read(mark)).toBe(KEPT);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(old.calls()).toEqual(['back=1', 'probe', 'back=1', 'probe']);
+  });
+
+  it('a .swapping kept for a release put back that does not come up stops no upgrade to a newer one, which goes on (review of HB-1456)', () => {
+    const w = world();
+    const old = comesUpWhen(w);
+    const sw = join(w.install, '.swapping');
+    publish(w.base, 'v2.0.1', { restart: STARTS_DOWN });
+    expect(upgrade(w, 'v2.0.1').status).toBe(1);
+    expect(read(sw)).toBe(`${PUT_BACK}tries 1\n`);
+    // A newer release, which comes up where v2.0.0 does not.
+    publish(w.base, 'v2.0.2');
+    const r = upgrade(w, 'v2.0.2');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('(2 of 3)');
+    expect(r.stdout).toContain(`Going on to v2.0.2, which may come up where v2.0.0 does not: this upgrade's own record has taken the place of ${sw}.`);
+    expect(r.stdout).toContain('Now on v2.0.2.');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.2');
+    expect(existsSync(sw)).toBe(false);
+    expect(old.calls()).toEqual(['back=1', 'probe', 'back=1']);
+    expect(read(join(w.home, '.config', 'hatchabot', 'channel')).trim()).toBe('v2.0.2');
+  });
+
+  /** The channel timer's tick, its channel naming `stable` (raw.githubusercontent answered for it; the API never). */
+  const channelTick = (w: ReturnType<typeof world>, stable: string) => {
+    const bin = join(w.root, 'channels-curl'); mkdirSync(bin, { recursive: true });
+    const curl = spawnSync('sh', ['-c', 'command -v curl'], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(bin, 'curl'), `#!/usr/bin/env bash\ncase "$*" in *raw.githubusercontent*) echo '{"stable":"${stable}"}'; exit 0 ;; *api.github*) exit 7 ;; esac\nexec ${JSON.stringify(curl)} "$@"\n`, { mode: 0o755 });
+    return () => spawnSync('bash', [join(w.install, 'scripts', 'follow-channel.sh'), 'stable'], {
+      encoding: 'utf8', timeout: 60_000,
+      env: { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: w.home, TMPDIR: join(w.home, 'tmp'), HATCHABOT_BUNDLE_BASE: `file://${w.base}`, HATCHABOT_UPGRADE_IMAGE: '0' },
+    });
+  };
+
+  it('the channel timer counts no try of a release that is the one put back and not up: nothing was tried (review of HB-1456)', () => {
+    const w = world();
+    comesUpWhen(w);
+    publish(w.base, 'v2.0.1', { restart: STARTS_DOWN });
+    expect(upgrade(w, 'v2.0.1').status).toBe(1);
+    // The channel names v2.0.0, the release put back.
+    const tick = channelTick(w, 'v2.0.0');
+    const state = join(w.home, '.local', 'state', 'hatchabot');
+    for (let i = 0; i < 2; i++) {
+      const r = tick();
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(r.stdout).toContain('v2.0.0 is on this machine but not up (above), and there was nothing to upgrade it to. This does not count against v2.0.0.');
+      expect(r.stdout).not.toMatch(/of 8\)/);
+      expect(readdirSync(state).filter((n) => n.startsWith('follow-channel-'))).toEqual([]);
+    }
+  });
+
+  it('a channel naming an older release than the one put back and not up: "Going on" is not said, as nothing went on, and the timer names the release that is not up (review of HB-1456)', () => {
+    const w = world();
+    publish(w.base, 'v2.0.1');
+    expect(upgrade(w, 'v2.0.1').status).toBe(0);
+    const old = comesUpWhen(w); // v2.0.1's restart.sh now
+    const sw = join(w.install, '.swapping');
+    publish(w.base, 'v2.0.2', { restart: STARTS_DOWN });
+    expect(upgrade(w, 'v2.0.2').status).toBe(1);
+    expect(read(sw)).toBe(`${PUT_BACK.replace('v2.0.0', 'v2.0.1')}tries 1\n`);
+    // The machine follows stable again, which still names v2.0.0.
+    writeFileSync(join(w.home, '.config', 'hatchabot', 'channel'), 'stable\n');
+    const r = channelTick(w, 'v2.0.0')();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain('(2 of 3)');
+    expect(r.stdout).toContain('On v2.0.1, which is newer than stable (v2.0.0). Nothing to do');
+    expect(r.stdout).not.toContain('Going on');
+    expect(r.stdout).toContain('v2.0.1 is on this machine but not up (above), and there was nothing to upgrade it to. This does not count against v2.0.0.');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.1');
+    expect(read(sw)).toBe(`${PUT_BACK.replace('v2.0.0', 'v2.0.1')}tries 1\nback\ntries 2\n`);
+    expect(old.calls()).toEqual(['back=1', 'probe', 'back=1']);
+  });
+
+  it('the channel\'s release set aside, with a release put back that is not up: the tick says it looks again at that one, not that it repairs an upgrade cut off, and past the cap only asks (review of HB-1456)', () => {
+    const w = world();
+    const old = comesUpWhen(w);
+    publish(w.base, 'v2.0.1', { restart: STARTS_DOWN });
+    expect(upgrade(w, 'v2.0.1').status).toBe(1);
+    const state = join(w.home, '.local', 'state', 'hatchabot');
+    const key = spawnSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.install], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(state, `follow-channel-failed-${key}`), 'v2.0.1\n');
+    const tick = channelTick(w, 'v2.0.1');
+    for (const n of [2, 3, 3]) {
+      const r = tick();
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(r.stdout).toContain("v2.0.1 was set aside, so it is not tried again; the channel's next release will be. This tick looks again at v2.0.0, which was not up, and only that.");
+      expect(r.stdout).not.toContain('repairs the upgrade that was cut off');
+      expect(r.stdout).toContain(n < 3 ? `(${n} of 3)` : 'after 3 tries to restart it, so upgrades stop restarting it');
+    }
+    expect(old.calls()).toEqual(['back=1', 'probe', 'back=1', 'probe', 'back=1', 'probe']);
+  });
+
+  it('the repair of a swap cut off once restarted: a restart back that does not come up keeps a record and says 6; the next run asks, and finds it up (HB-1456)', () => {
+    const w = world();
+    const old = comesUpWhen(w);
+    const sw = join(w.install, '.swapping');
+    // The restart onto v2.0.1 is killed with the upgrade.
+    publish(w.base, 'v2.0.1', { restart: '#!/usr/bin/env bash\nkill -9 "$PPID"\nexit 1\n' });
+    expect(upgrade(w, 'v2.0.1').signal).toBe('SIGKILL');
+    expect(read(sw)).toMatch(/\nrestarted\n$/);
+    const repair = timer(w);
+    expect(repair.status, repair.stdout + repair.stderr).toBe(6);
+    expect(repair.stdout).toContain('was cut off part-way — putting v2.0.0 back first');
+    expect(repair.stdout).toContain(`v2.0.0 is back in ${w.install}, but it did not come up (above). ${sw} stays: the next upgrade restarts it again if it is still not serving (1 of 3).`);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(read(sw)).toBe(`${PUT_BACK}tries 1\n`);
+    expect(existsSync(join(w.install, '.prev-release'))).toBe(false);
+    old.up();
+    const again = timer(w);
+    expect(again.status, again.stdout + again.stderr).toBe(0);
+    expect(existsSync(sw)).toBe(false);
+    expect(old.calls()).toEqual(['back=1', 'probe']);
+    expect(existsSync(join(w.install, 'data', 'hatchabot.sqlite.rolled-back'))).toBe(false); // v2.0.1 never said it started
+    for (const kept of ['scripts/upgrade.sh', '.bundle-files', '.node/bin/node', 'node_modules', 'BUNDLE.json']) expect(existsSync(join(w.install, kept)), kept).toBe(true);
+  });
+
+  it('a repair cut off once the files are back, before their restart: the record left is that restart\'s, so the next run restarts it, and the note was written first (review of HB-1456)', () => {
+    const w = world();
+    const old = comesUpWhen(w);
+    const sw = join(w.install, '.swapping'), mark = join(w.install, 'data', 'hatchabot.sqlite.rolled-back');
+    // v2.0.1 started, and the upgrade was killed there.
+    publish(w.base, 'v2.0.1', { restart: '#!/usr/bin/env bash\n[ -z "${HATCHABOT_RESTART_RECORD:-}" ] || echo started >> "$HATCHABOT_RESTART_RECORD"\nkill -9 "$PPID"\nexit 1\n' });
+    expect(upgrade(w, 'v2.0.1').signal).toBe('SIGKILL');
+    // The repair, killed as it lets go of the dependencies' lock with the files back.
+    const bin = join(w.root, 'killer-rm'); mkdirSync(bin);
+    writeFileSync(join(bin, 'rm'), `#!/usr/bin/env bash\ncase "$*" in *deps-*.lock.d*) grep -qx put-back ${JSON.stringify(sw)} 2>/dev/null && kill -9 "$PPID" ;; esac\nexec ${JSON.stringify(REAL_RM)} "$@"\n`, { mode: 0o755 });
+    const cut = upgrade(w, 'stable', bin, { HATCHABOT_UPGRADE_REPAIR_ONLY: '1', HATCHABOT_UPGRADE_BY_TIMER: '1' });
+    expect(cut.signal, cut.stdout + cut.stderr).toBe('SIGKILL');
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+    expect(read(sw)).toBe('from v2.0.0\npins-recorded\nsays-started\nrestarted\nput-back\n');
+    expect(read(mark)).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$/); // v2.0.1 started
+    old.up();
+    const again = timer(w);
+    expect(again.status, again.stdout + again.stderr).toBe(0);
+    expect(existsSync(sw)).toBe(false);
+    // Restarted, not asked: before the service manager restarted it back, what answers may be v2.0.1.
+    expect(old.calls()).toEqual(['back=1']);
   });
 
   it('another install of the dependencies holding their lock: the swap, which moves node_modules too, waits with nothing changed, then goes on once it is free (review of HB-1212)', async () => {

@@ -22,7 +22,9 @@ vi.setConfig({ testTimeout: 30_000 });
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-const SCRIPTS = ['release.sh', 'release-check.sh'];
+const SCRIPTS = ['release.sh', 'release-check.sh', 'publisher-copy.sh'];
+/** A made-up project's publish.toml, as the publish kit writes it (the publisher keeps the same file). */
+const PUBLISH_TOML = (exclude = '"publish.toml", "backlog.md"') => `name = "example"\npublic = "example-owner/example"\nprivate = "example-owner/example-dev"\nmode = "squash"\ntag_pattern = "v*.*.*"\nwait_hours = 1\nexclude = [${exclude}]\n`;
 const CHANGELOG = (v: string, body = '### Fixed\n- An agent no longer stalls.\n') => `# Changelog\n\n## [${v}] — 2026-10-10\n\n${body}\n## [9.8.6] — 2026-10-09\n\n- Older.\n`;
 
 function world() {
@@ -66,6 +68,7 @@ process.exit(Number(process.env.HB_PRIVACY_SYNC ?? 0));
     git(work, 'commit', '-q', '-m', `Release v${v}`);
     return git(work, 'rev-parse', 'HEAD');
   };
+  writeFileSync(join(work, 'publish.toml'), PUBLISH_TOML());
   commitVersion('9.8.6', '# Changelog\n\n## [9.8.6] — 2026-10-09\n\n- Older.\n');
   git(work, 'tag', 'v9.8.6');
   git(work, 'remote', 'add', 'origin', origin);
@@ -312,6 +315,147 @@ describe('scripts/release.sh refuses a release whose browser image was last refr
     const real = readFileSync('docker/Dockerfile.browser', 'utf8');
     expect(real).toMatch(/^ARG CHROMIUM_REFRESH=\d{4}-\d{2}-\d{2}$/m);
     expect(real).toMatch(/^RUN .*\$\{CHROMIUM_REFRESH\}/m);
+  });
+});
+
+describe('scripts/release.sh stops when publish.toml changed since the last release tag (HB-1492)', () => {
+  // The publisher's gate holds a tag to its own copy of publish.toml, which nothing here can read:
+  // f9efb686 changed `exclude` in the dev repo alone, and v2.191.0 stayed "incomplete" at the gate
+  // until the owner changed the copy. So a publish.toml that is not the newest release tag's stops
+  // before the tag, with the file the copy is to be set to.
+  const CHANGED = '"publish.toml", "backlog.md", "docs/notes.md"';
+  const changePublishToml = (w: ReturnType<typeof world>, exclude = CHANGED) => writeFileSync(join(w.work, 'publish.toml'), PUBLISH_TOML(exclude));
+  const noRef = (w: ReturnType<typeof world>) => expect(spawnSync('git', ['-C', w.work, 'for-each-ref', 'refs/hatchabot-copy/'], { encoding: 'utf8' }).stdout).toBe('');
+
+  it('changed since the last tag: exit 4 before anything is changed or pushed, with what changed, the whole file and the flag', () => {
+    const w = world();
+    changePublishToml(w);
+    const sha = w.landed('9.8.7');
+    const r = w.release(['9.8.7']);
+    expect(r.status, out(r)).toBe(4);
+    expect(r.stderr).toContain(`✗ publish.toml at ${sha.slice(0, 9)} has changed since v9.8.6, the last release tag.`);
+    expect(r.stderr).toContain("holds v9.8.7 to its own copy of the file (projects/example.toml in cksci/publisher)");
+    expect(r.stderr).toContain(`the candidate's publish.toml differs from the publisher's copy`);
+    expect(r.stderr).toContain('What changed since v9.8.6:\n    -exclude = ["publish.toml", "backlog.md"]\n    +exclude = ["publish.toml", "backlog.md", "docs/notes.md"]\n');
+    expect(r.stderr).toContain(`to exactly this (publish.toml at ${sha.slice(0, 9)}):\n\n` + PUBLISH_TOML(CHANGED).replace(/^/gm, '    ').replace(/ {4}$/, ''));
+    expect(r.stderr).toContain('kit preflight example --tag v9.8.7 (the owner runs it');
+    expect(r.stderr).toContain('Once the copy matches: scripts/release.sh 9.8.7 --publisher-copy-matches');
+    expect(r.stderr).not.toContain('Tagged but not published yet');
+    // Nothing changed: no tag here or on origin, the notes not checked, the fingerprints not synced.
+    expect(w.originTag('v9.8.7')).toBe('');
+    expect(spawnSync('git', ['-C', w.work, 'tag', '-l', 'v9.8.7'], { encoding: 'utf8' }).stdout).toBe('');
+    expect(w.privacyLog()).toBe('');
+    noRef(w);
+  });
+
+  it('--publisher-copy-matches goes on and tags it, saying so; the next release is compared with that tag', () => {
+    const w = world();
+    changePublishToml(w);
+    const sha = w.landed('9.8.7');
+    const r = w.release(['9.8.7', '--publisher-copy-matches']);
+    expect(r.status, out(r)).toBe(0);
+    expect(r.stdout).toContain(`⚠ publish.toml at ${sha.slice(0, 9)} is not v9.8.6's; going on, as the publisher's copy was changed to match it.`);
+    expect(w.originTag('v9.8.7')).toBe(`tag ${sha} hatchabot v9.8.7`);
+    noRef(w);
+    // Compared with v9.8.7, it passes; but v9.8.7 is not published yet and its publish.toml is not
+    // v9.8.6's, so a flag given before the copy was changed would hide the mismatch here: it warns.
+    const next8 = w.landed('9.8.8');
+    const next = w.release(['9.8.8']);
+    expect(next.status, out(next)).toBe(0);
+    expect(next.stdout).toContain(`⚠ publish.toml at ${next8.slice(0, 9)} is v9.8.7's, but v9.8.7 is not published yet and its publish.toml is not v9.8.6's (the newest published release's). Unless the publisher's copy was changed to match it, v9.8.7 is still waiting at the publisher's gate, and this tag will wait with it: check the publisher's issue for v9.8.7 ("the gate could not finish").`);
+    expect(w.originTag('v9.8.8')).not.toBe('');
+    noRef(w);
+    // Once v9.8.7 is published (the copy did match), not a word.
+    w.git(w.work, 'push', '-q', w.pub, 'v9.8.7', 'v9.8.8');
+    w.landed('9.8.9');
+    const after = w.release(['9.8.9']);
+    expect(after.status, out(after)).toBe(0);
+    expect(out(after)).not.toContain('publish.toml');
+  });
+
+  it('no change since the last tag passes as before, with no word about it', () => {
+    const w = world();
+    w.landed('9.8.7');
+    const r = w.release(['9.8.7']);
+    expect(r.status, out(r)).toBe(0);
+    expect(out(r)).not.toContain('publish.toml');
+    noRef(w);
+    // The flag then changes nothing.
+    const n = world();
+    n.landed('9.8.7');
+    const f = n.release(['9.8.7', '--publisher-copy-matches']);
+    expect(f.status, out(f)).toBe(0);
+    expect(out(f)).not.toContain('publish.toml');
+  });
+
+  it('a first release (no release tag on origin to compare with) stops the same way, and the flag goes on', () => {
+    const w = world();
+    w.git(w.work, 'push', '-q', 'origin', ':refs/tags/v9.8.6');
+    w.landed('9.8.7');
+    const r = w.release(['9.8.7']);
+    expect(r.status, out(r)).toBe(4);
+    expect(r.stderr).toContain('✗ No release tag on origin to compare publish.toml with (a first release).');
+    expect(r.stderr).toContain('projects/example.toml in cksci/publisher; kit adopt writes both');
+    expect(r.stderr).toContain(PUBLISH_TOML().replace(/^/gm, '    ').replace(/ {4}$/, ''));
+    expect(w.originTag('v9.8.7')).toBe('');
+    const go = w.release(['9.8.7', '--publisher-copy-matches']);
+    expect(go.status, out(go)).toBe(0);
+    expect(go.stdout).toContain("is not an earlier release tag's; going on");
+  });
+
+  it('names the releases tagged but not published yet, which a changed copy would strand (publish kit B-010)', () => {
+    const w = world();
+    const waiting = w.landed('9.8.7');
+    w.git(w.work, 'tag', '-a', 'v9.8.7', '-m', 'hatchabot v9.8.7', waiting); w.git(w.work, 'push', '-q', 'origin', 'v9.8.7');
+    changePublishToml(w);
+    w.landed('9.8.8');
+    const r = w.release(['9.8.8', '--commit', w.git(w.work, 'rev-parse', 'HEAD')]);
+    expect(r.status, out(r)).toBe(4);
+    expect(r.stderr).toContain('has changed since v9.8.7, the last release tag');
+    expect(r.stderr).toContain('Releases tagged but not published yet: v9.8.7.\nEach is gated against the copy as it is when the publisher gets to it');
+    expect(r.stderr).toContain('publish kit backlog B-010');
+    expect(r.stderr).toContain('A tag the publisher blocked is listed too, though it never publishes either way; one waiting only because its publish.toml is already this new file is rescued by the change, not stranded.');
+    expect(r.stderr).not.toContain('Fast-lane tags');
+    expect(r.stderr).toMatch(/Once the copy matches: scripts\/release\.sh 9\.8\.8 --commit [0-9a-f]{40} --publisher-copy-matches/);
+    expect(r.stderr).toMatch(/kit preflight example --tag v9\.8\.8 --rev [0-9a-f]{40} /);
+  });
+
+  it('names the fast-lane tags still to come too: dated after the public main\'s last "Update channels", asking for a file it does not have', () => {
+    const w = world();
+    const channels = (stable: string) => writeFileSync(join(w.work, 'channels.json'), `{\n  "stable": "${stable}",\n  "beta": "v9.8.5"\n}\n`);
+    // One the public main has the file of already (nothing to change there): not listed.
+    channels('v9.8.5'); w.git(w.work, 'add', '.'); w.git(w.work, 'commit', '-qm', 'Promote v9.8.5 to stable');
+    w.git(w.work, 'push', '-q', 'origin', 'main'); w.git(w.work, 'push', '-q', w.pub, 'HEAD:refs/heads/main');
+    w.git(w.work, 'tag', 'channels-20261125T000001Z'); w.git(w.work, 'push', '-q', 'origin', 'channels-20261125T000001Z');
+    // One asking for another file: still to come.
+    channels('v9.8.6'); w.git(w.work, 'commit', '-qam', 'Promote v9.8.6 to stable');
+    w.git(w.work, 'tag', '-a', 'channels-20261125T000002Z', '-m', 'hatchabot channels: stable → v9.8.6'); w.git(w.work, 'push', '-q', 'origin', 'main', 'channels-20261125T000002Z');
+    changePublishToml(w);
+    w.landed('9.8.7');
+    const r = w.release(['9.8.7']);
+    expect(r.status, out(r)).toBe(4);
+    expect(r.stderr).toContain('Fast-lane tags not published yet: channels-20261125T000002Z.\nEach is gated');
+    expect(r.stderr).not.toContain('Releases tagged but not published yet');
+    noRef(w);
+    // An "Update channels" commit on the public main dated after it: it is done.
+    w.git(w.work, 'checkout', '-q', '-b', 'pubside', 'HEAD~2'); channels('v9.8.4');
+    w.git(w.work, 'commit', '-qam', 'Update channels', '--date=@4102444800'); w.git(w.work, 'push', '-q', '-f', w.pub, 'pubside:main');
+    w.git(w.work, 'checkout', '-q', 'main');
+    const done = w.release(['9.8.7']);
+    expect(done.status, out(done)).toBe(4);
+    expect(done.stderr).not.toContain('Fast-lane tags');
+  });
+
+  it('a commit with no publish.toml is refused outright (the gate holds no tag without one), flag or not', () => {
+    const w = world();
+    rmSync(join(w.work, 'publish.toml'));
+    w.landed('9.8.7');
+    for (const args of [['9.8.7'], ['9.8.7', '--publisher-copy-matches']]) {
+      const r = w.release(args);
+      expect(r.status, out(r)).toBe(1);
+      expect(r.stderr).toContain('No publish.toml at');
+      expect(w.originTag('v9.8.7')).toBe('');
+    }
   });
 });
 

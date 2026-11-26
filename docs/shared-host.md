@@ -64,6 +64,7 @@ su - t1
   HATCHABOT_SETUP_ENV="DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
 HATCHABOT_OPS_PORT=8301
 HATCHABOT_EMBED_PORT=8501
+HATCHABOT_PROXY_PORT=8701
 HATCHABOT_GATEWAY_PORT_BASE=19100
 HATCHABOT_PREFIX=t1
 HATCHABOT_MAX_AGENTS_TOTAL=10
@@ -116,7 +117,7 @@ containers alike, while the router (Caddy) and root still get through:
 ```
 nft add table inet hb
 nft add chain inet hb out '{ type filter hook output priority 0; }'
-nft add rule inet hb out oif lo tcp dport { 8101, 8301, 8501, 19100-19199 } \
+nft add rule inet hb out oif lo tcp dport { 8101, 8701, 8301, 8501, 19100-19199 } \
     meta skuid != { $(id -u t1), $(id -u caddy), 0 } reject with tcp reset
 ```
 
@@ -127,9 +128,27 @@ that `nftables.service` loads at boot (`bin/hc` in the cloud repository keeps
 And it keeps OTHER tenants out, not the tenant's own containers: to its own
 Hatchabot those arrive from 127.0.0.1, so Hatchabot stops treating loopback
 as "this machine" under a rootless daemon (no setup-code bypass for the first
-account, no trust in a forwarded-for header) — set
+account, no trust in a forwarded-for header on its own port, nor on its
+listener for a proxy from its own user: a container there is counted as
+itself) — set
 `HATCHABOT_CONTAINERS_ON_LOOPBACK=1` in the tenant's `.env` to say so
 explicitly; it is detected at boot otherwise.
+
+Each Hatchabot also opens a listener for a proxy on `127.0.0.1`
+(`HATCHABOT_PROXY_PORT`, 8094 by default), the only port where it reads the
+visitor's address from `X-Forwarded-For`. Give each tenant its own, as its
+other ports are (8701 for t1 above; `scripts/shared-host-test.sh` uses
+8700 + the tenant's number), put it in the tenant's rule with them, and
+point the router at it, not at the app's own port (`reverse_proxy
+127.0.0.1:8701` in t1's site): there each visitor has their own sign-in
+limit, and at the app's own port everyone behind the router shares one.
+Left at 8094, every tenant wants the same port: the first to start gets it,
+the others log that it did not open, and no rule keeps the other tenants
+off the one that did. The rule matters more there than at the app's own
+port: the listener believes X-Forwarded-For from any user other than its
+tenant's, so another tenant that reached it could choose its sign-in limit
+on it. The router's user (Caddy) is meant to be believed: it is the one
+that sends each visitor's address.
 
 The other tenant's Docker socket (`/run/user/<uid>/docker.sock`) and home are
 theirs alone by ordinary permissions. Tenants share a kernel; the Dedicated

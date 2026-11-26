@@ -44,7 +44,10 @@ you can `HATCHABOT_IMAGE=hatchabot-runtime:<X> npm run e2e:docker` before
 `docker tag …:<X> …:latest`. Because OpenClaw's `openclaw.json` schema moves
 between releases, prefer the candidate path for a real version bump. After
 promoting, each agent shows "update available"; **Rebuild** it to adopt the new
-version, memory kept.
+version, memory kept. With `HATCHABOT_IMAGE` pinned to a version tag or a
+digest, that tag is the fleet default and Promote is off: `docker tag` would
+move only `:latest`. Set `HATCHABOT_IMAGE` in `.env` to the candidate's tag
+and restart Hatchabot instead (HB-1256).
 
 There is no form for this in the app: it's a slow, host-side, fleet-wide docker
 build. The Hatchabot agent can propose a candidate build (you confirm it), and

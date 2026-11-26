@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CONSOLE_STARTUP_CALLS, GuestConsoleLog, MAX_KEYS, NAMES_PER_DAY, OTHER_METHODS } from '../src/api/guestConsoleLog.js';
+import { CONSOLE_STARTUP_CALLS, GuestConsoleLog, MAX_KEYS, NAMES_PER_DAY, OTHER_METHODS } from '../src/api/console/guestConsoleLog.js';
 
 /**
  * A guest who reopened an agent's chat every few minutes filled its 200-line
